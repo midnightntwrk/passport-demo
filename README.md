@@ -1,72 +1,92 @@
-# Midnight Template Repository
+# MN Passport Foundations Demo
 
-This GitHub repository should be used as a template when creating a new Midnight GitHub repository.
-The template is configured with default repository settings and a set of default files that are expected to exist in all Midnight GitHub repositories.
+Client-facing MN Passport demo for a fresh user onboarding into a contract-custodied
+Midnight account.
 
-### LICENSE
+This repository is intentionally self-contained. It includes the demo React app,
+Compact contracts, wallet client wrapper, localnet scripts, and tests needed to
+run the end-to-end flow.
 
-Apache 2.0.
+The lower-level research/prototype work remains in the original `passport`
+repository under `experiments/account-custody-prototype/`.
 
-### README.md
+## What It Proves
 
-Provides a brief description for users and developers who want to understand the purpose, setup, and usage of the repository.
+- Browser passkey onboarding for a Night ID.
+- Passkey-derived device secret used to deploy the MN Passport custody account.
+- Identity registry binding from `<handle>.night` to the custody contract.
+- Direct localnet `deposit_night` into the custody account.
+- Position creation after custody deposit.
+- Logout/login restore of account, positions, and wallet state.
+- Custody workspace views for holdings, account overview, connections, devices,
+  and recovery.
 
-### SECURITY.md
+## Layout
 
-Provides a brief description of the Midnight Foundation's security policy and how to properly disclose security issues.
+| Path | Purpose |
+|---|---|
+| `app/` | Vite + React demo UI. |
+| `contracts/` | Compact contracts for account custody, faucet, and identity registry. |
+| `src/wallet/` | Platform-neutral wallet/account-custody client API. |
+| `src/node/` | Localnet wallet/provider/deployment helpers. |
+| `src/tests/` | Localnet lifecycle tests. |
+| `scripts/demo-local.mjs` | One-command localnet + deploy + Vite runner. |
+| `infra/` | Midnight localnet Docker compose files. |
 
-### CONTRIBUTING.md
+## Run The Demo
 
-Provides guidelines for how people can contribute to the Midnight project.
+Prerequisites:
 
-### CODEOWNERS
+- Docker
+- Node.js >= 22
+- `compact` 0.30.0 on PATH
+- Chrome for the headless E2E script
 
-Defines repository ownership rules.
+```sh
+npm install
+cd app && npm install && cd ..
+npm run demo
+```
 
-### ISSUE_TEMPLATE
+Open:
 
-Provides templates for reporting various types of issues, such as: bug report, documentation improvement and feature request.
+```sh
+http://localhost:5173/
+```
 
-### PULL_REQUEST_TEMPLATE
+The demo script:
 
-Provides a template for a pull request.
+1. Creates `infra/.env` if missing.
+2. Compiles Compact contracts if needed.
+3. Starts Midnight localnet and proof server.
+4. Deploys the faucet and identity registry.
+5. Starts the Vite demo app.
 
-### CLA Assistant
+## End-To-End Check
 
-The Midnight Foundation appreciates contributions, and like many other open source projects asks contributors to sign a contributor
-License Agreement before accepting contributions. We use CLA assistant (https://github.com/cla-assistant/cla-assistant) to streamline the CLA
-signing process, enabling contributors to sign our CLAs directly within a GitHub pull request.
+With the demo server running:
 
-### Dependabot
+```sh
+npm run demo:e2e
+```
 
-The Midnight Foundation uses GitHub Dependabot feature to keep our projects dependencies up-to-date and address potential security vulnerabilities.
+The E2E flow runs in automation mode, so it does not open a browser passkey
+prompt. It still exercises the meaningful localnet path:
 
-### Checkmarx
+1. Deploys a custody account.
+2. Registers a Night ID.
+3. Runs the real `deposit_night` circuit.
+4. Opens a position.
+5. Confirms custody holdings and workspace screens render.
 
-The Midnight Foundation uses Checkmarx for application security (AppSec) to identify and fix security vulnerabilities.
-All repositories are scanned with Checkmarx's suite of tools including: Static Application Security Testing (SAST), Infrastructure as Code (IaC), Software Composition Analysis (SCA), API Security, Container Security and Supply Chain Scans (SCS).
+For a client/manual pass, use the normal browser flow and create the passkey
+when prompted.
 
-### Unito
+## Notes
 
-Facilitates two-way data synchronization, automated workflows and streamline processes between: Jira, GitHub issues and Github project Kanban board.
-
-# TODO - New Repo Owner
-
-### Software Package Data Exchange (SPDX)
-Include the following Software Package Data Exchange (SPDX) short-form identifier in a comment at the top headers of each source code file.
-
-
- <I>// This file is part of <B>REPLACE WITH REPO-NAME</B>.<BR>
- // Copyright (C) Midnight Foundation<BR>
- // SPDX-License-Identifier: Apache-2.0<BR>
- // Licensed under the Apache License, Version 2.0 (the "License");<BR>
- // You may not use this file except in compliance with the License.<BR>
- // You may obtain a copy of the License at<BR>
- //<BR>
- //	https://www.apache.org/licenses/LICENSE-2.0<BR>
- //<BR>
- // Unless required by applicable law or agreed to in writing, software<BR>
- // distributed under the License is distributed on an "AS IS" BASIS,<BR>
- // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.<BR>
- // See the License for the specific language governing permissions and<BR>
- // limitations under the License.</I>
+- Runtime state such as `contracts/managed/`, `midnight-level-db/`,
+  `infra/.env`, and deployment JSON files is ignored.
+- Partner integration work belongs on a separate branch, not in this demo
+  folder.
+- This is a demo, not production custody. Recovery shares are still prototype
+  placeholders and the localnet genesis wallet funds demo deposits.
