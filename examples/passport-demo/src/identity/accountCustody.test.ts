@@ -60,10 +60,12 @@
  * have to be internally consistent, and is: `vite.config.ts`'s `dedupe` gives
  * the browser bundle one copy, which is the case that ships.)
  *
- * The fixture anchors on `contracts/managed/account/contract/index.js` rather
- * than on the `src/wallet/contract.js` specifier `./accountCustody.ts` imports,
- * for the plain reason that the latter is TypeScript and Node cannot load it.
- * It is a re-export of this exact module, so it is the same compiled contract.
+ * The fixture anchors on the staged `contracts/stagenet/account/index.js` —
+ * the same specifier `./accountCustody.ts` itself imports, staged from the
+ * balancer's own build. It used to name a re-export living beside a sibling
+ * prototype; after the migration that path resolved to another project's
+ * contract, which this repository does not build, so the type came from a
+ * module the app never loads.
  *
  * Runs identically from the workspace root and from `examples/passport-demo`:
  * `npx vitest run src/identity/accountCustody.test.ts`.
@@ -73,7 +75,7 @@ import { createRequire } from 'node:module';
 
 import { describe, expect, it } from 'vitest';
 
-import type { Ledger as AccountLedger } from '../../../../src/wallet/contract.js';
+import type { Ledger as AccountLedger } from '../../contracts/stagenet/account/index.js';
 
 import {
   AccountCustodyError,
