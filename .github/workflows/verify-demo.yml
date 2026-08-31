@@ -117,28 +117,6 @@ jobs:
             done
           done
 
-      # `examples/passport-demo` type-checks and unit-tests against this
-      # repository's OWN account build — `src/wallet/contract.ts` and
-      # `contracts/managed/account/contract/`, the foundations demo's contract,
-      # which `npm run compile` produces and `.gitignore` excludes. Before the
-      # migration those references pointed into a sibling checkout; they point
-      # here now because the prototype IS here.
-      #
-      # `npm run compile` needs the Compact toolchain on the runner, which this
-      # workflow does not yet install. Until a toolchain step is added, this
-      # guard names the missing input rather than letting `tsc` report it as an
-      # unresolved module two steps later.
-      - name: Check the account build the app type-checks against
-        run: |
-          set -euo pipefail
-          if [ ! -f contracts/managed/account/contract/index.d.ts ]; then
-            echo "::error::contracts/managed/account/contract/index.d.ts is missing."
-            echo "::error::\`npm run compile\` at the repository root produces it, and needs the Compact toolchain installed on this runner."
-            echo "::error::Add a toolchain install step above this one, or restore contracts/managed from a cache."
-            exit 1
-          fi
-          echo "Account build present: $(grep -o \"checkRuntimeVersion('[^']*'\" contracts/managed/account/contract/index.js | head -1)"
-
       # BEFORE the app's typecheck. See the header.
       - name: Rebuild the demo backend the app type-checks against
         run: |
