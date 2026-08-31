@@ -296,7 +296,12 @@ interface FixtureRuntime {
  *
  * `requireFromTest(contractPath)` makes Node load the contract module, so
  * Node resolves ITS `@midnight-ntwrk/compact-runtime` import by walking up from
- * the balancer's own `contracts-stagenet` build. `createRequire(contractPath)` asks
+ * the copy staged INTO this workspace. Which runtime a compiled contract
+ * gets is decided by where the contract FILE sits: the specifier is resolved
+ * from the module's own directory upwards, so a contract loaded from the
+ * balancer would find the root's ledger-8 runtime and refuse to load. The
+ * staged copy sits under the demo, where ledger-9 is nested — the same copy
+ * the app itself loads. `createRequire(contractPath)` asks
  * Node the same question from the same directory, so it cannot answer
  * differently. If that ever stops being true the fixture fails loudly with the
  * runtime's own "has unexpected type" rather than decoding something wrong.
@@ -304,7 +309,7 @@ interface FixtureRuntime {
 function fixtureModules(): { contract: FixtureContractModule; runtime: FixtureRuntime } {
   const requireFromTest = createRequire(import.meta.url);
   const contractPath = requireFromTest.resolve(
-    '../../../passport-balancer/contracts-stagenet/managed/account/contract/index.js',
+    '../../contracts/stagenet/account/index.js',
   );
   return {
     contract: requireFromTest(contractPath) as FixtureContractModule,
