@@ -24,10 +24,22 @@
  * THE TWO-RUNTIME SEAM, AND WHY THE FIXTURE BYPASSES VITE
  * -------------------------------------------------------
  * There are two installed copies of `@midnight-ntwrk/compact-runtime` in this
- * workspace: the root one, and the demo workspace's own nested copy.
- * They are the same version and structurally identical, and objects still do
- * not cross between them — a `ContractState` minted by one is refused by the
- * other's `coerceToChargedState` with "has unexpected type".
+ * repository: the root's LEDGER-8 0.16.0, and this workspace's nested
+ * LEDGER-9 0.18.0-rc.1. They are different versions with different execution
+ * APIs, and objects do not cross between them either — a `ContractState`
+ * minted by one is refused by the other's `coerceToChargedState`.
+ *
+ * READ THE MESSAGE CAREFULLY BEFORE BLAMING THE SEAM. That refusal reads
+ * `'contractState' parameter [object Object] has unexpected type`, and the
+ * SAME sentence is what the runtime says when the argument in that slot was
+ * never a contract state at all — which is what a 0.16-shaped call to 0.18's
+ * `createCircuitContext` produces, because 0.18 inserted a leading `circuitId`
+ * parameter and every later argument shifts by one. That is a call-shape bug
+ * wearing a resolution bug's clothes, and it is the one this fixture actually
+ * had (2026/08/31): both halves were resolving to the single correct copy the
+ * whole time. `executedLedger` below lists the three 0.16-to-0.18 differences.
+ * Before concluding that two runtimes are in play, check the premise — compare
+ * the instances directly, rather than inferring them from this message.
  *
  * Which copy a module gets depends on WHO resolved the specifier, and under
  * vitest that is not one answer:
@@ -261,15 +273,24 @@ describe('commitment derivation', () => {
 /* The ledger decoder, against a real contract execution                      */
 /* -------------------------------------------------------------------------- */
 
-/** Just enough of a circuit context to hand back into the next circuit. */
+/** Just enough of a circuit context to hand back into the next circuit.
+ *
+ * The live `QueryContext` sits under `callContext` rather than on the context
+ * itself: 0.18's `CircuitContext` is a CALL context, carrying a query context
+ * per contract on the call stack so a circuit can call into another contract.
+ * `callContext.currentQueryContext` is the one the runtime rewrites as the
+ * circuit runs — see `queryLedgerState` in the runtime's `circuit-context.js`. */
 interface FixtureCircuitContext {
-  currentQueryContext: { state: unknown };
+  callContext: { currentQueryContext: { state: unknown } };
 }
 
 interface FixtureContractModule {
   Contract: new (witnesses: unknown) => {
-    initialState(...args: unknown[]): { currentContractState: unknown };
-    impureCircuits: Record<string, (...args: unknown[]) => { context: FixtureCircuitContext }>;
+    initialState(...args: unknown[]): Promise<{ currentContractState: unknown }>;
+    impureCircuits: Record<
+      string,
+      (...args: unknown[]) => Promise<{ context: FixtureCircuitContext }>
+    >;
   };
   ledger(state: unknown): AccountLedger;
   pureCircuits: {
@@ -282,6 +303,7 @@ interface FixtureContractModule {
 interface FixtureRuntime {
   createConstructorContext(privateState: unknown, coinPublicKey: string): unknown;
   createCircuitContext(
+    circuitId: string,
     address: string,
     coinPublicKey: string,
     contractState: unknown,
@@ -326,8 +348,29 @@ const DEPOSIT = 1_000n;
 /**
  * Runs the real contract: construct with one device, register one grant, and
  * deposit NIGHT. Returns the ledger the indexer would end up serving.
+ *
+ * ASYNC, and every runtime call below is shaped for LEDGER-9. The staged
+ * contract is built against compact-runtime 0.18.0-rc.1, whose execution API
+ * differs from the 0.16 one this fixture was first written against in three
+ * ways, each of which this function has to honour:
+ *
+ *   - `initialState` and every impure circuit return PROMISES. They were
+ *     synchronous in 0.16. The same rename-and-await is written up in
+ *     `examples/passport-balancer/deploy-stagenet/src/smoke-artifacts.mjs`,
+ *     which smoke-tests these builds the same way.
+ *   - `createCircuitContext` takes the CIRCUIT ID first —
+ *     `(circuitId, address, coinPublicKey, contractState, privateState, …)`
+ *     against 0.16's `(address, coinPublicKey, contractState, privateState, …)`.
+ *     Calling it with the 0.16 shape lands `privateState` in the
+ *     `contractState` slot, and the runtime rejects it with
+ *     `'contractState' parameter [object Object] has unexpected type` — a
+ *     message that reads like a two-runtime `instanceof` mismatch and is not
+ *     one. The generated contract makes the correct call itself; see
+ *     `createCircuitContext('constructor', …)` inside the staged `index.js`.
+ *   - the live `QueryContext` is `context.callContext.currentQueryContext`,
+ *     not `context.currentQueryContext`.
  */
-function executedLedger(): { grantCommitment: bigint; ledger: AccountLedger } {
+async function executedLedger(): Promise<{ grantCommitment: bigint; ledger: AccountLedger }> {
   const { contract: module_, runtime } = fixtureModules();
   const contract = new module_.Contract({
     device_secret: (ctx: { privateState: unknown }) => [ctx.privateState, DEVICE_SECRET],
@@ -335,7 +378,7 @@ function executedLedger(): { grantCommitment: bigint; ledger: AccountLedger } {
     recovery_secret: (ctx: { privateState: unknown }) => [ctx.privateState, RECOVERY_SECRET],
   });
 
-  const initial = contract.initialState(
+  const initial = await contract.initialState(
     runtime.createConstructorContext({}, '0'.repeat(64)),
     module_.pureCircuits.derive_device_commitment(DEVICE_SECRET),
     module_.pureCircuits.derive_recovery_commitment(RECOVERY_SECRET),
@@ -347,23 +390,25 @@ function executedLedger(): { grantCommitment: bigint; ledger: AccountLedger } {
   const grantCommitment = module_.pureCircuits.derive_grant_commitment(GRANT_SECRET);
   const colour = nightColourBytes();
   let context = runtime.createCircuitContext(
+    'add_grant',
     '02'.padEnd(64, '0'),
     '0'.repeat(64),
     initial.currentContractState,
     {},
   );
-  context = contract.impureCircuits.add_grant(context, grantCommitment, colour, CAP).context;
-  context = contract.impureCircuits.deposit_night(context, colour, DEPOSIT).context;
+  context = (await contract.impureCircuits.add_grant(context, grantCommitment, colour, CAP))
+    .context;
+  context = (await contract.impureCircuits.deposit_night(context, colour, DEPOSIT)).context;
 
   return {
     grantCommitment,
-    ledger: module_.ledger(context.currentQueryContext.state),
+    ledger: module_.ledger(context.callContext.currentQueryContext.state),
   };
 }
 
 describe('decodeAccountState', () => {
-  it('projects a real executed ledger onto the shape the surfaces read', () => {
-    const { grantCommitment, ledger } = executedLedger();
+  it('projects a real executed ledger onto the shape the surfaces read', async () => {
+    const { grantCommitment, ledger } = await executedLedger();
     const state = decodeAccountState(ledger);
 
     // `deposit_night` credits the mirror the contract keeps of its own NIGHT.
@@ -407,8 +452,8 @@ describe('decodeAccountState', () => {
     expect(grant.epoch).toBe(state.deviceEpoch);
   });
 
-  it('keys balances by the same colour hex `colourHexToBytes` accepts', () => {
-    const { ledger } = executedLedger();
+  it('keys balances by the same colour hex `colourHexToBytes` accepts', async () => {
+    const { ledger } = await executedLedger();
     const [colourHex] = [...decodeAccountState(ledger).nightBalances.keys()];
     // The round trip a caller makes when it withdraws what it just read.
     expect(colourHexToBytes(colourHex)).toEqual(nightColourBytes());
