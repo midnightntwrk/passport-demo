@@ -33,6 +33,7 @@
     ".github/workflows call `npm run <script> --workspace <name>` directly."
   ],
   "scripts": {
+    "lint": "eslint .",
     "compile": "compact compile contracts/account.compact contracts/managed/account && compact compile contracts/faucet.compact contracts/managed/faucet && compact compile contracts/identity_registry.compact contracts/managed/identity_registry",
     "build": "tsc",
     "demo": "node scripts/demo-local.mjs",
@@ -87,6 +88,18 @@
     "",
     "The other deploy:* scripts are unchanged \u2014 only the Passport demo has",
     "continuous deployment so far."
+  ],
+  "//lint": [
+    "The whole tree at once. `eslint.config.js` at the root carries the rules,",
+    "the two tiers, and the reasons; nothing is configured per workspace.",
+    "",
+    "It is NOT in CI yet, and that is deliberate rather than forgotten. The",
+    "first full run reported 841 findings, so a gate added today would go red",
+    "on every pull request for reasons that have nothing to do with the pull",
+    "request. The order is: land the config, drive the count down, then add",
+    "one step to .github/workflows/verify-demo.yml.",
+    "",
+    "`experiments/` is out of scope — see the note in eslint.config.js."
   ],
   "//dependencies": [
     "TWO CHANGES, and the test for both is that this repository's own gates give",
@@ -146,6 +159,9 @@
     "`npm test`, and the demo's typecheck and `test:coverage`."
   ],
   "devDependencies": {
+    "eslint": "^10.9.1",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "typescript-eslint": "^8.69.0",
     "@types/node": "22.19.20",
     "@types/ws": "8.18.1",
     "tsx": "4.22.4",
