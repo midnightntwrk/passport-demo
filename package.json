@@ -18,6 +18,7 @@
   ],
   "workspaces": [
     "demo-backend",
+    "packages/connect",
     "examples/passport-app-hub",
     "examples/passport-demo",
     "examples/passport-docs",
