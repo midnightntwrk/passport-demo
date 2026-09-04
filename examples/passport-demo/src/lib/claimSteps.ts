@@ -59,7 +59,12 @@
  * than a promise made to them.
  */
 
-import type { AliasClaimProgress } from '../identity/midnames.js'
+/* The leaf, not `../identity/midnames.js`. This is a type-only import and so is
+   erased either way, but naming the leaf means nothing on the first render path
+   even MENTIONS the module that top-level awaits the ledger WASM — one keyword
+   deleted by a future editor can no longer put 9.84 MB in front of the welcome
+   screen. */
+import type { AliasClaimProgress } from '../identity/midnamesText.js'
 
 /** A claim phase, as the claim path reports it. */
 export type ClaimPhase = AliasClaimProgress['phase']
@@ -87,7 +92,28 @@ export interface ClaimStep {
   expectedSeconds: number | null
 }
 
-/** The three steps, in order. Exported so a screen cannot invent a fourth. */
+/**
+ * The three steps, in order. Exported so a screen cannot invent a fourth.
+ *
+ * THE ACCOUNT STEP'S 120 SECONDS, AND WHY IT DID NOT MOVE ON 2026/08/31
+ * ---------------------------------------------------------------------
+ * The claim's work was cut on that day — the activation grant no longer takes
+ * the sponsor's spend queue in front of the registration, and the registration
+ * is asked for on the account's address rather than on the indexer's word that
+ * the account exists — and the shape it was cut from was measured: three
+ * consecutive real claims reconstructed block by block from the stagenet
+ * indexer (register blocks 257787, 257685, 257522) each ran 84 s from the
+ * account deploy's block to the registration's, which with the deploy's own
+ * lead-in matched this 120 s estimate honestly.
+ *
+ * The number stays until a claim on the NEW path has been timed end to end,
+ * because an estimate here is a measurement and nothing else. Lowering it on
+ * the strength of the arithmetic would put a number on screen that no claim had
+ * produced, and a reader whose claim then ran over would be told it was "taking
+ * a little longer than usual" every single time — which is the copy this file
+ * has for something going wrong. Over-stating an estimate costs a reader
+ * nothing; understating one turns the normal case into an alarm.
+ */
 export const CLAIM_STEPS: readonly Omit<ClaimStep, 'state'>[] = [
   { id: 'name', label: 'Checking your name', expectedSeconds: 10 },
   /* No estimate, on purpose: this step is the USER'S, and a countdown against
@@ -225,4 +251,105 @@ export function stepTimingLine(step: Pick<ClaimStep, 'expectedSeconds'>, elapsed
     return `Taking a little longer than usual — ${elapsed}`
   }
   return `Usually ${expectedPhrase(step.expectedSeconds)} — ${elapsed} so far`
+}
+
+/* ------------------------------------------------------------------ */
+/* The sponsor wait                                                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The sponsor's fee cover, as the STEPPER sees it — a wait, not a refusal.
+ *
+ * WHY A RULE MODULE HOLDS A LIVE VALUE
+ * ------------------------------------
+ * Everything else in this file is a phase in and words out. This is a small
+ * published value, and it is here for two reasons rather than one.
+ *
+ * The first is what it describes. The fee sponsor reserves its DUST against
+ * each transaction it is balancing, so `available: 0` is a statement about the
+ * next minute and not about the day — `lib/sponsor.ts` has called that the
+ * transient state since 2026/08/25. Measured on the deployed balancer on
+ * 2026/09/02: a Passport claimed twenty seconds after another one was refused
+ * in two seconds, three times out of three, because the fee gate read the
+ * sponsor ONCE and believed a number that stopped being true while the refusal
+ * was being painted. The honest thing to show a person in that moment is the
+ * wait they are actually in, with the seconds counting, which is precisely what
+ * the rest of this file exists to do — so the fact belongs beside the other
+ * things the stepper is allowed to say.
+ *
+ * The second is where it can be imported from. This screen is on the first
+ * render path and `identity/passportContract.ts` reaches the ledger WASM
+ * through `identity/contractRuntime.ts`; a component that imported the fee gate
+ * to subscribe to it would hold React's mount behind 9.84 MB — the exact
+ * mistake this file's own header warns about. This module imports nothing at
+ * all at run time, so both sides can have it.
+ *
+ * It is NOT a gate. Nothing here decides whether a transaction may be built;
+ * the fee gate in `identity/passportContract.ts` does that, and this is the
+ * part of it a reader is shown.
+ */
+export const FEE_WAIT_LABEL = 'Waiting for the fee sponsor'
+
+export interface FeeWait {
+  /** True while a claim is holding for the sponsor's fee cover. */
+  waiting: boolean
+  /** `Date.now()` at the moment the wait began, or `null` when none is on. */
+  since: number | null
+}
+
+let feeWait: FeeWait = { waiting: false, since: null }
+const feeWaitListeners = new Set<(wait: FeeWait) => void>()
+
+/** The wait as it stands right now — for a first render, before any change. */
+export function feeWaitState(): FeeWait {
+  return feeWait
+}
+
+/**
+ * Watches the wait. The listener is called IMMEDIATELY with the current value,
+ * so a subscriber mounting mid-wait paints the wait rather than an empty row
+ * that fills in only when something changes.
+ */
+export function subscribeFeeWait(listener: (wait: FeeWait) => void): () => void {
+  feeWaitListeners.add(listener)
+  listener(feeWait)
+  return (): void => {
+    feeWaitListeners.delete(listener)
+  }
+}
+
+function publishFeeWait(next: FeeWait): void {
+  feeWait = next
+  for (const listener of feeWaitListeners) listener(next)
+}
+
+/**
+ * Says a wait has begun, at `since`.
+ *
+ * A wait already running is JOINED rather than restarted: two claims can be in
+ * flight in one tab, and the second one resetting the clock would tell somebody
+ * who had been waiting ninety seconds that they had been waiting none.
+ */
+export function beginFeeWait(since: number): void {
+  if (feeWait.waiting) return
+  publishFeeWait({ waiting: true, since })
+}
+
+/** Says the wait is over — the sponsor answered, or the window ran out. */
+export function endFeeWait(): void {
+  if (!feeWait.waiting) return
+  publishFeeWait({ waiting: false, since: null })
+}
+
+/**
+ * The one line a waiting reader is shown: what is being waited on, and for how
+ * long so far.
+ *
+ * The same shape as {@link stepTimingLine}, and deliberately: it sits among
+ * those lines, and a wait that announced itself in a different grammar would
+ * read as a different kind of event. No estimate, because there is no honest
+ * one — the sponsor's DUST comes back when its own transactions settle.
+ */
+export function feeWaitLine(elapsedMs: number): string {
+  return `${FEE_WAIT_LABEL} — ${formatElapsed(elapsedMs)}`
 }

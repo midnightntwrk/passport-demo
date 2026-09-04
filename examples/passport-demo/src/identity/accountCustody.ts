@@ -97,9 +97,19 @@ import {
 
 /** How long the wallet facade gets to answer with a state snapshot. */
 const STATE_TIMEOUT_MS = 15_000;
-/** Attempts, at two seconds apart, to map a transaction identifier to a hash. */
-const TX_HASH_ATTEMPTS = 5;
-const TX_HASH_INTERVAL_MS = 2_000;
+/**
+ * The window in which the indexer must map a transaction identifier to a ledger
+ * hash: ten seconds, unchanged, as twenty attempts half a second apart rather
+ * than five attempts two seconds apart (2026/08/31).
+ *
+ * The query being repeated costs 102–123 ms warm against stagenet, so a
+ * two-second gap was twenty times the cost of the question and the average
+ * overshoot was a second of pure waiting. Exceeding the window is unchanged and
+ * harmless: the identifier comes back as itself with `resolved: false`, and no
+ * caller links an unresolved id.
+ */
+const TX_HASH_ATTEMPTS = 20;
+const TX_HASH_INTERVAL_MS = 500;
 /** A Compact `Field` is carried as 32 bytes, so its hex form is 64 characters. */
 const FIELD_HEX_LENGTH = 64;
 
@@ -203,6 +213,7 @@ export function unshieldedAddressBytes(address: string, expectedNetworkId?: stri
       'invalid-request',
       'That is not a Midnight address.',
       cause instanceof Error ? cause.message : String(cause),
+      { cause },
     );
   }
   const addressNetwork = parsedNetworkName(parsed.network);
@@ -220,6 +231,7 @@ export function unshieldedAddressBytes(address: string, expectedNetworkId?: stri
       'invalid-request',
       'That is a Midnight address, but not an unshielded (mn_addr…) one.',
       cause instanceof Error ? cause.message : String(cause),
+      { cause },
     );
   }
   const bytes = new Uint8Array(decoded.data);
@@ -253,6 +265,7 @@ export function coinPublicKeyBytes(coinPublicKeyHex: string): Uint8Array {
       'invalid-request',
       'That is not a Midnight shielded coin public key.',
       cause instanceof Error ? cause.message : String(cause),
+      { cause },
     );
   }
 }
@@ -288,6 +301,81 @@ export function shieldedCoinFromWalletCoin(coin: {
   value: bigint;
 }): AccountShieldedCoin {
   return encodeShieldedCoinInfo({ type: coin.type, nonce: coin.nonce, value: coin.value });
+}
+
+/**
+ * The same translation, from a note in THIS APP's vocabulary.
+ *
+ * One line, and it earns its place: `type` is the ledger's word for a colour
+ * and `tokenType` is the word every surface in Passport uses, so the crossing
+ * between the two belongs here — beside both of them — rather than at each call
+ * site that holds a note and wants a coin.
+ */
+export function shieldedCoinFromNote(note: {
+  tokenType: string;
+  nonce: string;
+  value: bigint;
+}): AccountShieldedCoin {
+  return shieldedCoinFromWalletCoin({
+    type: note.tokenType,
+    nonce: note.nonce,
+    value: note.value,
+  });
+}
+
+/**
+ * A coin for PART of what the wallet holds — the deposit that pays a recipient
+ * out of a larger note.
+ *
+ * The nonce is fresh randomness rather than a note's own, and that is the whole
+ * difference from {@link shieldedCoinFromNote}. A deposit's coin is not a note
+ * being handed over intact: `receiveShielded` states a commitment the
+ * transaction must CONTAIN, midnight-js builds that contract-owned output, and
+ * the wallet's balancing funds it out of whatever notes it holds and returns
+ * the difference to itself as change. So the nonce is simply the identity the
+ * new coin will have inside the contract, and it must not collide with one
+ * already used for the same colour and value — which random 32 bytes will not.
+ *
+ * This is what lets a shielded payment take the WHOLE coin out of the account
+ * (the only safe branch of `withdraw_shielded` — see {@link withdrawShielded})
+ * and still pay the recipient exactly what they are owed.
+ */
+export function shieldedCoinOfValue(tokenType: string, value: bigint): AccountShieldedCoin {
+  const nonce = new Uint8Array(32);
+  globalThis.crypto.getRandomValues(nonce);
+  return shieldedCoinFromWalletCoin({ type: tokenType, nonce: bytesToHex(nonce), value });
+}
+
+/**
+ * Every shielded note the CALLING WALLET holds and could deposit, with each
+ * note's own nonce.
+ *
+ * Deliberately not the same thing as `LocalMidnightWallet.shieldedHoldings()`,
+ * which sums the wallet's notes into a balance per colour. A balance is what a
+ * screen shows; a NOTE is what {@link depositShielded} moves, and the two are
+ * not interchangeable — `receiveShielded` consumes one specific note, so a
+ * colour and an amount cannot describe a deposit however precise they are. This
+ * is the only read in the app that exposes the nonce, which is why it lives
+ * beside {@link shieldedCoinFromWalletCoin} rather than in the wallet module.
+ *
+ * `availableCoins` and not `totalCoins`: a pending note has not been confirmed
+ * as the wallet's yet, and building a deposit around one would fail at
+ * balancing rather than at anything a reader could act on.
+ *
+ * Nothing is filtered by colour or value here. Which of these notes matters is
+ * a rule with a wrong answer in it — see `lib/shieldedNote.ts`, where it is
+ * decided against a snapshot of what the wallet held BEFORE — and mixing a
+ * guess into the read would put that rule in two places.
+ */
+export async function walletShieldedNotes(
+  handle: LocalMidnightWallet,
+): Promise<{ tokenType: string; nonce: string; value: bigint }[]> {
+  const state = await currentWalletState(handle);
+  return state.shielded.availableCoins.map(({ coin }) => ({
+    tokenType: coin.type,
+    nonce: coin.nonce,
+    value: coin.value,
+  }));
 }
 
 /**
@@ -439,12 +527,27 @@ export type AccountCustodyErrorCode =
   | 'call-rejected';
 
 export class AccountCustodyError extends Error {
+  /**
+   * The ORIGINAL failure is kept, not merely quoted (2026/09/02).
+   *
+   * `detail` is a string, and a string is where a cause chain used to end: the
+   * SDK's own error — a node refusal, a balancing failure the transaction
+   * runtime had already classified as retryable — was flattened into
+   * `cause.message` and thrown away. Everything downstream that has to decide
+   * whether to try again was then left reading English prose, and the sentence
+   * a user saw was "The account contract rejected withdraw_night", which names
+   * the machinery and says nothing about what happened.
+   *
+   * So the cause is CARRIED. `lib/sendLegs.ts` walks the chain, and `detail`
+   * stays exactly what it was for the surfaces that print it.
+   */
   constructor(
     readonly code: AccountCustodyErrorCode,
     message: string,
     readonly detail?: string,
+    options?: { cause?: unknown },
   ) {
-    super(message);
+    super(message, options);
     this.name = 'AccountCustodyError';
   }
 }
@@ -581,23 +684,31 @@ export async function readAccountState(
   contractAddress: string,
 ): Promise<AccountState> {
   const address = rawContractAddress(contractAddress);
-  const [{ indexerPublicDataProvider }, { ledger }] = await Promise.all([
-    import('@midnight-ntwrk/midnight-js-indexer-public-data-provider'),
+  /* THE PROVIDER IS SHARED, not built here (2026/09/03). This function used to
+     construct an `indexerPublicDataProvider` — an Apollo client, an
+     `InMemoryCache`, a retry link, and a `graphql-ws` client — and drop it on
+     the floor at every read. That was one allocation per thing the reader did
+     until `lib/balanceWatch.ts` began re-reading the account every five to
+     thirty seconds, at which point it became one per tick, for ever, for as
+     long as a Passport is open. See `contractRuntime.sharedPublicDataProvider`. */
+  const [{ sharedPublicDataProvider }, { ledger }] = await Promise.all([
+    import('./contractRuntime.js'),
     loadAccountContract(),
   ]);
 
   let state: unknown;
   try {
-    const provider = indexerPublicDataProvider({
-      queryURL: network.indexerHttpUrl,
-      subscriptionURL: network.indexerWsUrl ?? indexerWsFrom(network.indexerHttpUrl),
-    });
+    const provider = (await sharedPublicDataProvider(
+      network.indexerHttpUrl,
+      network.indexerWsUrl ?? indexerWsFrom(network.indexerHttpUrl),
+    )) as { queryContractState(address: string): Promise<unknown> };
     state = await provider.queryContractState(address);
   } catch (cause) {
     throw new AccountCustodyError(
       'network-unreachable',
       'The indexer could not be reached, so this account’s balances are unknown.',
       cause instanceof Error ? cause.message : String(cause),
+      { cause },
     );
   }
   if (!state) {
@@ -621,6 +732,7 @@ export async function readAccountState(
       'contract-not-found',
       'The state at that address is not a Passport account-custody contract.',
       cause instanceof Error ? cause.message : String(cause),
+      { cause },
     );
   }
 }
@@ -646,6 +758,7 @@ export function decodeAccountState(decoded: AccountLedger): AccountState {
       'contract-not-found',
       'The state at that address is not a Passport account-custody contract.',
       cause instanceof Error ? cause.message : String(cause),
+      { cause },
     );
   }
 }
@@ -724,6 +837,14 @@ interface WalletFacadeState {
   shielded: {
     coinPublicKey: { toHexString(): string };
     encryptionPublicKey: { toHexString(): string };
+    /**
+     * The wallet's own confirmed notes — `AvailableCoin[]` from
+     * `wallet-sdk-shielded`, narrowed here to the three fields
+     * {@link walletShieldedNotes} reads. The commitment and the nullifier are
+     * the SDK's business; the `mt_index` on the coin is deliberately not read,
+     * for the reason {@link shieldedCoinFromWalletCoin} gives.
+     */
+    availableCoins: readonly { coin: { type: string; nonce: string; value: bigint } }[];
   };
   unshielded: { balances: Record<string, bigint> };
   dust: { balance(now: Date): bigint };
@@ -790,7 +911,10 @@ async function resolveTransactionHash(
   for (let attempt = 0; attempt < TX_HASH_ATTEMPTS; attempt += 1) {
     const hash = await resolveDeployTxHashOnce(indexerHttpUrl, identifier);
     if (hash) return { txId: hash, resolved: true };
-    await wait(TX_HASH_INTERVAL_MS);
+    /* No sleep after the LAST look. It bought nothing but half a second on the
+       front of the wait that follows — and on the send path that wait is the
+       one between the two legs, which now asks this same question itself. */
+    if (attempt + 1 < TX_HASH_ATTEMPTS) await wait(TX_HASH_INTERVAL_MS);
   }
   return { txId: identifier, resolved: false };
 }
@@ -829,41 +953,22 @@ export async function checkAccountCustodyFees(): Promise<
 type AccountCallTx = Record<string, (...args: unknown[]) => Promise<unknown>>;
 
 /**
- * Connects to the deployed contract and runs one circuit against it.
- *
- * The private-state id is fresh per call, which is `PassportAccount.connect`'s
- * own rule and its own reason: the secrets this call was handed must win over
- * anything a previous connection left behind, and a shared id would let a
- * stale private state decide who signed.
+ * Providers, compiled artefact, and `findDeployedContract` — everything up to
+ * the point where a circuit could be called, and nothing that submits.
  *
  * `findDeployedContract` is not a formality — it re-reads the deployed
  * contract's verifier keys and refuses our compiled build if they differ, which
  * is the check that turns an artefact-drift bug into a `call-rejected` with the
  * mismatch attached instead of a proof nobody can verify.
  */
-async function callAccountCircuit(
+async function openAccountContract(
   wallet: LocalMidnightWallet,
   options: {
-    contractAddress: string;
-    circuit: string;
-    args: readonly unknown[];
+    address: string;
+    privateStateId: string;
     secrets: { deviceSecret?: Uint8Array; grantSecret?: Uint8Array };
-    /**
-     * Coin-pk-hex → encryption-pk-hex, required by midnight-js to build a
-     * shielded output's note ciphertext for a third-party recipient. Presence
-     * switches the call onto `withContractScopedTransaction`, the only form
-     * that carries the mapping to the output builder.
-     */
-    coinEncPublicKeyMappings?: ReadonlyMap<string, string>;
   },
-  onPhase?: (progress: AccountCustodyProgress) => void,
-): Promise<AccountCustodyTxResult> {
-  const address = rawContractAddress(options.contractAddress);
-  const nonce = new Uint8Array(8);
-  globalThis.crypto.getRandomValues(nonce);
-  const privateStateId = `passport-account-${address.slice(0, 8)}-${bytesToHex(nonce)}`;
-
-  onPhase?.({ phase: 'connecting' });
+): Promise<{ providers: unknown; callTx: AccountCallTx }> {
   /* The witness factory and private-state builder from `./passportContract.ts`
      — the module that DEPLOYED this contract, so the two cannot disagree about
      what the private state looks like. They used to be imported from
@@ -887,32 +992,145 @@ async function callAccountCircuit(
      through this same plumbing later without changing it. */
   const initialPrivateState = accountPrivateStateFrom(options.secrets);
   const [providers, compiledContract, { findDeployedContract }] = await Promise.all([
-    createAccountProviders(wallet, privateStateId, initialPrivateState),
+    createAccountProviders(wallet, options.privateStateId, initialPrivateState),
     compiledAccountContract(accountWitnesses()),
     import('@midnight-ntwrk/midnight-js-contracts'),
   ]);
 
-  /* Two try blocks, not one, because the two failures are different things to
-     say: nothing has been submitted when the CONNECT fails, and something may
-     have been proved and refused when the CALL fails. A single catch would
-     report "the contract rejected withdraw_night" for a contract that was
-     never reached. */
-  let callTx: AccountCallTx;
+  /* Two try blocks across the pair, not one, because the two failures are
+     different things to say: nothing has been submitted when the CONNECT
+     fails, and something may have been proved and refused when the CALL fails.
+     A single catch would report "the contract rejected withdraw_night" for a
+     contract that was never reached. */
   try {
     const deployed = await findDeployedContract(providers as never, {
       compiledContract,
-      contractAddress: address,
-      privateStateId,
+      contractAddress: options.address,
+      privateStateId: options.privateStateId,
       initialPrivateState,
     } as never);
-    callTx = (deployed as { callTx: AccountCallTx }).callTx;
+    return { providers, callTx: (deployed as { callTx: AccountCallTx }).callTx };
   } catch (cause) {
     throw new AccountCustodyError(
       'call-rejected',
-      `The account contract at ${address.slice(0, 10)}… could not be opened, so nothing was submitted.`,
+      `The account contract at ${options.address.slice(0, 10)}… could not be opened, so nothing was submitted.`,
       cause instanceof Error ? cause.message : String(cause),
+      { cause },
     );
   }
+}
+
+/**
+ * A contract this wallet has already CONNECTED to, ready for one circuit call.
+ *
+ * WHAT IT IS FOR (2026/09/03). Paying a `.night` name is two legs, and the
+ * second one's connection depends on nothing the first one produces: the
+ * recipient's account address was resolved before the send began, and
+ * `deposit_night` / `deposit_shielded` are permissionless, so no secret goes
+ * into the private state. Everything expensive about reaching that contract —
+ * the compiled artefact, the providers, and `findDeployedContract`'s verifier-
+ * key read against the deployed build — can therefore be done WHILE leg one is
+ * still confirming, which is where it now happens. See `App.tsx#runNameSend`.
+ *
+ * ONLY FOR A CIRCUIT THAT NEEDS NO SECRETS. The private-state id is fresh per
+ * connection precisely so that the secrets a call was handed win over anything
+ * a previous one left behind; a prepared connection carries an EMPTY private
+ * state, and {@link callAccountCircuit} refuses to reuse one for a call that
+ * was given a secret rather than quietly proving against the wrong witness.
+ */
+export interface PreparedAccountCall {
+  /** The raw contract address this connection is for. */
+  readonly contractAddress: string;
+  readonly privateStateId: string;
+  readonly providers: unknown;
+  readonly callTx: AccountCallTx;
+}
+
+/**
+ * One connection to a deployed account contract, with its own private state.
+ *
+ * The private-state id is fresh per connection, which is
+ * `PassportAccount.connect`'s own rule and its own reason: the secrets this
+ * call was handed must win over anything a previous connection left behind,
+ * and a shared id would let a stale private state decide who signed.
+ */
+async function connectAccountContract(
+  wallet: LocalMidnightWallet,
+  options: {
+    contractAddress: string;
+    secrets: { deviceSecret?: Uint8Array; grantSecret?: Uint8Array };
+  },
+): Promise<PreparedAccountCall> {
+  const address = rawContractAddress(options.contractAddress);
+  const nonce = new Uint8Array(8);
+  globalThis.crypto.getRandomValues(nonce);
+  const privateStateId = `passport-account-${address.slice(0, 8)}-${bytesToHex(nonce)}`;
+  const { providers, callTx } = await openAccountContract(wallet, {
+    address,
+    privateStateId,
+    secrets: options.secrets,
+  });
+  return { contractAddress: address, privateStateId, providers, callTx };
+}
+
+/**
+ * Reaches the recipient's account contract before there is anything to pay
+ * into it — the preparation leg two would otherwise do on the critical path.
+ *
+ * Deposits only, and the type says so: no secret is accepted, because a
+ * connection made without one may not be reused for a circuit that needs one.
+ * A failure is the caller's to absorb — the unprepared path still works, and a
+ * prewarm that could break a send would be worse than the wait it saves.
+ */
+export async function prepareAccountDeposit(
+  handle: LocalMidnightWallet,
+  contractAddress: string,
+): Promise<PreparedAccountCall> {
+  return connectAccountContract(handle, { contractAddress, secrets: {} });
+}
+
+/**
+ * Runs one circuit against the deployed contract, connecting first unless the
+ * caller has already done that for us — see {@link PreparedAccountCall}.
+ */
+async function callAccountCircuit(
+  wallet: LocalMidnightWallet,
+  options: {
+    contractAddress: string;
+    circuit: string;
+    args: readonly unknown[];
+    secrets: { deviceSecret?: Uint8Array; grantSecret?: Uint8Array };
+    /**
+     * Coin-pk-hex → encryption-pk-hex, required by midnight-js to build a
+     * shielded output's note ciphertext for a third-party recipient. Presence
+     * switches the call onto `withContractScopedTransaction`, the only form
+     * that carries the mapping to the output builder.
+     */
+    coinEncPublicKeyMappings?: ReadonlyMap<string, string>;
+    /**
+     * A connection made earlier, by {@link prepareAccountDeposit}. Ignored
+     * when it is for another contract, and refused outright for a call that
+     * carries a secret — see {@link PreparedAccountCall}.
+     */
+    prepared?: PreparedAccountCall | null;
+  },
+  onPhase?: (progress: AccountCustodyProgress) => void,
+): Promise<AccountCustodyTxResult> {
+  const address = rawContractAddress(options.contractAddress);
+
+  onPhase?.({ phase: 'connecting' });
+  const hasSecret =
+    options.secrets.deviceSecret !== undefined || options.secrets.grantSecret !== undefined;
+  const reusable =
+    options.prepared && !hasSecret && options.prepared.contractAddress === address
+      ? options.prepared
+      : null;
+  const { providers, callTx } =
+    reusable ??
+    (await connectAccountContract(wallet, {
+      contractAddress: address,
+      secrets: options.secrets,
+    }));
 
   onPhase?.({ phase: 'submitting' });
   let identifier: string;
@@ -951,6 +1169,7 @@ async function callAccountCircuit(
       'call-rejected',
       `The account contract rejected ${options.circuit}.`,
       cause instanceof Error ? cause.message : String(cause),
+      { cause },
     );
   }
 
@@ -1072,24 +1291,53 @@ export interface WithdrawShieldedRequest {
    * and refuses anything less.
    */
   recipientShieldedAddress: string;
+  /**
+   * Take the WHOLE coin the account holds of this colour, whatever it is worth
+   * right now, rather than {@link amount}.
+   *
+   * The one branch of `withdraw_shielded` that leaves the account in a state it
+   * can be withdrawn from again — see {@link withdrawShielded}. `amount` is
+   * still required and still checked, because it is what the caller means to
+   * move on; `whole` only widens what leaves the account in this one
+   * transaction, and the caller puts the difference back.
+   */
+  whole?: boolean;
+}
+
+/**
+ * What a shielded withdrawal did, including how much of the account's coin it
+ * actually took — which is not {@link WithdrawShieldedRequest.amount} when the
+ * caller asked for the whole coin.
+ */
+export interface WithdrawShieldedResult extends AccountCustodyTxResult {
+  /** Atomic units of the colour that left the account. */
+  amount: bigint;
 }
 
 /**
  * Moves shielded value out of the account contract to a shielded address.
  *
  * Device-authorised, exactly as {@link withdrawNight} is. The contract holds at
- * most one qualified coin per colour, so a partial withdrawal takes the change
- * path — `sendShielded` splits, `sendImmediateShielded` returns the change to
- * the contract, and `insertCoin` re-registers it — and a full one removes the
- * entry. Both are the circuit's business; what this function owes the caller is
- * a refusal, before proving, when the contract does not hold that much.
+ * most one qualified coin per colour, and the circuit has two branches: asked
+ * for the WHOLE coin it takes `coins.remove`, asked for part of it it splits
+ * and re-registers the remainder with `sendImmediateShielded` +
+ * `insertCoin` — and the coin THAT leaves behind is one the node refuses every
+ * later withdrawal against (`Custom error: 239`, live on stagenet 2026/09/03).
+ *
+ * So {@link WithdrawShieldedRequest.whole} exists, and every send path in this
+ * app uses it: the amount is read from the account at build time and the whole
+ * of it comes out, with the client putting the change back afterwards. Reading
+ * the figure HERE rather than at the call site is the point — a caller that
+ * read the balance, then built, would be asking for a figure that a deposit
+ * arriving in between had already moved, and the split branch is exactly what
+ * that race lands on.
  */
 export async function withdrawShielded(
   handle: LocalMidnightWallet,
   deviceSecret: Uint8Array,
   request: WithdrawShieldedRequest,
   onPhase?: (progress: AccountCustodyProgress) => void,
-): Promise<AccountCustodyTxResult> {
+): Promise<WithdrawShieldedResult> {
   onPhase?.({ phase: 'checking' });
   const colour = colourHexToBytes(request.colourHex);
   requirePositiveAmount(request.amount, 'A withdrawal');
@@ -1107,13 +1355,15 @@ export async function withdrawShielded(
       `This account holds ${held} shielded of that colour, and the withdrawal would move ${request.amount}.`,
     );
   }
+  /* THE WHOLE COIN, read from the state this call is built against. */
+  const amount = request.whole === true ? held : request.amount;
 
-  return callAccountCircuit(
+  const result = await callAccountCircuit(
     handle,
     {
       contractAddress: request.contractAddress,
       circuit: 'withdraw_shielded',
-      args: [{ bytes: recipient.coinPublicKey }, colour, request.amount],
+      args: [{ bytes: recipient.coinPublicKey }, colour, amount],
       secrets: { deviceSecret },
       /* The coin-pk → encryption-pk mapping that lets midnight-js build the
          recipient's note ciphertext — see {@link WithdrawShieldedRequest}. */
@@ -1123,6 +1373,7 @@ export async function withdrawShielded(
     },
     onPhase,
   );
+  return { ...result, amount };
 }
 
 /**
@@ -1145,6 +1396,7 @@ async function decodeShieldedRecipient(
       'invalid-request',
       'That is not a Midnight address.',
       cause instanceof Error ? cause.message : String(cause),
+      { cause },
     );
   }
   const recipientNetwork = parsedNetworkName(parsed.network);
@@ -1165,6 +1417,7 @@ async function decodeShieldedRecipient(
       'invalid-request',
       'That is a Midnight address, but not a shielded (mn_shield-addr…) one.',
       cause instanceof Error ? cause.message : String(cause),
+      { cause },
     );
   }
   return {
@@ -1181,6 +1434,13 @@ export interface DepositNightRequest {
   contractAddress: string;
   colourHex: string;
   amount: bigint;
+  /**
+   * A connection to {@link contractAddress} made earlier by
+   * {@link prepareAccountDeposit}, so the proof starts without waiting for the
+   * verifier-key read. Optional in every sense: absent, or for another
+   * contract, and the call opens its own.
+   */
+  prepared?: PreparedAccountCall | null;
 }
 
 /**
@@ -1224,6 +1484,7 @@ export async function depositNight(
       circuit: 'deposit_night',
       args: [colour, request.amount],
       secrets: {},
+      prepared: request.prepared ?? null,
     },
     onPhase,
   );
@@ -1237,6 +1498,8 @@ export interface DepositShieldedRequest {
    * not enough, because `receiveShielded` consumes that specific coin.
    */
   coin: AccountShieldedCoin;
+  /** As {@link DepositNightRequest.prepared}. */
+  prepared?: PreparedAccountCall | null;
 }
 
 /**
@@ -1280,6 +1543,7 @@ export async function depositShielded(
       circuit: 'deposit_shielded',
       args: [{ nonce: coin.nonce, color: coin.color, value: coin.value }],
       secrets: {},
+      prepared: request.prepared ?? null,
     },
     onPhase,
   );

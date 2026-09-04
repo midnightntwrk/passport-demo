@@ -10,6 +10,8 @@
 
 import { readFileSync } from 'node:fs';
 
+import { DEFAULT_TRUSTED_PROXIES } from './limits.js';
+
 export interface BalancerNetworkEndpoints {
   indexerHttpUrl: string;
   indexerWsUrl: string;
@@ -47,6 +49,16 @@ export interface BalancerConfig extends BalancerNetworkEndpoints {
    */
   balanceTtlMs: number;
   /**
+   * How long a balanced transaction may go unseen on chain before the DUST it
+   * booked is reverted back into this wallet.
+   *
+   * `/balance-only` never submits — the caller does — so a caller whose submit
+   * is rejected or abandoned leaves this wallet's DUST booked against a
+   * transaction that will never land, for the whole of {@link balanceTtlMs}.
+   * This is how long the sweeper waits before it stops believing in one.
+   */
+  balanceOrphanMs: number;
+  /**
    * How often the in-process health watchdog evaluates this wallet. Zero turns
    * it off — the external `passport-balancer-watchdog.timer` on the droplet is
    * a separate leg and is unaffected.
@@ -79,6 +91,109 @@ export interface BalancerConfig extends BalancerNetworkEndpoints {
    * in whole mUSD. Zero disables the asset leg.
    */
   assetGrant: bigint;
+  /** The per-client ceiling on `/balance-only`, which pays a DUST fee per call. */
+  balanceRate: RateLimit;
+  /** The per-client ceiling on `/register-alias`. */
+  aliasRate: RateLimit;
+  /** The per-client ceiling on `/fund-account`. */
+  accountRate: RateLimit;
+  /**
+   * How many spend requests may be in flight at once, across every client.
+   * Zero means unbounded.
+   */
+  spendQueueMax: number;
+  /**
+   * The CEILING on how many spend jobs may run at once. The real limit is the
+   * number of free DUST coins, and `./server.ts` takes the smaller of the two.
+   */
+  spendLanes: number;
+  /**
+   * How long `/register-alias` and `/fund-account` may wait, outside the spend
+   * queue, for a fee-capable DUST coin to come free before refusing. See
+   * {@link DEFAULT_DUST_WAIT_MS} for why four minutes.
+   */
+  dustWaitMs: number;
+  /**
+   * How long ONE node submission may take before this service stops waiting on
+   * it. See {@link DEFAULT_SUBMIT_TIMEOUT_MS}: the wallet SDK's submission
+   * stream can be dropped without a callback, and nothing underneath bounds it.
+   */
+  submitTimeoutMs: number;
+  /**
+   * How long a submitted transaction may go unseen by the indexer before the
+   * job stops waiting and asks the indexer directly. See
+   * {@link DEFAULT_CONFIRM_TIMEOUT_MS}.
+   */
+  confirmTimeoutMs: number;
+  /**
+   * How long a running spend job may make no progress, with nothing of ours at
+   * the prover, before the queue aborts it and gives its lane back. See
+   * {@link DEFAULT_JOB_STALL_MS}.
+   */
+  jobStallMs: number;
+  /**
+   * How long the background chain walk may stall before {@link
+   * BalancerWallet.waitForSync} gives up and lets the health loop's rewarm act.
+   */
+  syncStallMs: number;
+  /**
+   * How long a spend job may hold a lane IN TOTAL, prover or no prover. See
+   * {@link DEFAULT_JOB_MAX_MS}. Zero removes the ceiling.
+   */
+  jobMaxMs: number;
+  /**
+   * How long the main thread may stop running before the liveness worker kills
+   * the process. See {@link DEFAULT_LOOP_BLOCKED_MS}. Zero switches the worker
+   * off and leaves only the lag measurement `/status` publishes.
+   */
+  loopBlockedMs: number;
+  /**
+   * The heap size, in bytes, past which the service recycles itself at the next
+   * quiet moment. See {@link DEFAULT_RECYCLE_HEAP_BYTES}. Zero switches it off.
+   */
+  recycleHeapBytes: number;
+  /**
+   * The resident size, in bytes, past which the service recycles itself at the
+   * next quiet moment. See {@link DEFAULT_RECYCLE_RSS_BYTES}.
+   */
+  recycleRssBytes: number;
+  /**
+   * How long one call into the wallet facade may take before this service stops
+   * waiting on it. See {@link DEFAULT_WALLET_CALL_TIMEOUT_MS}.
+   */
+  walletCallTimeoutMs: number;
+  /**
+   * How many pre-deployed resolver leaves the sponsor tries to hold. The filler
+   * tops the shelf up to here and never past it. Zero switches the pool off and
+   * every registration deploys its own leaf, which is the behaviour this
+   * service had before the pool existed.
+   */
+  resolverPoolTarget: number;
+  /**
+   * The depth below which the shelf is reported as LOW. It changes nothing
+   * about how the filler behaves — the filler is always at the lowest priority,
+   * and a shelf running out is never a reason to take a coin off a user — it is
+   * the number an operator reads on `/status` to know the shelf needs a quiet
+   * hour before the next demo.
+   */
+  resolverPoolFloor: number;
+  /**
+   * The peers whose `X-Forwarded-For` is believed. Everything else is keyed on
+   * the address its socket really came from, whatever its headers claim.
+   */
+  trustedProxies: string[];
+  /**
+   * When set, the three spend endpoints require it in an `X-Passport-Key`
+   * header. Unset — the default — leaves every caller admitted, which is the
+   * deployed behaviour.
+   */
+  clientKey?: string;
+}
+
+/** One endpoint's per-client token bucket. `perMinute: 0` turns it off. */
+export interface RateLimit {
+  perMinute: number;
+  burst: number;
 }
 
 /**
@@ -142,6 +257,18 @@ export const DEFAULT_ALLOWED_ORIGINS = ['https://midnightpassport.com'];
 export const DEFAULT_FEE_BLOCKS_MARGIN = 5;
 /** Thirty minutes, the same window the demo builds its own transfers with. */
 export const DEFAULT_BALANCE_TTL_MS = 30 * 60 * 1_000;
+/**
+ * How long a balanced transaction may go unseen on chain before the DUST it
+ * booked is handed back.
+ *
+ * Two minutes: well past a six-second block plus the indexer lag a caller's
+ * submit travels through (~14 s per round trip, measured 2026/09/02), and far
+ * short of {@link DEFAULT_BALANCE_TTL_MS}, which is the window a transaction the
+ * node has REJECTED would otherwise hold this wallet's DUST for. That is the
+ * failure this exists for: on 2026/09/02 a rejected transaction booked the
+ * balancer's only DUST coins for thirty minutes and onboarding stopped dead.
+ */
+export const DEFAULT_BALANCE_ORPHAN_MS = 120_000;
 /** The funder's ceiling on preview, and the same reasoning applies here. */
 export const DEFAULT_ALIAS_MAX_PER_HOUR = 20;
 /** Two thousand atomic NIGHT — 0.002 NIGHT — as an account's opening balance. */
@@ -168,6 +295,222 @@ export const DEFAULT_HEALTH_INTERVAL_MS = 10 * 60 * 1_000;
 export const ASSET_SYMBOL = 'mUSD';
 /** One hundred mUSD, the balance a new Passport opens with. */
 export const DEFAULT_ASSET_GRANT = 100n;
+
+/**
+ * The per-client ceilings.
+ *
+ * `/balance-only` is the one a normal session calls repeatedly — once per Send —
+ * so it gets the loose limit; twelve a minute is far more than a person can
+ * approve and a burst of six absorbs a client that retries. The other two are
+ * once-in-a-lifetime calls per Passport, gated on top of that by a persisted
+ * once-only ledger, so three a minute is generous for a family sharing an
+ * address and useless to anybody draining the wallet.
+ *
+ * These are PER CLIENT and sit UNDER the existing global `aliasMaxPerHour` and
+ * `accountMaxPerHour` ceilings, which are unchanged.
+ */
+export const DEFAULT_BALANCE_MAX_PER_MIN = 12;
+export const DEFAULT_BALANCE_BURST = 6;
+export const DEFAULT_SPEND_MAX_PER_MIN = 3;
+export const DEFAULT_SPEND_BURST = 3;
+/**
+ * How many spend requests may be in flight at once. Eight, because a spend that
+ * is merely waiting still holds a socket and whatever it read on the way in, and
+ * eight is comfortably more than the demo's own concurrency while being a number
+ * a flood reaches immediately.
+ */
+/**
+ * Thirty-two, not eight. Measured on 2026/09/03: the fifth sign-up inside a
+ * minute was answered `429 queue-full` with four requests in flight, and the
+ * client told its user the claim was "queued and will register on its own"
+ * with nothing behind it. Five people clicking in a minute is the demo, not an
+ * attack; the per-client limits are what bound one caller.
+ */
+export const DEFAULT_SPEND_QUEUE_MAX = 32;
+
+/**
+ * How many spend jobs may run at once, before the free-coin limit is applied.
+ *
+ * Three, because an activation is five sequential sponsored transactions and
+ * the two that can genuinely run in parallel — the NIGHT grant and the asset
+ * leg — plus one registration for the person onboarding behind them is the
+ * concurrency the demo actually produces. Higher would not help: the droplet
+ * has two vCPUs and one proof server shared with every client, so a fourth
+ * concurrent proof would simply queue there instead of here, where at least the
+ * queue is visible on `/status`.
+ *
+ * One restores the strictly-serial behaviour this service had before
+ * 2026/09/02, which is the setting to fall back to if concurrency is ever
+ * suspected of a fault.
+ */
+export const DEFAULT_SPEND_LANES = 3;
+
+/**
+ * How long a user's spend may WAIT for a fee-capable DUST coin to come free
+ * before this service gives up and refuses.
+ *
+ * Four minutes, and the figure is measured rather than chosen for roundness.
+ * The sponsor holds ONE coin above the fee floor, and the thing that books it
+ * during an onboarding is the user's OWN account deploy, which holds it for
+ * about 100 s. Before this existed, `/register-alias` passed a budget of zero
+ * to its fee estimate, so the first claim after that deploy answered 502
+ * `DustUnavailable` about 60 s after the click — 5/5 attempts on 2026/09/02 —
+ * and the user had to press Claim a second time, after which it completed in
+ * 52–58 s. Four minutes covers that hold twice over and still leaves the whole
+ * request inside the client's own 600-second ceiling with the ~55 s
+ * registration to follow.
+ *
+ * It is spent OUTSIDE the spend queue, holding nothing: see
+ * `BalancerWallet.awaitFreeDustCoin`. Waiting inside a job is what let one fee
+ * estimate block every other job for ten minutes on 2026/09/02, and that
+ * budget is still zero.
+ */
+export const DEFAULT_DUST_WAIT_MS = 240_000;
+
+/**
+ * How long ONE node submission may take before this service stops waiting.
+ *
+ * THIRTY SECONDS, AND IT IS A CEILING ON A SUB-SECOND OPERATION. Since
+ * 2026/09/02 every submission asks the node for `'Submitted'` — the first
+ * Ready/Broadcast status, which arrives in well under a second — rather than
+ * `'Finalized'`, which is 15–25 s of stagenet finality this service has no
+ * reason to hold a lane through. The bound exists because the wallet SDK's
+ * default submission service shares ONE polkadot-js `ApiPromise` across every
+ * submission and disconnects it at the end of each one, and polkadot-js drops
+ * `author_*` subscriptions on a reconnect WITHOUT erroring their handlers: an
+ * overlapping submission therefore leaves the first one's watch waiting for a
+ * status callback that will never come. That is the 23:03 and 23:46 hangs of
+ * 2026/09/02, both of which held a lane silently until an operator restarted
+ * the service.
+ */
+export const DEFAULT_SUBMIT_TIMEOUT_MS = 30_000;
+
+/**
+ * How long a submitted transaction may go unseen by the INDEXER.
+ *
+ * Two minutes: a stagenet block is 6 s and the indexer's own lag is about 14 s,
+ * so this is eight blocks of slack over the worst honest case. midnight-js
+ * waits on `watchForTxData` / `watchForDeployTxData` with no deadline at all,
+ * which turns a wedged indexer socket into a job that never ends. On expiry the
+ * transaction is looked up DIRECTLY by identifier before anything is given up
+ * on: a transaction that landed and was merely not streamed to us is a
+ * completed job, not a failed one.
+ */
+export const DEFAULT_CONFIRM_TIMEOUT_MS = 120_000;
+
+/**
+ * How long a running spend job may make NO PROGRESS before the queue aborts it.
+ *
+ * Two and a half minutes, and only while nothing of ours is at the prover — a
+ * proof is legitimately minutes long and reports no steps while it runs. Every
+ * other step of a job is seconds, so a job that has not moved for this long
+ * with an idle prover is not slow, it is stuck, and the lane it holds is a lane
+ * every user behind it is waiting for.
+ */
+export const DEFAULT_JOB_STALL_MS = 150_000;
+
+/** How long the background chain walk may stall before it is reported. */
+export const DEFAULT_SYNC_STALL_MS = 600_000;
+
+/**
+ * The LAST bound on a spend job: how long it may hold a lane in total.
+ *
+ * Twelve minutes, and — this is the point — regardless of the prover. The stall
+ * watchdog stands off while a proof is outstanding, because a proof reports no
+ * step for minutes and is perfectly healthy. That stand-off is also a way for
+ * one call to disable the watchdog for ever: on 2026/09/03 a job sat inside an
+ * unbounded wallet call with `proofInFlight` true and the five-second sweep
+ * returned at its first line for eight minutes, until systemd killed the
+ * process. A contract proof is itself bounded at ten minutes
+ * (`CONTRACT_PROOF_TIMEOUT_MS`), so a job still holding a lane at twelve has
+ * outlived every bound underneath it and is not proving.
+ */
+export const DEFAULT_JOB_MAX_MS = 720_000;
+
+/**
+ * How long the MAIN THREAD may stop running before this service kills itself.
+ *
+ * Ninety seconds. On 2026/09/03 the process stopped answering HTTP at about
+ * 01:45:30 UTC, wrote no journal line for eight minutes, ran neither its own
+ * five-second stall sweep nor its `SIGTERM` handler, and was `SIGKILL`ed by
+ * systemd at 01:53:29 after a ninety-second stop timeout. Nothing scheduled on
+ * a blocked event loop can end that, which is why the check that enforces this
+ * runs on a worker thread; see `./liveness.ts`.
+ *
+ * Ninety seconds is long enough that a heavy synchronous balancing — measured
+ * at several seconds on this two-core droplet, where the proof server is a
+ * neighbour — is never mistaken for a freeze, and short enough that
+ * `Restart=always` returns the sponsor inside a demo's patience.
+ */
+export const DEFAULT_LOOP_BLOCKED_MS = 90_000;
+
+/**
+ * The heap size past which this process recycles itself at the next quiet
+ * moment.
+ *
+ * 1.8 GB, against the 4 GB old-space limit the unit sets. The freeze of
+ * 2026/09/03 was reproduced live at 02:10 UTC seventeen minutes into a fresh
+ * process: `top -H` showed the main thread running at 50% with four V8 helper
+ * threads at 30–40% each against 2.39 GB resident, which is a garbage collector
+ * marking continuously rather than a call waiting on anything. The heavy
+ * allocation after `proved` is where the spiral starts; the heap it starts
+ * against is why.
+ *
+ * So the sponsor recycles at 1.8 GB — comfortably below where the spiral began,
+ * comfortably above the ~700 MB a healthy hour reaches — and only when no spend
+ * job is running and nothing is at the prover, so the second of
+ * resume-from-snapshot lands where nobody is waiting on it. Zero switches it
+ * off.
+ */
+export const DEFAULT_RECYCLE_HEAP_BYTES = 1_800_000_000;
+
+/**
+ * The resident size past which the same recycle happens.
+ *
+ * 2.0 GB, and this is the mark with the measurement behind it: the freeze of
+ * 2026/09/03 was read off `VmRSS`, at 2.39 GB, seventeen minutes into a fresh
+ * process. Both marks exist because they measure different halves. V8's heap is
+ * what its collector thrashes over, and `heapUsed` counts none of the ledger's
+ * WASM memory or the prover keys held beside it — a process can therefore reach
+ * 2.4 GB resident with a heap that looks healthy, which is what a sponsor doing
+ * contract work all day does. Zero switches it off.
+ */
+export const DEFAULT_RECYCLE_RSS_BYTES = 2_000_000_000;
+
+/**
+ * How long ONE call into the wallet facade may take before this service stops
+ * waiting on it.
+ *
+ * Two minutes. `estimateTransactionFee`, `balanceUnboundTransaction`, and
+ * `signRecipe` are the three calls a spend job makes between its circuit proof
+ * and its fee-leg proof, and on 2026/09/03 at 01:45:29 UTC a job disappeared
+ * between two of them and never came back: `the spare mUSD mint proved
+ * (job-13)` was the last line the service wrote for eight minutes. Every one of
+ * the three is local work over state the wallet already holds — the longest
+ * honest one measured on stagenet is a fee estimate at 2.4 s — so two minutes
+ * is fifty times the worst honest case and still short enough that the lane
+ * comes back inside a claim's patience.
+ */
+export const DEFAULT_WALLET_CALL_TIMEOUT_MS = 120_000;
+
+
+/**
+ * How many pre-deployed resolver leaves to hold, and the depth below which the
+ * shelf is called low.
+ *
+ * A hundred because the demand is a demo, not a market: a hundred leaves is a
+ * hundred names registered without anybody waiting on a leaf deploy, and at
+ * 1.37e16 Specks apiece they are paid for out of the sponsor's idle minutes
+ * rather than out of somebody's onboarding. The floor is half of
+ * it, which is the point where refilling deserves a deliberately quiet hour
+ * rather than whatever gaps the traffic leaves.
+ *
+ * Both are overridden by `RESOLVER_POOL_TARGET` and `RESOLVER_POOL_FLOOR` —
+ * unprefixed, because they are the operator's ruling about the shelf and not a
+ * tuning knob on the balancer's spending.
+ */
+export const DEFAULT_RESOLVER_POOL_TARGET = 100;
+export const DEFAULT_RESOLVER_POOL_FLOOR = 50;
 
 /**
  * The mUSD faucet each network's asset grant is minted from.
@@ -291,6 +634,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BalancerConfig
     throw new Error('BALANCER_BALANCE_TTL_MS must be a positive integer of milliseconds.');
   }
 
+  const balanceOrphanMs = Number(
+    trimmed(env.BALANCER_BALANCE_ORPHAN_MS) ?? DEFAULT_BALANCE_ORPHAN_MS,
+  );
+  if (!Number.isInteger(balanceOrphanMs) || balanceOrphanMs <= 0) {
+    throw new Error('BALANCER_BALANCE_ORPHAN_MS must be a positive integer of milliseconds.');
+  }
+
   const healthIntervalMs = Number(
     trimmed(env.BALANCER_HEALTH_INTERVAL_MS) ?? DEFAULT_HEALTH_INTERVAL_MS,
   );
@@ -354,6 +704,172 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BalancerConfig
     return normalized;
   };
 
+  /* A non-negative whole number, or the service does not start. A mistyped
+     ceiling that silently became `NaN` would read as "no limit" — the one
+     failure mode a limit must not have. */
+  const wholeNumber = (variable: string, raw: string | undefined, fallback: number): number => {
+    const value = Number(raw ?? fallback);
+    if (!Number.isInteger(value) || value < 0) {
+      throw new Error(`${variable} must be a non-negative integer.`);
+    }
+    return value;
+  };
+
+  const rateLimit = (
+    endpoint: string,
+    rateRaw: string | undefined,
+    burstRaw: string | undefined,
+    rateFallback: number,
+    burstFallback: number,
+  ): RateLimit => ({
+    perMinute: wholeNumber(`BALANCER_${endpoint}_MAX_PER_MIN`, rateRaw, rateFallback),
+    burst: wholeNumber(`BALANCER_${endpoint}_BURST`, burstRaw, burstFallback),
+  });
+
+  const balanceRate = rateLimit(
+    'BALANCE',
+    trimmed(env.BALANCER_BALANCE_MAX_PER_MIN),
+    trimmed(env.BALANCER_BALANCE_BURST),
+    DEFAULT_BALANCE_MAX_PER_MIN,
+    DEFAULT_BALANCE_BURST,
+  );
+  const aliasRate = rateLimit(
+    'ALIAS',
+    trimmed(env.BALANCER_ALIAS_MAX_PER_MIN),
+    trimmed(env.BALANCER_ALIAS_BURST),
+    DEFAULT_SPEND_MAX_PER_MIN,
+    DEFAULT_SPEND_BURST,
+  );
+  const accountRate = rateLimit(
+    'ACCOUNT',
+    trimmed(env.BALANCER_ACCOUNT_MAX_PER_MIN),
+    trimmed(env.BALANCER_ACCOUNT_BURST),
+    DEFAULT_SPEND_MAX_PER_MIN,
+    DEFAULT_SPEND_BURST,
+  );
+  const spendQueueMax = wholeNumber(
+    'BALANCER_SPEND_QUEUE_MAX',
+    trimmed(env.BALANCER_SPEND_QUEUE_MAX),
+    DEFAULT_SPEND_QUEUE_MAX,
+  );
+  const spendLanes = wholeNumber(
+    'BALANCER_SPEND_LANES',
+    trimmed(env.BALANCER_SPEND_LANES),
+    DEFAULT_SPEND_LANES,
+  );
+  if (spendLanes < 1) {
+    throw new Error('BALANCER_SPEND_LANES must be at least 1 (1 runs spends strictly one at a time).');
+  }
+
+  const dustWaitMs = Number(trimmed(env.BALANCER_DUST_WAIT_MS) ?? DEFAULT_DUST_WAIT_MS);
+  if (!Number.isInteger(dustWaitMs) || dustWaitMs < 0) {
+    throw new Error(
+      'BALANCER_DUST_WAIT_MS must be a whole number of milliseconds (0 refuses immediately rather than waiting).',
+    );
+  }
+
+  const submitTimeoutMs = wholeNumber(
+    'BALANCER_SUBMIT_TIMEOUT_MS',
+    trimmed(env.BALANCER_SUBMIT_TIMEOUT_MS),
+    DEFAULT_SUBMIT_TIMEOUT_MS,
+  );
+  if (submitTimeoutMs < 1_000) {
+    throw new Error('BALANCER_SUBMIT_TIMEOUT_MS must be at least 1000 ms.');
+  }
+  const confirmTimeoutMs = wholeNumber(
+    'BALANCER_CONFIRM_TIMEOUT_MS',
+    trimmed(env.BALANCER_CONFIRM_TIMEOUT_MS),
+    DEFAULT_CONFIRM_TIMEOUT_MS,
+  );
+  if (confirmTimeoutMs < 1_000) {
+    throw new Error('BALANCER_CONFIRM_TIMEOUT_MS must be at least 1000 ms.');
+  }
+  const jobStallMs = wholeNumber(
+    'BALANCER_JOB_STALL_MS',
+    trimmed(env.BALANCER_JOB_STALL_MS),
+    DEFAULT_JOB_STALL_MS,
+  );
+  if (jobStallMs < 10_000) {
+    throw new Error(
+      'BALANCER_JOB_STALL_MS must be at least 10000 ms: a shorter watchdog would abort jobs that are merely slow.',
+    );
+  }
+  const syncStallMs = wholeNumber(
+    'BALANCER_SYNC_STALL_MS',
+    trimmed(env.BALANCER_SYNC_STALL_MS),
+    DEFAULT_SYNC_STALL_MS,
+  );
+  if (syncStallMs < 10_000) {
+    throw new Error('BALANCER_SYNC_STALL_MS must be at least 10000 ms.');
+  }
+  const loopBlockedMs = wholeNumber(
+    'BALANCER_LOOP_BLOCKED_MS',
+    trimmed(env.BALANCER_LOOP_BLOCKED_MS),
+    DEFAULT_LOOP_BLOCKED_MS,
+  );
+  if (loopBlockedMs > 0 && loopBlockedMs < 10_000) {
+    throw new Error(
+      'BALANCER_LOOP_BLOCKED_MS must be at least 10000 ms (0 switches the liveness worker off).',
+    );
+  }
+  const jobMaxMs = wholeNumber('BALANCER_JOB_MAX_MS', trimmed(env.BALANCER_JOB_MAX_MS), DEFAULT_JOB_MAX_MS);
+  const recycleHeapBytes = wholeNumber(
+    'BALANCER_RECYCLE_HEAP_BYTES',
+    trimmed(env.BALANCER_RECYCLE_HEAP_BYTES),
+    DEFAULT_RECYCLE_HEAP_BYTES,
+  );
+  if (recycleHeapBytes > 0 && recycleHeapBytes < 200_000_000) {
+    throw new Error(
+      'BALANCER_RECYCLE_HEAP_BYTES must be at least 200000000 (0 switches the recycle off): a lower mark would recycle a healthy sponsor continuously.',
+    );
+  }
+  const recycleRssBytes = wholeNumber(
+    'BALANCER_RECYCLE_RSS_BYTES',
+    trimmed(env.BALANCER_RECYCLE_RSS_BYTES),
+    DEFAULT_RECYCLE_RSS_BYTES,
+  );
+  if (recycleRssBytes > 0 && recycleRssBytes < 400_000_000) {
+    throw new Error(
+      'BALANCER_RECYCLE_RSS_BYTES must be at least 400000000 (0 switches the recycle off): a sponsor holding three compiled builds is past that at rest.',
+    );
+  }
+  if (jobMaxMs > 0 && jobMaxMs <= jobStallMs) {
+    throw new Error(
+      'BALANCER_JOB_MAX_MS is the ceiling the stall watchdog cannot reach, so it must be greater than BALANCER_JOB_STALL_MS (0 removes the ceiling).',
+    );
+  }
+  const walletCallTimeoutMs = wholeNumber(
+    'BALANCER_WALLET_CALL_TIMEOUT_MS',
+    trimmed(env.BALANCER_WALLET_CALL_TIMEOUT_MS),
+    DEFAULT_WALLET_CALL_TIMEOUT_MS,
+  );
+  if (walletCallTimeoutMs < 1_000) {
+    throw new Error('BALANCER_WALLET_CALL_TIMEOUT_MS must be at least 1000 ms.');
+  }
+
+  const resolverPoolTarget = wholeNumber(
+    'RESOLVER_POOL_TARGET',
+    trimmed(env.RESOLVER_POOL_TARGET),
+    DEFAULT_RESOLVER_POOL_TARGET,
+  );
+  const resolverPoolFloor = wholeNumber(
+    'RESOLVER_POOL_FLOOR',
+    trimmed(env.RESOLVER_POOL_FLOOR),
+    DEFAULT_RESOLVER_POOL_FLOOR,
+  );
+  if (resolverPoolFloor > resolverPoolTarget) {
+    throw new Error(
+      `RESOLVER_POOL_FLOOR (${resolverPoolFloor}) cannot be above RESOLVER_POOL_TARGET (${resolverPoolTarget}): the filler never fills past the target, so a floor above it would report the shelf as low for ever.`,
+    );
+  }
+
+  const trustedProxies = (trimmed(env.BALANCER_TRUSTED_PROXIES) ?? '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+
+  const clientKey = trimmed(env.BALANCER_CLIENT_KEY);
+
   const midnamesTldAddress = contractAddressFrom(
     'BALANCER_MIDNAMES_TLD_ADDRESS',
     trimmed(env.BALANCER_MIDNAMES_TLD_ADDRESS) ?? MIDNAMES_TLD_DEFAULTS[networkId],
@@ -373,6 +889,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BalancerConfig
     host: trimmed(env.BALANCER_HOST) ?? '0.0.0.0',
     feeBlocksMargin,
     balanceTtlMs,
+    balanceOrphanMs,
     healthIntervalMs,
     ...(midnamesTldAddress ? { midnamesTldAddress } : {}),
     ...(trimmed(env.BALANCER_MIDNAMES_ASSETS)
@@ -389,5 +906,24 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BalancerConfig
     accountMaxPerHour,
     ...(assetFaucetAddress ? { assetFaucetAddress } : {}),
     assetGrant,
+    balanceRate,
+    aliasRate,
+    accountRate,
+    spendQueueMax,
+    spendLanes,
+    dustWaitMs,
+    submitTimeoutMs,
+    confirmTimeoutMs,
+    jobStallMs,
+    syncStallMs,
+    jobMaxMs,
+    loopBlockedMs,
+    recycleHeapBytes,
+    recycleRssBytes,
+    walletCallTimeoutMs,
+    resolverPoolTarget,
+    resolverPoolFloor,
+    trustedProxies: trustedProxies.length > 0 ? trustedProxies : [...DEFAULT_TRUSTED_PROXIES],
+    ...(clientKey ? { clientKey } : {}),
   };
 }

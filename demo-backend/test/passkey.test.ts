@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
+  ENROLMENT_PRF_MISSING_MESSAGE,
   MAX_ACCOUNT_BLOB_BYTES,
   PassportEnrolmentConflictError,
   PassportPasskeyDiscoveryError,
@@ -346,8 +347,202 @@ describe('WebAuthn largeBlob account metadata', () => {
     expect('write' in (extensions.largeBlob ?? {})).toBe(false);
     expect(extensions.prf).toBeDefined();
     expect(once.accountBlob).toEqual(blob);
+    // Nothing was asked to be written, so there is no write to report.
+    expect(once.accountBlobWritten).toBeNull();
     // No second ceremony was needed to obtain it.
     expect(assertions).toBe(1);
+    once.dispose();
+  });
+
+  /* THE RIDE-ALONG (2026/08/31). A largeBlob write is only possible during an
+     assertion and may not be paired with a read, so on its own it is a whole
+     user-verified ceremony — which arrived, for the product owner, as a passkey
+     prompt on a finished Home screen they had pressed nothing to summon. These
+     three hold the alternative: the write is carried by an assertion that was
+     happening anyway, it costs nothing, and what became of it is reported
+     precisely enough that a caller knows whether to try again. */
+  const assertionExtensions = (
+    options: CredentialRequestOptions | undefined,
+  ): { prf?: unknown; largeBlob?: { read?: boolean; write?: unknown } } =>
+    (options?.publicKey as Record<string, unknown>).extensions as {
+      prf?: unknown;
+      largeBlob?: { read?: boolean; write?: unknown };
+    };
+
+  it('carries a blob on the sign-in assertion instead of a read, for no extra ceremony', async () => {
+    let capturedOptions: CredentialRequestOptions | undefined;
+    let assertions = 0;
+    replaceNavigator({
+      credentials: {
+        get: async (options: CredentialRequestOptions) => {
+          assertions += 1;
+          capturedOptions = options;
+          return {
+            rawId: new Uint8Array([1, 2, 3, 4]).buffer,
+            getClientExtensionResults: () => ({
+              prf: { results: { first: new Uint8Array(32).fill(4).buffer } },
+              largeBlob: { written: true },
+            }),
+          };
+        },
+      },
+    });
+
+    const once = await WebAuthnPrfKeyProvider.assertOnce(reference, {
+      writeAccountBlob: blob,
+    });
+    const extensions = assertionExtensions(capturedOptions);
+    // The write, and — because the specification forbids the pair — no read.
+    expect(extensions.largeBlob?.write).toBeInstanceOf(ArrayBuffer);
+    expect('read' in (extensions.largeBlob ?? {})).toBe(false);
+    // The PRF still rides along: this is the sign-in's own assertion.
+    expect(extensions.prf).toBeDefined();
+    expect(await once.deriveWalletSeed(scope)).toHaveLength(32);
+    expect(once.accountBlobWritten).toBe('written');
+    // An assertion that wrote read nothing, and does not pretend otherwise.
+    expect(once.accountBlob).toBeNull();
+    // ONE ceremony, which is the whole point.
+    expect(assertions).toBe(1);
+    once.dispose();
+  });
+
+  it('separates a refusal, which is retryable, from a platform that has no largeBlob', async () => {
+    const outcomeFor = async (largeBlob: unknown): Promise<string | null> => {
+      replaceNavigator({
+        credentials: {
+          get: async () => ({
+            rawId: new Uint8Array([1, 2, 3, 4]).buffer,
+            getClientExtensionResults: () => ({
+              prf: { results: { first: new Uint8Array(32).fill(4).buffer } },
+              ...(largeBlob === undefined ? {} : { largeBlob }),
+            }),
+          }),
+        },
+      });
+      const once = await WebAuthnPrfKeyProvider.assertOnce(reference, {
+        writeAccountBlob: blob,
+      });
+      const outcome = once.accountBlobWritten;
+      once.dispose();
+      return outcome;
+    };
+
+    // The extension answered and the write did not land: ask again next time.
+    expect(await outcomeFor({ written: false })).toBe('refused');
+    // The slice is absent altogether: this credential will never hold a blob.
+    expect(await outcomeFor(undefined)).toBe('unsupported');
+  });
+
+  it('sends no largeBlob slice at all for a credential known not to hold one', async () => {
+    /* THE ANDROID PROMPT THAT NEVER FINISHED (2026/09/04).
+       Google Password Manager's passkeys implement PRF and do not implement
+       largeBlob, and Chrome on Android narrows its account sheet to the
+       credentials that can satisfy the extensions a request asks for. An
+       assertion asking for a largeBlob write against a GPM passkey therefore
+       raises a sheet with nothing selectable in it, and it does not settle —
+       reported as "the passkey prompt did not finish", on an ordinary sign-in,
+       days after the claim that owed the write.
+
+       So `largeBlob: false` OMITS the slice rather than sending `read: false`.
+       An extension the client must reconcile against the authenticator is one
+       more thing that can narrow a picker; one that was never sent cannot. */
+    let capturedOptions: CredentialRequestOptions | undefined;
+    replaceNavigator({
+      credentials: {
+        get: async (options: CredentialRequestOptions) => {
+          capturedOptions = options;
+          return {
+            rawId: new Uint8Array([1, 2, 3, 4]).buffer,
+            getClientExtensionResults: () => ({
+              prf: { results: { first: new Uint8Array(32).fill(4).buffer } },
+            }),
+          };
+        },
+      },
+    });
+
+    const once = await WebAuthnPrfKeyProvider.assertOnce(reference, {
+      writeAccountBlob: blob,
+      largeBlob: false,
+    });
+    const extensions = assertionExtensions(capturedOptions);
+    // Not `{ read: false }`, and not `{ write: … }`. Absent.
+    expect('largeBlob' in extensions).toBe(false);
+    // The PRF is untouched: the sign-in itself must still work, and on Android
+    // it is the only extension that ever did.
+    expect(extensions.prf).toBeDefined();
+    expect(await once.deriveWalletSeed(scope)).toHaveLength(32);
+    // Nothing was written and nothing was read, and neither is claimed.
+    expect(once.accountBlobWritten).toBeNull();
+    expect(once.accountBlob).toBeNull();
+    /* And nothing was LEARNT. An assertion that did not ask has no evidence
+       about the credential, and recording one would retire a capability on the
+       strength of a question nobody put. */
+    expect(once.largeBlobSupported).toBeNull();
+    once.dispose();
+  });
+
+  it('learns from an ordinary read whether the credential can hold a blob at all', async () => {
+    /* THE CHEAP HALF OF THE SAME FIX. Only the browser that ENROLLED a
+       credential ever sees `largeBlob.supported`; a passkey synced from another
+       device, or picked out of the platform's own account picker, arrives with
+       the question open — and the app then had no way to answer it except by
+       attempting the write that hangs. A read answers it for free and cannot
+       narrow a picker. By specification the client omits the whole output when
+       the authenticator has no largeBlob, and returns an empty slice when it
+       has one and simply holds nothing: "cannot" against "has not". */
+    const supportFor = async (largeBlob: unknown): Promise<boolean | null> => {
+      replaceNavigator({
+        credentials: {
+          get: async () => ({
+            rawId: new Uint8Array([1, 2, 3, 4]).buffer,
+            getClientExtensionResults: () => ({
+              prf: { results: { first: new Uint8Array(32).fill(4).buffer } },
+              ...(largeBlob === undefined ? {} : { largeBlob }),
+            }),
+          }),
+        },
+      });
+      const once = await WebAuthnPrfKeyProvider.assertOnce(reference);
+      const supported = once.largeBlobSupported;
+      once.dispose();
+      return supported;
+    };
+
+    // Supported, and holding nothing yet.
+    expect(await supportFor({})).toBe(true);
+    // Supported, and holding something.
+    expect(await supportFor({ blob: new Uint8Array([1]).buffer })).toBe(true);
+    // The slice is absent altogether: this credential will never hold a blob.
+    expect(await supportFor(undefined)).toBe(false);
+  });
+
+  it('falls back to the read rather than failing a sign-in over an unencodable blob', async () => {
+    /* An oversize payload is a programming error. It must not be the reason
+       somebody cannot get into their Passport, so the assertion sends exactly
+       what it would have sent with nothing offered. */
+    let capturedOptions: CredentialRequestOptions | undefined;
+    replaceNavigator({
+      credentials: {
+        get: async (options: CredentialRequestOptions) => {
+          capturedOptions = options;
+          return {
+            rawId: new Uint8Array([1, 2, 3, 4]).buffer,
+            getClientExtensionResults: () => ({
+              prf: { results: { first: new Uint8Array(32).fill(4).buffer } },
+            }),
+          };
+        },
+      },
+    });
+
+    const once = await WebAuthnPrfKeyProvider.assertOnce(reference, {
+      writeAccountBlob: { ...blob, alias: 'a'.repeat(MAX_ACCOUNT_BLOB_BYTES) },
+    });
+    const extensions = assertionExtensions(capturedOptions);
+    expect(extensions.largeBlob?.read).toBe(true);
+    expect('write' in (extensions.largeBlob ?? {})).toBe(false);
+    expect(once.accountBlobWritten).toBeNull();
     once.dispose();
   });
 
@@ -615,6 +810,41 @@ describe('enrolment overwrite guard', () => {
     expect(excluded.every((entry) => entry.id instanceof ArrayBuffer)).toBe(true);
   });
 
+  it('asks for a FRESH user handle on every enrolment, so no create can replace a passkey', async () => {
+    /* The re-login defect of 2026/09/03, in one assertion. The handle used to
+       be SHA-256 over a constant id, so a create on a browser whose site data
+       had been cleared named the pair the surviving credential occupied — and
+       `residentKey: 'required'` makes that a REPLACEMENT, not a refusal. The
+       replaced credential's PRF secret, and with it the wallet seed and the
+       `.night` name it held, were gone. Two enrolments, two handles, and the
+       authenticator has nothing to overwrite. */
+    const handles: string[] = [];
+    replaceNavigator({
+      credentials: {
+        create: async (options: CredentialCreationOptions) => {
+          const publicKey = options.publicKey as unknown as {
+            user: { id: ArrayBuffer };
+          };
+          handles.push(Buffer.from(new Uint8Array(publicKey.user.id)).toString('hex'));
+          return {
+            rawId: new Uint8Array([9]).buffer,
+            getClientExtensionResults: () => ({ prf: { enabled: true } }),
+          };
+        },
+      },
+    });
+
+    const options = { label: 'Midnight Passport', userId: 'passport-local-device' };
+    await WebAuthnPrfKeyProvider.enrollWithPrf(options);
+    // The SAME userId a second time: it is the case the defect was reported in.
+    await WebAuthnPrfKeyProvider.enrollWithPrf(options);
+
+    expect(handles).toHaveLength(2);
+    expect(handles[0]).not.toBe(handles[1]);
+    // 32 bytes of randomness, not a digest of anything a caller passed.
+    expect(handles[0]).toMatch(/^[0-9a-f]{64}$/);
+  });
+
   it('sends no exclusion list at all when nothing is known', async () => {
     let capturedOptions: CredentialCreationOptions | undefined;
     replaceNavigator({
@@ -671,6 +901,73 @@ describe('enrolment overwrite guard', () => {
     });
     await expect(enrolment).rejects.not.toBeInstanceOf(PassportEnrolmentConflictError);
     await expect(enrolment).rejects.toThrow('The user cancelled.');
+  });
+
+  it('reports a passkey it MADE with no PRF as itself, in words about the device', async () => {
+    /* THE ANDROID SHAPE, found by `examples/passport-demo/e2e/android-shapes.
+       spec.ts` on 2026/09/04. The platform honours the create, honours the
+       largeBlob preference, and returns no PRF at all — so the credential
+       exists and can derive nothing.
+
+       TWO THINGS ARE ASSERTED, AND THE SECOND IS THE DEFECT. It travels as a
+       typed failure carrying `prf-missing`, so the surface can tell it from an
+       assertion's `prf-missing` and refuse to offer a create that would loop.
+       And its sentence arrives INTACT: the message it used to throw ended
+       "…or PRF-capable security key", `errorMessage`'s substring sniff matched
+       the word "security", and a reviewer on `localhost` was told their origin
+       was not a valid HTTPS one. */
+    replaceNavigator({
+      credentials: {
+        create: async () => ({
+          rawId: new Uint8Array([9, 9]).buffer,
+          getClientExtensionResults: () => ({}),
+        }),
+      },
+    });
+    const enrolment = WebAuthnPrfKeyProvider.enrollWithPrf({
+      label: 'Midnight Passport',
+      userId: 'local-no-prf',
+    });
+    await expect(enrolment).rejects.toBeInstanceOf(PassportPasskeyDiscoveryError);
+    await expect(enrolment).rejects.toMatchObject({ reason: 'prf-missing' });
+    await expect(enrolment).rejects.toThrow(ENROLMENT_PRF_MISSING_MESSAGE);
+    /* And it says nothing a reader cannot act on. */
+    expect(ENROLMENT_PRF_MISSING_MESSAGE).not.toMatch(/PRF|WebAuthn|extension/i);
+    await expect(enrolment).rejects.not.toThrow(/HTTPS origin/);
+  });
+
+  it('rewrites a relying-party refusal by its NAME, never by its wording', async () => {
+    /* The origin message is worth keeping — "The operation is insecure" tells
+       a reader nothing — but it is earned by `SecurityError`, which is what a
+       browser raises for an RP id the origin cannot claim. Deciding it by
+       matching words over free text is how Passport's own sentences got
+       rewritten into a false diagnosis. */
+    replaceNavigator({
+      credentials: {
+        create: async () => {
+          const error = new Error('The operation is insecure.');
+          error.name = 'SecurityError';
+          throw error;
+        },
+      },
+    });
+    await expect(
+      WebAuthnPrfKeyProvider.enrollWithPrf({ label: 'Midnight Passport', userId: 'local-rp' }),
+    ).rejects.toThrow(/valid HTTPS origin/);
+
+    replaceNavigator({
+      credentials: {
+        create: async () => {
+          throw new Error('The security key was removed before it answered.');
+        },
+      },
+    });
+    const unnamed = WebAuthnPrfKeyProvider.enrollWithPrf({
+      label: 'Midnight Passport',
+      userId: 'local-plain',
+    });
+    await expect(unnamed).rejects.toThrow('The security key was removed before it answered.');
+    await expect(unnamed).rejects.not.toThrow(/HTTPS origin/);
   });
 
   it('signs in to a resident credential instead of creating one', async () => {

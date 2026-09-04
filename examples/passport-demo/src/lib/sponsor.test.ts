@@ -16,19 +16,23 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   assertSecureSponsorUrl,
+  combineSponsorReadiness,
   createSponsorError,
   describeSponsorWalletStatus,
   normaliseSponsorHex,
   parseSponsorWalletStatus,
   resetSponsorReadinessCache,
+  sponsorAbandonBalance,
   sponsorBalanceOnly,
   sponsorCanPay,
   sponsorConfig,
+  sponsorConfigs,
   sponsorFeeRefusal,
   sponsorRefusal,
   sponsorHexToBytes,
   sponsorReadiness,
   sponsorRetryDelayMs,
+  sponsorSupportsAbandon,
   sponsorWalletIsAvailable,
   validateSponsorBalanceResult,
   SPONSOR_PROBE_RETRY_DELAY_MS,
@@ -68,13 +72,13 @@ describe('sponsorConfig', () => {
        is no 1AM gateway on stagenet. It speaks the identical wire contract, so
        every other assertion in this file is unaffected. */
     expect(sponsorConfig({})).toEqual({
-      url: 'https://funder.midnightpassport.com/balancer',
+      url: 'https://67-205-177-162.sslip.io/balancer',
     });
     expect(sponsorConfig({ VITE_SPONSOR_URL: '   ' })).toEqual({
-      url: 'https://funder.midnightpassport.com/balancer',
+      url: 'https://67-205-177-162.sslip.io/balancer',
     });
     expect(sponsorConfig({ VITE_MIDNIGHT_NETWORK_ID: 'stagenet' })).toEqual({
-      url: 'https://funder.midnightpassport.com/balancer',
+      url: 'https://67-205-177-162.sslip.io/balancer',
     });
     /* The ledger-8 networks keep their entries: this build cannot transact on
        them, but the table is still the one place that says which gateway each
@@ -87,8 +91,8 @@ describe('sponsorConfig', () => {
     });
   });
 
-  it('is disabled by the literal `off`, and on a network with no gateway', () => {
-    expect(sponsorConfig({ VITE_SPONSOR_URL: 'off' })).toBeNull();
+  it('refuses the literal `off`, and is null on a network with no gateway', () => {
+    expect(() => sponsorConfig({ VITE_SPONSOR_URL: 'off' })).toThrow(/VITE_SPONSOR_URL/);
     expect(sponsorConfig({ VITE_MIDNIGHT_NETWORK_ID: 'undeployed' })).toBeNull();
   });
 
@@ -217,14 +221,39 @@ describe('createSponsorError', () => {
     expect(unknown.detail).toBe('HTTP 500');
     expect(unknown.retryAfterMs).toBeUndefined();
   });
+
+  it('keeps BOTH the sentence and the underlying cause in detail', () => {
+    /* The balancer puts its own sentence in `message` and the node's objection
+       in `cause`. Keeping only the first threw away the only part of the body
+       that said WHAT was rejected — which is how `Custom error: 239` reached a
+       console as `Failed to prove transaction` and nothing else. */
+    const error = createSponsorError(502, {
+      error: 'BALANCE_FAILED',
+      message: 'm',
+      cause: 'c',
+    });
+    expect(error.detail).toContain('m');
+    expect(error.detail).toContain('c');
+    expect(error.isRetryable).toBe(true);
+  });
 });
 
 describe('sponsorRetryDelayMs', () => {
-  it('honours retryAfterMs, floors it, and never overruns the budget', () => {
+  it('honours retryAfterMs, clamps it, and never overruns the budget', () => {
     expect(sponsorRetryDelayMs(5_000, 20_000)).toBe(5_000);
-    expect(sponsorRetryDelayMs(0, 20_000)).toBe(250);
+    /* The floor is two seconds since 2026/09/02, because the conditions this
+       waits out — the balancer's own DUST change settling — take 20 to 60 s,
+       and a quarter-second poll against those is two hundred POSTs and a rate
+       limit. */
+    expect(sponsorRetryDelayMs(0, 20_000)).toBe(2_000);
     expect(sponsorRetryDelayMs(undefined, 20_000)).toBe(2_000);
+    /* And a ceiling, so one enormous `retryAfterMs` cannot spend the whole
+       window in a single sleep and miss a sponsor that recovered in five
+       seconds. */
+    expect(sponsorRetryDelayMs(120_000, 600_000)).toBe(10_000);
+    /* The budget still wins over both, in either direction. */
     expect(sponsorRetryDelayMs(5_000, 900)).toBe(900);
+    expect(sponsorRetryDelayMs(0, 900)).toBe(900);
   });
 });
 
@@ -408,7 +437,15 @@ describe('sponsorBalanceOnly', () => {
       }),
     );
     const result = await sponsorBalanceOnly(bytes, { config, fetch: fetchSpy as never });
-    expect(result).toEqual({ txHash: 'aa', txBytes: 'bbcc', expiresAt: 'later' });
+    /* `servedBy` is the endpoint that balanced it — the operator's answer to
+       "where was this transaction's fee paid", which after the fact nothing
+       else can give. */
+    expect(result).toEqual({
+      txHash: 'aa',
+      txBytes: 'bbcc',
+      expiresAt: 'later',
+      servedBy: 'https://api-preview.1am.xyz',
+    });
     const [url, init] = fetchSpy.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toBe('https://api-preview.1am.xyz/balance-only');
     expect(init.method).toBe('POST');
@@ -432,21 +469,102 @@ describe('sponsorBalanceOnly', () => {
     expect(headers['X-Client-ID']).toBe('client');
   });
 
-  it('throws a typed terminal error on 503 without retrying', async () => {
+  it('throws a typed terminal error on a 400 the service will never take', async () => {
+    /* The half of the classification that matters most. A transaction the
+       service refuses as malformed is one it will refuse identically forever,
+       so re-posting it is a slower way of telling the user the same thing
+       while holding their sheet open. */
     const fetchSpy = vi.fn(async () =>
       new Response(
-        JSON.stringify({
-          error: 'WALLETS_UNAVAILABLE',
-          cause: 'INSUFFICIENT_DUST',
-          retryAfterMs: 5000,
-        }),
-        { status: 503 },
+        JSON.stringify({ error: 'INVALID_TRANSACTION', message: 'could not deserialise' }),
+        { status: 400 },
       ),
     );
-    await expect(sponsorBalanceOnly(bytes, { config, fetch: fetchSpy as never })).rejects.toThrow(
-      /WALLETS_UNAVAILABLE/,
-    );
+    /* VERBATIM, for a list of one: the typed error the endpoint produced, not
+       a wrapper around it. A caller that catches a `SponsorError` today must
+       still catch one. */
+    const failure = await sponsorBalanceOnly(bytes, {
+      config,
+      fetch: fetchSpy as never,
+    }).catch((cause: unknown) => cause);
+    expect(failure).toBeInstanceOf(SponsorError);
+    expect((failure as SponsorError).code).toBe('INVALID_TRANSACTION');
+    expect((failure as SponsorError).status).toBe(400);
     expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('waits out a round of transient 503s and is served on the next one', async () => {
+    /* The refusal that used to end a send on the spot. The balancer nullifies
+       its own DUST change for 20-60 s after each spend it makes, and it makes
+       five during an activation; `/wallet-status` answers instantly through
+       that whole window while the balancer itself is waiting the same
+       condition out server-side. */
+    let clock = 0;
+    const slept: number[] = [];
+    const refusals = ['INSUFFICIENT_DUST', 'WALLET_SYNCING'];
+    const fetchSpy = vi.fn(async () => {
+      const code = refusals.shift();
+      return code
+        ? new Response(JSON.stringify({ error: code }), { status: 503 })
+        : new Response(JSON.stringify({ txHash: 'aa', txBytes: 'bbcc' }), { status: 200 });
+    });
+    const result = await sponsorBalanceOnly(bytes, {
+      config,
+      fetch: fetchSpy as never,
+      now: () => clock,
+      sleep: async (ms) => {
+        slept.push(ms);
+        clock += ms;
+      },
+    });
+    expect(result.txBytes).toBe('bbcc');
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+    expect(slept).toEqual([2_000, 2_000]);
+  });
+
+  it('honours retryAfterMs when the per-client rate limit refuses', async () => {
+    let clock = 0;
+    const slept: number[] = [];
+    let calls = 0;
+    const fetchSpy = vi.fn(async () => {
+      calls += 1;
+      return calls === 1
+        ? new Response(JSON.stringify({ error: 'RATE_LIMITED', retryAfterMs: 7_500 }), {
+            status: 429,
+          })
+        : new Response(JSON.stringify({ txHash: 'aa', txBytes: 'bbcc' }), { status: 200 });
+    });
+    const result = await sponsorBalanceOnly(bytes, {
+      config,
+      fetch: fetchSpy as never,
+      now: () => clock,
+      sleep: async (ms) => {
+        slept.push(ms);
+        clock += ms;
+      },
+    });
+    expect(result.txBytes).toBe('bbcc');
+    expect(slept).toEqual([7_500]);
+  });
+
+  it('stops repeating a round once the window is spent, however the clock behaves', async () => {
+    /* The window is a wall-clock budget, and a caller can make a clock stand
+       still. The sleeps this loop asks for are counted too, so the rounds are
+       bounded either way — without that, a retryable refusal and a no-op sleep
+       are an unbounded loop. */
+    const fetchSpy = vi.fn(async () =>
+      new Response(JSON.stringify({ error: 'INSUFFICIENT_DUST' }), { status: 503 }),
+    );
+    await expect(
+      sponsorBalanceOnly(bytes, {
+        config,
+        fetch: fetchSpy as never,
+        now: () => 0,
+        sleep: async () => {},
+      }),
+    ).rejects.toThrow(/INSUFFICIENT_DUST/);
+    // 20 s of budget at the 2 s floor: ten waits, eleven rounds.
+    expect(fetchSpy).toHaveBeenCalledTimes(11);
   });
 
   it('retries a 429 inside the window and gives up at the deadline', async () => {
@@ -498,7 +616,13 @@ describe('sponsorBalanceOnly', () => {
       throw new TypeError('fetch failed');
     });
     await expect(
-      sponsorBalanceOnly(bytes, { config, fetch: fetchSpy as never, sleep: async () => {} }),
+      sponsorBalanceOnly(bytes, {
+        config,
+        fetch: fetchSpy as never,
+        sleep: async () => {},
+        // One round only, which is what this drills: the two POSTs inside it.
+        pendingRetryWindowMs: 0,
+      }),
     ).rejects.toThrow(/fetch failed/);
     expect(fetchSpy).toHaveBeenCalledTimes(2);
   });
@@ -515,6 +639,10 @@ describe('sponsorBalanceOnly', () => {
         sleep: async (ms) => {
           slept.push(ms);
         },
+        // One round only. A later round is a fresh POST after a deliberate
+        // wait, which is a different thing from the immediate re-post drilled
+        // here.
+        pendingRetryWindowMs: 0,
       }),
     ).rejects.toThrow(/WALLETS_UNAVAILABLE/);
     // A body that arrived is a body to act on — re-posting it could balance
@@ -764,6 +892,29 @@ describe('SponsorError classification', () => {
     expect(createSponsorError(400, { error: 'BAD_REQUEST' }).isRetryable).toBe(false);
   });
 
+  it('retries only what the service clears on its own', () => {
+    /* Each of these refused a real send on 2026/09/02, and each clears without
+       anybody doing anything. */
+    for (const code of [
+      'INSUFFICIENT_DUST',
+      'WALLET_SYNCING',
+      'WALLETS_UNAVAILABLE',
+      'PROVER_UNAVAILABLE',
+    ]) {
+      expect(createSponsorError(503, { error: code }).isRetryable).toBe(true);
+    }
+    expect(createSponsorError(503, { error: 'UNSUPPORTED' }).isRetryable).toBe(false);
+    // Every 429 — the serialised balancer AND the per-client rate limit.
+    expect(createSponsorError(429, { error: 'PENDING_TRANSACTION' }).isRetryable).toBe(true);
+    expect(createSponsorError(429, { error: 'RATE_LIMITED' }).isRetryable).toBe(true);
+    // A 502 only when the dust leg's proof is what failed.
+    expect(createSponsorError(502, { error: 'BALANCE_FAILED' }).isRetryable).toBe(true);
+    expect(createSponsorError(502, { error: 'BAD_GATEWAY' }).isRetryable).toBe(false);
+    // And nothing else, which is the half that keeps a doomed send short.
+    expect(createSponsorError(400, { error: 'INVALID_TRANSACTION' }).isRetryable).toBe(false);
+    expect(createSponsorError(500, { error: 'INTERNAL' }).isRetryable).toBe(false);
+  });
+
   it('recognises a pending transaction named only in the assembled message', () => {
     /* `message` is `${code}: ${detail}`, so a service that puts the phrase in
        its CODE is still recognised — the detail alone would miss it. */
@@ -924,5 +1075,498 @@ describe('sponsorRefusal', () => {
     expect(refusal.cause).toBe('busy');
     expect(refusal.message).toContain('cannot cover this one right now');
     expect(refusal.detail).toBe('balancing threw');
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* More than one sponsor                                                      */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The failover rules, in the vocabulary a fee gate branches on.
+ *
+ * The selection rule itself is drilled in `./endpoints.test.ts`. What is
+ * asserted here is what this module does WITH it: which endpoint pays, what a
+ * user is told when none of them will, and — the property the whole change
+ * turns on — that a list of one is indistinguishable from the single URL
+ * `VITE_SPONSOR_URL` used to hold.
+ */
+describe('sponsorConfigs', () => {
+  const GATEWAY = 'https://api-stagenet.1am.xyz';
+  const BALANCER = 'https://67-205-177-162.sslip.io/balancer';
+
+  it('reads a comma-separated list in the order an operator wrote it', () => {
+    expect(sponsorConfigs({ VITE_SPONSOR_URL: `${GATEWAY}, ${BALANCER}` })).toEqual([
+      { url: GATEWAY },
+      { url: BALANCER },
+    ]);
+  });
+
+  it('reads one URL as a list of one, and refuses `off` by name', () => {
+    expect(sponsorConfigs({ VITE_SPONSOR_URL: GATEWAY })).toEqual([{ url: GATEWAY }]);
+    /* `off` used to answer with an empty list, which built a Passport whose one
+       deploy could not be paid for and only said so at the first transaction.
+       The refusal names the variable so the operator knows what to change. */
+    expect(() => sponsorConfigs({ VITE_SPONSOR_URL: 'off' })).toThrow(/VITE_SPONSOR_URL/);
+    expect(sponsorConfigs({ VITE_MIDNIGHT_NETWORK_ID: 'undeployed' })).toEqual([]);
+  });
+
+  it('shares the optional credentials across every endpoint in the list', () => {
+    expect(
+      sponsorConfigs({
+        VITE_SPONSOR_URL: `${GATEWAY},${BALANCER}`,
+        VITE_SPONSOR_API_KEY: 'key',
+        VITE_SPONSOR_CLIENT_ID: 'client',
+      }),
+    ).toEqual([
+      { url: GATEWAY, apiKey: 'key', clientId: 'client' },
+      { url: BALANCER, apiKey: 'key', clientId: 'client' },
+    ]);
+  });
+
+  it('refuses the whole list when any entry could leak a signed transaction', () => {
+    /* Refused at configuration time rather than skipped at send time: an
+       endpoint silently dropped from a failover list is a single point of
+       failure nobody knows they have. */
+    expect(() => sponsorConfigs({ VITE_SPONSOR_URL: `${GATEWAY},http://elsewhere` })).toThrow(
+      /Insecure sponsor service URL/,
+    );
+  });
+
+  it('names the first endpoint through the single-sponsor accessor', () => {
+    expect(sponsorConfig({ VITE_SPONSOR_URL: `${GATEWAY},${BALANCER}` })).toEqual({
+      url: GATEWAY,
+    });
+  });
+});
+
+describe('combineSponsorReadiness', () => {
+  const busy = (url: string) =>
+    ({ state: 'unavailable', url, reason: `${url} has no dust`, cause: 'busy' }) as const;
+  const dead = (url: string) =>
+    ({ state: 'unavailable', url, reason: `${url} timed out`, cause: 'unreachable' }) as const;
+  const ready = (url: string) => ({ state: 'ready', url, available: 1 }) as const;
+
+  it('is disabled when nothing is configured', () => {
+    expect(combineSponsorReadiness([])).toEqual({ state: 'disabled' });
+  });
+
+  it('hands back a single endpoint’s answer verbatim, diagnostic and all', () => {
+    /* The compatibility property, at the level a fee gate reads: a list of one
+       must produce the identical `reason` string the single-URL build produced,
+       because `feeReadinessPoll` logs it and an operator greps it. */
+    expect(combineSponsorReadiness([busy('https://a')])).toEqual(busy('https://a'));
+    expect(combineSponsorReadiness([ready('https://a')])).toEqual(ready('https://a'));
+  });
+
+  it('takes the first endpoint that can pay', () => {
+    expect(combineSponsorReadiness([busy('https://a'), ready('https://b')])).toEqual(
+      ready('https://b'),
+    );
+  });
+
+  it('calls an all-refused list busy when any one of them answered', () => {
+    /* `busy` is the transient cause and the one a surface waits out. At least
+       one service answered and told us about its DUST, so "cannot be reached"
+       would be contradicted by the evidence. */
+    const combined = combineSponsorReadiness([dead('https://a'), busy('https://b')]);
+    expect(combined).toEqual({
+      state: 'unavailable',
+      url: 'https://a',
+      reason: 'https://a: https://a timed out; https://b: https://b has no dust',
+      cause: 'busy',
+    });
+    // And the sentence a user reads is the one they read about a single sponsor.
+    expect(sponsorFeeRefusal(combined as never)).toBe(
+      'Network fees on this Passport are covered by the fee sponsor, and the sponsor cannot cover this one right now.',
+    );
+  });
+
+  it('calls it unreachable only when nothing was learned from any of them', () => {
+    const combined = combineSponsorReadiness([dead('https://a'), dead('https://b')]);
+    expect(combined).toMatchObject({ state: 'unavailable', cause: 'unreachable' });
+    expect(sponsorFeeRefusal(combined as never)).toBe(
+      'Network fees on this Passport are covered by the fee sponsor, and the fee sponsor cannot be reached right now.',
+    );
+  });
+});
+
+describe('failover, end to end through the client', () => {
+  const GATEWAY = 'https://gateway.example';
+  const BALANCER = 'https://balancer.example';
+  const configs = [{ url: GATEWAY }, { url: BALANCER }];
+  const bytes = Uint8Array.from([9, 9]);
+
+  const walletStatus = (available: number) =>
+    new Response(
+      JSON.stringify({
+        total: 1,
+        available,
+        wallets: [{ index: 0, ready: true, syncState: 'ready', dust: { balance: '1', utxoCount: 1, isSynced: true } }],
+      }),
+      { status: 200 },
+    );
+
+  it('probes past a sponsor that cannot pay and names the one that can', async () => {
+    resetSponsorReadinessCache();
+    const asked: string[] = [];
+    const fetchSpy = vi.fn(async (url: string) => {
+      asked.push(url);
+      return walletStatus(url.startsWith(GATEWAY) ? 0 : 1);
+    });
+    const readiness = await sponsorReadiness({ configs, fetch: fetchSpy as never });
+    expect(readiness).toEqual({ state: 'ready', url: BALANCER, available: 1 });
+    expect(asked).toEqual([`${GATEWAY}/wallet-status`, `${BALANCER}/wallet-status`]);
+  });
+
+  it('never contacts the second sponsor while the first can pay', async () => {
+    resetSponsorReadinessCache();
+    const fetchSpy = vi.fn(async () => walletStatus(1));
+    const readiness = await sponsorReadiness({ configs, fetch: fetchSpy as never });
+    expect(readiness).toEqual({ state: 'ready', url: GATEWAY, available: 1 });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('caches the verdict per LIST, so reordering the list re-probes', async () => {
+    resetSponsorReadinessCache();
+    const fetchSpy = vi.fn(async () => walletStatus(1));
+    await sponsorReadiness({ configs, fetch: fetchSpy as never });
+    await sponsorReadiness({ configs, fetch: fetchSpy as never });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const reversed = await sponsorReadiness({
+      configs: [{ url: BALANCER }, { url: GATEWAY }],
+      fetch: fetchSpy as never,
+    });
+    expect(reversed).toEqual({ state: 'ready', url: BALANCER, available: 1 });
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('balances at the second sponsor when the first refuses, and says which paid', async () => {
+    const fetchSpy = vi.fn(async (url: string) =>
+      url.startsWith(GATEWAY)
+        ? new Response(JSON.stringify({ error: 'WALLETS_UNAVAILABLE' }), { status: 503 })
+        : new Response(JSON.stringify({ txHash: 'ab', txBytes: 'cd' }), { status: 200 }),
+    );
+    const result = await sponsorBalanceOnly(bytes, { configs, fetch: fetchSpy as never });
+    expect(result.servedBy).toBe(BALANCER);
+    expect(result.txBytes).toBe('cd');
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('falls through a sponsor whose POST never answered at all', async () => {
+    const slept: number[] = [];
+    const fetchSpy = vi.fn(async (url: string) => {
+      if (url.startsWith(GATEWAY)) throw new TypeError('fetch failed');
+      return new Response(JSON.stringify({ txHash: 'ab', txBytes: 'cd' }), { status: 200 });
+    });
+    const result = await sponsorBalanceOnly(bytes, {
+      configs,
+      fetch: fetchSpy as never,
+      sleep: async (ms) => {
+        slept.push(ms);
+      },
+    });
+    expect(result.servedBy).toBe(BALANCER);
+    /* The first endpoint still gets its own single retry before the list moves
+       on — a throw means nothing reached us, so re-posting cannot balance the
+       same transaction twice. */
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+    expect(slept).toEqual([SPONSOR_PROBE_RETRY_DELAY_MS]);
+  });
+
+  /* -------------------------------------------------------------------- */
+  /* The busy hint (2026/09/04)                                            */
+  /* -------------------------------------------------------------------- */
+
+  /** `429 PENDING_TRANSACTION` — a queue position, with the wait it asks for. */
+  const busy = (retryAfterMs?: number) =>
+    new Response(
+      JSON.stringify({
+        error: 'PENDING_TRANSACTION',
+        message: 'This balancer wallet already has a transaction pending. Try again shortly.',
+        ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+      }),
+      { status: 429 },
+    );
+  const balanced = () =>
+    new Response(JSON.stringify({ txHash: 'ab', txBytes: 'cd' }), { status: 200 });
+
+  it('waits out a busy sponsor on the SAME endpoint before falling through', async () => {
+    /* THE 2026/09/04 STABILITY AUDIT. The balancer answered
+       `429 {"error":"PENDING_TRANSACTION","retryAfterMs":2000}` — it was about
+       to be free — and the client posted the same transaction to the 1AM
+       gateway instead. A queue position is not a refusal, so it is waited out
+       where it was given, and the second sponsor is never contacted at all. */
+    let clock = 0;
+    const slept: number[] = [];
+    const asked: string[] = [];
+    let calls = 0;
+    const fetchSpy = vi.fn(async (url: string) => {
+      asked.push(url);
+      calls += 1;
+      return calls === 1 ? busy(2_000) : balanced();
+    });
+    const result = await sponsorBalanceOnly(bytes, {
+      configs,
+      fetch: fetchSpy as never,
+      now: () => clock,
+      sleep: async (ms) => {
+        slept.push(ms);
+        clock += ms;
+      },
+    });
+    expect(result.servedBy).toBe(GATEWAY);
+    expect(slept).toEqual([2_000]);
+    expect(asked).toEqual([`${GATEWAY}/balance-only`, `${GATEWAY}/balance-only`]);
+    expect(asked.some((url) => url.startsWith(BALANCER))).toBe(false);
+  });
+
+  it('waits as long as the sponsor asked, inside the clamp', async () => {
+    /* The hint is honoured, not replaced by a fixed poll: five seconds sits
+       between the 2 s floor and the 10 s ceiling, so it is used as given. */
+    let clock = 0;
+    const slept: number[] = [];
+    let calls = 0;
+    const fetchSpy = vi.fn(async () => {
+      calls += 1;
+      return calls === 1 ? busy(5_000) : balanced();
+    });
+    await sponsorBalanceOnly(bytes, {
+      configs,
+      fetch: fetchSpy as never,
+      now: () => clock,
+      sleep: async (ms) => {
+        slept.push(ms);
+        clock += ms;
+      },
+    });
+    expect(slept).toEqual([5_000]);
+  });
+
+  it('falls through to the next sponsor when the busy one stays busy', async () => {
+    /* Three waits, and then the fall-through happens after all: a sponsor that
+       is genuinely stuck costs a few seconds, never the whole send. */
+    let clock = 0;
+    const slept: number[] = [];
+    const asked: string[] = [];
+    const fetchSpy = vi.fn(async (url: string) => {
+      asked.push(url);
+      return url.startsWith(GATEWAY) ? busy(2_000) : balanced();
+    });
+    const result = await sponsorBalanceOnly(bytes, {
+      configs,
+      fetch: fetchSpy as never,
+      now: () => clock,
+      sleep: async (ms) => {
+        slept.push(ms);
+        clock += ms;
+      },
+    });
+    expect(result.servedBy).toBe(BALANCER);
+    expect(slept).toEqual([2_000, 2_000, 2_000]);
+    /* Four posts to the busy one — the first, and one after each wait — then
+       the second sponsor, once. */
+    expect(asked.filter((url) => url.startsWith(GATEWAY))).toHaveLength(4);
+    expect(asked.filter((url) => url.startsWith(BALANCER))).toHaveLength(1);
+  });
+
+  it('does not wait on a busy sponsor at all when the window is disabled', async () => {
+    const asked: string[] = [];
+    const slept: number[] = [];
+    const fetchSpy = vi.fn(async (url: string) => {
+      asked.push(url);
+      return url.startsWith(GATEWAY) ? busy(2_000) : balanced();
+    });
+    const result = await sponsorBalanceOnly(bytes, {
+      configs,
+      fetch: fetchSpy as never,
+      pendingRetryWindowMs: 0,
+      sleep: async (ms) => {
+        slept.push(ms);
+      },
+    });
+    expect(result.servedBy).toBe(BALANCER);
+    expect(slept).toEqual([]);
+    expect(asked.filter((url) => url.startsWith(GATEWAY))).toHaveLength(1);
+  });
+
+  it('stops waiting on the busy sponsor the moment the budget is spent', async () => {
+    /* The window is the bound on ALL of this waiting, and honouring a hint
+       spends it rather than adding to it. A one-millisecond budget buys one
+       one-millisecond wait and nothing more. */
+    let clock = 0;
+    const slept: number[] = [];
+    const asked: string[] = [];
+    const fetchSpy = vi.fn(async (url: string) => {
+      asked.push(url);
+      return url.startsWith(GATEWAY) ? busy(2_000) : balanced();
+    });
+    const result = await sponsorBalanceOnly(bytes, {
+      configs,
+      fetch: fetchSpy as never,
+      pendingRetryWindowMs: 1,
+      now: () => clock,
+      sleep: async (ms) => {
+        slept.push(ms);
+        clock += ms;
+      },
+    });
+    expect(result.servedBy).toBe(BALANCER);
+    expect(slept).toEqual([1]);
+    expect(asked.filter((url) => url.startsWith(GATEWAY))).toHaveLength(2);
+  });
+
+  it('waits out a refusal that is not a busy hint only after every sponsor has refused', async () => {
+    /* Falling through FIRST and waiting SECOND is still the rule for every
+       OTHER retryable refusal: a sponsor whose own change is settling cannot
+       serve anybody right now, so an idle second sponsor is the better answer.
+       Only the queue position is waited out where it was given. */
+    let clock = 0;
+    const slept: number[] = [];
+    /* The gateway's change is settling for one round and clear the next; the
+       balancer never frees up. So round one refuses twice, and only THEN is
+       there anything to wait for. */
+    let gatewayCalls = 0;
+    const settling = () =>
+      new Response(JSON.stringify({ error: 'INSUFFICIENT_DUST' }), { status: 503 });
+    const fetchSpy = vi.fn(async (url: string) => {
+      if (!url.startsWith(GATEWAY)) return settling();
+      gatewayCalls += 1;
+      return gatewayCalls === 1 ? settling() : balanced();
+    });
+    const result = await sponsorBalanceOnly(bytes, {
+      configs,
+      fetch: fetchSpy as never,
+      now: () => clock,
+      sleep: async (ms) => {
+        slept.push(ms);
+        clock += ms;
+      },
+    });
+    expect(result.servedBy).toBe(GATEWAY);
+    /* Round one: both refused. One wait, at the default the service named no
+       figure for. Round two: the first sponsor served. */
+    expect(slept).toEqual([2_000]);
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+  });
+
+  it('refuses in the same words when every sponsor refuses, naming both only in the log half', async () => {
+    const fetchSpy = vi.fn(async () =>
+      new Response(JSON.stringify({ error: 'WALLETS_UNAVAILABLE' }), { status: 503 }),
+    );
+    let failure = '';
+    try {
+      // One round: the sentence is what this drills, not the waiting.
+      await sponsorBalanceOnly(bytes, {
+        configs,
+        fetch: fetchSpy as never,
+        pendingRetryWindowMs: 0,
+      });
+    } catch (cause) {
+      failure = cause instanceof Error ? cause.message : String(cause);
+    }
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(failure).toContain(GATEWAY);
+    expect(failure).toContain(BALANCER);
+    /* What a user reads is unchanged: the endpoint names live in `detail`,
+       which is a log line, and never in the sentence. */
+    const refusal = sponsorRefusal({ state: 'unavailable', reason: failure });
+    expect(refusal.message).toBe(
+      'Network fees on this Passport are covered by the fee sponsor, and the sponsor cannot cover this one right now.',
+    );
+    expect(refusal.message).not.toContain(GATEWAY);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* Handing a balanced transaction back                                        */
+/* -------------------------------------------------------------------------- */
+
+describe('sponsorSupportsAbandon', () => {
+  it('is true for our own balancer and false for every 1AM gateway', () => {
+    expect(sponsorSupportsAbandon('https://67-205-177-162.sslip.io/balancer')).toBe(true);
+    expect(sponsorSupportsAbandon('http://localhost:8807')).toBe(true);
+    expect(sponsorSupportsAbandon('https://api-stagenet.1am.xyz')).toBe(false);
+    expect(sponsorSupportsAbandon('https://api-preview.1am.xyz')).toBe(false);
+    expect(sponsorSupportsAbandon('https://1am.xyz')).toBe(false);
+  });
+
+  it('is false for something that is not a URL at all', () => {
+    expect(sponsorSupportsAbandon('not a url')).toBe(false);
+  });
+});
+
+/**
+ * A COURTESY, never a step. The sponsor books a whole DUST coin per balanced
+ * transaction and only recovers it when that transaction lands; a node-rejected
+ * one never does, and on 2026/09/02 the coin sat spoken-for until a sweeper
+ * found it two minutes later, with every registration behind it waiting. This
+ * says so at once — and, being fired from a failure path, must never turn a
+ * failure into a second one.
+ */
+describe('sponsorAbandonBalance', () => {
+  const BALANCER = 'https://balancer.example';
+  const HASH = 'ab'.repeat(32);
+
+  it('posts the hash to the endpoint that balanced it', async () => {
+    const calls: Array<[string, RequestInit | undefined]> = [];
+    const fetchStub = (async (input: unknown, init?: RequestInit) => {
+      calls.push([String(input), init]);
+      return new Response(JSON.stringify({ txHash: HASH, released: true }), { status: 200 });
+    }) as unknown as typeof globalThis.fetch;
+
+    await sponsorAbandonBalance(HASH, BALANCER, {
+      config: { url: BALANCER, apiKey: 'k', clientId: 'c' },
+      fetch: fetchStub,
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.[0]).toBe(`${BALANCER}/balance-only/abandon`);
+    expect(calls[0]?.[1]?.method).toBe('POST');
+    expect(calls[0]?.[1]?.body).toBe(JSON.stringify({ txHash: HASH }));
+    // The credentials of the endpoint that balanced it travel with the notice.
+    expect(calls[0]?.[1]?.headers).toMatchObject({ 'X-API-Key': 'k', 'X-Client-ID': 'c' });
+  });
+
+  it('carries no credentials when the endpoint is not one we know', async () => {
+    const calls: Array<RequestInit | undefined> = [];
+    const fetchStub = (async (_input: unknown, init?: RequestInit) => {
+      calls.push(init);
+      return new Response('{}', { status: 200 });
+    }) as unknown as typeof globalThis.fetch;
+
+    await sponsorAbandonBalance(HASH, BALANCER, {
+      config: { url: 'https://other.example', apiKey: 'k' },
+      fetch: fetchStub,
+    });
+    expect(calls[0]?.headers).toEqual({ 'Content-Type': 'application/json' });
+  });
+
+  it.each([
+    ['a refusal', 400],
+    ['an outage', 503],
+  ])('resolves without throwing on %s', async (_name, status) => {
+    const fetchStub = (async () =>
+      new Response('{}', { status })) as unknown as typeof globalThis.fetch;
+    await expect(
+      sponsorAbandonBalance(HASH, BALANCER, { config: { url: BALANCER }, fetch: fetchStub }),
+    ).resolves.toBeUndefined();
+  });
+
+  it('resolves without throwing when nothing reaches the sponsor at all', async () => {
+    const fetchStub = (async () => {
+      throw new TypeError('Failed to fetch');
+    }) as unknown as typeof globalThis.fetch;
+    await expect(
+      sponsorAbandonBalance(HASH, BALANCER, { config: { url: BALANCER }, fetch: fetchStub }),
+    ).resolves.toBeUndefined();
+  });
+
+  it('says nothing at all to a 1AM gateway, which has no such route', async () => {
+    const fetchStub = vi.fn();
+    await sponsorAbandonBalance(HASH, 'https://api-stagenet.1am.xyz', {
+      fetch: fetchStub as unknown as typeof globalThis.fetch,
+    });
+    expect(fetchStub).not.toHaveBeenCalled();
   });
 });

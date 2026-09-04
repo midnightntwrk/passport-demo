@@ -13,8 +13,11 @@ import {
   classifyHolding,
   describeColour,
   describeColours,
+  describeItem,
+  GENESIS_PASS_COLOUR_HEX,
   MUSD_COLOUR_HEX,
   NIGHT_COLOUR_HEX,
+  SUSD_COLOUR_HEX,
   nftTitle,
   normalisedColourHex,
   shortColour,
@@ -72,6 +75,14 @@ describe('describeColour', () => {
     expect(describeColour(MUSD_COLOUR_HEX)).toEqual({
       symbol: 'mUSD',
       name: 'stablecoin',
+      decimals: 0,
+      known: true,
+    });
+    // The swap desk's own colour — a currency, so it belongs on the token
+    // table however little of it is held, not on the item shelf.
+    expect(describeColour(SUSD_COLOUR_HEX)).toEqual({
+      symbol: 'sUSD',
+      name: 'Swap dollar',
       decimals: 0,
       known: true,
     });
@@ -313,5 +324,102 @@ describe('nftTitle', () => {
 
   it('leaves a real ticker alone', () => {
     expect(nftTitle('NIGHT')).toBe('NIGHT');
+  });
+});
+
+describe('describeItem', () => {
+  it('names and pictures the Genesis Pass', () => {
+    const art = describeItem(GENESIS_PASS_COLOUR_HEX);
+    expect(art).toEqual({
+      title: 'Midnight Genesis Pass',
+      image: '/nft/genesis-pass.svg',
+      description: 'Midnight Passport · genesis edition',
+    });
+  });
+
+  it('accepts the same colour however it is quoted', () => {
+    /* The registry is keyed on the normalised form, so a `0x` prefix or an
+       upper-case quote off some other reader still finds the art. */
+    expect(describeItem(`0x${GENESIS_PASS_COLOUR_HEX.toUpperCase()}`)).toEqual(
+      describeItem(GENESIS_PASS_COLOUR_HEX),
+    );
+  });
+
+  it('has nothing for a colour nobody has drawn', () => {
+    expect(describeItem('cd'.repeat(32))).toBeNull();
+  });
+
+  it('refuses anything that is not a colour rather than guessing', () => {
+    /* A short value is a misconfiguration, and padding it would show one
+       item's art against another item's holding. */
+    expect(describeItem('815183a7')).toBeNull();
+    expect(describeItem('')).toBeNull();
+  });
+});
+
+describe('the Genesis Pass on the shelves', () => {
+  const pass = { colourHex: GENESIS_PASS_COLOUR_HEX, amount: 1n };
+
+  it('is an item, because having art is not the same as having a name', () => {
+    /* THE POINT OF THE SEPARATE REGISTRY. `KNOWN_ITEMS` must not make the
+       colour NAMED: a named colour is a token at any amount, and the Pass
+       would then be a balance row reading "1" instead of a card. */
+    expect(describeColour(GENESIS_PASS_COLOUR_HEX).known).toBe(false);
+    expect(classifyHolding(pass)).toBe('nft');
+  });
+
+  it('goes on the item shelf and leaves the token shelf alone', () => {
+    const split = splitHoldings([
+      { colourHex: NIGHT_COLOUR_HEX, amount: 12n },
+      pass,
+      { colourHex: MUSD_COLOUR_HEX, amount: 1n },
+    ]);
+    expect(split.nfts).toEqual([pass]);
+    expect(split.tokens.map((held) => held.colourHex)).toEqual([
+      NIGHT_COLOUR_HEX,
+      MUSD_COLOUR_HEX,
+    ]);
+  });
+
+  it('is a token again the moment an account holds two of it', () => {
+    /* The classification rule is unchanged by the registry: one unit is what
+       makes an item, and a second one makes it a quantity. */
+    expect(classifyHolding({ colourHex: GENESIS_PASS_COLOUR_HEX, amount: 2n })).toBe('token');
+  });
+
+  it('is the colour the faucet computes, not a chosen one', () => {
+    /* Printed by `passport-balancer/ops/gift-nft.ts` on the droplet against
+       the stagenet faucet on 2026/09/03. Pinned so a change to it is a failing
+       test rather than an item card that quietly loses its picture. */
+    expect(GENESIS_PASS_COLOUR_HEX).toBe(
+      '815183a74a98593bf16344ef6e920313f9c57ccb2feef3f9fe944ba5c4079e26',
+    );
+    expect(normalisedColourHex(GENESIS_PASS_COLOUR_HEX)).toBe(GENESIS_PASS_COLOUR_HEX);
+  });
+});
+
+describe('the swap desk’s colour', () => {
+  it('is the hex the balancer mints, pinned on both sides of the boundary', () => {
+    // `rawTokenType(separator "passport-swap-musd", faucet 4fc92e15…be78e92f)`,
+    // printed by `passport-balancer/ops/gift-nft.ts --dry-run` on the droplet on
+    // 2026/09/03 and asserted against the same function in
+    // `passport-balancer/test/swap.test.ts`. This side pins the literal, so a
+    // change to either half fails here rather than showing a hundred sUSD as
+    // `Token · a62e…`.
+    expect(SUSD_COLOUR_HEX).toBe(
+      'a62e273dda9a4a288068dec91c3b6ce8ca10fd085703469ac371b7c415884d3b',
+    );
+  });
+
+  it('is a token on the balance table, not an item, at any amount', () => {
+    // The item rule is "one unit of a colour nothing can name". Naming it is
+    // exactly what keeps a swap payout off the item shelf.
+    expect(classifyHolding({ colourHex: SUSD_COLOUR_HEX, amount: 100n })).toBe('token');
+    expect(classifyHolding({ colourHex: SUSD_COLOUR_HEX, amount: 1n })).toBe('token');
+    expect(describeItem(SUSD_COLOUR_HEX)).toBeNull();
+  });
+
+  it('is a different colour from mUSD, which is the whole point of it', () => {
+    expect(SUSD_COLOUR_HEX).not.toBe(MUSD_COLOUR_HEX);
   });
 });

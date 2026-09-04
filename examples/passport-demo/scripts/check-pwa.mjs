@@ -136,6 +136,18 @@ includes(sourceWorker, '.then(() => self.skipWaiting())', 'a new worker activate
 includes(sourceWorker, '.then(() => self.clients.claim())', 'an activated worker claims the open page');
 includes(sourceWorker, "new Request(asset, { cache: 'reload' })", 'the shell is precached from the network, not the HTTP cache');
 includes(sourceWorker, "url.pathname.startsWith('/assets/')", 'content-hashed assets are served cache-first');
+/* The ZK keys are 144 MB of the deploy and the one family the runtime rule
+   below cannot reach: `wasmProver.ts` fetches them with an empty
+   `request.destination` and `.prover`/`.verifier` match no cacheable
+   extension, so before this branch existed they were re-downloaded every
+   session. They share `/assets/**`'s cache-first path, which is sound because
+   the cache is named for the build id and `activate` drops every other one. */
+includes(sourceWorker, "url.pathname.startsWith('/zk/')", 'proving keys are served cache-first');
+includes(
+  sourceWorker,
+  "url.pathname.startsWith('/zk-params/')",
+  'shared proving parameters are served cache-first',
+);
 includes(sourceWorker, "'/midnight-wordmark.svg'", 'onboarding art is a precached shell asset');
 includes(sourceWorker, "url.origin !== self.location.origin", 'cross-origin requests bypass caches');
 includes(sourceWorker, "url.pathname.startsWith('/api/')", 'same-origin API requests bypass caches');
@@ -180,6 +192,21 @@ const headerValue = (source, key) =>
   headerRule(source)?.headers.find((header) => header.key === key)?.value;
 assert.equal(headerValue('/assets/(.*)', 'cache-control'), 'public, max-age=31536000, immutable');
 pass('content-hashed assets are declared immutable');
+/* The proving keys and the shared proving parameters are content-addressed the
+   same way, by the contract manifest a build is compiled against: a given url's
+   bytes cannot change, and a new build asks for new urls. They were inheriting
+   Vercel's `max-age=0, must-revalidate` default, which put a conditional
+   request in front of 144 MB on every cold session that the service worker
+   could not answer from its own cache — the CDN was being re-asked for files
+   that are, by construction, already final. */
+for (const source of ['/zk/(.*)', '/zk-params/(.*)']) {
+  assert.equal(
+    headerValue(source, 'cache-control'),
+    'public, max-age=31536000, immutable',
+    `${source} must be declared immutable alongside /assets/(.*)`,
+  );
+}
+pass('content-addressed proving keys and parameters are declared immutable');
 assert.equal(headerValue('/((?!zk/|zk-params/|assets/).*)', 'cache-control'), 'no-cache');
 pass('every stable-url file, both HTML shells included, must be revalidated');
 assert.equal(headerValue('/sw.js', 'cache-control'), 'no-cache');
@@ -190,6 +217,39 @@ assert.ok(
   'The no-cache header rule and the SPA rewrite must share one negative lookahead.',
 );
 pass('the cache rule and the SPA rewrite cover exactly the same paths');
+
+/* THE RESPONSE HEADERS THAT ARE NOT ABOUT CACHING
+   -----------------------------------------------
+   Passport is never legitimately framed. `screens/AppBrowser.tsx` frames
+   registry apps INSIDE Passport and already refuses any entry whose origin
+   equals Passport's own, precisely because `allow-same-origin` on a
+   same-origin document lifts the sandbox. `frame-ancestors 'none'` closes the
+   other direction, which nothing in the app relies on: no page may put
+   Passport in a frame, so a hostile page cannot overlay the owner's own Send
+   sheet, and a registry app that navigates itself to Passport's origin mid-
+   session gets a refused document rather than one it can read.
+
+   `nosniff` and a `Referrer-Policy` ride along because they are free and
+   unconditional. What is DELIBERATELY absent is a `script-src`/`connect-src`
+   policy: the ledger WASM needs `'wasm-unsafe-eval'` and the service worker
+   needs its own `worker-src` allowance, and the exact directive set has to be
+   measured against a real build rather than guessed — a CSP that is wrong by
+   one directive is a blank app. That is a separate change with its own
+   evidence. These three are asserted here so the framing refusal cannot be
+   dropped by a later edit to the caching rules it sits beside. */
+const securityHeaders = {
+  'content-security-policy': "frame-ancestors 'none'",
+  'x-content-type-options': 'nosniff',
+  'referrer-policy': 'strict-origin-when-cross-origin',
+};
+for (const [key, value] of Object.entries(securityHeaders)) {
+  assert.equal(
+    headerValue('/(.*)', key),
+    value,
+    `Every route must carry ${key}: ${value}`,
+  );
+}
+pass('every route carries frame-ancestors, nosniff, and a referrer policy');
 
 const pwaSource = await text(path.join(root, 'src/pwa.tsx'));
 includes(pwaSource, "navigator.serviceWorker.register('/sw.js'", 'client registers the root service worker');

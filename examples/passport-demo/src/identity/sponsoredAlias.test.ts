@@ -30,6 +30,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   AliasSponsorRefusal,
+  aliasRefusalMessage,
   checkAliasSponsorship,
   invalidateSponsorshipProbe,
   sponsorAliasRegistration,
@@ -44,7 +45,7 @@ vi.mock('./midnames.js', () => ({
   resolveAliasTarget: (...args: unknown[]) => resolveAliasTarget(...args),
 }));
 
-const FUNDER = 'https://funder.midnightpassport.com/balancer';
+const FUNDER = 'https://67-205-177-162.sslip.io/balancer';
 const ACCOUNT = '7c2f4a19e6d0b83c5194fe2a77bb0c61d8a3e94f20cb5d7e8f16a0b3c4d5e6f7';
 const RESOLVER = '3d1c8b7a6f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4';
 const OWNER_KEY = Uint8Array.from({ length: 32 }, (_unused, index) => index);
@@ -203,6 +204,152 @@ describe('sponsorAliasRegistration — the request it sends', () => {
   });
 });
 
+describe('sponsorAliasRegistration — a target that is submitted but not yet served', () => {
+  const confirmed = (): void => {
+    resolveAliasTarget.mockResolvedValue({
+      resolverAddress: RESOLVER,
+      target: { kind: 'contract', hex: ACCOUNT },
+    });
+  };
+
+  it('sends `targetPending` only when the caller says the deploy is in flight', async () => {
+    const spy = installFetch(async () => json(registeredBody()));
+    confirmed();
+
+    await sponsorAliasRegistration(FUNDER, { ...request, targetPending: true });
+    const [, pending] = spy.mock.calls[0] as unknown as [string, RequestInit];
+    expect(JSON.parse(pending.body as string)).toMatchObject({ targetPending: true });
+
+    await sponsorAliasRegistration(FUNDER, request);
+    const [, settled] = spy.mock.calls[1] as unknown as [string, RequestInit];
+    /* Absent, not `false`: the request a settled target makes is byte-identical
+       to the one this client has always sent. */
+    expect(Object.keys(JSON.parse(settled.body as string))).not.toContain('targetPending');
+  });
+
+  it('waits for the account and asks once more when the service says target-missing', async () => {
+    let posts = 0;
+    installFetch(async () => {
+      posts += 1;
+      return posts === 1
+        ? json({ error: 'target-missing', message: 'No contract state is served there.' }, 400)
+        : json(registeredBody());
+    });
+    confirmed();
+    const waited: string[] = [];
+
+    const result = await sponsorAliasRegistration(
+      FUNDER,
+      { ...request, targetPending: true },
+      {
+        awaitTarget: async () => {
+          waited.push('landed');
+        },
+      },
+    );
+
+    expect(posts).toBe(2);
+    expect(waited).toEqual(['landed']);
+    expect(result.alias).toBe('alice');
+  });
+
+  it('reports a SECOND target-missing as the refusal it is, and does not loop', async () => {
+    let posts = 0;
+    installFetch(async () => {
+      posts += 1;
+      return json({ error: 'target-missing', message: 'Still nothing there.' }, 400);
+    });
+
+    const refusal = await sponsorAliasRegistration(
+      FUNDER,
+      { ...request, targetPending: true },
+      { awaitTarget: async () => undefined },
+    ).catch((cause) => cause);
+
+    expect(posts).toBe(2);
+    expect(refusal).toBeInstanceOf(AliasSponsorRefusal);
+    expect((refusal as AliasSponsorRefusal).code).toBe('target-missing');
+    /* Passport's own sentence, not the service's: the reader is told the name
+       was not registered and is kept, and "still nothing there" — which is
+       about a contract they have never heard of — goes to the log half. */
+    expect((refusal as AliasSponsorRefusal).message).toBe(
+      'alice.night was not registered, and your name is kept for you.',
+    );
+    expect((refusal as AliasSponsorRefusal).serviceMessage).toBe('Still nothing there.');
+  });
+
+  it('lets the deploy’s own failure travel rather than blaming the name service', async () => {
+    installFetch(async () =>
+      json({ error: 'target-missing', message: 'No contract state is served there.' }, 400),
+    );
+
+    await expect(
+      sponsorAliasRegistration(
+        FUNDER,
+        { ...request, targetPending: true },
+        {
+          awaitTarget: async () => {
+            throw new Error('Your Passport account could not be set up.');
+          },
+        },
+      ),
+    ).rejects.toThrow('Your Passport account could not be set up.');
+  });
+
+  it('does not retry target-missing without a way to wait, or without the flag', async () => {
+    let posts = 0;
+    installFetch(async () => {
+      posts += 1;
+      return json({ error: 'target-missing', message: 'Nothing there.' }, 400);
+    });
+
+    // Declared pending, but the caller offered no way to wait.
+    await sponsorAliasRegistration(FUNDER, { ...request, targetPending: true }).catch(
+      (cause) => cause,
+    );
+    expect(posts).toBe(1);
+
+    // A way to wait, but nothing was declared pending — so this is a real refusal.
+    await sponsorAliasRegistration(FUNDER, request, {
+      awaitTarget: async () => undefined,
+    }).catch((cause) => cause);
+    expect(posts).toBe(2);
+  });
+
+  it('retries nothing but target-missing', async () => {
+    let posts = 0;
+    installFetch(async () => {
+      posts += 1;
+      return json({ error: 'rate-limited', message: 'Try again later.' }, 429);
+    });
+
+    const refusal = await sponsorAliasRegistration(
+      FUNDER,
+      { ...request, targetPending: true },
+      { awaitTarget: async () => undefined },
+    ).catch((cause) => cause);
+
+    expect(posts).toBe(1);
+    expect((refusal as AliasSponsorRefusal).code).toBe('rate-limited');
+  });
+
+  it('treats an unparseable target-missing body as no retry', async () => {
+    let posts = 0;
+    installFetch(async () => {
+      posts += 1;
+      return new Response('not json', { status: 400 });
+    });
+
+    await sponsorAliasRegistration(
+      FUNDER,
+      { ...request, targetPending: true },
+      { awaitTarget: async () => undefined },
+    ).catch((cause) => cause);
+
+    expect(posts).toBe(1);
+  });
+});
+
 describe('sponsorAliasRegistration — refusals', () => {
   it('reports an unreachable service as retryable, and dates the probe', async () => {
     installFetch(async (url) => {
@@ -236,15 +383,53 @@ describe('sponsorAliasRegistration — refusals', () => {
     expect(refusal.message).toContain('the tab was closed mid-request');
   });
 
-  it('carries the service’s own code and sentence verbatim', async () => {
+  it('carries the service’s own code, and its sentence in the half a log reads', async () => {
+    /* The code travels verbatim — callers branch on it. The SENTENCE does not:
+       until 2026/09/02 it went straight to the screen, which is how "The .night
+       registry rejected the registration of alice.night" came to be the thing a
+       person was shown when the sponsor simply had no free DUST. */
     installFetch(async () =>
       json({ error: 'funder-empty', message: 'The sponsor holds no NIGHT.' }, 503),
     );
     const refusal = await sponsorAliasRegistration(FUNDER, request).catch((cause) => cause);
     expect(refusal.code).toBe('funder-empty');
-    expect(refusal.message).toBe('The sponsor holds no NIGHT.');
+    expect(refusal.message).toBe(
+      'The sponsor is busy — your name is queued and will register on its own.',
+    );
+    expect(refusal.serviceMessage).toBe('The sponsor holds no NIGHT.');
     expect(refusal.name).toBe('AliasSponsorRefusal');
     expect(refusal.selfPayWorthTrying).toBe(true);
+  });
+
+  it('turns the live 502 into the sponsor’s own sentence, and shows none of its words', async () => {
+    /* The body the deployed balancer actually answered with on 2026/09/02,
+       five times out of five, ~60 s after the first claim of a pair: the
+       registration was refused because the sponsor's single fee-capable DUST
+       coin was booked by the user's own account deploy. Everything the service
+       said about it is read — the diagnostic to classify, the delay to confirm
+       — and none of it reaches the sentence. */
+    installFetch(async () =>
+      json(
+        {
+          error: 'register-rejected',
+          message: 'The .night registry rejected the registration of alice.night.',
+          detail: "DustUnavailable: no DUST coin was free to pay this transaction's fee",
+          retryAfterMs: 5_000,
+        },
+        502,
+      ),
+    );
+    const refusal = await sponsorAliasRegistration(FUNDER, request).catch((cause) => cause);
+    expect(refusal.message).toBe(
+      'The sponsor is busy — your name is queued and will register on its own.',
+    );
+    expect(refusal.message).not.toMatch(/registry|DUST/i);
+    // The name is kept and offered the Register-now control, not abandoned.
+    expect(refusal.selfPayWorthTrying).toBe(true);
+    // And an operator still has every word the service said.
+    expect(refusal.serviceMessage).toBe(
+      'The .night registry rejected the registration of alice.night.',
+    );
   });
 
   it('marks the three double-registration codes as not worth retrying', async () => {
@@ -261,7 +446,10 @@ describe('sponsorAliasRegistration — refusals', () => {
     installFetch(async () => new Response('gateway timeout', { status: 504 }));
     const refusal = await sponsorAliasRegistration(FUNDER, request).catch((cause) => cause);
     expect(refusal.code).toBe('unreachable');
-    expect(refusal.message).toBe('The sponsorship service refused with status 504.');
+    expect(refusal.message).toBe(
+      'alice.night was not registered, and your name is kept for you.',
+    );
+    expect(refusal.serviceMessage).toBe('The sponsorship service refused with status 504.');
     expect(refusal.selfPayWorthTrying).toBe(true);
   });
 
@@ -269,11 +457,25 @@ describe('sponsorAliasRegistration — refusals', () => {
     installFetch(async () => json({ error: 7, message: { text: 'no' } }, 400));
     const refusal = await sponsorAliasRegistration(FUNDER, request).catch((cause) => cause);
     expect(refusal.code).toBe('unreachable');
-    expect(refusal.message).toBe('The sponsorship service refused with status 400.');
+    expect(refusal.message).toBe(
+      'alice.night was not registered, and your name is kept for you.',
+    );
+    expect(refusal.serviceMessage).toBe('The sponsorship service refused with status 400.');
   });
 
-  it('drops the cached probe for the three refusals that date it', async () => {
-    for (const error of ['funder-empty', 'funder-no-dust', 'rate-limited']) {
+  it('drops the cached probe for every refusal that dates it', async () => {
+    /* `rate-limited` is in this list although it no longer shares the busy
+       SENTENCE: a ceiling refusal dates the probe harder than any of the
+       others, because the sponsor is up and will go on refusing for the rest
+       of the hour. The two questions are separate sets in the module for
+       exactly this reason. */
+    for (const error of [
+      'funder-empty',
+      'funder-no-dust',
+      'rate-limited',
+      'PENDING_TRANSACTION',
+      'wallet-syncing',
+    ]) {
       const spy = installFetch(async (url) =>
         url.endsWith('/status')
           ? json({ network: 'stagenet', aliasSponsorship: 'available' })
@@ -408,5 +610,175 @@ describe('sponsorAliasRegistration — the independent read-back', () => {
       claimedAt: '2026-08-25T10:00:00.000Z',
       registryConfirmed: false,
     });
+  });
+});
+
+describe('aliasRefusalMessage', () => {
+  const BUSY = 'The sponsor is busy — your name is queued and will register on its own.';
+  const RATE_LIMITED =
+    'Passport is registering a lot of names right now. Yours is kept for you — try again in a few minutes.';
+  const KEPT = 'alice.night was not registered, and your name is kept for you.';
+  const base = { code: 'register-rejected', domain: 'alice.night', detail: null, retryAfterMs: null };
+
+  it('calls the measured fault what it is: the sponsor, busy, and the name kept', () => {
+    /* THE ONE THIS EXISTS FOR. On 2026/09/02 the first claim of a demo pair
+       failed five times out of five and the screen said "The .night registry
+       rejected the registration of alice.night". The registry had rejected
+       nothing: the sponsor held one fee-capable DUST coin, the user's own
+       account deploy had booked it, and the registration was refused before it
+       was ever asked for. The service's own diagnostic said so — this is that
+       diagnostic, verbatim from the journal — and the reader is now told the
+       true thing instead. */
+    expect(
+      aliasRefusalMessage({
+        ...base,
+        detail: "DustUnavailable: no DUST coin was free to pay this transaction's fee",
+      }),
+    ).toBe(BUSY);
+  });
+
+  it('reads a retry delay as the sponsor asking for time, whatever the code says', () => {
+    expect(aliasRefusalMessage({ ...base, retryAfterMs: 5_000 })).toBe(BUSY);
+    // Including zero, which is a delay the service named rather than none.
+    expect(aliasRefusalMessage({ ...base, retryAfterMs: 0 })).toBe(BUSY);
+  });
+
+  it('says the same of every code that means “cannot pay right now”', () => {
+    for (const code of [
+      'funder-empty',
+      'funder-no-dust',
+      'PENDING_TRANSACTION',
+      'WALLET_SYNCING',
+      'wallet-syncing',
+    ]) {
+      expect(aliasRefusalMessage({ ...base, code })).toBe(BUSY);
+    }
+  });
+
+  it('does NOT call a ceiling refusal a busy sponsor', () => {
+    /* THE COPY DEFECT OF 2026/09/04. Two signups in the sponsor soak were
+       refused at the hourly ceiling and both readers were told the sponsor was
+       busy and their name would register on its own. The sponsor was answering
+       `/status` in 60 ms with four spend lanes open and refused in 25 ms
+       without attempting anything; the name was queued in the reader's own
+       browser and nowhere else; and nothing was ever going to register it. A
+       reader who believes that sentence waits for something that cannot
+       happen. */
+    const limited = aliasRefusalMessage({ ...base, code: 'rate-limited' });
+    expect(limited).toBe(RATE_LIMITED);
+    expect(limited).not.toBe(BUSY);
+    expect(limited).not.toMatch(/busy/i);
+    expect(limited).not.toMatch(/on its own/i);
+  });
+
+  it('keeps that sentence when the refusal names a delay, which the per-caller half does', () => {
+    /* The ceiling refusal carries no `retryAfterMs`; the per-client token
+       bucket's carries one. Both are `rate-limited`, both mean too many names
+       too recently, and the `retryAfterMs` branch below would otherwise
+       recapture the second one into the busy sentence. */
+    expect(aliasRefusalMessage({ ...base, code: 'rate-limited', retryAfterMs: 7_000 })).toBe(
+      RATE_LIMITED,
+    );
+    expect(
+      aliasRefusalMessage({
+        ...base,
+        code: 'rate-limited',
+        detail: 'DustUnavailable: no DUST coin was free',
+      }),
+    ).toBe(RATE_LIMITED);
+  });
+
+  it('tells the reader the name is kept, and what to do about it', () => {
+    /* The two things the busy sentence got wrong. The promise that survives is
+       the one that is true — the record is queued locally, see
+       `claimOrQueueAlias` — and the action replaces the promise that was not.
+       The controls beside it are unchanged: Try again, and Continue to Home,
+       which `lib/claimFailure.ts` decides from the failure rather than from
+       its wording. */
+    expect(RATE_LIMITED).toMatch(/kept for you/i);
+    expect(RATE_LIMITED).toMatch(/try again/i);
+  });
+
+  it('keeps a taken name as its own plain sentence, and promises no queue', () => {
+    /* The one refusal that is genuinely about what the reader typed. It must
+       not be folded into the busy sentence: a name somebody else holds will
+       never register on its own, however long the queue runs. */
+    const taken = aliasRefusalMessage({ ...base, code: 'name-taken' });
+    expect(taken).toBe('alice.night has already been taken — choose another name.');
+    expect(taken).not.toMatch(/queue/i);
+    /* And it does NOT say the name is kept, which is why the claim card cannot
+       carry a fixed note promising that it is: this is the one refusal where
+       the promise would be false. */
+    expect(taken).not.toMatch(/kept/i);
+  });
+
+  it('says the honest non-answer when it cannot tell which party failed', () => {
+    expect(aliasRefusalMessage(base)).toBe(KEPT);
+    expect(aliasRefusalMessage({ ...base, code: 'confirmation-failed' })).toBe(KEPT);
+    expect(aliasRefusalMessage({ ...base, detail: 'the leaf could not be deployed' })).toBe(KEPT);
+  });
+
+  it('never says “registry”, and never any of the other machinery words', () => {
+    /* The house rule, held over EVERY sentence this function can produce
+       rather than over the ones a test happened to name. A Passport holder is
+       shown nothing about a registry, a resolver, an indexer, a contract, a
+       wallet, or DUST — they hold none of it and can act on none of it. */
+    const every = [
+      aliasRefusalMessage(base),
+      aliasRefusalMessage({ ...base, code: 'name-taken' }),
+      aliasRefusalMessage({ ...base, code: 'funder-no-dust' }),
+      aliasRefusalMessage({ ...base, code: 'rate-limited' }),
+      aliasRefusalMessage({ ...base, retryAfterMs: 1 }),
+      aliasRefusalMessage({ ...base, detail: 'DustUnavailable' }),
+    ];
+    for (const sentence of every) {
+      expect(sentence).not.toMatch(/registry|resolver|indexer|contract|wallet|DUST|ledger|tx\b/i);
+      /* And no rate, no limit, no ceiling, and no quota. The sponsor's own 429
+         says "the balancer has reached its ceiling of 20 sponsored
+         registrations per hour", which is an operator's sentence in every
+         word. */
+      expect(sentence).not.toMatch(/rate.?limit|ceiling|quota|429|balancer|sponsor\w*ed\b/i);
+    }
+  });
+
+  it('says it in ONE sentence, whichever branch answers', () => {
+    /* THE COPY DEFECT OF 2026/09/03. This sentence is the whole body of the
+       claim screen's failure card, and the card read: an unpunctuated heading,
+       a two-sentence refusal from here, a second "the name is kept for you to
+       register again shortly" appended by `App.tsx`, and a note beneath the
+       buttons describing the buttons. Three sentences for one fact.
+
+       Held as a shape rather than as four string comparisons: exactly one
+       terminal stop, at the end, and the fact said once. An em dash or a comma
+       is how a second clause joins — a full stop is how a second sentence
+       starts, and there is not one. */
+    const every = [
+      aliasRefusalMessage(base),
+      aliasRefusalMessage({ ...base, code: 'name-taken' }),
+      aliasRefusalMessage({ ...base, code: 'funder-no-dust' }),
+      aliasRefusalMessage({ ...base, retryAfterMs: 1 }),
+      aliasRefusalMessage({ ...base, detail: 'DustUnavailable' }),
+    ];
+    for (const sentence of every) {
+      expect(sentence, sentence).toMatch(/\.$/);
+      /* One stop only. `alice.night` carries stops of its own, so the count is
+         of SENTENCE ends — a stop followed by a space or the end of the line. */
+      expect(sentence.match(/\.(?=\s|$)/g) ?? [], sentence).toHaveLength(1);
+      expect(sentence.match(/\bkept\b/gi) ?? [], sentence).not.toHaveLength(2);
+    }
+  });
+
+  it('spends its second sentence, once, on the one refusal that needs an action', () => {
+    /* THE ONE CARVE-OUT from the rule above, held here rather than left as a
+       gap in the list. The 2026/09/03 ruling was against three sentences
+       saying the SAME fact; this is two sentences saying two — why the name is
+       not registered, and what to do — and the second exists because the
+       branch it replaced promised something would happen on its own and
+       nothing would. The rest of the rule still binds it: the fact is said
+       once, and there is no third sentence describing the buttons. */
+    const limited = aliasRefusalMessage({ ...base, code: 'rate-limited' });
+    expect(limited).toMatch(/\.$/);
+    expect(limited.match(/\.(?=\s|$)/g) ?? []).toHaveLength(2);
+    expect(limited.match(/\bkept\b/gi) ?? []).toHaveLength(1);
   });
 });

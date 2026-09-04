@@ -157,7 +157,9 @@ parser against this service's live response.
       "dust": { "balance": "0", "utxoCount": 0, "isSynced": true },
       "unavailableCause": "INSUFFICIENT_DUST"
     }
-  ]
+  ],
+  "settling": true,
+  "retryAfterMs": 3000
 }
 ```
 
@@ -188,6 +190,13 @@ queue separately as `busy`. See `src/reservation.ts`.
 is there so an operator reading a raw probe is not left guessing between
 `WALLET_SYNCING`, `INSUFFICIENT_DUST`, `PENDING_TRANSACTION`, `PROVER_WARMING`,
 and `PROVER_UNAVAILABLE`.
+
+`settling` and `retryAfterMs` appear only when the unavailability is a **wait**
+rather than a state: this service's own last spend has not had its change back
+yet, or a transaction it balanced is still outstanding. They never raise
+`available` — an empty wallet cannot pay a fee and saying otherwise would send a
+caller straight into a refusal — they say the wait is short and bounded, so a
+client mid-send can hold rather than go looking for another sponsor.
 
 ### `POST /balance-only`
 
@@ -222,14 +231,65 @@ Refusals are typed, and carry the HTTP status `sponsor.ts` branches on:
 | --- | --- | --- |
 | 400 | `INVALID_TRANSACTION` | The body is not a serialised finalized transaction. |
 | 429 | `PENDING_TRANSACTION` | Another caller is claiming this wallet's coins right now — balancing, signing, or submitting, which is seconds. Carries `retryAfterMs`; the client retries inside a bounded window. A job that is merely *proving* is not a reason to refuse. |
-| 503 | `WALLET_SYNCING` | Not synced yet. |
-| 503 | `INSUFFICIENT_DUST` | No spendable DUST. |
+| 429 | `PENDING_TRANSACTION` | …or this service has caught its own DUST bookkeeping wedged and is repairing it. `retryAfterMs` is 5,000, and the repair is a snapshot rewrite plus a restart. See [The DUST wedge](#the-dust-wedge). |
+| 429 | `PENDING_TRANSACTION` | …or the wallet is unsynced or out of DUST **inside** the settle window: its own last spend's change is still in flight, or a transaction it balanced is still outstanding. `cause` carries which of the two it really was, and `retryAfterMs` is 3,000. |
+| 503 | `WALLET_SYNCING` | Not synced, with nothing in flight to explain it. |
+| 503 | `INSUFFICIENT_DUST` | No spendable DUST, with nothing in flight to explain it. |
 | 503 | `PROVER_UNAVAILABLE` | Proving key material could not be loaded. |
 | 502 | `BALANCE_FAILED` | Balancing or proving failed; `cause` carries the detail. |
+
+The 429/503 split on those middle two rows is not cosmetic. `sponsor.ts` waits
+out a `PENDING_TRANSACTION` and **falls through to the next sponsor** on a 503 —
+and a client that changes sponsor between the two legs of a transfer proves its
+second leg against a state its first leg has already moved. On 2026/09/02 that
+cost a send: the balancer answered 503 instantly for a shortfall that was two
+blocks old, the client went to the upstream gateway, and the `withdraw_night`
+never landed. A shortfall the service can explain is now a wait.
 
 Only DUST is balanced (`tokenKindsToBalance: ['dust']`). The caller balanced its
 own shielded and unshielded legs before asking — adding to those here would
 spend the balancer's NIGHT on somebody else's transfer.
+
+#### Booked DUST, and how it is given back
+
+`/balance-only` books a DUST coin as spent and then lets go: the caller submits,
+and this service never learns whether it landed. When it does not — the node
+refuses it, the browser closes, a preflight fails — the booking used to stand
+for the whole `BALANCER_BALANCE_TTL_MS`. On 2026/09/02 at 14:12:57Z a rejected
+transaction (`Custom error: 239`) took this wallet's only DUST coins with it and
+onboarding was refused until 14:42:57Z.
+
+So the booking is provisional. Every balanced transaction is watched; a sweeper
+runs every six seconds, and once one is `BALANCER_BALANCE_ORPHAN_MS` old it asks
+the indexer whether the chain has it:
+
+- **on chain** — dropped, nothing else happens;
+- **definitely absent** — `facade.revert(…)` hands the DUST back, logged as
+  `[balance] released the DUST booked for <hash>: not on chain <n> s after
+  balancing` and counted on `/status` as `balancesOrphaned`;
+- **could not be asked** — left alone and asked again next sweep. An unanswered
+  question is never evidence of absence: reverting a transaction that *had*
+  landed would double-spend.
+
+`/status` also carries `balancesWatched`, the number outstanding right now, and
+the health watchdog reads it — a wallet whose DUST is booked against an
+outstanding balance is `settling`, never `degraded`, however long ago the last
+sponsorship was.
+
+### `POST /balance-only/abandon`
+
+A caller whose own submit failed can say so and not wait out the window:
+
+```sh
+curl -X POST http://127.0.0.1:8807/balance-only/abandon \
+  -H 'content-type: application/json' \
+  -d '{"txHash": "<the txHash /balance-only handed back>"}'
+```
+
+`{ "txHash": "…", "released": true }` when the booking was outstanding and its
+DUST has been given back, `released: false` when nothing was being watched under
+that hash — a second call, or one the sweeper has already ruled on. Rate-limited
+on the same bucket as `/balance-only`.
 
 ### `POST /register-alias`
 
@@ -251,10 +311,24 @@ curl -X POST http://127.0.0.1:8807/register-alias \
 | `ownerAddress` | no | An `mn_addr…` unshielded address for the leaf's `owner_address` half. Absent means 32 zero bytes — the balancer will not substitute its own, or a payment meant for the user would land here. |
 | `network` | no | Must be `stagenet` when given. |
 
-Two transactions happen, in order: a **resolver leaf** is deployed with
-`DOMAIN_TARGET = [contractAddress, ContractAddr]` and `DOMAIN_OWNER` set to the
-supplied key, then `register_domain_for(owner, domain, len, resolver)` is called
-on the TLD. Success is returned **only** after the registry has been read back
+There are two paths, and which one runs depends only on whether the sponsor has
+a pre-deployed leaf on the shelf. See [the resolver-leaf
+pool](#the-resolver-leaf-pool).
+
+**Off the shelf.** A leaf deployed earlier is taken and marked consumed, then
+`update_domain_target(contractAddress)` on that leaf and
+`register_domain_for(owner, domain, len, resolver)` on the TLD run
+**concurrently**, on two DUST coins — neither reads the other's result.
+`change_owner(ownerKey, ownerAddress)` follows in the background once the name
+is confirmed, unwaited and logged: the name already resolves, and nobody is
+watching a screen for the hand-over.
+
+**Empty shelf.** Exactly the path this service has always taken, unchanged: a
+**resolver leaf** is deployed with `DOMAIN_TARGET = [contractAddress,
+ContractAddr]` and `DOMAIN_OWNER` set to the supplied key, then
+`register_domain_for` is called on the TLD.
+
+Either way success is returned **only** after the registry has been read back
 and seen resolving the name to that contract — not merely after the transactions
 land:
 
@@ -265,7 +339,8 @@ land:
   "resolverDeployTx": "<64-hex ledger hash>", "registerTx": "<64-hex ledger hash>",
   "resolverDeployBlock": 159260, "registerBlock": 159274,
   "target": { "kind": "contract", "address": "<64 hex>" },
-  "ownerKey": "<64 hex>", "costAtomic": "10", "registeredAt": "<ISO 8601>"
+  "ownerKey": "<64 hex>", "costAtomic": "10", "registeredAt": "<ISO 8601>",
+  "fromPool": true
 }
 ```
 
@@ -435,6 +510,11 @@ ready, what the DUST registration did, how many transactions it has balanced —
 plus the sponsorship counters:
 
 ```
+balancesWatched                            transactions this service balanced and
+                                           handed away that the chain has not
+                                           been seen carrying yet
+balancesOrphaned                           bookings whose DUST the sweeper has
+                                           taken back — see "Booked DUST" above
 aliasesSponsored / aliasesSponsoredTotal   this process / the persisted ledger
 aliasSponsorship                           available | unavailable
 aliasTldAddress                            the registry names go to
@@ -455,6 +535,13 @@ assetsFunded / assetsFundedTotal           this process / ledger entries whose
                                            succeed and fail apart
 assetFunding                               available | unavailable
 assetUnavailableReason                     null, or why the asset leg is off
+assetSpare                                 ready | minting | none | unsupported
+                                           — whether a grant-sized mUSD coin is
+                                           already minted and waiting, which is
+                                           the difference between an asset leg
+                                           of one deposit and one of a mint plus
+                                           the three minutes this wallet takes
+                                           to see its own coin
 contractProving                            wasm | server — how CONTRACT circuits
                                            are proved, which is a different
                                            question from `proving` above
@@ -488,6 +575,98 @@ failed is a real, recorded NIGHT credit with no asset entry, and the gap is
 precisely the set of accounts a retried `/fund-account` would top up.
 
 None of these is key material and none of them names a user.
+
+`resolverPool` is the shelf of pre-deployed resolver leaves, or `null` when
+there is no `.night` sponsor to deploy through:
+
+```
+depth         unconsumed leaves on the shelf
+target        RESOLVER_POOL_TARGET
+floor         RESOLVER_POOL_FLOOR
+state         idle | filling | paused
+reason        the one sentence behind that state
+lastDeployAt  when this process last put a leaf on the shelf, or null
+```
+
+---
+
+## The resolver-leaf pool
+
+Registering a name is two dependent proofs, and the first is the expensive one:
+deploying the resolver leaf costs **1.37e16 Specks** against 8.5e14 for the
+registration itself, plus a block of waiting, all of it spent while somebody is
+watching a screen.
+
+None of that deploy depends on the user. `DOMAIN` is sealed at construction, but
+`DOMAIN_TARGET` is settable afterwards by `update_domain_target` and
+`DOMAIN_OWNER` by `change_owner`, both gated on the caller's derived key
+matching the leaf's current owner — and `register_domain_for` on the TLD writes
+only `{ owner, resolver }`, never looking inside the leaf. So a leaf can be
+built ahead of time with no domain, a zero target, and the **sponsor's** own key
+as owner, and bound to a person later.
+
+The sponsor therefore keeps a shelf of them. `RESOLVER_POOL_TARGET` (default
+**100**) is what it fills to; `RESOLVER_POOL_FLOOR` (default **50**) is the
+depth below which `/status` calls the shelf low. The shelf lives in
+`resolvers-<network>.json`, beside `accounts-<network>.json` and
+`aliases-<network>.json`, on the same atomic write-and-rename:
+
+```json
+{
+  "<leaf contract address>": {
+    "address": "<64 hex>", "deployTx": "<64-hex ledger hash>",
+    "deployBlock": 164800, "deployedAt": "<ISO 8601>",
+    "consumedBy": "<account contract, once taken>", "consumedAt": "<ISO 8601>"
+  }
+}
+```
+
+`deployTx` is the indexer's ledger **hash**, and `deployBlock` the block it
+landed in, both resolved by the filler at deploy time — at a moment nobody is
+waiting. That is deliberate: `resolveTransactionHash` maps a midnight-js
+transaction *identifier* to a hash, and the indexer answers an empty list for a
+hash offered as an identifier, so a registration that put a pooled leaf's
+`deployTx` back through the lookup would find nothing and spend the full retry
+budget — about thirty seconds — at the end of the very request the shelf exists
+to shorten. The pooled path therefore reads both fields and asks the indexer
+only about the registration transaction.
+
+A leaf is marked consumed **the instant it is taken** — before a single proof is
+attempted — because the failure that guards against is two registrations racing
+onto one leaf, and a leaf marked only on success would be free for the whole
+minute the first binding spends proving. A leaf whose binding then fails stays
+spent: it cost one deploy, the filler replaces it, and reusing a half-bound leaf
+under somebody else's name is not a trade worth making.
+
+### The filler is the lowest-priority thing this service does
+
+Not a queue priority — a priority still competes. It is a set of preconditions
+that make the filler simply not ask. It deploys **one** leaf at a time, **at
+most one a minute**, and only when *all* of these hold:
+
+| Precondition | Why |
+| --- | --- |
+| the health verdict is `healthy` | it pauses on `busy`, `settling`, `degraded`, `wedged`, and `dust-wedged` |
+| the reservation shows nothing waiting, running, or booked | a leaf deploy must never join a queue somebody is waiting in |
+| at least **two** fee-capable DUST coins (≥ 1.5e16 Specks) exist | it spends the second coin and never the last, so fee sponsorship stays up |
+| no proof is in flight at the prover | one proof server, two vCPUs: the proof that would suffer is a person's |
+| ≥ 60 s since the last user-facing request | `/status` and `/wallet-status` do not count, or watchdog polling would pause it for ever |
+| ≥ 60 s since the last leaf deploy, **failed ones included** | a failed deploy still cost a proof; retrying it at once is how a broken artefact becomes a spend loop |
+
+Any of these failing is a **pause**, not a fault. On the deployed sponsor today
+— two DUST coins, one of them fee-capable — the filler sits at:
+
+```json
+"resolverPool": { "depth": 0, "target": 100, "floor": 50,
+                  "state": "paused", "reason": "one fee-capable coin",
+                  "lastDeployAt": null }
+```
+
+and that is the system working. The shelf fills when the sponsor's NIGHT is
+spread across more coins; until then every registration takes the unchanged
+deploy-then-register path and nothing about the service is worse than it was.
+
+`RESOLVER_POOL_TARGET=0` switches the pool off entirely.
 
 ---
 
@@ -533,10 +712,15 @@ DUST is on its way back:
    funded, **or** DUST-less within 5 minutes of a sponsorship. Deliberately not
    gated on `synced`, because the post-spend flap and the nullified DUST are one
    event.
-4. `degraded` — unsynced; a dropped subscription; `proving: failed`;
-   `proving: warming` long past a cold start; no DUST with nothing to explain
-   it; sync indices that have not moved in half an hour.
-5. `healthy`.
+4. `dust-wedged` — the wallet holds NIGHT, reports no spendable DUST, is
+   synced, has nothing of its own pending, nothing it balanced outstanding, and
+   is past the orphan window since its last sponsorship. Decided **before** the
+   settling branches, because it is proved rather than inferred. See
+   [The DUST wedge](#the-dust-wedge).
+5. `degraded` — unsynced; a dropped subscription; `proving: failed`;
+   `proving: warming` long past a cold start; no DUST *and no NIGHT*, so nothing
+   to explain it; sync indices that have not moved in half an hour.
+6. `healthy`.
 
 Only `healthy` clears the unhealthy streak. `busy` and `settling` **hold** it: a
 wallet that was degraded and is now merely mid-spend has not been shown to be
@@ -550,7 +734,19 @@ prefix:**
 | --- | --- | --- | --- |
 | `refresh` | every acting tick | `wallet.currentState()` then `wallet.progress()` — a fresh read off the facade's state observable, which carries its own 30 s timeout | one per tick |
 | `rewarm` | 2 consecutive unhealthy ticks | `wallet.warmProvingKeys()` then `wallet.saveSnapshot()` | once per 5 min |
+| `resyncDust` | the **first** tick of a `dust-wedged` verdict | `wallet.saveSnapshot()`, then `rollbackDustSnapshot` on the stored snapshot (falling back to a `dust-cold-start-<network>` marker), then `process.exit(1)` | once per 2 min |
 | `restart` | 3 consecutive unhealthy ticks (immediately for `wedged`) | `wallet.saveSnapshot()` then `process.exit(1)`; `Restart=always` brings the unit back | once per 30 min, **persisted** |
+
+`resyncDust` deliberately bypasses `restartAfterTicks`, the restart cooldown,
+and `awaitingHealthyTick`. Those limits exist to stop a soft, possibly transient
+signal from bouncing a live sponsor, and a wedge is neither soft nor transient —
+its conjunction admits one explanation. It does **not** bypass the in-use gate:
+the remedy exits the process, and doing that mid-spend would abandon a proof
+somebody is waiting on. While a repair is pending, `/balance-only`,
+`/register-alias`, and `/fund-account` answer `429 PENDING_TRANSACTION` with
+`retryAfterMs: 5000`; `/balance-only/abandon` still passes, because it spends
+nothing and telling this service a balancing is dead is exactly what should get
+through.
 
 `rewarm` is the rung that repairs something in place rather than merely looking:
 `warmProvingKeys()` re-attempts the key-material fetch whenever readiness is
@@ -589,6 +785,307 @@ restart, which is the only reopen the SDK actually supports.
 - Never twice without an intervening healthy tick — likewise persisted, and
   reported on `/status` as `awaitingHealthyTick`.
 
+### The DUST wedge
+
+**What happens.** Every balancing runs `CoreWallet.spendCoins` →
+`DustLocalState.spend()`, which does *not* remove the spent coin: it sets
+`pending_until = ctime + dust_grace_period` (3 hours) on the entry, and
+`utxos()` and `wallet_balance()` skip entries carrying that flag. So a DUST
+balance of zero immediately after a spend is correct and expected.
+
+**Why it can stick.** The SDK also pushes the spent coins onto an in-memory
+`pendingDust` array, and `applyEventsWithChanges` filters that array against the
+*pending-excluding* `utxos` getter. The first replayed dust event batch after a
+spend — every block with dust activity, so within about six seconds — therefore
+empties `pendingDust` while the ledger entries keep their flags.
+`facade.revert(tx)` un-pends only spends still listed in `pendingDust`, so after
+that window it is a no-op. The coins stay hidden for the full three hours.
+
+**Why a restart does not fix it.** The snapshot serialises the ledger state,
+`pending_until` included, but not `pendingDust`. A process that resumes from the
+snapshot inherits the flags *and* the disabled revert.
+
+Observed twice on 2026/09/02: 4,998 NIGHT held, `dust 0 / utxoCount 0 /
+INSUFFICIENT_DUST` for an hour, with `dust.complete` true throughout. The health
+ladder — refresh, rewarm, restart-from-snapshot — cleared none of it.
+
+**The repair.** `src/dustRollback.ts` deserialises the stored DUST state and
+calls `processTtls(now + 4 h)` — exactly the call `applyFailed` should have made
+— which un-pends every entry whose grace period has expired and drops any that
+decayed to zero. It refuses (`NothingToRepair`) when the count of spendable
+UTxOs does not change, so it can never be mistaken for a repair that did
+nothing.
+
+```
+node dist/dust-rollback.mjs --check           # say what is wrong, write nothing
+node dist/dust-rollback.mjs                   # repair in place, with the service STOPPED
+node dist/dust-rollback.mjs --path <snapshot> # against a named file
+```
+
+Exit codes are an interface: `0` repaired (or, under `--check`, a repair is
+available), `3` nothing to repair, `1` the snapshot could not be read, parsed, or
+written. Three is separate from one because the watchdog's fallback — moving the
+snapshot aside for a ~90 s cold walk — is the right answer to a snapshot it could
+not repair and the wrong answer to one that needed no repair. Every repair keeps
+the bytes it was made from at `<snapshot>.pre-rollback-<timestamp>`.
+
+**The narrower fallback.** When the rollback itself fails, the service writes
+`dust-cold-start-<network>` in the state directory. The next start restores the
+shielded and unshielded wallets from the snapshot — the wedge never touches
+those — and walks only the DUST wallet from chain. The marker is consumed and
+deleted on the start that honours it, so a cold DUST start can never become
+permanent.
+
+### Spend lanes
+
+Spends used to run strictly one at a time, which made an activation five
+sequential sponsored transactions: two minutes to a name and five more to
+assets, with a second Passport's registration queued 280 s behind the first's.
+
+`BALANCER_SPEND_LANES` (default **3**) is the ceiling on concurrent spend jobs.
+The real limit is the number of free DUST coins, and the service takes the
+smaller of the two, re-read before every start: every sponsored spend consumes a
+whole DUST coin, and the SDK selects the smallest coin with a value above zero
+until the fee is covered, so a job started with no free coin does not wait
+politely — it fails to balance, or sweeps a coin a running job was about to
+spend. Lanes therefore close as coins are taken and reopen as change lands, with
+nothing having to notify the queue. `/status` publishes `lanes`,
+`lanesConfigured`, `jobsRunning`, and a `jobs` array giving each running job's
+label, its last reported step, and how long ago it reported it.
+
+Set it to `1` to restore the strictly-serial behaviour.
+
+### Nothing waits for ever
+
+Lanes made two balancer submissions overlap for the first time, and that
+uncovered a fault underneath. The wallet SDK holds **one** node connection for
+the whole facade and disconnects it at the end of every submission; polkadot-js
+drops `author_*` subscriptions on the reconnect without erroring them. So one
+submission ending could kill another's watch in silence — and on 2026/09/02 it
+did, twice: a spend job held a lane for 37 minutes and another for 23, with the
+proof server idle and not one journal line, until an operator restarted the
+service. Both transactions had landed on chain the whole time.
+
+Two narrower answers were tried and both were measured failing on the deployed
+service. **Ordering** the submissions does not help: `WsProvider.disconnect()`
+calls `websocket.close(1000)` and resolves without waiting for the socket's
+close event, so the event arrives after the submission that caused it is over —
+by which time the next submission has reconnected the same provider and
+registered its own handler, and `#onSocketClose` errors the whole provider-wide
+handler map. On 2026/09/03 at 02:28 UTC that killed a registration 39.7 s in
+with `disconnected from wss://rpc.stagenet.shielded.tools/: 1000:: Normal
+Closure`, and the user saw a refused claim. **A connection per submission** does
+not help either, and fails harder: `PolkadotNodeClient.make` disconnects as soon
+as it has loaded its metadata, so a client built moments before its own
+submission kills that submission with its own start-up close — every spare-mint
+attempt at 02:40 and 02:41 UTC on 2026/09/03 failed in exactly that way, 12.9 s
+in.
+
+What holds is owning the connection: one socket, opened once, never
+disconnected while the service is running.
+
+Four things close it, and the fourth is the one that matters most:
+
+1. **This service owns the node connection**, and bounds every submission on it
+   (`BALANCER_SUBMIT_TIMEOUT_MS`). `src/submission.ts` submits through
+   polkadot-js directly, over one connection that is opened once and
+   disconnected only when the service stops, so no submission ever closes
+   anything and there is no close event for a watch to be lost to. Submissions
+   are still taken one at a time — the window is well under a second now, and it
+   keeps the node from seeing several of this wallet's transactions built
+   against one view of its coins at once. And a submission resolves on the
+   node's first accepting status rather than on `Finalized` — 15–25 s of
+   stagenet finality per transaction that no longer sits on a user's click,
+   since every job confirms against the indexer anyway. A socket that drops on
+   its own is the one case left: the provider reconnects by itself, the ceiling
+   catches the submission that was in flight, and the caller asks the indexer
+   whether it landed.
+2. **Indexer watches are bounded** (`BALANCER_CONFIRM_TIMEOUT_MS`). midnight-js
+   waits on `watchForTxData` and `watchForDeployTxData` with no deadline at all.
+3. **A stalled job loses its lane** (`BALANCER_JOB_STALL_MS`), but only while
+   nothing of ours is at the prover — a proof is minutes of legitimate silence.
+4. **A timeout never means "failed".** Every one of these paths asks the indexer
+   directly before it gives up on a transaction, because both hangs had already
+   landed: treating a deadline as a failure would revert DUST the chain has
+   genuinely spent and rebuild transactions that are genuinely on chain. Only an
+   answer of *not there* becomes a rebuild — and *not there* means a reachable
+   indexer said so. An indexer that cannot be reached is evidence about the
+   indexer, never about the chain, so the job waits it out and the queue's
+   ceiling, not a failed connection, decides when to give up. A blackout drill
+   on 2026/09/03 failed three jobs and refused a claim whose `deposit_night`
+   was already in block 293270; that is the answer this rules out.
+
+Every step of a spend job is now one journal line — `queued`, `started`,
+`proving`, `proved`, `balancing`, `balanced`, `fee leg proved`, `waiting to
+submit`, `submitting`, `submitted`, `seen-on-chain`, `confirmed`, then
+`done`/`failed`/`aborted` — prefixed `[job]` and naming the job's label and id.
+
+`seen-on-chain` is a **confirmation** and is printed only after this job has
+submitted something. midnight-js reads an existing contract through the very
+same `watchForDeployTxData` that a deploy waits on, so a job that is merely
+looking one up says `found the contract on chain` instead. Without that
+distinction the journal of 2026/09/03 carried `seen-on-chain` one line after
+`started`, before the job had built anything at all.
+
+The steps that look like padding are the ones that earn their place. A job
+waiting its turn to submit, and a job waiting to rebuild after a node refusal,
+are both doing nothing at the prover for up to two minutes — the exact shape the
+stall watchdog aborts on. Reporting them is what stops a healthy job losing its
+lane for being quiet: on 2026/09/03 an activation grant sat 115 s at `fee leg
+proved` through a rebuild and recovered on its own, thirty-five seconds inside
+the window.
+The droplet watchdog reads the same facts off `/status` and restarts the unit if
+a job stays silent with an idle prover for `BALANCER_WATCHDOG_JOB_STALL`
+seconds (default 300), which is the backstop for a stall the process cannot end
+itself.
+
+An activation's two grants — NIGHT into `night_balances`, mUSD into `coins` —
+now run together, since they contend for nothing. Priorities are unchanged: they
+order what is *waiting*, and a registration still overtakes a queued grant.
+
+### When the event loop itself stops
+
+The four bounds above are all scheduled on the main thread, and on 2026/09/03
+that thread stopped. The service wrote `[job] the spare mUSD mint proved
+(job-13)` at 01:45:29 UTC and then nothing: no journal line for eight minutes,
+no five-second stall sweep, no answer on `/status` (the TLS proxy held one
+request open for 369.8 s before returning 502), and no `SIGTERM` handler when
+systemd tried to stop the unit at 01:51:59 — it was `SIGKILL`ed at 01:53:29
+after the ninety-second stop timeout.
+
+Nothing scheduled on a blocked loop can end one. Three things close it:
+
+- **The wallet calls that hang now expire** (`BALANCER_WALLET_CALL_TIMEOUT_MS`).
+  `proved` is the last step before the fee estimate, the balancing, and the
+  signing, and none of those three had a ceiling. All three now do, and the
+  journal names which one a quiet job is inside.
+- **A lane comes back at a ceiling the prover cannot raise**
+  (`BALANCER_JOB_MAX_MS`). The stall watchdog stands off while a proof is
+  outstanding, which is right and is also a way to be silenced; the ceiling
+  consults nothing.
+- **A worker thread kills the process if the main one stops**
+  (`BALANCER_LOOP_BLOCKED_MS`, `src/liveness.ts`). The main thread stamps a
+  shared buffer twice a second; a worker reads that stamp through `Atomics` —
+  no message, no callback, no main-thread scheduling — and after ninety stale
+  seconds writes a line straight to file descriptor 2 (a worker's `stderr` is
+  forwarded *by the parent*, so `console.error` would queue behind the very
+  blockage it reports) and sends `SIGKILL`. `Restart=always` with
+  `TimeoutStopSec=15s` — see `deploy/passport-balancer.service` — brings the
+  sponsor back in seconds rather than after eight minutes of silence and ninety
+  more of an unanswerable stop.
+
+And a fifth, which is where the heap came from:
+
+- **Every job now closes the indexer client it opened.**
+  `indexerPublicDataProvider` is an Apollo client over a graphql-ws WebSocket
+  and it has a `dispose()`; nothing here called it. Measured on the droplet on
+  2026/09/03: one resolver-leaf deploy took the sponsor from **6 sockets and
+  276 MB** resident to **14 sockets and 373 MB**. Eight sockets and
+  ninety-seven megabytes per job, never given back — and the retained
+  subscriptions are not idle, because `TXS_FROM_BLOCK_SUB` carries every block
+  on chain for each surviving client to inflate, parse, and normalise into a
+  cache of its own, on this thread. Thirty-five jobs in, that is thirty-five
+  copies of that work per block against 2.4 GB of heap, which is the freeze.
+  Disposal is registered with the running **job** rather than written as a
+  `finally` at each call site, because a job the watchdog abandons never
+  reaches its own `finally` — and an abandoned job is precisely the one whose
+  sockets nobody else will close.
+
+  The resolver shelf is **off** (`RESOLVER_POOL_TARGET=0` in the unit) until
+  three consecutive filler deploys run with `/status` answering inside one
+  second throughout: the filler is the one thing here that starts a contract
+  job every minute unprompted, so it reached the freeze first and reached it
+  while nobody had asked for anything.
+
+And a fourth, which is the kinder one:
+
+- **The sponsor recycles before the spiral** (`BALANCER_RECYCLE_HEAP_BYTES`).
+  The freeze was reproduced live at 02:10 UTC on 2026/09/03, seventeen minutes
+  into a fresh process: `[job] a resolver leaf for the shelf proved (job-5)` at
+  01:58:21 and then nothing, `/status` unanswered after 25 s, and `top -H`
+  showing the main thread **running** at 50% with four V8 helper threads at
+  30–40% each against **2.39 GB** resident. That is a garbage collector marking
+  continuously, not a call waiting on a socket: the heavy allocation after
+  `proved` is where the spiral starts and the heap it starts against is why. So
+  the heap is sampled twice a second, and at 1.8 GB of heap **or 2.0 GB
+  resident** — with **no spend job running and nothing at the prover** — the
+  service exits cleanly for `Restart=always` to replace it. Both marks, because
+  `heapUsed` counts none of the ledger's WASM memory or the prover keys beside
+  it, and the 2.39 GB that froze was read off `VmRSS`. That costs a second of resume-from-snapshot at
+  a moment when nobody is waiting, instead of eight minutes of a frozen sponsor
+  at a moment when somebody is.
+
+`/status` publishes `loopLagMs`, `loopWorstLagMs`, `loopWatched`,
+`heapUsedBytes`, and `rssBytes` — the measurements that would have made the
+freeze visible while it was happening rather than afterwards.
+
+### Rebuilding a transaction the node refused
+
+A transaction balanced one block behind the chain is refused with
+`RpcError: 1010: Invalid Transaction: Custom error: 231` (or `239`). Seen at
+15:35:43 on 2026/09/02, five seconds after the registration in front of it
+landed. `withNodeRejectionRetry` (in `src/account.ts`, used by both
+`src/account.ts` and `src/midnames.ts`) waits for `isSynced`,
+`dust.complete`, **and nothing of this sponsor's own still in flight** — the
+rejection is about the DUST the balancing selected — then **rebuilds** from a
+fresh `findDeployedContract`/`callTx`, because the bytes are what the node
+refused and resending them would fail identically for ever. Three attempts, a
+two-minute wait each.
+
+The third term was measured on 2026/09/03: a grant refused at 02:14:19 was
+rebuilt at 02:14:46 and 02:14:56 and refused both times, because a registration
+of the same wallet's was submitted and unlanded throughout. Three proofs, three
+balancings, and a lane on a wallet with one fee-capable coin went to
+transactions that could not land, and the two claims behind them reached Home at
+146.5 s against a bar of 120. Waiting for the pending one costs a block or two. Anything that is not a node rejection is
+rethrown untouched on the first attempt.
+
+It wraps `deposit_night`, `deposit_shielded`, the resolver deploy, and
+`register_domain_for`.
+
+#### The other half: a transaction that lands and is not applied
+
+A refusal at the RPC is only the first half of this failure. The second is a
+transaction the node **accepts**, includes in a block, and then does not apply:
+midnight-js throws `CallTxFailedError` whenever the finalised status is not
+`SucceedEntirely`, and two such statuses exist — `FailFallible`, where the
+guaranteed segment (the fee) was applied and every fallible segment was
+discarded, and `FailEntirely`, where nothing was applied at all. In both, the
+effect this service was paying for did not happen, the fee was still charged,
+and a rebuild is safe because there is nothing a second build could double.
+
+Measured on 2026/09/03: the activation grant for `c1a4ae05…` was refused with
+`1010: Custom error: 231` at 02:48:26, 02:48:29, and 02:48:57 — and then, at
+02:50:09, `register_domain_for hcmtkxcwhntzz.night` **landed** at block
+**293959** as `FailFallible`, segment map `{0: SegmentSuccess, 1:
+SegmentSuccess, 61517: SegmentFail}`, fees paid in full. The proof had been
+built against a view of the registry the chain had since moved past. The caller
+reported it as a rejection by the registry, which it was not.
+
+`isLandedFailure` (in `src/account.ts`) recognises it — structurally through
+`finalizedTxData.status`, and by message for copies re-wrapped on their way out
+— and `isRebuildable` accepts it, so the same wait-then-rebuild applies.
+`describeRebuildCause` names it in the journal and the step as *the chain landed
+but did not apply*, never as a refusal, because the person reading the journal
+is trying to tell these two apart.
+
+#### Named residual: the wait is on the wallet, the staleness is in the indexer
+
+**`caughtUp` is a wallet predicate — `isSynced`, `dust.complete`, nothing of
+ours in flight — but the contract state a rebuild is proved against is read
+through the indexer, which trails the node by roughly fourteen seconds.** A
+wallet can therefore be caught up while the registry view is not, and attempt 2
+can rebuild against exactly the state that produced the `FailFallible` and fail
+identically; attempt 3, after a further ~30 s of proving, usually clears it.
+
+The real fix is to wait until the indexer's block height reaches the failing
+transaction's own `finalizedTxData.blockHeight` — **293959** in the case above,
+which the error hands us directly — before rebuilding. That means threading the
+public data provider into `withNodeRejectionRetry`, which is why it is recorded
+here rather than done in the same change. Anyone who sees a second
+`FailFallible` on the same circuit within ~15 s of the first is seeing this, not
+a new fault.
+
 ### Leg B — the external timer, for the wedged case
 
 A process that is alive but no longer answering HTTP cannot notice itself: the
@@ -611,7 +1108,108 @@ all three hold:
 3. the last watchdog restart was more than 30 minutes ago. That clock is a file
    in the state directory, so it survives the restart it bounds.
 
+**And it repairs a DUST wedge on the FIRST strike.** A wedged wallet is a synced
+one, so `/wallet-status` answers `ready: true` and rule 1 above exits happily
+while nothing can be sponsored — which is exactly how the sponsor stayed down
+for an hour twice on 2026/09/02 with this timer running throughout. The wedge is
+matched on its own signature, taken from both endpoints at once and every term
+required:
+
+| Endpoint | Required |
+| --- | --- |
+| `/wallet-status` | `dust.balance` `"0"` and `dust.utxoCount` `0` |
+| `/status` | `synced: true`, `balanceAtomic` non-zero, `pendingTransactions: 0`, `balancesWatched: 0`, `balancing: false`, `busy: false`, `settling: false` |
+
+Each term rules out one innocent explanation — a syncing wallet, an empty one, a
+spend of its own in flight, a balancing handed to somebody else, a claim on the
+coins, or change still settling. It acts on the first strike because that
+conjunction is *proved*, not inferred, and six minutes of a demo is the demo. It
+stops the unit first (a running service rewrites the snapshot every minute and
+would overwrite the repair), runs `dist/dust-rollback.mjs`, falls back to moving
+the snapshot aside for a cold walk, and starts the unit again. Its own cooldown,
+`BALANCER_WATCHDOG_DUST_COOLDOWN`, defaults to **300 s**.
+
+It has a second leg, for a spend job that has gone silent while holding a lane.
+That failure looks perfectly healthy from outside — through both hangs of
+2026/09/02 `/wallet-status` answered `ready: true` — so it is matched on
+`/status` alone: `jobsRunning` at least one, `proofInFlight: false`, and a
+`jobs[].sinceProgressMs` past `BALANCER_WATCHDOG_JOB_STALL` (default **300 s**,
+deliberately twice the in-process window, so the service gets first refusal on
+its own stall). `proofInFlight` is not optional there: a proof is minutes of
+silence and perfectly healthy, and restarting through one would fail a
+registration somebody is watching.
+
+`bash test/watchdog.test.sh` drives the whole script against a stub HTTP server,
+with recorders standing in for `systemctl` and `node`, and checks each term of
+the signature removed in turn. It needs no droplet and no root.
+
 Everything it decides goes to `journalctl -u passport-balancer-watchdog`.
+
+---
+
+## Who may spend
+
+The alias and account policies above bound what one **Passport** can be given.
+Until 2026/09/01 nothing bounded what one **caller** could ask for: the three
+spending endpoints ran their handlers for anybody who knew the URL, and
+`/balance-only` paid a DUST fee on every call with no ceiling at all. The CORS
+allow-list was never a gate — it decides which headers a *browser* is handed
+back, long after the handler has run and the fee has been paid.
+
+So each of the three now passes three guards before it reaches a policy gate.
+`GET /wallet-status` and `GET /status` pass none of them: they are what every
+client and both watchdogs poll, and neither spends a Speck.
+
+1. **A per-client token bucket**, keyed on the caller's address.
+   `/balance-only` gets 12/min with a burst of 6 — far more than a person can
+   approve, and enough that a client which retries is never punished for it.
+   `/register-alias` and `/fund-account` get 3/min: they are once-per-Passport
+   calls, gated on top of that by a persisted once-only ledger.
+2. **A cap on spend requests in flight** — 8 — so a flood is refused rather
+   than stacked behind the wallet's one-at-a-time queue, each waiter holding a
+   socket and whatever it read on the way in.
+3. **An optional shared secret.** With `BALANCER_CLIENT_KEY` set, the three
+   endpoints require it in an `X-Passport-Key` header. Unset — the default —
+   admits everybody, which is the behaviour every deployed client is written
+   against today.
+
+The existing global `BALANCER_ALIAS_MAX_PER_HOUR` and
+`BALANCER_ACCOUNT_MAX_PER_HOUR` ceilings are unchanged and still sit above all
+of this: the per-client bucket bounds one caller, the hourly ceiling bounds the
+wallet.
+
+Every refusal is the service's ordinary `{ error, message }` shape, logged under
+the endpoint's own `[balance]` / `[alias]` / `[account] refused:` prefix so the
+watchdog and `journalctl` need to learn nothing new, and counted on `/status`:
+
+```jsonc
+"limits": {
+  "refusedRateLimited": 27, "refusedQueueFull": 9, "refusedUnauthorised": 2,
+  "spendQueueDepth": 0, "spendQueueMax": 8, "clientsTracked": 5,
+  "clientKeyRequired": false
+}
+```
+
+| Status | `error` | When |
+| --- | --- | --- |
+| 429 | `rate-limited` | This client's bucket is empty. Carries `Retry-After` and `retryAfterMs`. |
+| 429 | `queue-full` | `BALANCER_SPEND_QUEUE_MAX` spends are already in flight. |
+| 401 | `unauthorised` | `BALANCER_CLIENT_KEY` is set and the request did not carry it. |
+
+### The forwarded-address rule
+
+A per-client limit keyed on a header anybody can set is not a limit: an abuser
+sends a fresh `X-Forwarded-For` per request and earns a fresh bucket every time.
+So the header is read **only** when the socket's own peer is a trusted proxy —
+loopback by default, which is where Caddy is — and never otherwise. A request
+arriving at the port directly is keyed on the address it really came from,
+whatever its headers claim.
+
+Behind a trusted peer the chain is read **from the right**. Caddy *appends* the
+address it observed to whatever the client sent, so `X-Forwarded-For:
+10.0.0.1, 203.0.113.9` has exactly one entry the client could not have written —
+the last one. Further trusted proxies are skipped, so a two-hop deployment
+(add them to `BALANCER_TRUSTED_PROXIES`) still lands on the real caller.
 
 ---
 
@@ -634,13 +1232,35 @@ Everything comes from the environment. Only `BALANCER_SEED` is required.
 | `BALANCER_NODE_URL` | `wss://rpc.stagenet.shielded.tools` | Submission relay source. |
 | `BALANCER_FEE_BLOCKS_MARGIN` | `5` | Fee-estimate margin. A wallet with only a few blocks of DUST refuses its own transactions under a larger one. |
 | `BALANCER_BALANCE_TTL_MS` | `1800000` | TTL on every balanced transaction, and the `expiresAt` handed back. |
+| `BALANCER_BALANCE_ORPHAN_MS` | `120000` | How long a balanced transaction may go unseen on chain before the DUST it booked is handed back. See "Booked DUST" below. |
 | `BALANCER_HEALTH_INTERVAL_MS` | `600000` | How often the in-process watchdog evaluates the wallet. Minimum `5000`; **`0` turns it off**, and the external timer is unaffected. |
 | `BALANCER_MIDNAMES_TLD_ADDRESS` | our stagenet TLD | The `.night` registry names go to. Unset **and** no known default disables `/register-alias`. |
 | `BALANCER_ALIAS_MAX_PER_HOUR` | `20` | Sponsored registrations per rolling hour. |
+| `RESOLVER_POOL_TARGET` | `100` | Pre-deployed resolver leaves to hold. **`0` turns the pool off**, and every name deploys its own leaf. |
+| `RESOLVER_POOL_FLOOR` | `50` | The depth below which `/status` calls the shelf low. Changes nothing about the filler, which is always at the lowest priority. Must not exceed the target. |
 | `BALANCER_ACCOUNT_GRANT_ATOMIC` | `2000` | The activation grant, in atomic NIGHT (0.002 NIGHT). |
 | `BALANCER_ACCOUNT_MAX_PER_HOUR` | `30` | Funded accounts per rolling hour. Counts activations, not legs. |
 | `BALANCER_ASSET_GRANT` | `100` | The opening balance, in whole mUSD. **`0` turns the asset leg off.** |
 | `BALANCER_ASSET_FAUCET_ADDRESS` | our stagenet faucet | The mUSD faucet the grant is minted from. Unset **and** no known default disables the asset leg. |
+| `BALANCER_BALANCE_MAX_PER_MIN` | `12` | Per-client ceiling on `/balance-only`. **`0` turns the per-client limit off.** |
+| `BALANCER_BALANCE_BURST` | `6` | How many `/balance-only` calls one client may make at once. |
+| `BALANCER_ALIAS_MAX_PER_MIN` | `3` | Per-client ceiling on `/register-alias`. |
+| `BALANCER_ALIAS_BURST` | `3` | Burst allowance on `/register-alias`. |
+| `BALANCER_ACCOUNT_MAX_PER_MIN` | `3` | Per-client ceiling on `/fund-account`. |
+| `BALANCER_ACCOUNT_BURST` | `3` | Burst allowance on `/fund-account`. |
+| `BALANCER_SPEND_QUEUE_MAX` | `8` | Spend requests in flight at once, across every client. **`0` is unbounded.** |
+| `BALANCER_SPEND_LANES` | `3` | Ceiling on concurrent spend jobs. The effective limit is `min(this, free DUST coins)`. `1` runs spends strictly one at a time. |
+| `BALANCER_SUBMIT_TIMEOUT_MS` | `30000` | How long one node submission may take before the service stops waiting on it and asks the indexer whether it landed. |
+| `BALANCER_CONFIRM_TIMEOUT_MS` | `120000` | How long a submitted transaction may go unseen by the indexer before the service queries it directly. Eight stagenet blocks of slack. |
+| `BALANCER_JOB_STALL_MS` | `150000` | How long a running spend job may report no step, **with nothing at the prover**, before the queue aborts it and gives its lane back. |
+| `BALANCER_JOB_MAX_MS` | `720000` | How long a spend job may hold a lane in total, **prover or no prover**. Past every bound underneath it, the ten-minute proof bound included. `0` removes the ceiling. |
+| `BALANCER_WALLET_CALL_TIMEOUT_MS` | `120000` | How long one call into the wallet facade — the fee estimate, the balancing, the signing — may take before the service stops waiting on it and rebuilds. |
+| `BALANCER_LOOP_BLOCKED_MS` | `90000` | How long the main thread may stop running before the liveness worker kills the process for the supervisor to restart. `0` switches the worker off and leaves only the lag measurement. |
+| `BALANCER_RECYCLE_HEAP_BYTES` | `1800000000` | The heap size past which the service exits cleanly, at the next moment with no spend job running and nothing at the prover, for the supervisor to replace it. `0` switches the recycle off. |
+| `BALANCER_RECYCLE_RSS_BYTES` | `2000000000` | The same recycle, on resident size — the half `heapUsed` does not count, and the number the 2026/09/03 freeze was read off. `0` switches it off. |
+| `BALANCER_SYNC_STALL_MS` | `600000` | How long the background chain walk may stall before it is reported and the health loop's rewarm is left to act. |
+| `BALANCER_TRUSTED_PROXIES` | `127.0.0.1,::1` | The peers whose `X-Forwarded-For` is believed. Everything else is keyed on its socket address. |
+| `BALANCER_CLIENT_KEY` | — | When set, the three spend endpoints require it in an `X-Passport-Key` header. Unset leaves them open. |
 | `BALANCER_MIDNAMES_ASSETS` | `contracts-stagenet/managed/midnames` | Overrides where the compiled Midnames ZK artefacts are read from. |
 | `BALANCER_ACCOUNT_ASSETS` | `contracts-stagenet/managed/account` | Overrides where the compiled account ZK artefacts are read from. |
 | `BALANCER_ASSET_ASSETS` | `contracts-stagenet/managed/faucet` | Overrides where the compiled faucet ZK artefacts are read from. |
@@ -823,13 +1443,63 @@ refuses with `funding-unsupported`, and a missing **faucet** build alone costs
 only the asset leg: `GET /status` reports `assetFunding: "unavailable"` with the
 reason, and activations still deposit their NIGHT.
 
+### The TLS proxy, and the two root paths it must carry
+
+`deploy/Caddyfile` is the proxy configuration this service is served through,
+kept here rather than only on the droplet because one of its blocks is a bug fix
+that is invisible from the balancer's own logs.
+
+The wallet SDK's `HttpProverClient` builds its endpoint as
+`new URL('/prove', baseUrl)`, which **discards the path on the base**. A client
+configured with `https://…/prover` therefore posts its Zswap spend proof to
+`https://…/prove`, at the root. Until 2026/09/02 that fell through to the
+catch-all, which answered 200 with no `Access-Control-Allow-Origin`: the browser
+blocked the preflight, every send needing a wallet-side shielded proof failed —
+`deposit_shielded`, and so the second leg of every shielded transfer — and the
+app reported it as a sponsor refusal while the note sat stranded in the sender's
+wallet. So `/prove` and `/check` are proxied to the proof server as well, with
+no path strip, because the proof server wants them exactly as they arrive and
+sets its own CORS headers.
+
+Install and reload it alongside a deploy:
+
+```sh
+rsync -a deploy/ root@<droplet>:/opt/passport-balancer/deploy/
+ssh root@<droplet> '
+  install -m 644 /opt/passport-balancer/deploy/Caddyfile /etc/caddy/Caddyfile
+  caddy validate --config /etc/caddy/Caddyfile && systemctl reload caddy'
+```
+
+Check it from the outside rather than from the box — the failure was a missing
+header, not a missing route:
+
+```sh
+curl -s -X OPTIONS -H 'Origin: https://midnightpassport.com' \
+  -H 'Access-Control-Request-Method: POST' -D - \
+  https://67-205-177-162.sslip.io/prove | grep -i access-control-allow-origin
+```
+
 The service handles `SIGTERM` by saving its sync snapshot before exiting, so a
 restart resumes in under a second instead of walking the chain again.
 
 `Restart=always` with `RestartSec=5` on the unit is load-bearing, not
 decoration: it is what the health loop's last-resort rung relies on, since the
-only way this process can reopen its wallet is to be given a new one. Install
-the external watchdog beside it — the second leg of "Keeping itself alive"
+only way this process can reopen its wallet is to be given a new one — and it is
+what makes the liveness worker a remedy rather than a diagnosis. The unit itself
+lives at `deploy/passport-balancer.service`, because `TimeoutStopSec=15s` is
+part of that fix: a process whose event loop has stopped cannot answer
+`SIGTERM`, and systemd's default made finding that out cost ninety seconds on
+2026/09/03.
+
+```sh
+rsync -a deploy/ root@<droplet>:/opt/passport-balancer/deploy/
+ssh root@<droplet> '
+  install -m 644 /opt/passport-balancer/deploy/passport-balancer.service \
+    /etc/systemd/system/
+  systemctl daemon-reload'
+```
+
+Install the external watchdog beside it — the second leg of "Keeping itself alive"
 above:
 
 ```sh

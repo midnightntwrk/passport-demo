@@ -57,10 +57,67 @@ env:
   # Exactly the values the old `deploy:passport` built with. Kept here rather
   # than in the npm script so that what ships is visible in the run log, and so
   # `deploy:passport:manual` and this workflow cannot drift apart silently.
+  #
+  # PROVING AND FEE SPONSORSHIP TAKE A LIST (2026/08/31). Both variables are
+  # comma-separated and tried left to right, per request, falling through on a
+  # failure or a timeout. Until today all four of proving, fee sponsorship,
+  # sponsored name registration, and activation grants rode one host; the two
+  # that have a second provider on stagenet now name it.
+  #
+  # OUR BALANCER IS FIRST, AND THE 1AM GATEWAY IS A WORKING SECOND. The order
+  # is a measurement, and the measurement has already moved once.
+  #
+  # On 2026/08/31 the gateway could not serve us at all: its prover-enclave
+  # answered `POST /prove` and `POST /check` with `expected header tag
+  # 'midnight:ir-source[v3-generic]:', got 'midnight:ir-source[v2]:'`, and
+  # `POST /balance-only` with `BALANCE_FAILED: Failed to prove transaction` for
+  # the same reason, since it proves the dust leg on the same enclave. Our
+  # artefacts are Compact 0.33.0-rc.2 and zkir-v2, which emit v2, and they
+  # cannot be rebuilt: that compiler is no longer installable and the deployed
+  # contract's verifier keys travel with a release.
+  #
+  # On 2026/09/01 1AM shipped a build named `ledger9-zkir2-dispatch`
+  # (`binaryHash` a02f9c81 to fd377eaf) and it now serves us. Re-drilled the
+  # same day, gateway first, through a logging proxy. Every call a 200:
+  #
+  #   POST /balance-only  200  1331 ms  in  19330 B  out 45303 B   (deploy)
+  #   POST /check         200   191 ms  in   1388 B  out    72 B
+  #   POST /prove         200   561 ms  in 283375 B  out  2940 B   (add_grant)
+  #   POST /balance-only  200   935 ms  in   3735 B  out 14095 B
+  #
+  # It is still second, and that is now a judgement rather than a fact. The fix
+  # is one day old, `release.services` in the gateway's own /health still
+  # reports the superseded git_commit 7f6a497 with `git_dirty: true`, and
+  # stagenet is explicitly an experimental environment. The cost of being wrong
+  # is asymmetric: a 429 from the gateway's balance wallet falls through in
+  # 144 ms, measured under deliberate contention, but a REGRESSION TO 500 costs
+  # about seven seconds per circuit, because midnight-js's own proof-server
+  # client retries a 500 three times with 1/2/4 s backoff. That is what made
+  # the broken gateway cost 41-43 s per contract call against 24 s with the
+  # balancer first.
+  #
+  # The argument for flipping, once it has held for a while: our balancer is
+  # the ONLY thing that can serve /register-alias and /fund-account, so every
+  # DUST speck the gateway pays for a fee is one our balancer keeps for the
+  # path that has no second provider at all.
+  #
+  # `VITE_FUNDER_URL` stays a single URL on purpose: `/register-alias` and
+  # `/fund-account` exist nowhere but our balancer (the gateway 404s both).
+  #
+  # THE BALANCER IS NAMED BY ITS SSLIP.IO ADDRESS, NOT BY A DNS RECORD
+  # (2026/09/02). The friendly name this file used until today still resolves,
+  # but to a RECYCLED address: the 1 GB droplet it pointed at was deleted on
+  # 2026/08/27 and its IP was handed to somebody else, so the record now names
+  # a stranger's Caddy — which is why its ACME renewal has been failing hourly
+  # ever since. Every production deploy that worked was built with the values
+  # below passed in by hand; this file was the last place still carrying the
+  # dead name, and a build that took its defaults from it would have shipped
+  # proving and sponsorship pointed at a host that is not ours. sslip.io
+  # encodes the address in the name, so there is no record left to go stale.
   VITE_MIDNIGHT_NETWORK_ID: stagenet
-  VITE_MIDNIGHT_PROVING_URL: https://funder.midnightpassport.com/prover
-  VITE_SPONSOR_URL: https://funder.midnightpassport.com/balancer
-  VITE_FUNDER_URL: https://funder.midnightpassport.com/balancer
+  VITE_MIDNIGHT_PROVING_URL: https://67-205-177-162.sslip.io/prover,https://api-stagenet.1am.xyz
+  VITE_SPONSOR_URL: https://67-205-177-162.sslip.io/balancer,https://api-stagenet.1am.xyz
+  VITE_FUNDER_URL: https://67-205-177-162.sslip.io/balancer
   VITE_RAFFLE_URL: https://raffle.midnightpassport.com
 
 jobs:

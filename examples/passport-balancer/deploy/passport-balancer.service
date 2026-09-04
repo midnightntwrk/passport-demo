@@ -1,0 +1,132 @@
+# The balancer's systemd unit, as deployed on the sponsor droplet.
+#
+# Kept in the repository because two of its settings are part of the fix for
+# the freeze of 2026/09/03 and would otherwise live only in one machine's
+# /etc/systemd/system:
+#
+#   TimeoutStopSec  systemd's default is ninety seconds, and a process whose
+#                   event loop has stopped cannot answer SIGTERM at all — on
+#                   2026/09/03 the stop was issued at 01:51:59 and the SIGKILL
+#                   that ended it came at 01:53:29. Fifteen seconds is longer
+#                   than a healthy shutdown has ever taken here (it saves one
+#                   snapshot and closes one wallet, and its own handler already
+#                   gives up after ten) and ninety seconds shorter than a stop
+#                   that is never going to be answered.
+#   Restart         always, which is what makes `./liveness.ts` a remedy rather
+#                   than a diagnosis: the worker thread kills the process, and
+#                   this brings it back five seconds later.
+#
+# Install with:
+#   install -m644 deploy/passport-balancer.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl restart passport-balancer
+#
+# The environment file it reads is NOT in this repository: /etc/passport-balancer.env
+# holds the sponsor's seed.
+
+[Unit]
+Description=Midnight Passport stagenet balancer (fee, name, and activation sponsor)
+Documentation=https://github.com/midnightntwrk/passport/tree/demo/pwa-demo/examples/passport-balancer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/passport-balancer
+EnvironmentFile=/etc/passport-balancer.env
+Environment=BALANCER_NETWORK=stagenet
+Environment=BALANCER_STATE_DIR=/var/lib/passport-balancer
+Environment=BALANCER_PORT=8807
+# The sponsor proves through the SAME public route the app uses — the 1AM
+# gateway first, our own proof server behind it — instead of addressing
+# 127.0.0.1:6300 directly. This box has two vCPUs and one proof server with a
+# twelve-slot queue, and it also carries the balancer and the indexer; a mUSD
+# deposit used to wait behind every other proof on it.
+#
+# THIS MOVES ONE OF THE TWO PROVING LEGS, NOT BOTH, because the two clients
+# join a base URL to `/prove` differently:
+#
+#   - CONTRACT circuits (`createContractProofProvider` in
+#     ../src/contractRuntime.ts) use midnight-js's `httpClientProofProvider`,
+#     which appends: `url.pathname = url.pathname.replace(/\/$/, '') + '/prove'`.
+#     A base with a path is preserved, so these post to `/prover/prove` and
+#     `handle_path /prover/*` in ./Caddyfile.stagenet sends them to the gateway.
+#     This is the leg that carries `deposit_night`, `deposit_shielded`, and
+#     `register_domain_for` — the queue this change is for.
+#   - The WALLET's balancing leg (`makeServerProvingService` in ../src/wallet.ts)
+#     uses wallet-sdk's `HttpProverClient`, which builds `new URL('/prove', base)`.
+#     `/prove` is an absolute path, so the base's path is DISCARDED and the
+#     request goes to the origin root, `/prove`. That root is deliberately
+#     routed to 127.0.0.1:6300 in ./Caddyfile.stagenet, so this leg still
+#     proves on this box — now by way of one loopback TLS hop, measured at
+#     ~40 ms against multi-second proofs.
+#
+# Verified on the droplet by status code, which differs per upstream: an empty
+# POST to /prover/prove answers 500 (the gateway), and to /prove or
+# /prover-local/prove answers 400 (our proof server).
+#
+# To move the wallet leg too, the base URL would have to carry no path — a
+# loopback listener serving /prove and /check at ITS root over the same
+# gateway-first upstream pair, with BALANCER_PROVER_URL naming that listener.
+# Not done here: the origin root is claimed by the browser client, which has
+# the same path-dropping SDK and must keep reaching a prover that works.
+Environment=BALANCER_PROVER_URL=https://67-205-177-162.sslip.io/prover
+# Reached only by the TLS proxy on the funder host; the firewall admits it alone.
+Environment=BALANCER_HOST=0.0.0.0
+Environment=BALANCER_ALLOWED_ORIGINS=https://midnightpassport.com,https://raffle.midnightpassport.com,https://template.midnightpassport.com,http://localhost:5175
+Environment=NODE_OPTIONS=--max-old-space-size=4096
+# The resolver shelf is OFF pending proof that its filler is safe to leave
+# running. Until 2026/09/03 every contract job leaked its indexer client — eight
+# sockets and ninety-seven megabytes a job, measured — and the filler is the one
+# thing here that runs a contract job every minute unprompted, so it reached the
+# freeze first and reached it while nobody had asked for anything. With the
+# leak closed, the gate to lift this is three consecutive filler deploys with
+# /status answering inside one second throughout. Every registration deploys its
+# own leaf meanwhile, which is what this service did before the shelf existed.
+Environment=RESOLVER_POOL_TARGET=0
+# The floor may not exceed the target, so both go to zero together.
+Environment=RESOLVER_POOL_FLOOR=0
+# Four, not six, now that the contract leg proves off-box. A lane is a
+# concurrent spend job, and every one of them still runs its wallet balancing
+# proof HERE — see the note on BALANCER_PROVER_URL above for why that leg stays
+# local. Six lanes were sized for a box that did all of its own proving and
+# queued the excess inside the proof server; with the contract leg gone the
+# limit that remains is this box's two vCPUs against the wallet leg, and four
+# is the setting that matches it.
+Environment=BALANCER_SPEND_LANES=4
+# The global hourly ceilings, raised from the 20/30 defaults after the
+# 2026/09/04 sponsor soak. They are GLOBAL, not per client, and they were the
+# binding constraint on the hour: 18 signups with one other tester on the same
+# service exhausted both, and the last two signups were refused a name they
+# were never going to get back — about 20 people an hour across everybody, with
+# two demos running at once halving each other.
+#
+# Nothing else in that hour was near its limit. Spend lanes never fell below 3
+# after the first burst, DUST recovered to 90% of its start within 16-56 s of
+# every burst and its UTxO count ended at 313 against 318 at baseline, RSS was
+# flat, and every one of the 30 grant coins spent was a distinct UTxO of
+# exactly 2000. /status answered 200 on all 672 samples with a worst latency of
+# 0.881 s. Sixty and eighty is the headroom that measurement supports for a
+# week of stakeholder use.
+#
+# The per-client limits are deliberately UNCHANGED: they are what bounds one
+# caller, and raising a global ceiling without them would hand the hour to
+# whoever asks fastest. Note also that this service holds ONE wallet, so a
+# ceiling raised far past this would move the bottleneck to that rather than
+# remove it.
+Environment=BALANCER_ALIAS_MAX_PER_HOUR=60
+Environment=BALANCER_ACCOUNT_MAX_PER_HOUR=80
+ExecStart=/usr/bin/node dist/server.mjs
+Restart=always
+RestartSec=5
+TimeoutStartSec=0
+TimeoutStopSec=15s
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/passport-balancer
+
+[Install]
+WantedBy=multi-user.target

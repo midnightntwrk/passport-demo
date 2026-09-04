@@ -2,27 +2,42 @@ import {
   ArrowRight,
   Check,
   CircleSlash,
+  Gamepad2,
+  Home,
   Loader2,
+  RotateCcw,
   Sparkles,
   Wifi,
 } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
+/* `../identity/midnamesText.js`, NOT `../identity/midnames.js`. This screen is
+   on the first render path, and `midnames.ts` top-level awaits a 9.84 MB ledger
+   WASM through `contractRuntime.ts` — importing a value from it here held
+   React's mount behind that fetch. The registry itself is reached the way
+   `App.tsx` has always reached it: a dynamic import at the moment of the claim. */
 import {
   aliasDomain,
   normalizePassportAlias,
   type AliasAvailability,
   type AliasClaimProgress,
-} from '../identity/midnames.js'
+} from '../identity/midnamesText.js'
+import { claimFailureCard } from '../lib/claimFailure.js'
 import {
   claimSteps,
   claimSubStages,
+  feeWaitLine,
+  feeWaitState,
   formatElapsed,
   stepTimingLine,
+  subscribeFeeWait,
   type ClaimStep,
+  type FeeWait,
 } from '../lib/claimSteps.js'
+import { OFFER_AFTER_MS } from '../lib/waitingGame.js'
 import { NETWORK_LABELS, type PassportNetwork } from './NetworkSwitcher.js'
 import { PasskeyWayOutActions } from './PasskeyWayOut.js'
+import WaitingGame from './WaitingGame.js'
 import ThemeToggle from './ThemeToggle.js'
 import './identity.css'
 
@@ -82,6 +97,18 @@ export interface AliasClaimProps {
    */
   onQueue: (alias: string, reason: string) => Promise<void>
   onSkip: () => void
+  /**
+   * Leaves the name step for Home, with the name still queued.
+   *
+   * NOT a skip, though the host runs the same handler for both: a claim that
+   * failed has already persisted its name as queued, so Home is where that
+   * name is waiting with its own "Register now" beside it. This is the
+   * SECOND control on the failure card — the one that turns a refusal into a
+   * destination — and it is a separate prop from {@link AliasClaimProps.onSkip}
+   * because that one is the host's escape hatch for a network Passport cannot
+   * register on, and the two must stay legible as different offers.
+   */
+  onContinueHome: () => void
   claimPhase: AliasClaimProgress['phase'] | null
   error: string | null
   /**
@@ -123,6 +150,24 @@ export interface AliasClaimProps {
    * screen reports a registration before one has happened.
    */
   nameSponsored?: boolean
+  /**
+   * Opens the "find my Passport by its name" step, or absent where the host
+   * cannot offer one.
+   *
+   * WHY THIS SCREEN CARRIES IT. The name step is where a returning Passport
+   * wrongly ends up, and until 2026/09/04 there was nothing on it that said so.
+   * Recovery went entirely through the passkey's own largeBlob, and Android
+   * passkeys have none — Google Password Manager implements PRF and not
+   * largeBlob — so on that platform a browser with cleared site data could
+   * recover NOTHING and was put here, in front of a naming ceremony, over a
+   * Passport that already had a name. Claiming from here would have set up a
+   * second account and paid for a second name.
+   *
+   * It is quiet, and under the primary action, because the common reader of
+   * this screen genuinely is naming a new Passport. It is a way out for the one
+   * who is not.
+   */
+  onFindExisting?: () => void
 }
 
 type FieldState =
@@ -204,11 +249,13 @@ export default function AliasClaimScreen(props: AliasClaimProps) {
     onClaim,
     onQueue,
     onSkip,
+    onContinueHome,
     claimPhase,
     error,
     errorIsPasskeyWayOut,
     onSignOut,
     nameSponsored,
+    onFindExisting,
   } = props
 
   const [value, setValue] = useState('')
@@ -351,6 +398,85 @@ export default function AliasClaimScreen(props: AliasClaimProps) {
     return () => window.clearInterval(timer)
   }, [activeStepId])
 
+  /* ---------------------------------------------------------------- */
+  /* THE OFFER OF SOMETHING TO DO (2026/09/03)                          */
+  /*                                                                    */
+  /* "An embedded game while you're waiting, like the Chrome dinosaur." */
+  /* The stepper is what makes a two-minute wait legible; this is for   */
+  /* the two minutes themselves.                                        */
+  /*                                                                    */
+  /* It is OFFERED, never started: a control appears once the claim has */
+  /* been running for {@link OFFER_AFTER_MS}, and nothing is on screen  */
+  /* until it is pressed. Most claims never reach that mark, and an     */
+  /* offer of a distraction from a wait that is about to end is itself  */
+  /* the distraction.                                                   */
+  /*                                                                    */
+  /* Three rules keep it subordinate to the claim, and they are the     */
+  /* whole of what this state is for. It sits BENEATH the stepper in    */
+  /* normal flow, so it covers nothing. It is taken off screen — and    */
+  /* the loop stopped — the moment the passkey step is the running one, */
+  /* because that is the one moment the claim needs the reader's hand,  */
+  /* and it comes back afterwards where it left off rather than         */
+  /* starting again. And it can be shut, for the rest of this claim.    */
+  /* ---------------------------------------------------------------- */
+  const [waitedMs, setWaitedMs] = useState(0)
+  const [gameOpen, setGameOpen] = useState(false)
+  const [gameDismissed, setGameDismissed] = useState(false)
+
+  useEffect(() => {
+    if (!busy) {
+      // The claim ended, one way or the other. The next one is offered afresh.
+      setWaitedMs(0)
+      setGameOpen(false)
+      setGameDismissed(false)
+      return undefined
+    }
+    const startedAt = Date.now()
+    const timer = window.setInterval(() => setWaitedMs(Date.now() - startedAt), 1_000)
+    return () => window.clearInterval(timer)
+  }, [busy])
+
+  /* The passkey prompt is a browser dialogue over this screen, and the game
+     goes away for it rather than competing with it. */
+  const passkeyPromptUp = claimPhase === 'confirm-passkey'
+  const offerGame = busy && waitedMs >= OFFER_AFTER_MS && !gameDismissed
+
+  /* ---------------------------------------------------------------- */
+  /* THE SPONSOR WAIT (2026/09/02)                                      */
+  /*                                                                    */
+  /* The fee gate no longer refuses a claim because the sponsor said    */
+  /* `available: 0` at one instant — it waits up to three minutes for   */
+  /* the sponsor's own DUST to come back, which on the deployed         */
+  /* balancer takes two to four. See                                    */
+  /* `../identity/passportContract.ts#checkPassportContractFunds` for   */
+  /* the measurement and the rule.                                      */
+  /*                                                                    */
+  /* A wait nobody is told about is a hang, and this one lands inside   */
+  /* the longest step of the claim — so it says what it is waiting on   */
+  /* and counts, in the same grammar as every other line in the         */
+  /* stepper. The value is published by `../lib/claimSteps.ts` rather   */
+  /* than by the fee gate itself, because importing the fee gate here   */
+  /* would put the 9.84 MB ledger WASM in front of React's mount.       */
+  /* ---------------------------------------------------------------- */
+  const [feeWait, setFeeWait] = useState<FeeWait>(feeWaitState)
+  useEffect(() => subscribeFeeWait(setFeeWait), [])
+
+  const [feeWaitNow, setFeeWaitNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (!feeWait.waiting) return undefined
+    setFeeWaitNow(Date.now())
+    const timer = window.setInterval(() => setFeeWaitNow(Date.now()), 1_000)
+    return () => window.clearInterval(timer)
+  }, [feeWait.waiting])
+
+  /* Shown only while a claim is on screen: the same wait can be entered by
+     the Home card's own retry, which this screen is not mounted for, and a
+     line about a claim that is not running would have nothing to sit under. */
+  const feeWaitText =
+    busy && feeWait.waiting && feeWait.since !== null
+      ? feeWaitLine(feeWaitNow - feeWait.since)
+      : null
+
   /** How long the step being timed has been running, in milliseconds. */
   const elapsedFor = (step: ClaimStep): number | null => {
     if (clock === null) return null
@@ -387,6 +513,21 @@ export default function AliasClaimScreen(props: AliasClaimProps) {
     alias === null ||
     availability === null ||
     availability.status === 'taken'
+
+  /* WHAT THE FAILURE CARD CARRIES, decided in `../lib/claimFailure.ts` rather
+     than by the shape of the JSX below. The card used to be furnished for
+     exactly one failure — the passkey one — and bare for every other, which is
+     how a claim refused by the service after the account was already live
+     ended on a panel with nothing on it (live acceptance, 2026/09/02). The
+     rule is one answer for all of them, so a card with no controls is not a
+     state this screen can be in. */
+  const failure = claimFailureCard({
+    error,
+    passkeyWayOut: errorIsPasskeyWayOut === true,
+    canSignOut: onSignOut !== undefined,
+    alias,
+    busy,
+  })
 
   return (
     <section className="mnid-screen" aria-busy={busy}>
@@ -513,6 +654,17 @@ export default function AliasClaimScreen(props: AliasClaimProps) {
                           {timing}
                         </span>
                       ) : null}
+                      {/* WHAT THE CLAIM IS ACTUALLY HELD ON, when it is held
+                          on the fee sponsor. It carries the same class as the
+                          note below it — it is the same kind of quiet line —
+                          and its own, so a test can name it without also
+                          naming the timer, whose text `claim-progress.spec.ts`
+                          asserts one of per step. */}
+                      {feeWaitText !== null && step.state === 'active' ? (
+                        <span className="mnid-stepper-note mnid-stepper-wait" aria-live="off">
+                          {feeWaitText}
+                        </span>
+                      ) : null}
                       {/* The four states of the long wait, on screen from the
                           first frame of the claim so they FILL IN rather than
                           appearing under the reader mid-wait. */}
@@ -535,6 +687,28 @@ export default function AliasClaimScreen(props: AliasClaimProps) {
               })}
             </ol>
           </div>
+        ) : null}
+
+        {/* Beneath the stepper, never over it — see the block above. */}
+        {steps !== null && offerGame ? (
+          gameOpen ? (
+            <WaitingGame
+              paused={passkeyPromptUp}
+              onDismiss={() => {
+                setGameOpen(false)
+                setGameDismissed(true)
+              }}
+            />
+          ) : passkeyPromptUp ? null : (
+            <button
+              type="button"
+              className="mngame-offer"
+              onClick={() => setGameOpen(true)}
+            >
+              <Gamepad2 size={14} aria-hidden="true" />
+              Play while you wait
+            </button>
+          )
         ) : null}
 
         {/* The promise, until it is being kept. "Press claim" is advice about a
@@ -577,8 +751,20 @@ export default function AliasClaimScreen(props: AliasClaimProps) {
           <div className="mnid-panel" role="alert">
             <p className="mnid-panel-head">
               <CircleSlash size={15} aria-hidden="true" />
-              The claim did not complete
+              {/* PUNCTUATED, because the heading and the sentence beneath it
+                  are read as one line by anybody scanning the card and by
+                  every screen reader that runs them together: "The claim did
+                  not complete alice.night was not registered" was the whole
+                  of the first thing a refused claim said. */}
+              The claim did not complete.
             </p>
+            {/* THE ONE SENTENCE. It names what happened and that the name is
+                kept, and it is composed once — `aliasRefusalMessage` in
+                `identity/sponsoredAlias.ts`, or the host's own sentence for a
+                failure the service never saw. Nothing is added to it here:
+                this card carried the "kept" fact three times over until
+                2026/09/03, the last copy of it a note describing the two
+                buttons immediately below the two buttons. */}
             <p>{error}</p>
             {/* THE CARD THAT HAD NOTHING ON IT.
                 A passkey failure here used to end at the line above, on a
@@ -586,13 +772,51 @@ export default function AliasClaimScreen(props: AliasClaimProps) {
                 browser's back button and closing the tab. Both controls go in
                 THIS card rather than in a toast: the card is where the user is
                 already reading, and a toast that carried the only way out of a
-                dead end would take it away again after five seconds. */}
-            {errorIsPasskeyWayOut && onSignOut ? (
+                dead end would take it away again after five seconds.
+
+                Since 2026/09/02 EVERY failure gets a pair, not just the passkey
+                one. A name the service refused after the account was already
+                live landed on this card with nothing but the sentence — and the
+                "Register now" that could have finished the job was on Home,
+                which the card never mentioned. "Continue to Home" below is
+                that way there, and its label is the whole of the promise. */}
+            {/* The passkey pair keeps the SURFACE's own busy flag rather than
+                `failure.canRetry`: one flag governs both its controls, and a
+                sign-out disabled because the name field happened to be empty
+                would be this screen's dead end all over again. Its retry is
+                guarded where it lands, in `handleSubmit`. */}
+            {failure.way === 'passkey' && onSignOut ? (
               <PasskeyWayOutActions
                 onRetry={handleSubmit}
                 onSignOut={onSignOut}
                 busy={busy}
               />
+            ) : null}
+            {/* The same two-pill row as the passkey pair, because they are the
+                same object in the same card: a claim that did not complete, and
+                the two things a person can do about it. The retry runs the claim
+                that was pressed — one passkey assertion, exactly as the first
+                attempt did — and nothing here is promptless. */}
+            {failure.way === 'queued' ? (
+              <div className="mnwo-actions">
+                <button
+                  type="button"
+                  className="mnwo-action mnwo-action-primary"
+                  onClick={handleSubmit}
+                  disabled={!failure.canRetry}
+                >
+                  <RotateCcw size={15} strokeWidth={2} aria-hidden="true" />
+                  Try again
+                </button>
+                <button
+                  type="button"
+                  className="mnwo-action"
+                  onClick={onContinueHome}
+                >
+                  <Home size={15} strokeWidth={2} aria-hidden="true" />
+                  Continue to Home
+                </button>
+              </div>
             ) : null}
           </div>
         ) : null}
@@ -619,6 +843,23 @@ export default function AliasClaimScreen(props: AliasClaimProps) {
               remains for the HOST's escape hatches (network unsupported), not
               as a user choice on this screen. */}
         </div>
+
+        {/* NOT A SKIP EITHER, and it is worth being clear about the difference:
+            a skip leaves this screen with nothing set up, which is the state
+            onboarding may not end in. This leaves it with an account that
+            already exists, proved on chain, and it is the only route back to a
+            Passport on a platform whose passkeys carry no largeBlob — which is
+            every Android passkey. See `AliasClaimProps.onFindExisting`. */}
+        {onFindExisting ? (
+          <button
+            type="button"
+            className="mnid-alt"
+            onClick={onFindExisting}
+            disabled={busy}
+          >
+            I already have a name — find my Passport
+          </button>
+        ) : null}
 
         <p className="mnid-foot">
           <Check size={13} aria-hidden="true" />

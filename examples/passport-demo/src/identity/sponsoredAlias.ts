@@ -42,19 +42,31 @@
  */
 
 import type { AliasClaimResult, MidnamesNetwork } from './midnames.js';
+/* The leaf, not `./midnames.js`: this module is pure transport and must stay
+   importable without the ledger WASM behind it. */
+import { aliasDomain } from './midnamesText.js';
 
 /** How long one probe answer is trusted before the funder is asked again. */
 const PROBE_TTL_MS = 30_000;
 /** Ceiling on the probe round-trip — a slow funder must not stall a claim. */
 const PROBE_TIMEOUT_MS = 4_000;
 /**
- * Ceiling on the registration round-trip. The service submits two
- * transactions and waits for the registry to confirm before answering: 63 s
- * measured on preview with a remote proof server (2026/08/20), 113 s on
- * stagenet proving in-process on a laptop (2026/08/24), and slower again on a
- * small server. Matches the fee sponsor's own patience — abandoning a
- * registration the service is still proving costs more than waiting, because
- * the name then lands with nobody listening.
+ * Ceiling on the registration round-trip. The service submits two transactions
+ * and waits for the registry to confirm before answering.
+ *
+ * What that costs, measured rather than remembered: 63 s on preview with a
+ * remote proof server (2026/08/20); the stagenet balancer proves on a LOCAL
+ * proof server at 127.0.0.1:6300 — its own `/status` says so — and took ~9 s
+ * from receiving a request to landing a fully proved circuit call in a block,
+ * with the rest of the wait being blocks and indexer lag rather than proving.
+ * An earlier version of this comment quoted 113 s for "stagenet proving
+ * in-process on a laptop", which stopped describing this deployment when the
+ * proof server arrived.
+ *
+ * The ceiling stays where it is regardless, and generously: it matches the fee
+ * sponsor's own patience, and abandoning a registration the service is still
+ * proving costs more than waiting, because the name then lands with nobody
+ * listening.
  */
 const REGISTER_TIMEOUT_MS = 600_000;
 
@@ -75,10 +87,180 @@ export class AliasSponsorRefusal extends Error {
      * from the wallet, and there is no longer a wallet-funded claim to permit.
      */
     readonly selfPayWorthTrying: boolean,
+    /**
+     * What the SERVICE said, for a log — never for a screen.
+     *
+     * The split is `lib/sponsor.ts`'s, and it is here for the same reason it
+     * is there. Until 2026/09/02 this client put the service's own sentence in
+     * front of the user, and what a person saw when the sponsor ran out of
+     * free DUST mid-claim was "The .night registry rejected the registration
+     * of alice.night" — a machinery word, and a wrong diagnosis: the registry
+     * had rejected nothing, the sponsor could not pay for the transaction that
+     * would have asked it. {@link message} is now Passport's own sentence and
+     * this carries the rest, so an operator loses nothing.
+     *
+     * Deliberately NOT called `detail`: the claim path in `App.tsx` appends a
+     * caught error's `detail` to what it shows and stores, so a field by that
+     * name would put these words back on the screen by another route.
+     */
+    readonly serviceMessage: string = message,
   ) {
     super(message);
     this.name = 'AliasSponsorRefusal';
   }
+}
+
+/**
+ * Refusal codes whose whole meaning to a READER is "not right now".
+ *
+ * All of them are the service saying it cannot pay for THIS transaction at
+ * this moment — no NIGHT free, no DUST free, a spend of its own still
+ * settling, or a wallet still walking the chain — and every one of them clears
+ * on its own without anybody doing anything. None of them is a fact about the
+ * name, and none of them is anything a person could act on.
+ *
+ * `rate-limited` LEFT THIS SET on 2026/09/04, and it is the reason the set has
+ * a header — see {@link SPONSOR_RATE_LIMITED_SENTENCE}. It is the one refusal
+ * here that clears because OTHER PEOPLE stop asking rather than because this
+ * service finishes something, and the difference is exactly what the reader
+ * needs to know.
+ */
+const SPONSOR_BUSY_CODES = new Set([
+  'funder-empty',
+  'funder-no-dust',
+  /* The two the service answers while a spend of its own is in the way, and
+     the only two the busy sentence is now written for. */
+  'PENDING_TRANSACTION',
+  'WALLET_SYNCING',
+  /* The balancer spells its own readiness refusal in lower case; the funder
+     and the fee path use the upper-case one. The same fact either way. */
+  'wallet-syncing',
+]);
+
+/**
+ * The one sentence for a sponsor that cannot pay right now.
+ *
+ * It says the true thing and the useful thing in that order: it is the
+ * sponsor, not the name and not the reader, and the name is not lost. The
+ * Register-now control on the queued name is the manual half of "on its own",
+ * and it is already there — see `App.tsx#registerQueuedAlias`.
+ */
+const SPONSOR_BUSY_SENTENCE =
+  'The sponsor is busy — your name is queued and will register on its own.';
+
+/**
+ * The sentence for a registration refused because too many names have been
+ * registered lately — the sponsor's hourly ceiling, or its per-caller one.
+ *
+ * WHAT WAS WRONG WITH THE BUSY SENTENCE HERE (sponsor soak, 2026/09/04)
+ * ---------------------------------------------------------------------
+ * Two signups were refused at the ceiling and both readers were told "The
+ * sponsor is busy — your name is queued and will register on its own." Every
+ * clause of that was false at that moment. The sponsor was not busy: it was
+ * answering `/status` in 60 ms, it had 4 spend lanes open, and it refused in
+ * 25 ms without attempting anything. The name was not queued anywhere but in
+ * the reader's own browser. And nothing registers it on its own — the only
+ * thing that ever will is somebody pressing Register now.
+ *
+ * A reader told that waits for something that is never going to happen. So
+ * this sentence names the real cause, keeps the one promise that is true, and
+ * says what to do and roughly when. It is two sentences rather than the one
+ * every other branch keeps, and deliberately: the fact, and the action. See
+ * `sponsoredAlias.test.ts` for that carve-out held explicitly.
+ *
+ * "Passport", not "the sponsor": at the ceiling the thing that ran out is the
+ * service's budget for everybody, which from the reader's side is Passport
+ * itself being popular. There is no machinery in it and no party to blame.
+ */
+const SPONSOR_RATE_LIMITED_SENTENCE =
+  'Passport is registering a lot of names right now. Yours is kept for you — try again in a few minutes.';
+
+/**
+ * Refusals that prove a cached "the sponsor is available" answer stale.
+ *
+ * Every busy code, and `rate-limited` as well — which is why this is its own
+ * set rather than {@link SPONSOR_BUSY_CODES}, whose membership is a question
+ * about a SENTENCE. A refusal at the ceiling dates the probe harder than any
+ * of them: the sponsor is up and will go on refusing for the rest of the hour,
+ * so a cached "available" would send the next claim straight back into it.
+ */
+const PROBE_DATING_CODES = new Set([...SPONSOR_BUSY_CODES, 'rate-limited']);
+
+/**
+ * The sentence a PERSON reads when the service will not register their name.
+ *
+ * WHY THE SERVICE'S OWN WORDS ARE NOT IT
+ * --------------------------------------
+ * They were, until 2026/09/02, and the first live claim of a demo pair failed
+ * five times out of five with "The .night registry rejected the registration of
+ * alice.night" on screen. Both halves of that are wrong for a reader: the
+ * registry is machinery a Passport holder is never shown, and it had rejected
+ * nothing — the sponsor held one fee-capable DUST coin, the user's own account
+ * deploy had it booked for a hundred seconds, and the registration was refused
+ * before it was ever asked for. A refusal that names the wrong party sends
+ * somebody to change their name when what they had to do was press the button
+ * again.
+ *
+ * So the code is mapped, and the mapping is the decision:
+ *
+ *   - Too many names, too recently. `rate-limited` — the hourly ceiling for
+ *     everybody, or the per-caller bucket. It clears, but not because this
+ *     service finishes anything, and nothing registers the name in the
+ *     meantime, so it gets {@link SPONSOR_RATE_LIMITED_SENTENCE} and is read
+ *     BEFORE the busy branches below, whose `retryAfterMs` condition would
+ *     otherwise swallow the per-caller half of it.
+ *   - The sponsor could not pay. `DustUnavailable` inside the service's own
+ *     diagnostic, a `retryAfterMs` beside the refusal, or one of
+ *     {@link SPONSOR_BUSY_CODES}. This is the measured fault, it clears on its
+ *     own, and it gets {@link SPONSOR_BUSY_SENTENCE}.
+ *   - The name itself was refused. `name-taken` is the only one of these the
+ *     service can report, and it is the one refusal that is genuinely ABOUT
+ *     what the reader typed — so it says so plainly, names no machinery, and
+ *     does not promise a queue that would never drain.
+ *   - Anything else. The registration did not happen and the name is kept.
+ *     Said in that order, without a party named, because at this point the
+ *     honest answer is that we do not know which one is at fault.
+ *
+ * ONE SENTENCE EACH, AND ONE ONLY (2026/09/03)
+ * --------------------------------------------
+ * This sentence is the WHOLE of the body of the failure card on the claim
+ * screen — see `screens/AliasClaim.tsx`, whose panel is now a punctuated
+ * heading, this sentence, and the two controls. It was three sentences on
+ * screen at once: the second half of the refusal here ("can be registered
+ * again"), the host's own addition to it in `App.tsx`, and a note beneath the
+ * pair in `lib/claimFailure.ts` — each of them saying the name was kept, none
+ * of them saying anything the others did not. So every branch below returns
+ * exactly one sentence, and everything a person can DO about it lives on the
+ * buttons rather than in a third paragraph telling them the buttons are there.
+ *
+ * `detail` and `retryAfterMs` are read to CLASSIFY and are never rendered:
+ * `detail` is where the service puts the ledger's own words, which is exactly
+ * the vocabulary this function exists to keep off the screen.
+ */
+export function aliasRefusalMessage(refusal: {
+  code: string;
+  domain: string;
+  detail: string | null;
+  retryAfterMs: number | null;
+}): string {
+  if (refusal.code === 'name-taken') {
+    return `${refusal.domain} has already been taken — choose another name.`;
+  }
+  /* BEFORE the busy branches, and it has to be: the per-caller half of this
+     refusal carries a `retryAfterMs`, which the next condition reads as the
+     sponsor asking for time. It is not — it is the sponsor asking this caller
+     for time, which is a different sentence. */
+  if (refusal.code === 'rate-limited') {
+    return SPONSOR_RATE_LIMITED_SENTENCE;
+  }
+  if (
+    SPONSOR_BUSY_CODES.has(refusal.code) ||
+    refusal.retryAfterMs !== null ||
+    (refusal.detail !== null && refusal.detail.includes('DustUnavailable'))
+  ) {
+    return SPONSOR_BUSY_SENTENCE;
+  }
+  return `${refusal.domain} was not registered, and your name is kept for you.`;
 }
 
 /** Codes after which the name must NOT be re-attempted — see `selfPayWorthTrying`. */
@@ -151,6 +333,42 @@ export interface SponsorAliasRequest {
      value to the wallet, which the account model forbids. The service
      zero-fills it, and the account remains the only target. */
   network: MidnamesNetwork;
+  /**
+   * True when {@link contractAddress} names an account contract that has been
+   * SUBMITTED but may not yet be served by the indexer.
+   *
+   * The service's fourth gate reads the target's state and refuses
+   * `target-missing` when it finds none — both a correctness gate (a name bound
+   * to nothing is worse than no name) and its anti-spam gate (a target costs a
+   * real transaction to mint). This flag does not waive that gate; it moves
+   * WHEN it is answered, from a precondition on the request to a precondition
+   * on the registry call, which the service makes after it has deployed the
+   * resolver leaf. A caller that sets it is saying "the deploy is in flight,
+   * wait for it rather than turning me away", and a service that has never
+   * heard of the flag simply ignores it and refuses exactly as it does today —
+   * which is what {@link SponsorAliasOptions.awaitTarget} is for.
+   */
+  targetPending?: boolean;
+}
+
+export interface SponsorAliasOptions {
+  /**
+   * How to wait for the account contract, used ONLY after the service has
+   * refused with `target-missing`.
+   *
+   * This is the compatibility half of {@link SponsorAliasRequest.targetPending}
+   * and it is not optional politeness: a service that predates the flag refuses
+   * a submitted-but-unindexed target, and without this the claim would fail on
+   * a contract that is perfectly real and merely fourteen seconds early. So the
+   * refusal is taken as "not yet", this is awaited, and the request is made
+   * once more — after which a second `target-missing` is a genuine refusal and
+   * is reported as one.
+   *
+   * It may REJECT, and a rejection is not swallowed: the account deploy failing
+   * is precisely why the target will never appear, and the caller needs that
+   * error rather than a sentence about the name service.
+   */
+  awaitTarget?: () => Promise<unknown>;
 }
 
 interface FunderSuccessBody {
@@ -180,53 +398,104 @@ const bytesToHex = (bytes: Uint8Array): string =>
  * Refusals throw {@link AliasSponsorRefusal}; the caller inspects
  * `selfPayWorthTrying` to decide whether the name is worth queueing for another
  * attempt or whether it must stop with the service's own sentence.
+ *
+ * Exactly ONE refusal is retried here rather than reported: `target-missing`,
+ * and only when the caller both declared the target pending and said how to
+ * wait for it. See {@link SponsorAliasOptions.awaitTarget}.
  */
 export async function sponsorAliasRegistration(
   funderUrl: string,
   request: SponsorAliasRequest,
+  options: SponsorAliasOptions = {},
 ): Promise<AliasClaimResult> {
-  let response: Response;
-  try {
-    response = await fetchWithTimeout(`${funderUrl}/register-alias`, REGISTER_TIMEOUT_MS, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        alias: request.alias,
-        ownerKey: bytesToHex(request.ownerKey),
-        contractAddress: request.contractAddress,
-        network: request.network,
-      }),
-    });
-  } catch (cause) {
-    invalidateSponsorshipProbe(funderUrl);
-    throw new AliasSponsorRefusal(
-      'unreachable',
-      `The sponsorship service could not be reached: ${
-        cause instanceof Error ? cause.message : String(cause)
-      }`,
-      true,
-    );
-  }
+  const post = async (): Promise<{ response: Response; body: unknown }> => {
+    let response: Response;
+    try {
+      response = await fetchWithTimeout(`${funderUrl}/register-alias`, REGISTER_TIMEOUT_MS, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          alias: request.alias,
+          ownerKey: bytesToHex(request.ownerKey),
+          contractAddress: request.contractAddress,
+          network: request.network,
+          /* Omitted rather than sent as `false`, so the request a settled
+             target makes is byte-identical to the one this client has always
+             sent. */
+          ...(request.targetPending ? { targetPending: true } : {}),
+        }),
+      });
+    } catch (cause) {
+      invalidateSponsorshipProbe(funderUrl);
+      throw new AliasSponsorRefusal(
+        'unreachable',
+        `The sponsorship service could not be reached: ${
+          cause instanceof Error ? cause.message : String(cause)
+        }`,
+        true,
+      );
+    }
+    let parsed: unknown = null;
+    try {
+      parsed = await response.json();
+    } catch {
+      // Handled below: a non-JSON body from the funder is a refusal, not a crash.
+    }
+    return { response, body: parsed };
+  };
 
-  let body: unknown = null;
-  try {
-    body = await response.json();
-  } catch {
-    // Handled below: a non-JSON body from the funder is a refusal, not a crash.
+  let { response, body } = await post();
+
+  /* THE ONE RETRY, and the only refusal that earns one. `target-missing` from
+     a service that was told the target is pending means that service does not
+     know the flag: it read the indexer once, before the account deploy had been
+     served, and turned the claim away for a contract that exists. Waiting for
+     the deploy and asking again costs one HTTP round trip and restores exactly
+     the behaviour this client had before it started asking early. Every other
+     refusal is final on the first answer, and a SECOND `target-missing` is
+     reported as the refusal it is. */
+  if (
+    !response.ok &&
+    options.awaitTarget &&
+    request.targetPending &&
+    (body as { error?: unknown } | null)?.error === 'target-missing'
+  ) {
+    await options.awaitTarget();
+    ({ response, body } = await post());
   }
 
   if (!response.ok) {
-    const refusal = (body ?? {}) as { error?: unknown; message?: unknown };
+    const refusal = (body ?? {}) as {
+      error?: unknown;
+      message?: unknown;
+      /* The service's own diagnostic — the ledger's words, routinely. Read to
+         classify the refusal and never rendered; see `aliasRefusalMessage`. */
+      detail?: unknown;
+      retryAfterMs?: unknown;
+    };
     const code = typeof refusal.error === 'string' ? refusal.error : 'unreachable';
-    const message =
+    const serviceMessage =
       typeof refusal.message === 'string'
         ? refusal.message
         : `The sponsorship service refused with status ${response.status}.`;
-    if (code === 'funder-empty' || code === 'funder-no-dust' || code === 'rate-limited') {
+    if (PROBE_DATING_CODES.has(code)) {
       // The probe's cached "available" is now demonstrably stale.
       invalidateSponsorshipProbe(funderUrl);
     }
-    throw new AliasSponsorRefusal(code, message, !NO_FALLBACK_CODES.has(code));
+    throw new AliasSponsorRefusal(
+      code,
+      aliasRefusalMessage({
+        code,
+        domain: aliasDomain(request.alias),
+        detail: typeof refusal.detail === 'string' ? refusal.detail : null,
+        retryAfterMs:
+          typeof refusal.retryAfterMs === 'number' && Number.isFinite(refusal.retryAfterMs)
+            ? refusal.retryAfterMs
+            : null,
+      }),
+      !NO_FALLBACK_CODES.has(code),
+      serviceMessage,
+    );
   }
 
   const success = body as FunderSuccessBody;

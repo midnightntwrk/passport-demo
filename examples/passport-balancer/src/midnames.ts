@@ -28,7 +28,10 @@
  *   1. it deploys the resolver leaf with `DOMAIN_TARGET = [contractAddress,
  *      AddressType.ContractAddr]` (the user's account-custody contract) and
  *      `DOMAIN_OWNER` = the owner key the caller supplied; then
- *   2. it calls `register_domain_for` on the network's TLD with that same owner
+ *   2. where the caller declared the target still pending, it waits for that
+ *      contract to appear on chain — see `awaitTarget`, and the gate in
+ *      `./server.ts` that decides when that is allowed; then
+ *   3. it calls `register_domain_for` on the network's TLD with that same owner
  *      key, paying COST from the balancer's own NIGHT and the fee from the
  *      balancer's own DUST.
  *
@@ -57,6 +60,7 @@
 import { Buffer } from 'node:buffer';
 import { createHash } from 'node:crypto';
 
+import { withNodeRejectionRetry } from './account.js';
 import type { BalancerConfig } from './config.js';
 import {
   CONFIRM_INTERVAL_MS,
@@ -68,13 +72,25 @@ import {
   managedBuildPath,
   nativeColourBytes,
   publicDataProviderFor,
+  queryIndexerHeight,
   rawContractAddress,
   resolveTransactionHash,
   transactionIdentifier,
   wait,
   type ContractProvingMode,
 } from './contractRuntime.js';
-import type { BalancerWallet } from './wallet.js';
+import { SpendPriority, progress } from './reservation.js';
+import {
+  FEE_CAPABLE_SPECKS,
+  deployTransactionReference,
+  type PooledResolver,
+} from './resolverPool.js';
+import {
+  isDustShortfall,
+  isEffectivelySynced,
+  withDustWait,
+  type BalancerWallet,
+} from './wallet.js';
 
 /* -------------------------------------------------------------------------- */
 /* Constants                                                                  */
@@ -104,7 +120,28 @@ export const RESERVED_ALIASES: readonly string[] = [
 ];
 
 /** Attempts, {@link CONFIRM_INTERVAL_MS} apart, to watch the binding appear. */
-const CONFIRM_ATTEMPTS = 45;
+const CONFIRM_ATTEMPTS = 180;
+
+/**
+ * How long a pending account contract gets to appear before the registration is
+ * refused, as attempts times an interval: sixty seconds.
+ *
+ * Sized against what it is waiting for rather than picked round. The client
+ * submits the account deploy and asks for the name within a second; the deploy
+ * needs one block (6.000 s, measured over 15 consecutive intervals on
+ * 2026/08/31) and then the indexer's own lag (13.2–14.1 s over 16 observations
+ * the same day) before this read can answer — around twenty seconds, and the
+ * resolver deploy above has already spent more than that. Sixty seconds is
+ * therefore three times the expected wait, which is enough for a bad minute on
+ * the indexer and short enough that a target which is never coming does not
+ * hold the wallet's queue for long.
+ *
+ * Exceeding it refuses the registration with `target-missing`. The name stays
+ * free, the user's client keeps it queued, and the only thing spent is the
+ * resolver leaf — which the gate in `./server.ts` accounts for.
+ */
+const TARGET_ATTEMPTS = 120;
+const TARGET_INTERVAL_MS = 500;
 
 /* -------------------------------------------------------------------------- */
 /* Pure helpers — copies of the funder's, and they must stay copies           */
@@ -275,8 +312,21 @@ export type AliasSponsorErrorCode =
   | 'deploy-failed'
   /** The TLD refused the registration; the leaf is deployed but unnamed. */
   | 'register-rejected'
+  /**
+   * The name was registered against a pooled leaf, but pointing that leaf at
+   * the account contract failed. The name exists and is the user's; it resolves
+   * to nothing until the target is set, which is why this is a failure and not
+   * a partial success.
+   */
+  | 'bind-failed'
   /** Both transactions landed, but the registry never showed the binding. */
-  | 'confirmation-failed';
+  | 'confirmation-failed'
+  /**
+   * The account contract the name was to resolve to never appeared on chain
+   * inside the window a pending target is given. The leaf was deployed and is
+   * unused; nothing was registered and the name is still free.
+   */
+  | 'target-missing';
 
 export class AliasSponsorError extends Error {
   constructor(
@@ -311,6 +361,57 @@ export interface AliasRegistrationRequest {
    * its own, or a payment meant for the user would land on the balancer.
    */
   ownerAddressBytes?: Uint8Array;
+  /**
+   * Wait for {@link contractAddress} to appear on chain before calling
+   * `register_domain_for`, rather than requiring it to be there already.
+   *
+   * Set by the server when its fourth gate found no state at the address AND
+   * the client declared the deploy pending. It does not weaken the rule that a
+   * name is never bound to a contract that does not exist — it moves where that
+   * rule is enforced, from before the request to after the resolver leaf, which
+   * is several proofs and at least one block later. See the gate itself in
+   * `./server.ts` for the anti-spam reasoning and for what a target that never
+   * appears costs.
+   */
+  awaitTarget?: boolean;
+  /**
+   * A leaf THIS registration already deployed on an earlier attempt.
+   *
+   * Not the same thing as {@link pooledResolver}, and the difference is
+   * ownership. A pooled leaf is unbound and owned by this SERVICE, so binding
+   * it takes `update_domain_target` and hands it over with `change_owner`. A
+   * leaf deployed for this request is already built with this name's key, this
+   * account as its target, and the USER as its owner — this service could not
+   * call `update_domain_target` on it if it wanted to. All that is left for it
+   * is `register_domain_for`.
+   *
+   * It exists because a registration that ran out of DUST between its two legs
+   * used to throw the leaf away: the wait outside would rebuild from the top,
+   * deploy a SECOND leaf, and so need two fee-capable coins where it needed
+   * one. Measured on the live run at 20:39 on 2026/09/02 — two waits, 55 s then
+   * 132 s, and a wasted leaf between them. See
+   * {@link AliasRegistrationRequest.onResolverDeployed}, which is how a caller
+   * gets hold of the address to send back.
+   */
+  deployedResolver?: { address: string; deployTx: string };
+  /**
+   * Called the moment a fresh leaf is on chain, before anything that could
+   * fail after it. A caller that retries passes what it is given here back as
+   * {@link deployedResolver}.
+   */
+  onResolverDeployed?: (leaf: { address: string; deployTx: string }) => void;
+  /**
+   * A leaf the sponsor deployed earlier and is holding for whoever asks next.
+   *
+   * When present the registration SKIPS its own deploy and binds this one
+   * instead: `update_domain_target` on the leaf and `register_domain_for` on
+   * the TLD, which do not depend on each other and therefore run together, and
+   * `change_owner` afterwards to hand the leaf to the user. When absent the
+   * path is exactly the one this service has always taken — deploy, then
+   * register — so an empty shelf costs a user nothing but the wait they would
+   * have had anyway. See `./resolverPool.ts`.
+   */
+  pooledResolver?: PooledResolver;
 }
 
 export interface AliasRegistration {
@@ -329,11 +430,22 @@ export interface AliasRegistration {
   ownerKey: string;
   costAtomic: bigint;
   registeredAt: string;
+  /** Whether the leaf came off the shelf or was deployed for this request. */
+  fromPool: boolean;
 }
 
 export interface MidnamesSponsor {
   /** The TLD this service registers against. */
   readonly tldAddress: string;
+  /**
+   * The sponsor's OWN Midnames owner key — 32 bytes derived from the same
+   * caller secret `register_domain_for` is paid under.
+   *
+   * A pooled leaf is deployed owned by this key, because a leaf nobody owns
+   * cannot have its target set, and the user whose name it will carry is not
+   * known yet. `change_owner` hands it over once the name is confirmed.
+   */
+  readonly poolOwnerKey: Uint8Array;
   /** Where the compiled build was found, for the start-up log. */
   readonly assetsPath: string;
   /** How contract circuits are proved — `'wasm'` needs no proof server. */
@@ -345,13 +457,91 @@ export interface MidnamesSponsor {
   /** What the name resolves to right now, or null when it is not registered. */
   resolve(label: string): Promise<{ resolverAddress: string; target: ResolvedDomainTarget } | null>;
   /**
-   * Deploys the leaf, registers the name, and reads the binding back. Resolves
-   * only when the registry really reports the requested contract address.
+   * Deploys the leaf, waits for the target where the caller asked it to, calls
+   * `register_domain_for`, and reads the binding back. Resolves only when the
+   * registry really reports the requested contract address.
    *
    * MUST be called inside `wallet.exclusive(...)`: it spends the balancer's
    * coins twice and would otherwise contend with a fee-sponsorship request.
    */
   register(request: AliasRegistrationRequest): Promise<AliasRegistration>;
+  /**
+   * Deploys ONE unbound resolver leaf for the shelf: no domain, a zero target,
+   * and {@link poolOwnerKey} as its owner.
+   *
+   * MUST be called inside `wallet.exclusive(...)`, and only when the filler's
+   * gate in `./resolverPool.ts` says every one of its preconditions holds —
+   * this spends a fee-capable DUST coin and it is never a user's turn.
+   */
+  deployPoolLeaf(): Promise<{ address: string; deployTx: string; deployBlock: number | null }>;
+}
+
+/**
+ * What became of a pooled registration's two legs.
+ *
+ * A result rather than an exception for the two legs' own failures, so the
+ * caller can word each one for the person reading it. A DUST shortfall on the
+ * REGISTER leg is the exception to that and is thrown: nothing was registered,
+ * the caller's `withDustWait` is what has the budget to wait for a coin, and
+ * rebuilding the whole registration is exactly the right thing to do.
+ */
+export type PooledLegOutcome<T> =
+  | { kind: 'registered'; registerTx: T }
+  | { kind: 'register-rejected'; cause: unknown }
+  | { kind: 'bind-rejected'; registerTx: T; cause: unknown };
+
+/**
+ * Runs a pooled registration's register and bind legs — TOGETHER OR IN TURN.
+ *
+ * Together needs a fee-capable DUST coin for each of them, and nothing else:
+ * neither leg reads the other's result, because the registry stores the leaf's
+ * ADDRESS and never looks inside it while the leaf's target is its own state.
+ *
+ * With one coin free they must not both start. Two jobs against one coin is one
+ * job plus one that spends fifteen seconds balancing before it fails and then
+ * waits out the coin the first is spending — 22 s and 45 s of a 157-second
+ * registration, measured on the deployed service on 2026/09/02 — and it is a
+ * race this path can simply decline to enter. The register leg goes first,
+ * because a bind against a name nobody registered is wasted either way.
+ *
+ * The bind's own failure is NEVER rethrown, whatever it was. By then the name
+ * is registered, and handing a DUST shortfall back to a wait that rebuilds the
+ * whole registration would send the caller to register a name it already owns.
+ * `bindLeg` is expected to carry its own bounded wait for a coin; this is the
+ * guard that holds even if it stops doing so.
+ */
+export async function runPooledLegs<T>(
+  lanes: number,
+  registerLeg: () => Promise<T>,
+  bindLeg: () => Promise<unknown>,
+): Promise<PooledLegOutcome<T>> {
+  if (lanes >= 2) {
+    /* `allSettled` rather than `all`: `all` rejects on the first failure and
+       leaves the other leg's rejection unhandled, which on Node is a warning
+       today and a killed process on a future default. */
+    const [bind, registration] = await Promise.allSettled([bindLeg(), registerLeg()]);
+    if (registration.status === 'rejected') {
+      if (isDustShortfall(registration.reason)) throw registration.reason;
+      return { kind: 'register-rejected', cause: registration.reason };
+    }
+    if (bind.status === 'rejected') {
+      return { kind: 'bind-rejected', registerTx: registration.value, cause: bind.reason };
+    }
+    return { kind: 'registered', registerTx: registration.value };
+  }
+  let registerTx: T;
+  try {
+    registerTx = await registerLeg();
+  } catch (cause) {
+    if (isDustShortfall(cause)) throw cause;
+    return { kind: 'register-rejected', cause };
+  }
+  try {
+    await bindLeg();
+  } catch (cause) {
+    return { kind: 'bind-rejected', registerTx, cause };
+  }
+  return { kind: 'registered', registerTx };
 }
 
 /**
@@ -440,6 +630,110 @@ export async function createMidnamesSponsor(
     CompiledContract.withCompiledFileAssets(managedPath),
   );
 
+  /**
+   * The sponsor's own owner key, and the identity a pooled leaf is deployed
+   * under. `derive_public_key` inside the circuits is this same hash, which is
+   * why `update_domain_target` and `change_owner` on a pooled leaf accept the
+   * `secretKey` witness this module already carries.
+   */
+  const sponsorOwnerKey = deriveMidnamesOwnerKey(callerSecret);
+
+  const zeroBytes = (): Uint8Array => new Uint8Array(32);
+
+  /**
+   * `DOMAIN_TARGET` as `update_domain_target` takes it: the full nested
+   * `Either`, contract branch selected. The two unselected branches carry 32
+   * zeros — the same convention the constructor's `AddressType` tag produces,
+   * and the one {@link decodeDomainTarget} reads back.
+   */
+  const contractTargetEither = (
+    bytes: Uint8Array,
+  ): {
+    is_left: boolean;
+    left: { bytes: Uint8Array };
+    right: { is_left: boolean; left: { bytes: Uint8Array }; right: { bytes: Uint8Array } };
+  } => ({
+    is_left: true,
+    left: { bytes },
+    right: { is_left: true, left: { bytes: zeroBytes() }, right: { bytes: zeroBytes() } },
+  });
+
+  /**
+   * The thirteen constructor arguments, in `deploy.mjs`'s order — the order the
+   * leaf behind `passport-771a3f.night` was deployed with. `cost_*` are zero and
+   * `buy_enabled` is false because a LEAF sells nothing; only the TLD does.
+   *
+   * Shared by both paths deliberately. A pooled leaf and a per-request leaf
+   * differ in exactly three arguments — target, domain, and owner — and writing
+   * the list twice is how those three quietly become four.
+   */
+  const leafArgs = (fields: {
+    targetBytes: Uint8Array;
+    domainKey?: Uint8Array;
+    ownerKey: Uint8Array;
+    ownerAddressBytes?: Uint8Array;
+  }): unknown[] => [
+    maybeBytes(domainToKey(MIDNAMES_TLD).key),
+    { bytes: contractAddressBytes(tldAddress) },
+    [fields.targetBytes, midnames.AddressType.ContractAddr],
+    maybeBytes(fields.domainKey),
+    nativeColourBytes(),
+    0n,
+    0n,
+    0n,
+    maybeString(),
+    false,
+    fields.ownerKey,
+    { bytes: fields.ownerAddressBytes ?? zeroBytes() },
+    emptyKvs(),
+  ];
+
+  /**
+   * Has this wallet caught up with the chain that refused a transaction?
+   * `isSynced` and `dust.complete` together, for the reason
+   * `withNodeRejectionRetry` sets out: the rejection is about the DUST the
+   * balancing selected.
+   */
+  /**
+   * Caught up ENOUGH to rebuild a transaction the node refused.
+   *
+   * Three terms, and the third was measured on 2026/09/03. The first two are
+   * the original rule: the refusal is about the DUST the balancing selected, so
+   * the wallet must have walked the block that refused it and finished its dust
+   * scan. The third is that this service must have NOTHING OF ITS OWN still in
+   * flight.
+   *
+   * At 02:14:19 UTC an activation grant was refused with `Custom error: 231`
+   * and rebuilt twice more, at 02:14:46 and 02:14:56, and refused both times —
+   * because a registration of this sponsor's was submitted and unlanded
+   * throughout, and a rebuild that spends this wallet's DUST while another of
+   * its transactions is pending selects against a view the node has already
+   * moved past. Three attempts of proving, balancing, and a lane went to
+   * transactions that could not land, on a wallet with one fee-capable coin,
+   * and the two name claims behind them reached Home at 146.5 s against a bar
+   * of 120.
+   *
+   * Waiting for the pending one costs a block or two. Not waiting cost a
+   * minute of somebody's onboarding.
+   */
+  const caughtUp = async (): Promise<boolean> => {
+    const walked = await wallet.progress();
+    /* Effectively synced, for the reason `caughtUp` in `./account.ts` gives. */
+    if (!isEffectivelySynced(walked)) return false;
+    /* NOT "and nothing of ours pending". That term dated from the morning of
+       2026/09/03, when a rebuild against a stale coin view was the failure;
+       the coin reservation now keeps in-flight coins out of every selection,
+       and under three sign-ups at once something of this wallet's is always
+       pending — at 11:28 three grants each made one refused submission and
+       then waited the whole 120 s budget out on this line, never rebuilding. */
+    return true;
+  };
+  /** The rebuild's wait on the indexer, for every retry in this module. */
+  const heightGate = {
+    indexerHeight: () => queryIndexerHeight(config.indexerHttpUrl),
+    chainHeight: () => wallet.nodeHeight(),
+  };
+
   const isAvailable = async (label: string): Promise<boolean> => {
     const registry = await readLedger(tldAddress);
     if (!registry) {
@@ -479,6 +773,44 @@ export async function createMidnamesSponsor(
 
     resolve: resolveAlias,
 
+    poolOwnerKey: sponsorOwnerKey,
+
+    async deployPoolLeaf(): Promise<{ address: string; deployTx: string; deployBlock: number | null }> {
+      /* ONE private-state id for every pooled leaf, not one per leaf. The
+         private state here is a single constant — the caller secret — so a
+         fresh id per deploy would grow the store without ever holding anything
+         two leaves did not share. */
+      const privateStateId = 'passport-balancer-resolver-pool';
+      const providers = await contractProviders(config, {
+        privateStateId,
+        initialPrivateState: { secretKey: callerSecretHex },
+        zkConfigProvider: zkConfigProvider as never,
+        proofProvider,
+        walletProvider: wallet.contractWalletProvider(),
+      });
+      /* An unbound leaf: no domain, a zero target, owned by this service. All
+         three are settable or bindable later — `DOMAIN` is sealed but is never
+         read by `register_domain_for`, which keys the registry on the label it
+         is given and stores only `{ owner, resolver }`. */
+      const deployed = await withNodeRejectionRetry(
+        () =>
+          deployContract(providers as never, {
+            compiledContract,
+            privateStateId,
+            initialPrivateState: { secretKey: callerSecretHex },
+            args: leafArgs({ targetBytes: zeroBytes(), ownerKey: sponsorOwnerKey }),
+          } as never),
+        { label: 'resolver leaf for the pool', synced: caughtUp, ...heightGate },
+      );
+      const deployTxData = (deployed as { deployTxData: unknown }).deployTxData as {
+        public: { contractAddress: string };
+      };
+      const address = rawContractAddress(deployTxData.public.contractAddress);
+      const identifier = transactionIdentifier(deployTxData);
+      const resolved = await resolveTransactionHash(config.indexerHttpUrl, identifier);
+      return { address, deployTx: resolved.hash, deployBlock: resolved.block };
+    },
+
     async register(request: AliasRegistrationRequest): Promise<AliasRegistration> {
       const label = request.label;
       const contractAddress = rawContractAddress(request.contractAddress);
@@ -500,69 +832,224 @@ export async function createMidnamesSponsor(
          already refused. */
       const targetBytes = contractAddressBytes(contractAddress);
 
+      const pooled = request.pooledResolver;
+
       let resolverAddress: string;
       let resolverDeployTx: string;
-      try {
-        /* Thirteen arguments, in `deploy.mjs`'s order — the order the leaf that
-           backs `passport-771a3f.night` was deployed with. `cost_*` are zero and
-           `buy_enabled` is false because a LEAF sells nothing; only the TLD
-           does. */
-        const deployed = await deployContract(providers as never, {
-          compiledContract,
-          privateStateId,
-          initialPrivateState: { secretKey: callerSecretHex },
-          args: [
-            maybeBytes(domainToKey(MIDNAMES_TLD).key),
-            { bytes: contractAddressBytes(tldAddress) },
-            [targetBytes, midnames.AddressType.ContractAddr],
-            maybeBytes(labelKey),
-            nativeColourBytes(),
-            0n,
-            0n,
-            0n,
-            maybeString(),
-            false,
-            request.ownerKey,
-            { bytes: request.ownerAddressBytes ?? new Uint8Array(32) },
-            emptyKvs(),
-          ],
-        } as never);
-        const deployTxData = (deployed as { deployTxData: unknown }).deployTxData as {
-          public: { contractAddress: string };
-        };
-        resolverAddress = rawContractAddress(deployTxData.public.contractAddress);
-        resolverDeployTx = transactionIdentifier(deployTxData);
-      } catch (cause) {
-        throw new AliasSponsorError(
-          'deploy-failed',
-          `The resolver contract for ${aliasDomain(label)} could not be deployed, so nothing was registered.`,
-          cause instanceof Error ? cause.message : String(cause),
-        );
+      const alreadyDeployed = request.deployedResolver;
+      if (alreadyDeployed) {
+        /* This registration's OWN leaf, from an attempt that ran out of DUST
+           before it could register. It already carries this name's key, this
+           target, and the user as its owner, so the deploy below is skipped and
+           the binding legs are skipped with it — `register_domain_for` is all
+           that was ever left. */
+        resolverAddress = rawContractAddress(alreadyDeployed.address);
+        resolverDeployTx = alreadyDeployed.deployTx;
+      } else if (pooled) {
+        /* Already on chain, already paid for, already owned by this service.
+           The whole of the deploy below happened minutes or hours ago in a
+           quiet gap — see `./resolverPool.ts` for the gate that found one. */
+        resolverAddress = rawContractAddress(pooled.address);
+        resolverDeployTx = pooled.deployTx;
+      } else {
+        try {
+          /* Thirteen arguments, in `deploy.mjs`'s order — the order the leaf
+             that backs `passport-771a3f.night` was deployed with. */
+          const deployed = await withNodeRejectionRetry(
+            () => deployContract(providers as never, {
+            compiledContract,
+            privateStateId,
+            initialPrivateState: { secretKey: callerSecretHex },
+            args: leafArgs({
+              targetBytes,
+              domainKey: labelKey,
+              ownerKey: request.ownerKey,
+              ...(request.ownerAddressBytes
+                ? { ownerAddressBytes: request.ownerAddressBytes }
+                : {}),
+            }),
+            } as never),
+            /* A refused leaf deploy is the worst of the rejections to give up on:
+               it is the FIRST of the name path's two dependent proofs, and the
+               client's answer to a 502 here is to start the whole registration
+               again. Rebuilt once the wallet is current instead. */
+            { label: `resolver deploy for ${aliasDomain(label)}`, synced: caughtUp, ...heightGate },
+          );
+          const deployTxData = (deployed as { deployTxData: unknown }).deployTxData as {
+            public: { contractAddress: string };
+          };
+          resolverAddress = rawContractAddress(deployTxData.public.contractAddress);
+          resolverDeployTx = transactionIdentifier(deployTxData);
+          /* Announced before anything downstream can fail, so a caller that
+             waits for a coin and asks again does not pay for a second leaf. */
+          request.onResolverDeployed?.({ address: resolverAddress, deployTx: resolverDeployTx });
+        } catch (cause) {
+          /* A DUST shortfall is NOT the registry refusing anything, and must
+             not be dressed up as one. It travels out untouched so `./server.ts`
+             can wait for a coin and rebuild — and so the sentence a user is
+             shown stops saying the registry rejected their name when what
+             happened is that this service had no coin free. Nothing has landed
+             at this point, so the rebuild is clean. */
+          if (isDustShortfall(cause)) throw cause;
+          throw new AliasSponsorError(
+            'deploy-failed',
+            `The resolver contract for ${aliasDomain(label)} could not be deployed, so nothing was registered.`,
+            cause instanceof Error ? cause.message : String(cause),
+          );
+        }
       }
 
-      let registerTx: string;
-      try {
-        const tld = await findDeployedContract(providers as never, {
-          compiledContract,
-          contractAddress: tldAddress,
-          privateStateId,
-          initialPrivateState: { secretKey: callerSecretHex },
-        } as never);
-        const callTx = (tld as { callTx: Record<string, (...args: unknown[]) => Promise<unknown>> })
-          .callTx;
-        /* The paid call. `request.ownerKey` — the USER's key — is argument one,
-           so the registry records the user as owner while the balancer's own
-           NIGHT covers COST and the balancer's own DUST covers the fee. */
-        const registration = await callTx.register_domain_for(request.ownerKey, labelKey, len, {
-          bytes: contractAddressBytes(resolverAddress),
-        });
-        registerTx = transactionIdentifier(registration);
-      } catch (cause) {
-        throw new AliasSponsorError(
-          'register-rejected',
-          `The .night registry rejected the registration of ${aliasDomain(label)}.`,
-          cause instanceof Error ? cause.message : String(cause),
+      /* THE TARGET GATE, ASKED HERE RATHER THAN AT THE DOOR. By now the leaf
+         has been built, proved, balanced, signed, submitted, and — because
+         `deployContract` waits on the indexer — served back, which on stagenet
+         is a block plus the indexer's own 13.2–14.1 s. A client that submitted
+         its account deploy just before asking will have had all of that to
+         land. Nothing is registered until this passes; the only thing the
+         earlier gate bought that this does not is the resolver deploy above,
+         and the ceilings around this call are what cap that. */
+      if (request.awaitTarget) {
+        let appeared = false;
+        for (let attempt = 0; attempt < TARGET_ATTEMPTS && !appeared; attempt += 1) {
+          if (attempt > 0) await wait(TARGET_INTERVAL_MS);
+          try {
+            appeared = Boolean(await reader.queryContractState(contractAddress));
+          } catch {
+            // Indexer lag or a transient failure; asked again below.
+          }
+        }
+        if (!appeared) {
+          throw new AliasSponsorError(
+            'target-missing',
+            `No contract state is served at ${contractAddress}, so there is nothing for ${aliasDomain(label)} to resolve to. The account contract was reported as being deployed, but it has not appeared.`,
+            `resolver ${resolverAddress} was deployed and is unused; deploy ${resolverDeployTx}`,
+          );
+        }
+      }
+
+      /* And the second of the two. A rejection here leaves a deployed,
+         unregistered resolver behind, so it is worth a rebuild rather than a
+         refusal — the alternative costs the user their name and this service
+         the fee it already paid for the leaf. */
+      const registerLeg = (): Promise<string> =>
+        withNodeRejectionRetry(
+          async () => {
+            const tld = await findDeployedContract(providers as never, {
+              compiledContract,
+              contractAddress: tldAddress,
+              privateStateId,
+              initialPrivateState: { secretKey: callerSecretHex },
+            } as never);
+            const callTx = (
+              tld as { callTx: Record<string, (...args: unknown[]) => Promise<unknown>> }
+            ).callTx;
+            /* The paid call. `request.ownerKey` — the USER's key — is argument
+               one, so the registry records the user as owner while the
+               balancer's own NIGHT covers COST and the balancer's own DUST
+               covers the fee. */
+            const registration = await callTx.register_domain_for(request.ownerKey, labelKey, len, {
+              bytes: contractAddressBytes(resolverAddress),
+            });
+            return transactionIdentifier(registration);
+          },
+          { label: `register_domain_for ${aliasDomain(label)}`, synced: caughtUp, ...heightGate },
         );
+
+      /**
+       * The pooled leaf's own half: point it at this account contract.
+       *
+       * A SECOND private-state id, and that is load-bearing. This runs at the
+       * same time as the registration above, and midnight-js writes the private
+       * state of every call it makes; two concurrent calls sharing one id would
+       * be two writers on one record. They carry the same secret, so nothing is
+       * lost by giving each its own.
+       */
+      const leafPrivateStateId = `passport-balancer-midnames-${label}-leaf`;
+      const targetLeg = async (): Promise<string> => {
+        const leafProviders = await contractProviders(config, {
+          privateStateId: leafPrivateStateId,
+          initialPrivateState: { secretKey: callerSecretHex },
+          zkConfigProvider: zkConfigProvider as never,
+          proofProvider,
+          walletProvider: wallet.contractWalletProvider(),
+        });
+        return withNodeRejectionRetry(
+          async () => {
+            const leaf = await findDeployedContract(leafProviders as never, {
+              compiledContract,
+              contractAddress: resolverAddress,
+              privateStateId: leafPrivateStateId,
+              initialPrivateState: { secretKey: callerSecretHex },
+            } as never);
+            const callTx = (
+              leaf as { callTx: Record<string, (...args: unknown[]) => Promise<unknown>> }
+            ).callTx;
+            /* Gated on `derive_public_key(secret) == DOMAIN_OWNER[0]`, which
+               holds because the leaf was deployed under this service's own key
+               and has not been handed over yet. */
+            const update = await callTx.update_domain_target(contractTargetEither(targetBytes));
+            return transactionIdentifier(update);
+          },
+          { label: `update_domain_target for ${aliasDomain(label)}`, synced: caughtUp, ...heightGate },
+        );
+      };
+
+      /**
+       * The bind leg, WAITING for a coin of its own rather than refusing.
+       *
+       * It cannot be left to the caller's `withDustWait` the way the register
+       * leg is, and the asymmetry is the whole reason this exists. The
+       * caller's wait rebuilds the WHOLE registration, which is right while
+       * nothing has been registered and catastrophic once it has: a bind that
+       * ran out of coins after `register_domain_for` landed would send the
+       * caller back to register a name it already owns. So the bind waits
+       * here, where the only thing rebuilt is the bind.
+       *
+       * Rebuilding it is safe by construction. `update_domain_target` sets the
+       * leaf's target to one value; running it twice sets the same value
+       * twice, and a run that failed on a DUST shortfall never reached the
+       * node at all. The hold is a registration's, because that is what this
+       * is a leg of — somebody is watching a screen for it.
+       */
+      const bindLeg = (): Promise<string> =>
+        withDustWait(targetLeg, {
+          label: `pointing the resolver for ${aliasDomain(label)} at ${contractAddress}`,
+          windowMs: config.dustWaitMs,
+          holdWhileWaiting: () => wallet.hold(SpendPriority.Registration),
+          awaitFreeCoin: (maxMs) =>
+            wallet.awaitFreeDustCoin(maxMs, { minSpecks: FEE_CAPABLE_SPECKS }),
+        });
+
+      let registerTx: string;
+      if (pooled) {
+        const outcome = await runPooledLegs(wallet.spendLanes(), registerLeg, bindLeg);
+        if (outcome.kind === 'register-rejected') {
+          throw new AliasSponsorError(
+            'register-rejected',
+            `The .night registry rejected the registration of ${aliasDomain(label)}.`,
+            outcome.cause instanceof Error ? outcome.cause.message : String(outcome.cause),
+          );
+        }
+        if (outcome.kind === 'bind-rejected') {
+          throw new AliasSponsorError(
+            'bind-failed',
+            `${aliasDomain(label)} was registered but its resolver could not be pointed at ${contractAddress}.`,
+            `resolver ${resolverAddress}, register ${outcome.registerTx}; ${
+              outcome.cause instanceof Error ? outcome.cause.message : String(outcome.cause)
+            }`,
+          );
+        }
+        registerTx = outcome.registerTx;
+      } else {
+        try {
+          registerTx = await registerLeg();
+        } catch (cause) {
+          if (isDustShortfall(cause)) throw cause;
+          throw new AliasSponsorError(
+            'register-rejected',
+            `The .night registry rejected the registration of ${aliasDomain(label)}.`,
+            cause instanceof Error ? cause.message : String(cause),
+          );
+        }
       }
 
       /* Confirmation is the decisive step, and it is not "the name exists": it
@@ -579,6 +1066,7 @@ export async function createMidnamesSponsor(
             resolved.target.hex === contractAddress
           ) {
             confirmed = true;
+            progress('confirmed');
             break;
           }
         } catch {
@@ -594,8 +1082,66 @@ export async function createMidnamesSponsor(
         );
       }
 
+      /* THE HAND-OVER, AND IT IS DELIBERATELY NOT AWAITED.
+         A pooled leaf is still owned by this service, and the user's ownership
+         is what lets them later call `set_resolver` or move the name. But the
+         name resolves correctly the instant the two legs above confirmed, and
+         nobody is watching a screen for `change_owner`. Making the request wait
+         for a third proof would hand back the whole saving the pool exists to
+         make. So it is queued as its own spend job, behind everything, and its
+         failure is a log line rather than a refused registration — the name is
+         already the user's on the registry either way, and a leaf still owned
+         here can be handed over again by hand. */
+      if (pooled) {
+        void wallet
+          .exclusive(() =>
+            withNodeRejectionRetry(
+              async () => {
+                const leafProviders = await contractProviders(config, {
+                  privateStateId: leafPrivateStateId,
+                  initialPrivateState: { secretKey: callerSecretHex },
+                  zkConfigProvider: zkConfigProvider as never,
+                  proofProvider,
+                  walletProvider: wallet.contractWalletProvider(),
+                });
+                const leaf = await findDeployedContract(leafProviders as never, {
+                  compiledContract,
+                  contractAddress: resolverAddress,
+                  privateStateId: leafPrivateStateId,
+                  initialPrivateState: { secretKey: callerSecretHex },
+                } as never);
+                const callTx = (
+                  leaf as { callTx: Record<string, (...args: unknown[]) => Promise<unknown>> }
+                ).callTx;
+                const handover = await callTx.change_owner(request.ownerKey, {
+                  bytes: request.ownerAddressBytes ?? zeroBytes(),
+                });
+                return transactionIdentifier(handover);
+              },
+              { label: `change_owner for ${aliasDomain(label)}`, synced: caughtUp, ...heightGate },
+            ),
+            { label: `change_owner for ${aliasDomain(label)}` },
+          )
+          .then((handoverTx) =>
+            console.log(
+              `[alias] handed resolver ${resolverAddress} to the owner of ${aliasDomain(label)} (${handoverTx})`,
+            ),
+          )
+          .catch((cause: unknown) =>
+            console.warn(
+              `[alias] ${aliasDomain(label)} resolves correctly but its resolver ${resolverAddress} is still owned by this service: ${cause instanceof Error ? cause.message : String(cause)}`,
+            ),
+          );
+      }
+
+      /* A pooled leaf's deploy transaction was resolved to the indexer's hash
+         when the filler deployed it, so it is read rather than looked up: the
+         lookup takes an IDENTIFIER, finds nothing for a hash, and would spend
+         its whole retry budget doing it. See `deployTransactionReference`. */
       const [deploy, register] = await Promise.all([
-        resolveTransactionHash(config.indexerHttpUrl, resolverDeployTx),
+        deployTransactionReference(pooled, resolverDeployTx, (identifier) =>
+          resolveTransactionHash(config.indexerHttpUrl, identifier),
+        ),
         resolveTransactionHash(config.indexerHttpUrl, registerTx),
       ]);
 
@@ -613,6 +1159,7 @@ export async function createMidnamesSponsor(
         ownerKey: bytesToHex(request.ownerKey),
         costAtomic: aliasCostAtomicNight(label),
         registeredAt: new Date().toISOString(),
+        fromPool: pooled !== undefined,
       };
     },
   };

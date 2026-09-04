@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ENROLMENT_PRF_MISSING_MESSAGE,
   EncryptedPassportPrivateStateStore,
   IndexedDbPassportEncryptedRecordStore,
   PassportEnrolmentConflictError,
@@ -7,11 +8,33 @@ import {
   PassportStateInjection,
   WebAuthnPrfKeyProvider,
 } from './backend.js';
-import type { DiscoveredPassportPasskey, PassportAccountBlob } from './backend.js';
-
+import type {
+  DiscoveredPassportPasskey,
+  PassportAccountBlob,
+  PassportAccountBlobWriteOutcome,
+} from './backend.js';
+import {
+  accountFromBlob,
+  accountRecheckDelayMs,
+  accountToRemember,
+  aliasFromRecoveredAccount,
+  learnedLargeBlobSupport,
+  mayUseLargeBlob,
+  pendingAccountBlob,
+  settledAccountOnPasskey,
+  type AccountFromBlobAccount,
+} from './lib/accountOnPasskey.js';
 import { compactAddress } from './lib/address.js';
+import {
+  nameOwnershipOutcome,
+  nameRecoveryStillOpening,
+  nameResolutionOutcome,
+  registryUnavailableFor,
+  unreachableBecause,
+  type NameRecoveryOutcome,
+} from './lib/nameRecovery.js';
 import { holdCriticalWork } from './lib/appBusy.js';
-import { normalisedColourHex, shortColour } from './lib/colour.js';
+import { describeColour, normalisedColourHex, shortColour } from './lib/colour.js';
 import {
   isMidSessionWayOut,
   KEYLESS_PASSKEY_MESSAGE,
@@ -20,8 +43,18 @@ import {
   PASSKEY_CEREMONY_TIMEOUT_MESSAGE,
   passkeySignInRecovery,
 } from './lib/passkeyRecovery.js';
-import { classifyFundAccountAnswer } from './lib/activation.js';
+import {
+  ACTIVATION_EXHAUSTED_LABEL,
+  activationRetryRowId,
+  classifyFundAccountAnswer,
+} from './lib/activation.js';
 import type { FundAccountAnswer } from './lib/activation.js';
+import {
+  activationGrantHeld,
+  holdActivationGrant,
+  refusalHoldsActivation,
+  releaseActivationGrant,
+} from './lib/activationHold.js';
 import {
   ACTIVITY_KEEP,
   activityStorageKey,
@@ -30,8 +63,32 @@ import {
 } from './lib/activityFeed.js';
 import type { ActivityFeedItem } from './screens/ActivityFeed.js';
 import type { NameLookup } from './lib/recipientName.js';
+/* The two-leg send's record and its retry rules. Pure — no React, no fetch, no
+   storage — see `lib/sendLegs.ts`, where every branch is drilled. */
+import {
+  classifyLegError,
+  pendingSendsStorageKey,
+  pendingSendStepLine,
+  planOfRecord,
+  planShieldedSend,
+  pendingSendAmountLabel,
+  readPendingSends,
+  resumesWithoutPrompt,
+  retryDelayMs,
+  SEND_LEG_ATTEMPTS,
+  sendRefusalText,
+  serialisePendingSends,
+  watchForSettlement,
+  type PendingSend,
+  type PendingSendAsset,
+  type PendingSendKind,
+} from './lib/sendLegs.js';
+/* The note a shielded transfer's two legs are joined by. Type-only, so the rule
+   itself is still loaded beside the account module at the moment of the send. */
+import type { WalletShieldedNote } from './lib/shieldedNote.js';
 import { requestPassportStoragePersistence } from './pwa.js';
 import {
+  deleteDemoProfile,
   listLocalProfiles,
   loadLocalProfileByCredential,
   localCredentialAccountId,
@@ -50,14 +107,21 @@ import { PassportCallbackConsent } from './screens/callbackConsent.js';
 import { PassportTxConsent } from './txConsent.js';
 import OnboardingScreen from './screens/Onboarding.js';
 import WelcomeScreen from './screens/Welcome.js';
+import AccountRecoveryScreen from './screens/AccountRecovery.js';
 import HomeScreen from './screens/Home.js';
 import AliasClaimScreen from './screens/AliasClaim.js';
 import BackupScreen from './screens/Backup.js';
 import EcosystemScreen from './screens/Ecosystem.js';
 import AliasReclaimModal from './screens/AliasReclaimModal.js';
+import RecoverByNameScreen from './screens/RecoverByName.js';
 import {
+  adoptLegacyAliasRecords,
+  aliasRecordsForCredential,
+  forgetAliasRecordsForCredential,
+  forgetLegacyAliasRecords,
   loadAliasRecord,
   loadAliasRecords,
+  removeAliasRecord,
   saveAliasRecord,
   subscribeAliasRecords,
   type AliasRecord,
@@ -76,6 +140,7 @@ import type {
 } from './identity/midnames.js';
 import { createClaimWarmup } from './identity/claimWarmup.js';
 import {
+  forgetPassportContractRecordsForCredential,
   loadPassportContractRecord,
   loadPassportContractRecords,
   passportContractRecordKey,
@@ -86,11 +151,12 @@ import {
 import type {
   PassportContractDeployment,
   PassportContractProgress,
+  PassportContractSubmission,
 } from './identity/passportContract.js';
 /* The account-custody contract's own progress vocabulary. Type-only, so the
    module — and the ledger it statically imports — stays behind the dynamic
    imports every call site below uses. */
-import type { AccountCustodyProgress } from './identity/accountCustody.js';
+import type { AccountCustodyProgress, PreparedAccountCall } from './identity/accountCustody.js';
 import type { PassportBackupLedgerCheck } from './identity/backup.js';
 import {
   NETWORK_LABELS,
@@ -131,6 +197,25 @@ type ProfileStatus = 'idle' | 'loading' | 'ready' | 'missing' | 'error';
 type ActivitySource = 'local' | 'wallet' | 'chain';
 type OnboardingIntent = 'local-create' | 'local-signin';
 type LocalWalletStatus = 'idle' | 'opening' | 'ready' | 'error';
+
+/**
+ * One account-custody deploy in flight, as the two moments a caller can want.
+ *
+ * `submitted` is the transaction handed to the node — and with it the contract
+ * ADDRESS, which is a pure function of the constructor's initial state and so
+ * is known before any of the waiting starts. `landed` is the chain agreeing,
+ * which on stagenet arrives an indexer-lag later (13.2–14.1 s, measured
+ * 2026/08/31). A claim needs the first to ask for a name; the Home card's retry
+ * needs the second, because finding out whether it worked is the whole of what
+ * a retry is for.
+ *
+ * Both reject when the deploy fails, and a caller that reads only one of them
+ * must still account for the other — see `deployPassportContractOnce`.
+ */
+interface PassportContractRun {
+  submitted: Promise<PassportContractSubmission>;
+  landed: Promise<PassportContractDeployment>;
+}
 
 interface ActivityEntry {
   id: string;
@@ -223,14 +308,20 @@ const FUND_ACCOUNT_TIMEOUT_MS = 600_000;
  * SYNCING — a 503 — for a minute or two afterwards while its wallet catches up.
  * Observed live on 2026/08/24, and the account sat at zero because a single
  * attempt was all it got. So a refusal that time can fix is retried rather than
- * recorded as the end of the story: five retries, ~10 minutes of patience in
+ * recorded as the end of the story: seven retries, ~10 minutes of patience in
  * total, all of it in the background and none of it able to touch the name.
+ *
+ * THE FIRST WAIT IS FIVE SECONDS, not twenty (2026/09/02). The grant is now
+ * fired the moment the account lands rather than after the name is registered,
+ * and the commonest refusal at that instant is `indexer-unreachable` for a
+ * contract the indexer has not served yet — a state that clears in a block. A
+ * twenty-second first wait spent the whole of that gap doing nothing.
  *
  * Separate from {@link FUND_ACCOUNT_TIMEOUT_MS}, which bounds one request. A
  * slow answer is the sponsor doing chain work and is waited out; a fast refusal
  * is what this schedule exists for.
  */
-const FUND_ACCOUNT_RETRY_DELAYS_MS = [20_000, 40_000, 80_000, 160_000, 320_000];
+const FUND_ACCOUNT_RETRY_DELAYS_MS = [5_000, 10_000, 20_000, 40_000, 80_000, 160_000, 320_000];
 /**
  * Which account contracts this browser has already asked the sponsor to
  * activate. Keyed by contract address because that is what a Passport has
@@ -412,9 +503,14 @@ function appTransferCodeFor(code: string | null): string | null {
 /**
  * The queue reason when the sponsor cannot register a name right now. Never
  * followed by a wallet-funded attempt: the wallet does not pay for names.
+ *
+ * ONE SENTENCE, because this is the whole body of the claim screen's failure
+ * card — see `aliasRefusalMessage` in `identity/sponsoredAlias.ts` for the rule
+ * and the three-sentence card it was written against. What the reader can do
+ * about it is on the two controls, not in a second clause.
  */
 const SPONSOR_UNAVAILABLE_SENTENCE =
-  'The Passport service that registers names is not available right now. Your name is kept for you and can be registered when it is back.';
+  'The Passport service that registers names is not available right now, and your name is kept for you.';
 
 /**
  * Whether the funder is sponsoring `.night` registrations on `network` right
@@ -598,7 +694,32 @@ const PASSPORT_CONTRACT_SCOPE = { appId: APP_ID, accountId: 'passport-contract-v
  * this session created. See `WelcomeScreen` for what it says and why it is
  * shown once.
  */
-type IdentityStep = 'welcome' | 'alias' | 'backup' | 'ecosystem' | null;
+type IdentityStep = 'welcome' | 'alias' | 'recover' | 'backup' | 'ecosystem' | null;
+
+/**
+ * An account read off a passkey that the chain has not answered for YET.
+ *
+ * It is a session's state and never storage: what survives a reload is the
+ * profile note the recovery writes (`accountOnPasskey`) and the name it
+ * restores. This is only the search itself — where it has got to, and whether
+ * it is still running — because a search is the one thing a reload should
+ * start again rather than resume half-way through.
+ */
+interface AccountSearch {
+  /** The account-custody address the blob named. */
+  address: string;
+  network: string;
+  /** The name restored with it, when the blob carried one. */
+  alias: string | null;
+  /** How many read-backs have already come back with nothing. */
+  attempt: number;
+  /**
+   * `checking` while the chain is still being asked — Home says the account is
+   * being set up — and `not-found` once the attempts are spent, which raises
+   * `AccountRecovery.tsx` and its two controls.
+   */
+  phase: 'checking' | 'not-found';
+}
 
 /**
  * How long a WebAuthn ceremony may sit unanswered before Passport stops
@@ -755,6 +876,18 @@ function storeNameStep(credentialId: string, resolution: NameStepResolution): vo
 }
 
 /**
+ * Forgets a credential's name-step resolution, so the Passport that replaces it
+ * is walked through naming rather than dropped on a finished Home screen.
+ */
+function forgetNameStep(credentialId: string): void {
+  try {
+    window.localStorage.removeItem(`${NAME_STEP_STORAGE_PREFIX}${credentialId}`);
+  } catch {
+    // Best-effort: the step may then be skipped once more.
+  }
+}
+
+/**
  * Whether this browser has already shown the welcome screen for a credential.
  *
  * Its own key rather than a widened `NameStepResolution`, because the two
@@ -784,6 +917,15 @@ function storeWelcomeSeen(credentialId: string): void {
   } catch {
     // Best-effort. Without it the introduction may be offered once more, which
     // is the harmless direction to fail in.
+  }
+}
+
+/** Forgets that this credential was welcomed. Its replacement is new here. */
+function forgetWelcomeSeen(credentialId: string): void {
+  try {
+    window.localStorage.removeItem(`${WELCOME_STORAGE_PREFIX}${credentialId}`);
+  } catch {
+    // Best-effort. The introduction may then be offered once more.
   }
 }
 
@@ -1005,6 +1147,57 @@ function formatNightUnits(units: bigint): string {
 }
 
 /**
+ * How long the wait between a send's two legs is given.
+ *
+ * Three minutes rather than the two the two paths used to allow separately.
+ * The wait is for the indexer to serve a transaction it has already accepted —
+ * measured at 13–14 s on stagenet — and every second past that is congestion
+ * rather than failure. Running out no longer ends the transfer either way: the
+ * record stays at `settle` and Home offers to look again.
+ */
+const SETTLE_DEADLINE_MS = 180_000;
+
+/**
+ * How long after the session is ready an unfinished payment carries itself on.
+ *
+ * A page that has just loaded is still opening its wallet and reading its first
+ * balances, and a leg submitted into that fails for a reason that has nothing
+ * to do with the payment. Three seconds after the account is there is the beat
+ * that costs nobody anything and saves a leg built against a wallet mid-sync.
+ */
+const PENDING_SEND_AUTO_RESUME_DELAY_MS = 3_000;
+
+/** A run, as it is written down before anything is submitted. */
+function newPendingSend(input: {
+  kind: PendingSendKind;
+  recipient: { label: string; accountAddress: string };
+  amount: bigint;
+  tokenType?: string;
+  colourHex: string;
+  ownReceivingAddress: string;
+  /** What leg one will take out — the whole coin. See `planShieldedSend`. */
+  withdrawAmount?: bigint;
+}): PendingSend {
+  const now = new Date().toISOString();
+  return {
+    id: crypto.randomUUID(),
+    kind: input.kind,
+    recipient: input.recipient,
+    amount: input.amount.toString(),
+    ...(input.tokenType ? { tokenType: input.tokenType } : {}),
+    ...(input.withdrawAmount !== undefined && input.withdrawAmount > input.amount
+      ? { withdrawAmount: input.withdrawAmount.toString() }
+      : {}),
+    colourHex: input.colourHex,
+    ownReceivingAddress: input.ownReceivingAddress,
+    leg: 'withdraw',
+    attempts: { withdraw: 0, deposit: 0, change: 0 },
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+/**
  * The addresses of a freshly opened local wallet, before its first balance
  * read. Every balance is `null` — unknown — and never a fabricated zero.
  */
@@ -1108,6 +1301,26 @@ export default function PassportDemo() {
    * panel shows.
    */
   const [keylessPasskey, setKeylessPasskey] = useState<string | null>(null);
+  /**
+   * Set when the passkey this app JUST MADE came back without a PRF result —
+   * the Android shape, and a different fact from either state above.
+   *
+   * `unusableCredential` is somebody else's passkey answering a picker, and
+   * the answer to it is a passkey of our own. This is the platform answering
+   * about itself: it was asked for the extension the wallet seed derives from,
+   * it made the credential and left the extension out, and it will do exactly
+   * that again. So the panel this state raises carries no "create" control —
+   * the only doors that lead anywhere are a passkey held somewhere else,
+   * through the platform's own cross-device sheet, or another device.
+   *
+   * Found on 2026/09/04 by `e2e/android-shapes.spec.ts`. What the screen said
+   * before it was a state at all: "Passport passkeys require a valid HTTPS
+   * origin or localhost relying-party domain" — a banner, on `localhost`,
+   * about a thing that was not wrong, with no control under it. See
+   * `demo-backend/src/passkey.ts#errorMessage` for how that sentence was
+   * reached.
+   */
+  const [unusableDevice, setUnusableDevice] = useState<string | null>(null);
   const [localSurfaces, setLocalSurfaces] = useState<LocalWalletSurfaces | null>(null);
   const [localWalletStatus, setLocalWalletStatus] = useState<LocalWalletStatus>('idle');
   const [localSyncPercent, setLocalSyncPercent] = useState<number | null>(null);
@@ -1137,9 +1350,49 @@ export default function PassportDemo() {
   /* ---------------------------------------------------------------------- */
   /* Identity — the .night name, per network                                */
   /* ---------------------------------------------------------------------- */
+  /**
+   * THE RAW STORE MAP, keyed by `credentialId::network` — and almost nothing
+   * should read it directly. {@link aliasByNetwork} below is what every surface
+   * wants.
+   */
   const [aliasRecords, setAliasRecords] = useState<Record<string, AliasRecord>>(loadAliasRecords);
+  /** The credential this session is signed in as, or null before it is. */
+  const activeCredentialId = profile?.passkey.credentialId ?? null;
+  /**
+   * The names THIS Passport holds, by network — and the whole of the fix of
+   * 2026/09/04 on the reading side.
+   *
+   * Every surface used to index the store by network alone, so a credential
+   * enrolled seconds ago read whatever the last one had claimed: the name step
+   * saw a record and skipped itself, and Home printed a name over an account
+   * that belonged to a different passkey. `aliasRecordsForCredential` answers
+   * for one credential, so a new Passport reads an empty map and is walked
+   * through naming like the new Passport it is — and switching back to the
+   * older passkey shows its name again, because nothing was overwritten.
+   *
+   * Empty before sign-in. There is no Passport to have a name yet, and a screen
+   * that borrowed one from storage would be doing exactly what this replaces.
+   */
+  const aliasByNetwork = useMemo<Record<string, AliasRecord>>(
+    () => (activeCredentialId ? aliasRecordsForCredential(activeCredentialId, aliasRecords) : {}),
+    [activeCredentialId, aliasRecords],
+  );
   const [incentives, setIncentives] = useState<PassportIncentiveRecord[]>(loadIncentives);
   const [identityStep, setIdentityStep] = useState<IdentityStep>(null);
+  /** See {@link AccountSearch}. `null` when nothing is being looked for. */
+  const [accountSearch, setAccountSearch] = useState<AccountSearch | null>(null);
+  /**
+   * A sign-in that is CARRYING an account blob, from the moment the ceremony
+   * hands one over to the moment the recovery has finished with it.
+   *
+   * It exists to hold the name step, and it is a separate flag from
+   * {@link accountSearch} because it has to be true EARLIER than the search
+   * can be: the name-step gate resolves the instant the wallet opens, which is
+   * before the blob's name has been restored, and a gate that resolved there
+   * would put a Passport that has a name onto "Choose your .night name" —
+   * which is the defect, seen live on 2026/09/03.
+   */
+  const [recoveringAccount, setRecoveringAccount] = useState(false);
   const [claimPhase, setClaimPhase] = useState<AliasClaimProgress['phase'] | null>(null);
   /**
    * Why the last claim did not complete, and whether the screen owes the user
@@ -1171,6 +1424,15 @@ export default function PassportDemo() {
   const [nameSponsored, setNameSponsored] = useState(false);
   /** True while a queued name's "Register now" re-run is in flight. */
   const [registerNowBusy, setRegisterNowBusy] = useState(false);
+  /**
+   * True while the trail's own "Retry" is asking for the opening balance again.
+   *
+   * `fundAccountOnce` is patient — it keeps asking for up to ten minutes — and
+   * it is silent while it waits, by design. Without this the control would
+   * answer a second press by doing nothing at all (the in-flight guard) with
+   * nothing on screen to say why, which is a button that looks broken.
+   */
+  const [grantRetryBusy, setGrantRetryBusy] = useState(false);
   /* ---------------------------------------------------------------------- */
   /* The account-custody contract (C1), per credential and network          */
   /* ---------------------------------------------------------------------- */
@@ -1199,6 +1461,30 @@ export default function PassportDemo() {
    * rather than empty.
    */
   const [stablecoin, setStablecoin] = useState<{ symbol: string; colourHex: string } | null>(null);
+  /* The same answer, readable from inside the send orchestrator without making
+     it depend on the sponsor having replied yet. */
+  const stablecoinRef = useRef<{ symbol: string; colourHex: string } | null>(null);
+  stablecoinRef.current = stablecoin;
+
+  /**
+   * What to call the asset one unfinished payment moves.
+   *
+   * The same `describeColour` every balance list is painted from, so the
+   * recovery card, the token shelf, and the Send sheet that opened the payment
+   * all name the colour the same way — which is what "SENDING 1 UNITS TO
+   * SBMTN702YEJFH.NIGHT" was not doing until 2026/09/04. The sponsor's own
+   * answer outranks the table, because it mints that asset.
+   *
+   * A NIGHT run is NIGHT whatever spelling of the native colour this network
+   * turns out to quote, so the record's `kind` has the last word when the table
+   * cannot name what it is holding.
+   */
+  const pendingSendAsset = useCallback((record: PendingSend): PendingSendAsset => {
+    const identity = describeColour(record.colourHex, stablecoinRef.current);
+    return record.kind === 'night' && !identity.known
+      ? { symbol: 'NIGHT', decimals: 6 }
+      : identity;
+  }, []);
   /** True while the one-time sweep of legacy wallet funds is running. */
   const [depositBusy, setDepositBusy] = useState(false);
   /**
@@ -1222,8 +1508,13 @@ export default function PassportDemo() {
    * Whichever caller STARTED a deploy owns the recording of it: see
    * {@link deployPassportContractOnce}, which writes the deployed record itself
    * so a joining caller cannot write a duplicate.
+   *
+   * Each entry holds BOTH halves of a deploy — the submission, which carries
+   * the contract address, and the landing, which is the chain agreeing — so a
+   * joining caller gets whichever of the two it actually needs rather than the
+   * slower one by default.
    */
-  const contractDeploysInFlight = useRef(new Map<string, Promise<PassportContractDeployment>>());
+  const contractDeploysInFlight = useRef(new Map<string, PassportContractRun>());
   /** The pending per-network reclaim conflict, when the target says "taken". */
   const [reclaim, setReclaim] = useState<{ target: PassportNetwork; alias: string } | null>(null);
   const [reclaimBusy, setReclaimBusy] = useState(false);
@@ -1300,10 +1591,21 @@ export default function PassportDemo() {
    * by the sync-progress effect, which owns the same handle's stream.
    */
   const localWalletSynced = useRef(false);
+  /**
+   * This wallet's own receiving address, for the incoming-transfer watch.
+   *
+   * A ref rather than the state it mirrors: the watch subscribes to a balance
+   * stream and must not resubscribe every time an address is re-read.
+   */
+  const unshieldedAddressRef = useRef<string | null>(null);
 
   useEffect(() => {
     profileRef.current = profile;
   }, [profile]);
+
+  useEffect(() => {
+    unshieldedAddressRef.current = localSurfaces?.unshieldedAddress ?? null;
+  }, [localSurfaces]);
 
   /**
    * Records something that happened, for the trail Home renders.
@@ -1313,10 +1615,10 @@ export default function PassportDemo() {
    * fixed at the moment the row is written because that is when it was true —
    * see {@link ActivityEntry.network}.
    *
-   * {@link ACTIVITY_KEEP} rows are held rather than the ten Home shows. The
-   * feed is now persisted, and a trail that forgot everything past the visible
-   * ten would have nothing to restore after a reload but what was already on
-   * screen.
+   * {@link ACTIVITY_KEEP} rows are held rather than the ten Home OPENS on. The
+   * feed is persisted and paged — a press reveals the next ten, down to all
+   * fifty — so a trail that forgot everything past the first ten would have
+   * nothing to restore after a reload and nothing to disclose before one.
    */
   const addActivity = useCallback(
     (entry: Omit<ActivityEntry, 'id' | 'createdAt' | 'network'>) => {
@@ -1711,6 +2013,20 @@ export default function PassportDemo() {
           ? await loadLocalProfileByCredential(restored.credentialId).catch(() => null)
           : await migrateLegacyLocalProfile().catch(() => null);
         if (!superseded() && stored) {
+          /* BEFORE the profile reaches state, because the name-step gate reads
+             the alias store the moment it does, and a name adopted a tick later
+             is a name adopted after somebody has been asked to choose one.
+             This is the path a returning user actually takes — a reload, no
+             ceremony — so it is the path on which most legacy records will be
+             handed back. See `adoptLegacyNamesFor`.
+
+             Deliberately NOT in this effect's dependency list: that callback
+             closes over `addActivity`, which changes with the selected network,
+             and adding it would restart the session restore on every network
+             switch. This effect runs once on mount and the mount-time closure
+             is the right one — the only thing it decides differently is which
+             network an activity line is filed under. */
+          await adoptLegacyNamesFor(stored).catch(() => {});
           setProfile(stored);
           setLocalPassportKnown(true);
         }
@@ -1729,6 +2045,12 @@ export default function PassportDemo() {
       cancelled = true;
       if (sessionRestoreCancel.current === abort) sessionRestoreCancel.current = null;
     };
+    /* `adoptLegacyNamesFor` is deliberately absent: it closes over
+       `addActivity`, which changes with the selected network, so listing it
+       would restart the session restore on every network switch. See the call
+       site above for what the mount-time closure costs, which is the network an
+       activity line is filed under and nothing else. */
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [closeLocalWallet, refreshLocalBalances]);
 
   /* ---------------------------------------------------------------------- */
@@ -1736,15 +2058,17 @@ export default function PassportDemo() {
   /* ---------------------------------------------------------------------- */
 
   /**
-   * Records what the platform proved about largeBlob on this credential, in
-   * BOTH places that read it: the stored profile, so the next session knows,
-   * and this session's state, so a second claim in the same session does not
-   * re-ask a question already answered. A storage failure is a non-event —
-   * the worst it costs is one more prompt next time.
+   * Persists a patch to the stored profile in BOTH places that read it: the
+   * record on disk, so the next session knows, and this session's state, so a
+   * second claim does not re-ask a question already answered. A storage
+   * failure is a non-event — the worst it costs is one more attempt later.
    */
-  const rememberLargeBlobSupport = useCallback(
-    async (activeProfile: DemoPassportProfile, supported: boolean): Promise<void> => {
-      const updated: DemoPassportProfile = { ...activeProfile, largeBlobSupported: supported };
+  const patchProfile = useCallback(
+    async (
+      activeProfile: DemoPassportProfile,
+      patch: Partial<DemoPassportProfile>,
+    ): Promise<void> => {
+      const updated: DemoPassportProfile = { ...activeProfile, ...patch };
       setProfile((current) =>
         current && current.subjectId === activeProfile.subjectId ? updated : current,
       );
@@ -1754,133 +2078,274 @@ export default function PassportDemo() {
   );
 
   /**
-   * Writes this Passport's account-custody contract onto the passkey itself,
-   * so a device that has never seen this Passport can find it again.
+   * REMEMBERS the account this Passport now holds. Prompts for nothing.
    *
-   * ALWAYS BEST EFFORT, NEVER BLOCKING. The claim it follows has already
-   * succeeded on chain; nothing about it depends on this. So the whole thing
-   * is fire-and-forget: `writeAccountBlob` does not throw, whatever the
-   * platform does, and the outcome is recorded in the activity feed in the
-   * platform's own words rather than surfaced as a failure the user cannot act
-   * on.
+   * This is the whole of what a finished claim does about the passkey, and the
+   * change is deliberate (2026/08/31). It used to call `writeAccountBlob`
+   * here, fire-and-forget, on the reasoning that the write would ride the
+   * gesture that earned the claim's own prompt. It did not: a claim is minutes
+   * of chain work, a largeBlob write may not be paired with the read every
+   * other assertion makes, and so it was a second whole user-verified
+   * assertion. The product owner met it as a macOS passkey prompt sitting on
+   * top of a finished Home screen — name registered, account deployed,
+   * balances rendered — having pressed nothing to summon it.
    *
-   * WHY IT IS A SEPARATE CEREMONY. The WebAuthn specification allows a
-   * largeBlob write only during an assertion, and forbids pairing it with a
-   * read in the same one. The claim's own assertion happened before the
-   * contract existed and minutes of chain work ago, so there is no live user
-   * gesture left to ride on: this is a second prompt or it is nothing.
-   *
-   * WHICH IS WHY IT IS NOT ALWAYS ATTEMPTED. On a credential the platform said
-   * cannot hold a blob, the write is skipped entirely — it would cost a real
-   * prompt and achieve nothing. The first attempt that reports the extension
-   * missing writes that fact back to the profile, so nobody is asked twice for
-   * nothing.
+   * The bytes still reach the passkey. They go on during the next assertion
+   * the user asks for anyway (see {@link unlockLocalPassportProfile}), where
+   * the largeBlob slice is free and the read it displaces is worthless to a
+   * browser that already holds the record. Arriving on Home costs nothing.
    */
-  const rememberAccountOnPasskey = useCallback(
+  const noteAccountForPasskey = useCallback(
     async (
       activeProfile: DemoPassportProfile,
       account: { address: string; network: string },
       alias?: string,
     ): Promise<void> => {
-      if (activeProfile.largeBlobSupported === false) return;
-      const result = await WebAuthnPrfKeyProvider.writeAccountBlob(activeProfile.passkey, {
-        v: 1,
-        acc: { address: account.address, network: account.network },
-        ...(alias ? { alias } : {}),
-      });
-      if (result.written) {
-        addActivity({
-          label: 'Passport saved to your passkey',
-          detail:
-            'A new device signing in with this passkey can now find your Passport on its own. No keys were stored — only where to look.',
-          status: 'complete',
-          source: 'local',
-        });
-        if (activeProfile.largeBlobSupported !== true) {
-          await rememberLargeBlobSupport(activeProfile, true);
-        }
-        return;
-      }
-      addActivity({
-        label: 'Passport not saved to your passkey',
-        detail: `${result.reason ?? 'The write did not happen.'} Nothing else is affected — your name and your account are unchanged.`,
-        status: 'blocked',
-        source: 'local',
-      });
-      /* A platform without the extension is a permanent answer for this
-         credential; a refusal or a cancellation is not, and must stay
-         retryable. */
-      if (result.reason?.includes('does not implement')) {
-        await rememberLargeBlobSupport(activeProfile, false);
-      }
+      const note = accountToRemember(activeProfile, account, alias);
+      if (!note) return;
+      await patchProfile(activeProfile, { accountOnPasskey: note });
     },
-    [addActivity, rememberLargeBlobSupport],
+    [patchProfile],
   );
 
   /**
-   * Sign-in recovery: turn a blob read off the passkey into a contract record,
-   * but ONLY once the chain has answered for the address.
+   * Records what an assertion that CARRIED a write made of it, and says so
+   * once — in the activity trail, where the user can go and look.
    *
-   * The three conditions, all required:
-   *
-   *   1. the assertion actually returned a blob (`null` on every platform
-   *      without largeBlob, which is most of them — and not an error);
-   *   2. this browser holds NO record for that credential and network. A
-   *      device that already knows its own contract is not recovering
-   *      anything, and a blob must never overwrite a locally observed record;
-   *   3. the indexer answers for the address. Until it does, all we have is a
-   *      claim by a file; `confirmPassportContractOnLedger` is what turns it
-   *      into a fact. If it does not confirm, NOTHING is written and nothing
-   *      is said — the user is simply where they were.
-   *
-   * The record it writes carries `recovered: true` precisely so no surface
-   * ever shows a deployment transaction this device never saw.
+   * A refusal records nothing and is retried on the next assertion; a platform
+   * with no largeBlob at all is a permanent answer for this credential and
+   * stops the ride-along for good. Neither is surfaced: nothing the user did
+   * failed, and there is nothing for them to act on.
    */
-  const recoverAccountFromPasskey = useCallback(
-    async (credentialId: string, blob: PassportAccountBlob | null): Promise<void> => {
-      if (!blob) return;
-      const handle = localWalletRef.current;
-      // The read-back has to happen against the network the blob names, and
-      // the only indexer this session holds is the open wallet's.
-      if (!handle || handle.network.networkId !== blob.acc.network) return;
-      if (loadPassportContractRecord(credentialId, blob.acc.network)) return;
-      const { confirmPassportContractOnLedger } = await import('./identity/passportContract.js');
-      const confirmed = await confirmPassportContractOnLedger(
-        handle.network.indexerHttpUrl,
-        blob.acc.address,
-      );
-      if (!confirmed) {
-        addActivity({
-          label: 'Passport not restored',
-          detail: `Your passkey names an account on ${blob.acc.network}, but ${blob.acc.network} does not answer for it, so nothing was restored.`,
-          status: 'blocked',
-          source: 'chain',
-        });
-        return;
-      }
+  const settleAccountOnPasskey = useCallback(
+    async (
+      activeProfile: DemoPassportProfile,
+      outcome: PassportAccountBlobWriteOutcome | null,
+    ): Promise<void> => {
+      const patch = settledAccountOnPasskey(activeProfile, outcome);
+      if (!patch) return;
+      await patchProfile(activeProfile, patch);
+      if (outcome !== 'written') return;
+      addActivity({
+        label: 'Passport saved to your passkey',
+        detail:
+          'A new device signing in with this passkey can now find your Passport on its own. No keys were stored — only where to look.',
+        status: 'complete',
+        source: 'local',
+      });
+    },
+    [addActivity, patchProfile],
+  );
+
+  /**
+   * Hands the names written before 2026/09/04 to the Passport that owns them.
+   *
+   * Every alias record this browser held until that day was keyed by network
+   * alone and named no credential, so on this build it sits unreadable under a
+   * bare network key. This is what gives it back — to the credential that can
+   * be SHOWN to own it, and to no other. `adoptLegacyAliasRecords` holds the
+   * rule; the two things it needs are gathered here because only the app knows
+   * them: which networks this credential holds an account-custody contract on,
+   * and whether it is the only Passport in this browser.
+   *
+   * Runs on the SIGN-IN paths only. A credential enrolled a moment ago has
+   * claimed nothing, and handing it a name it did not claim is the whole defect
+   * — the rule would refuse it anyway (no contract, and not the sole profile),
+   * and not asking is clearer than being refused.
+   *
+   * Never awaited into a sign-in's outcome: a name that stays legacy for one
+   * more session costs a person nothing, and a storage read that throws must
+   * not cost them their Passport.
+   */
+  const adoptLegacyNamesFor = useCallback(
+    async (activeProfile: DemoPassportProfile): Promise<void> => {
+      const credentialId = activeProfile.passkey.credentialId;
+      const networks = Object.values(loadPassportContractRecords())
+        .filter((record) => record.credentialId === credentialId && record.status === 'deployed')
+        .map((record) => record.network);
+      const profiles = await listLocalProfiles().catch(() => []);
+      const adopted = adoptLegacyAliasRecords(credentialId, {
+        networks,
+        soleProfile: profiles.length <= 1,
+      });
+      if (adopted.length === 0) return;
+      addActivity({
+        label: 'Your name is on this Passport',
+        detail: `This device was holding ${
+          adopted.length === 1 ? 'a name' : 'names'
+        } without recording which passkey claimed ${
+          adopted.length === 1 ? 'it' : 'them'
+        }. ${adopted.length === 1 ? 'It is' : 'They are'} now filed under this one.`,
+        status: 'complete',
+        source: 'local',
+      });
+    },
+    [addActivity],
+  );
+
+  /**
+   * Records what an assertion learnt about this credential's largeBlob support.
+   *
+   * Silent, and deliberately: nothing the user did succeeded or failed, and
+   * there is nothing for them to act on. What it buys is that the NEXT sign-in
+   * — the one that would carry the write — already knows not to ask.
+   */
+  const learnLargeBlobSupport = useCallback(
+    async (
+      activeProfile: DemoPassportProfile,
+      supported: boolean | null | undefined,
+    ): Promise<void> => {
+      const patch = learnedLargeBlobSupport(activeProfile, supported);
+      if (!patch) return;
+      await patchProfile(activeProfile, patch);
+    },
+    [patchProfile],
+  );
+
+  /**
+   * Writes down an account that has ANSWERED — the end of a successful
+   * recovery, from the sign-in itself or from the search that followed it.
+   *
+   * `recovered: true` is load-bearing: it is what stops every surface showing
+   * a deployment transaction this device never saw.
+   */
+  const saveRecoveredAccount = useCallback(
+    (credentialId: string, account: AccountFromBlobAccount): void => {
       savePassportContractRecord({
         credentialId,
-        network: blob.acc.network,
+        network: account.network,
         status: 'deployed',
-        address: blob.acc.address,
+        address: account.address,
         recovered: true,
         ledgerConfirmed: true,
         updatedAt: new Date().toISOString(),
       });
       addActivity({
         label: 'Passport restored',
-        detail: `Your account was read from your passkey and confirmed on ${blob.acc.network}. This device never saw it being set up, so there is no transaction to show for it.`,
+        detail: `Your account was read from your passkey and confirmed on ${account.network}. This device never saw it being set up, so there is no transaction to show for it.`,
         status: 'complete',
         source: 'chain',
       });
       pushToast({
         tone: 'success',
-        title: 'Your Passport contract is back',
-        body: 'Read from your passkey and confirmed on chain.',
+        title: 'Your account is back',
+        body: 'Read from your passkey and confirmed on Midnight.',
       });
     },
     [addActivity],
   );
+
+  /**
+   * Sign-in recovery: what a blob read off the passkey is worth, and what is
+   * kept while the chain is still being asked.
+   *
+   * THE DEFECT THIS REPLACES (reproduced 2026/09/03). The old shape was one
+   * indexer read and a straight discard on anything but `true`. A browser whose
+   * site data had been cleared — which iOS does by itself after seven days away
+   * — signed in with the passkey that held the account, met one bad read, and
+   * was left holding NOTHING: no account, no name, and no trace but a line in
+   * an activity trail it could not reach. The screen it landed on was "Choose
+   * your .night name", over a Passport that already had one, where claiming
+   * again would set up a second account and pay for a second name.
+   *
+   * So the blob is treated as what it is: evidence, written by this Passport,
+   * onto its own credential. `src/lib/accountOnPasskey.ts` holds the rule; this
+   * is the wiring, and it does three things the old path did not:
+   *
+   *   - it KEEPS the account before the chain has answered — on the profile,
+   *     where a reload still finds it — and restores the name that came with
+   *     it, so the person lands on their own Passport rather than on a naming
+   *     ceremony they have already been through;
+   *   - it goes on ASKING, on a bounded backoff (see the effect below), and
+   *     upgrades to a recorded account the moment the chain answers;
+   *   - and when the asking runs out it hands the user a screen with two
+   *     controls rather than silence.
+   *
+   * What it still refuses to do is overrule this device's own witness: a record
+   * here for a different address is a conflict, and the record stays.
+   */
+  const recoverAccountFromPasskey = useCallback(
+    async (
+      activeProfile: DemoPassportProfile,
+      blob: PassportAccountBlob | null,
+    ): Promise<void> => {
+      try {
+        const credentialId = activeProfile.passkey.credentialId;
+        const handle = localWalletRef.current;
+        const context = {
+          // The read-back can only happen against the open wallet's own indexer.
+          walletNetwork: handle?.network.networkId ?? null,
+          localRecord: blob ? loadPassportContractRecord(credentialId, blob.acc.network) : null,
+          hasLocalAlias: blob ? loadAliasRecord(credentialId, blob.acc.network) !== null : false,
+        };
+        const pending = accountFromBlob(blob, context, 'unconfirmed');
+        if (pending.kind === 'conflict') {
+          /* Both cannot be this Passport's account, and the one this device
+             watched being made is the one it has evidence for. Said out loud
+             rather than silently resolved, because it is the one outcome a
+             person might want to act on. */
+          addActivity({
+            label: 'Your passkey names a different account',
+            detail:
+              'This device already holds an account for this Passport, so the one written on your passkey was left alone. Nothing was changed.',
+            status: 'blocked',
+            source: 'local',
+          });
+          return;
+        }
+        const indexerUrl = handle?.network.indexerHttpUrl ?? null;
+        if (pending.kind !== 'adopt-checking' || !indexerUrl) return;
+        const account = pending.account;
+        /* HELD BEFORE IT IS CHECKED. The note is what a reload reads, and the
+           name is what keeps this Passport off the name step; neither claims
+           the account has been seen on chain, which is what a contract record
+           would claim and why one is not written here. */
+        await patchProfile(activeProfile, {
+          accountOnPasskey: {
+            address: account.address,
+            network: account.network,
+            ...(account.alias ? { alias: account.alias } : {}),
+            /* It came OFF the credential, so it is already on it: nothing is
+               owed to a future assertion. */
+            written: true,
+          },
+        });
+        const restoredAlias = aliasFromRecoveredAccount(
+          credentialId,
+          account,
+          new Date().toISOString(),
+        );
+        if (restoredAlias) saveAliasRecord(restoredAlias);
+        const { confirmPassportContractOnLedger } = await import('./identity/passportContract.js');
+        const confirmed = await confirmPassportContractOnLedger(indexerUrl, account.address);
+        const settled = accountFromBlob(blob, context, confirmed ? 'confirmed' : 'unconfirmed');
+        if (settled.kind === 'adopt-confirmed') {
+          saveRecoveredAccount(credentialId, settled.account);
+          return;
+        }
+        /* Not answered for yet. The search below keeps asking; Home says the
+           account is being set up while it does. */
+        setAccountSearch({
+          address: account.address,
+          network: account.network,
+          alias: account.alias ?? null,
+          attempt: 0,
+          phase: 'checking',
+        });
+      } finally {
+        setRecoveringAccount(false);
+      }
+    },
+    [addActivity, patchProfile, saveRecoveredAccount],
+  );
+
+  /**
+   * Marks a sign-in as one that is carrying an account to recover, BEFORE the
+   * wallet opens. See {@link recoveringAccount} for why the moment matters.
+   */
+  const armAccountRecovery = (blob: PassportAccountBlob | null): void => {
+    if (blob) setRecoveringAccount(true);
+  };
 
   /**
    * A private-state store bound to ONE already-made assertion.
@@ -1918,8 +2383,15 @@ export default function PassportDemo() {
       const seed = await discovered.deriveWalletSeed(scope);
       setProfile(known);
       setLocalPassportKnown(true);
+      // Held before the wallet opens: see `recoveringAccount`.
+      armAccountRecovery(discovered.accountBlob);
+      await adoptLegacyNamesFor(known).catch(() => {});
       await openLocalWalletWithSeed(seed, scope, known.passkey.credentialId);
-      await recoverAccountFromPasskey(known.passkey.credentialId, discovered.accountBlob);
+      await recoverAccountFromPasskey(known, discovered.accountBlob);
+      /* What the picker's own assertion revealed about this credential — the
+         only chance a passkey synced from another device gets to answer the
+         question before a write is owed. */
+      void learnLargeBlobSupport(known, discovered.largeBlobSupported);
       addActivity({
         label: 'Signed in',
         detail: 'Opened with a passkey chosen from this device.',
@@ -1942,6 +2414,15 @@ export default function PassportDemo() {
       },
       accountId,
       createdAt: new Date().toISOString(),
+      /* WHAT THE PICKER'S ASSERTION ALREADY TOLD US. This profile is bound to a
+         credential this browser did not enrol, so it never saw enrolment's own
+         `largeBlob.supported` — and until 2026/09/04 that left the question
+         open until the first WRITE, which on Android is the assertion that
+         hangs. The read this assertion just made answers it for free. Recorded
+         only when it is a definite answer. */
+      ...(typeof discovered.largeBlobSupported === 'boolean'
+        ? { largeBlobSupported: discovered.largeBlobSupported }
+        : {}),
     };
     const state: PassportDemoState = {
       deviceSecret: newDeviceSecret(),
@@ -1961,11 +2442,12 @@ export default function PassportDemo() {
     // part of ITS setup. A sign-in to a known profile never arms it.
     identityStepArmed.current = true;
     const seed = await discovered.deriveWalletSeed(scope);
+    armAccountRecovery(discovered.accountBlob);
     await openLocalWalletWithSeed(seed, scope, discovered.credentialId);
     /* The fresh-device case this whole mechanism exists for: a passkey
        synced here from another device, no local records at all, and its
-       blob naming the contract to look for. */
-    await recoverAccountFromPasskey(discovered.credentialId, discovered.accountBlob);
+       blob naming the account to look for. */
+    await recoverAccountFromPasskey(nextProfile, discovered.accountBlob);
     addActivity({
       label: 'Passport created',
       detail: 'This passkey now holds its own Passport on this device.',
@@ -2031,6 +2513,40 @@ export default function PassportDemo() {
     if (recovery === 'none') return cause;
     setKeylessPasskey(KEYLESS_PASSKEY_MESSAGE);
     return new PasskeyWayOutError(KEYLESS_PASSKEY_MESSAGE, detail);
+  };
+
+  /**
+   * The same wiring for the ceremony that MAKES a credential, and the reason
+   * it cannot be the function above.
+   *
+   * `signInCeremonyFailure` answers every unexplained failure with "make a new
+   * passkey", which is right when the thing that failed was an assertion. It
+   * is the loop when the thing that failed was a creation: a platform that
+   * returns a passkey with no PRF returns the same passkey next time, and the
+   * button would put the reader back on the panel that offered it. So the rule
+   * is asked with `stage: 'enrolment'`, which is the one stage that may answer
+   * `unusable-device` — a state with no create control at all.
+   *
+   * Every other enrolment failure is handed straight back. A dismissed sheet
+   * and a busy keystore are the button that was pressed not working this time,
+   * and the banner plus the button already on the screen is the whole of the
+   * honest response.
+   */
+  const enrolmentCeremonyFailure = (cause: unknown): unknown => {
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    const recovery = passkeySignInRecovery({
+      stage: 'enrolment',
+      reason: cause instanceof PassportPasskeyDiscoveryError ? cause.reason : null,
+      timedOut: cause instanceof PasskeyCeremonyTimeout,
+    });
+    if (recovery !== 'unusable-device') return cause;
+    setUnusableDevice(detail);
+    /* Thrown as a way-out failure so the banner stands down and the panel is
+       the only thing saying this — the same rule the other two panels follow.
+       The message and the detail are the same sentence here because the
+       backend's account of this failure IS the sentence a reader needs; there
+       is no platform jargon to keep out of the way. */
+    return new PasskeyWayOutError(ENROLMENT_PRF_MISSING_MESSAGE, detail);
   };
 
   const knownLocalCredentialIds = async (): Promise<string[]> =>
@@ -2132,10 +2648,11 @@ export default function PassportDemo() {
    *
    * A resident credential for this origin answered and returned no PRF output,
    * so it CANNOT open a Passport — there is no seed to derive from it and no
-   * state it could decrypt. Passport refuses to create over that on its own,
-   * because a create under the same deterministic user handle may replace the
-   * answering credential, and replacing a passkey that might have been someone
-   * else's Passport is not a decision an app may take silently.
+   * state it could decrypt. Passport still does not enrol over that on its own:
+   * the credential that answered may be somebody else's Passport, and quietly
+   * leaving a second passkey for this site beside it — which is all a create
+   * can do since the user handle became random on 2026/09/03 — is not a
+   * decision an app may take without saying so.
    *
    * It is a decision the USER may take, and this is the only path on which
    * they take it: they have been told, in as many words, that the passkey this
@@ -2202,7 +2719,7 @@ export default function PassportDemo() {
         }),
       );
     } catch (cause) {
-      if (!(cause instanceof PassportEnrolmentConflictError)) throw cause;
+      if (!(cause instanceof PassportEnrolmentConflictError)) throw enrolmentCeremonyFailure(cause);
       return signInAfterEnrolmentConflict();
     }
     return { profile: await adoptEnrolledPasskey(enrolled), created: true };
@@ -2220,11 +2737,14 @@ export default function PassportDemo() {
    * ASK THE AUTHENTICATOR BEFORE CREATING ANYTHING — BUT ONLY WHEN THERE IS
    * SOMETHING TO ASK ABOUT. "No local profile" is not the same fact as "no
    * passkey": site data cleared with the passkey still in the keychain looks
-   * identical to a first visit, and a `create` there would REPLACE the
-   * surviving credential — the user handle is deterministic — taking its PRF
-   * secret, and every coin the wallet seed derives with it. So when this
-   * browser knows of any credential, discovery runs first and enrolment only
-   * follows if nothing answers.
+   * identical to a first visit. Until 2026/09/03 a `create` there REPLACED the
+   * surviving credential — the user handle was a digest of a constant — taking
+   * its PRF secret and every coin the wallet seed derives with it. The handle
+   * is now random per enrolment (`demo-backend/src/passkey.ts#newUserHandle`),
+   * so that credential can no longer be overwritten by anything this app does;
+   * what a create still costs such a user is a SECOND Passport where they
+   * meant to reopen their first. So when this browser knows of any credential,
+   * discovery runs first and enrolment only follows if nothing answers.
    *
    * When it knows of none, discovery is skipped, because the dialog it raises
    * asks the wrong question of a newcomer and can leave them with no way
@@ -2266,14 +2786,15 @@ export default function PassportDemo() {
        ID, Windows Hello, or a phone, and the question asked is the one the
        user came to answer.
 
-       The overwrite this replaces is still guarded where it can be: every
-       create carries `knownCredentialIds` in `excludeCredentials`, and the
-       authenticator reports {@link PassportEnrolmentConflictError} rather
-       than replacing a credential we named. What is genuinely given up is the
-       case where site data was cleared and the passkey survived, leaving
-       nothing to exclude — that user now creates a second credential instead
-       of finding the first. "Use a different passkey" on the landing screen
-       is the discovery path, and remains their way back to the original. */
+       What that costs is bounded, and since 2026/09/03 it is bounded at the
+       right place: the create cannot replace anything, because the user handle
+       is random per enrolment, and `knownCredentialIds` still makes the
+       authenticator refuse outright for a credential this browser knows of.
+       The user whose site data was cleared with the passkey surviving does
+       still enrol a second credential instead of finding the first — their
+       original is untouched, in the picker, holding the account blob, and
+       "Use a different passkey" is the one control that reaches it. That is a
+       recoverable wrong turn rather than the permanent loss it used to be. */
     const discoverFirst = knownCredentialIds.length > 0;
     setOnboardingBusyLabel(
       discoverFirst
@@ -2300,7 +2821,7 @@ export default function PassportDemo() {
             })),
       );
     } catch (cause) {
-      if (!(cause instanceof PassportEnrolmentConflictError)) throw cause;
+      if (!(cause instanceof PassportEnrolmentConflictError)) throw enrolmentCeremonyFailure(cause);
       return signInAfterEnrolmentConflict();
     }
     if (onboarding.outcome === 'unusable-credential') {
@@ -2353,6 +2874,15 @@ export default function PassportDemo() {
    * Decrypting the stored state proves the passkey is the right one (and fails
    * loudly if the record belongs to another device); the wallet seed comes
    * from the very same assertion instead of a second prompt.
+   *
+   * AND, SINCE 2026/08/31, IT CARRIES THE ACCOUNT BLOB. A claim only notes the
+   * account it bound; the bytes go onto the credential here, in the largeBlob
+   * slice of an assertion that was happening anyway. That slice is either a
+   * read or a write and never both, so the trade is real — and it is free,
+   * because a browser holding this profile already knows its own contract and
+   * `recoverAccountFromPasskey` does nothing for it. The alternative was a
+   * ceremony of its own, which is the prompt this app raised on Home for a
+   * piece of metadata nobody asked to save. See `src/lib/accountOnPasskey.ts`.
    */
   const unlockLocalPassportProfile = async (): Promise<DemoPassportProfile> => {
     const existing = await resolveDefaultLocalProfile();
@@ -2377,8 +2907,27 @@ export default function PassportDemo() {
        still excludes this profile's credential, so a passkey that turns out to
        be alive after all is refused by the authenticator rather than replaced. */
     let handle: DiscoveredPassportPasskey;
+    /* What this Passport owes its passkey, if anything. `null` on every
+       session that owes nothing, and the assertion then reads as it always
+       has. */
+    const pendingBlob = pendingAccountBlob(existing);
+    /* AND WHETHER IT MAY ASK AT ALL (2026/09/04). A credential the platform has
+       already said cannot hold a blob is asserted with no largeBlob slice in
+       either direction. On Android that is the difference between a sign-in and
+       a sheet that never settles: Chrome narrows its passkey picker to
+       credentials that can satisfy the extensions asked for, and a Google
+       Password Manager passkey cannot satisfy largeBlob, so the picker comes up
+       empty and stays there. The reviewer met it as "the passkey prompt did not
+       finish", on an ordinary sign-in, days after the claim that owed the
+       write. See `src/lib/accountOnPasskey.ts#mayUseLargeBlob`. */
+    const largeBlob = mayUseLargeBlob(existing);
     try {
-      handle = await withPasskeyWatchdog(() => WebAuthnPrfKeyProvider.assertOnce(existing.passkey));
+      handle = await withPasskeyWatchdog(() =>
+        WebAuthnPrfKeyProvider.assertOnce(existing.passkey, {
+          ...(pendingBlob ? { writeAccountBlob: pendingBlob } : {}),
+          largeBlob,
+        }),
+      );
     } catch (cause) {
       throw signInCeremonyFailure(cause);
     }
@@ -2387,11 +2936,27 @@ export default function PassportDemo() {
       setProfile(existing);
       setLocalPassportKnown(true);
       const seed = await handle.deriveWalletSeed(unlockScope);
+      armAccountRecovery(handle.accountBlob);
+      /* BEFORE the recovery below and before the name step resolves: an adopted
+         name is one of the answers to "does this Passport already have a
+         name", and an answer that arrives late is an answer that arrives after
+         the person has been asked the question. */
+      await adoptLegacyNamesFor(existing).catch(() => {});
       await openLocalWalletWithSeed(seed, unlockScope, existing.passkey.credentialId);
       /* The blob rode in on the assertion above, so this costs no prompt. It
-         does nothing at all unless this browser has no record of the contract
-         AND the indexer confirms the address. */
-      await recoverAccountFromPasskey(existing.passkey.credentialId, handle.accountBlob);
+         does nothing at all unless this browser has no record of the account —
+         which is exactly why the assertion above may spend its largeBlob slice
+         writing instead. */
+      await recoverAccountFromPasskey(existing, handle.accountBlob);
+      /* What the write did, recorded rather than announced. Never awaited into
+         the sign-in's own outcome: a blob is a nicety, and a signed-in
+         Passport does not depend on one. */
+      void settleAccountOnPasskey(existing, handle.accountBlobWritten);
+      /* And what the READ revealed about whether this credential could ever
+         hold one. It is the cheap half of the Android fix: a sign-in that only
+         reads still learns the answer, so by the time a claim owes a write the
+         profile already knows whether asking for it would hang. */
+      void learnLargeBlobSupport(existing, handle.largeBlobSupported);
       return existing;
     } finally {
       handle.dispose();
@@ -2414,6 +2979,7 @@ export default function PassportDemo() {
        of these panels put there. */
     setUnusableCredential(null);
     setKeylessPasskey(null);
+    setUnusableDevice(null);
     setError(null);
     // Provisional intent so the screen flips to its working stage at once;
     // the resolved journey below corrects the label.
@@ -2508,6 +3074,10 @@ export default function PassportDemo() {
       }
       setOnboardingIntent(null);
       setOnboardingBusyLabel(null);
+      /* A sign-in that never reached the recovery — the wallet refused to open,
+         the state would not decrypt — must not leave the name step held open
+         for a recovery that is not coming. */
+      setRecoveringAccount(false);
       onboardingRunning.current = false;
     }
   };
@@ -2530,6 +3100,7 @@ export default function PassportDemo() {
        try is never read against the first try's explanation. */
     setUnusableCredential(null);
     setKeylessPasskey(null);
+    setUnusableDevice(null);
     setError(null);
     setOnboardingIntent('local-signin');
     setOnboardingBusyLabel('Choose a passkey on this device');
@@ -2673,7 +3244,24 @@ export default function PassportDemo() {
       knownNight = next;
       if (previous === null || next <= previous) return;
       if (!localWalletSynced.current) return;
-      const amount = formatNightUnits(next - previous);
+      const arrived = next - previous;
+      /* NOT A RECEIPT — the sender's OWN first leg (2026/09/02). Paying a
+         Passport pays the amount to the sender's own receiving address before
+         paying it on, so the wallet really does see it arrive; announcing that
+         as "NIGHT received" reports somebody's outgoing payment back to them as
+         income, and the row then invites them to move into their account money
+         that is on its way to somebody else. */
+      if (
+        pendingSendsRef.current.some(
+          (record) =>
+            record.kind === 'night' &&
+            record.ownReceivingAddress === unshieldedAddressRef.current &&
+            BigInt(record.amount) === arrived,
+        )
+      ) {
+        return;
+      }
+      const amount = formatNightUnits(arrived);
       addActivity({
         label: 'NIGHT received',
         /* It arrived at the address the resolver leaf carries, which is the
@@ -2765,6 +3353,100 @@ export default function PassportDemo() {
   useEffect(() => subscribeAliasRecords(setAliasRecords), []);
   useEffect(() => subscribeIncentives(setIncentives), []);
   useEffect(() => subscribePassportContractRecords(setContractRecords), []);
+
+  /**
+   * KEEP ASKING — the bounded search for an account a passkey named and the
+   * chain has not answered for yet.
+   *
+   * The read it retries used to happen exactly once, inside the sign-in, and a
+   * single unlucky answer was the difference between somebody's Passport and a
+   * blank name step. One read is the right number for a sign-in, which must not
+   * stall behind an indexer; it is the wrong number for the question "does this
+   * account exist", which a node three blocks behind answers wrongly and
+   * correctly a few seconds later.
+   *
+   * So the retrying happens HERE, out of the sign-in's way: five attempts on a
+   * doubling backoff — about a minute in all, `accountRecheckDelayMs` — while
+   * Home says the account is being set up. It ends in one of two places and
+   * never in silence: a recorded account, or `AccountRecovery.tsx`, which puts
+   * the choice to the person whose account it is.
+   */
+  useEffect(() => {
+    const search = accountSearch;
+    if (!search || search.phase !== 'checking') return undefined;
+    const delay = accountRecheckDelayMs(search.attempt);
+    if (delay === null) {
+      /* Spent. The screen this raises is the way out; nothing is deleted and
+         nothing is set up behind the user's back. */
+      setAccountSearch({ ...search, phase: 'not-found' });
+      addActivity({
+        label: 'Your account could not be found',
+        detail: `Your passkey names an account on ${search.network} and ${search.network} has not answered for it. Nothing was changed — you can look again, or set up a new account.`,
+        status: 'blocked',
+        source: 'chain',
+      });
+      return undefined;
+    }
+    let live = true;
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        const handle = localWalletRef.current;
+        const credentialId = profileRef.current?.passkey.credentialId ?? null;
+        const indexerUrl = handle?.network.indexerHttpUrl ?? null;
+        /* Signed out, or the wallet moved networks under us: the search is
+           about a session that no longer exists. */
+        if (!indexerUrl || !credentialId) return;
+        const { confirmPassportContractOnLedger } = await import(
+          './identity/passportContract.js'
+        );
+        const confirmed = await confirmPassportContractOnLedger(indexerUrl, search.address);
+        if (!live) return;
+        if (!confirmed) {
+          setAccountSearch((current) =>
+            current && current.phase === 'checking'
+              ? { ...current, attempt: current.attempt + 1 }
+              : current,
+          );
+          return;
+        }
+        saveRecoveredAccount(credentialId, {
+          address: search.address,
+          network: search.network,
+          ...(search.alias ? { alias: search.alias } : {}),
+        });
+        setAccountSearch(null);
+      })();
+    }, delay);
+    return () => {
+      live = false;
+      window.clearTimeout(timer);
+    };
+  }, [accountSearch, addActivity, saveRecoveredAccount]);
+
+  /**
+   * The way out's second control: stop looking, and set an account up the way
+   * a new Passport does — by choosing a name, deliberately, on screen.
+   *
+   * It CREATES NOTHING here. What it does is clear what was read off the
+   * passkey — the profile note, and the name restored from it, which is the
+   * one record that would otherwise sit on a Passport claiming a name whose
+   * account nobody could find — and hand the person to the name step. The
+   * account the passkey names is untouched: it is on Midnight, not on this
+   * device, and a later sign-in that can see it will still find it.
+   */
+  const startNewAccountAfterSearch = async (): Promise<void> => {
+    const search = accountSearch;
+    const active = profileRef.current;
+    setAccountSearch(null);
+    if (search && active) {
+      const credentialId = active.passkey.credentialId;
+      const restored = loadAliasRecord(credentialId, search.network);
+      // Only the name THIS search restored; never one this browser watched.
+      if (restored?.recovered === true) removeAliasRecord(credentialId, search.network);
+    }
+    if (active) await patchProfile(active, { accountOnPasskey: undefined });
+    setIdentityStep('alias');
+  };
 
   /**
    * The stored record for THIS credential on the network the WALLET signs on.
@@ -2950,7 +3632,14 @@ export default function PassportDemo() {
   /** Records a name as queued — never as registered — with its reason. */
   const queueAlias = useCallback(
     (alias: string, network: PassportNetwork, reason: string) => {
+      /* A queued name belongs to the Passport that picked it, exactly as a
+         registered one does. No signed-in credential means there is nobody to
+         file it under, and filing it under nobody is what put one passkey's
+         name on another's Home screen. */
+      const credentialId = profileRef.current?.passkey.credentialId;
+      if (!credentialId) return;
       saveAliasRecord({
+        credentialId,
         alias,
         domain: aliasDomainOf(alias),
         network,
@@ -2972,29 +3661,41 @@ export default function PassportDemo() {
    *
    * Starts `run` only when no deploy for this credential and network is already
    * running; when one is, the caller joins it and receives that deploy's
-   * outcome instead of issuing a second one. `joined` says which happened, so
-   * the caller can tell "I deployed this" from "somebody else did, and here it
-   * is" — the two want different activity entries and only the first wants a
-   * toast.
+   * submission and outcome instead of issuing a second one. `joined` says which
+   * happened, so the caller can tell "I deployed this" from "somebody else did,
+   * and here it is" — the two want different activity entries and only the
+   * first wants a toast.
    *
-   * The DEPLOYED record is written here rather than by the callers, because it
-   * must be written exactly once no matter how many callers were waiting on the
-   * deploy. Failure records stay with the callers: each has its own words for
-   * what the failure meant to the flow it interrupted, and each writes one only
-   * when it owned the run.
+   * TWO PROMISES, AND WHY (2026/08/31)
+   * ----------------------------------
+   * `submitted` settles when the transaction has been proved, balanced, signed,
+   * and handed to the node — the moment the contract ADDRESS is a fact. `landed`
+   * settles when the chain has been seen carrying it. They used to be the same
+   * moment, and the ~14 s of indexer lag between them was time the claim spent
+   * not asking for a name it already had the target for.
+   *
+   * The DEPLOYED record is still written from `landed`, and deliberately: this
+   * store's own rule is that nothing is written here until the chain has
+   * answered (see `identity/passportContractStore.ts`), and knowing an address
+   * early is not the chain answering. It is written here rather than by the
+   * callers because it must be written exactly once no matter how many callers
+   * were waiting. Failure records stay with the callers: each has its own words
+   * for what the failure meant to the flow it interrupted, and each writes one
+   * only when it owned the run.
    */
   const deployPassportContractOnce = useCallback(
     (
       credentialId: string,
       network: string,
-      run: () => Promise<PassportContractDeployment>,
-    ): { outcome: Promise<PassportContractDeployment>; joined: boolean } => {
+      run: () => Promise<PassportContractSubmission>,
+    ): PassportContractRun & { joined: boolean } => {
       const key = passportContractRecordKey(credentialId, network);
       const existing = contractDeploysInFlight.current.get(key);
-      if (existing) return { outcome: existing, joined: true };
+      if (existing) return { ...existing, joined: true };
 
-      const started = (async () => {
-        const deployment = await run();
+      const submitted = run();
+      const landed = (async () => {
+        const deployment = await (await submitted).settled;
         /* `deployTxId` is whatever the resolution loop ended with: the ledger
            HASH where the indexer had caught up, and the raw 33-byte identifier
            where it had not. Which of the two it is gets recorded, because an
@@ -3016,15 +3717,26 @@ export default function PassportDemo() {
 
       /* Claimed synchronously — before anything awaits — and released however
          it settles, so a failed deploy never leaves the pair permanently
-         un-deployable. */
-      contractDeploysInFlight.current.set(key, started);
+         un-deployable. Released on `landed`, not on `submitted`: until the
+         chain has answered there is still a deploy in flight for this pair, and
+         a second caller arriving in that window must join it rather than start
+         another contract. */
+      const entry: PassportContractRun = { submitted, landed };
+      contractDeploysInFlight.current.set(key, entry);
       const release = () => {
-        if (contractDeploysInFlight.current.get(key) === started) {
+        if (contractDeploysInFlight.current.get(key) === entry) {
           contractDeploysInFlight.current.delete(key);
         }
       };
-      started.then(release, release);
-      return { outcome: started, joined: false };
+      landed.then(release, release);
+      /* `submitted` and `landed` both reject when a deploy fails, and every
+         caller reads at most one of them. The other would be an unhandled
+         rejection — a console error the user's browser reports and nobody
+         asked for — so both are given a no-op handler here. Nothing is
+         swallowed: these are extra handlers, not replacements. */
+      submitted.catch(() => undefined);
+      landed.catch(() => undefined);
+      return { ...entry, joined: false };
     },
     [],
   );
@@ -3123,11 +3835,20 @@ export default function PassportDemo() {
    * ONCE PER CONTRACT, ACROSS SESSIONS. The marker is written only on evidence
    * the grant exists, so a Passport whose activation never landed is still
    * PENDING on the next launch — and the wallet-open effect below finishes it.
+   *
+   * NOT WHILE THE NAME IS QUEUED (2026/09/04). A registration the sponsor
+   * refused leaves this account without a name, and a grant is once per account
+   * for ever: spending it now is a half-provisioned Passport and a coin that
+   * cannot be recovered by asking again. So the hold is read HERE, before every
+   * attempt rather than only at the call site, because the refusal and the
+   * account's landing race — see `lib/activationHold.ts` for both orders and
+   * for what lifts it.
    */
   const fundAccountOnce = useCallback(
     async (contractAddress: string): Promise<void> => {
       if (!FUNDER_URL) return;
       if (accountFundingAttempted(contractAddress)) return;
+      if (activationGrantHeld(contractAddress)) return;
       if (accountFundingInFlight.current.has(contractAddress)) return;
       accountFundingInFlight.current.add(contractAddress);
       try {
@@ -3139,7 +3860,7 @@ export default function PassportDemo() {
             /* The schedule is spent. The account is empty and the screen already
                says so honestly; this row is why, in the sponsor's own words. */
             addActivity({
-              label: 'Opening balance not added',
+              label: ACTIVATION_EXHAUSTED_LABEL,
               detail: `The sponsor could not add your opening balance within ten minutes of trying: ${outcome.reason}`,
               status: 'blocked',
               source: 'chain',
@@ -3149,6 +3870,10 @@ export default function PassportDemo() {
           await pause(delayMs);
           // Another surface — or another tab — may have finished it meanwhile.
           if (accountFundingAttempted(contractAddress)) return;
+          /* And the registration may have been refused while this schedule was
+             waiting, which is the order where the grant is already in flight.
+             The attempts that have not been made yet are the ones this stops. */
+          if (activationGrantHeld(contractAddress)) return;
         }
       } finally {
         accountFundingInFlight.current.delete(contractAddress);
@@ -3170,6 +3895,26 @@ export default function PassportDemo() {
    * Costs nothing when there is nothing to do: `fundAccountOnce` returns
    * immediately on a marked contract and on one already in flight, so the
    * claim's own call and this effect can never both run a schedule.
+   *
+   * IT NO LONGER WAITS FOR THE CLAIM (2026/09/02).
+   * ------------------------------------------------------------------------
+   * From 2026/08/31 this effect stood down while a claim was running, because
+   * the sponsor ran one spend job at a time and the grant took the queue in
+   * front of the name — three consecutive claims reconstructed block by block
+   * from the stagenet indexer that day (register blocks 257787, 257685,
+   * 257522) all showed the same shape: account deploy at +0 s, `deposit_night`
+   * at +24 s, resolver deploy at +48 s, `register_domain_for` at +84 s. Those
+   * two middle blocks were this effect, sitting between the account and the
+   * name.
+   *
+   * The sponsor now puts a registration ahead of a waiting grant itself, so the
+   * deferral no longer buys the name anything and costs the account the whole
+   * registration — a minute and a half — before it starts filling. The claim
+   * fires the grant the moment the account LANDS, and this effect is the
+   * safety net for everything that never gets there: a claim that failed at the
+   * registration, a reload during the backoff, a laptop closed mid-claim.
+   * `fundAccountOnce` is once per contract across all of them, so nothing here
+   * can run a second schedule.
    */
   useEffect(() => {
     if (localWalletStatus !== 'ready' || !accountContractAddress) return;
@@ -3214,7 +3959,7 @@ export default function PassportDemo() {
    * name to the wallet address, because a name that silently points somewhere
    * other than where the user was told is the one outcome worth failing for.
    */
-  const claimAliasBoundToAccount = useCallback(
+  const runClaimBoundToAccount = useCallback(
     async (
       handle: LocalMidnightWallet,
       activeProfile: DemoPassportProfile,
@@ -3233,7 +3978,7 @@ export default function PassportDemo() {
          here with its own message. */
       const [
         { AliasClaimError, deriveMidnamesOwnerKey },
-        { deployPassportContract },
+        { submitPassportContract },
         { deriveWalletSeed },
         { AliasSponsorRefusal, sponsorAliasRegistration },
       ] = await Promise.all([
@@ -3335,6 +4080,60 @@ export default function PassportDemo() {
         oneShot.dispose();
       }
 
+      /**
+       * One place the account deploy's failure becomes the claim's failure.
+       *
+       * It is reached from two directions now that the deploy is not waited on
+       * in a straight line: the submission itself refusing, and the chain later
+       * refusing a transaction that was already submitted. Both mean the same
+       * thing to the reader — there is nothing for the name to point at — so
+       * both say it in the same words, and the failure RECORD (which is what
+       * puts "Try deploying again" on the Home card) is written exactly once,
+       * by whichever claim owned the run.
+       */
+      const accountFailure = (cause: unknown, owned: boolean): Error => {
+        const message = cause instanceof Error ? cause.message : String(cause);
+        const detail = (cause as { detail?: string })?.detail;
+        if (owned) {
+          savePassportContractRecord({
+            credentialId,
+            network,
+            status: 'failed',
+            failureReason: detail ? `${message} (${detail})` : message,
+            updatedAt: new Date().toISOString(),
+          });
+        }
+        return new AliasClaimError(
+          'account-contract-failed',
+          /* No machinery in a sentence a person reads. What failed is the
+             ACCOUNT — the thing they were waiting for — and the reason the name
+             did not follow is that there was nothing for it to point at. The
+             parts' own names go in the detail, for a log. */
+          `${alias}.night was not registered: your Passport account could not be set up, so there was nothing for the name to point at.`,
+          /* The inner REASON only. Its message now says the same thing as the
+             sentence above, and carrying both put one fact on screen twice with
+             a dash between the copies. */
+          detail ?? message,
+        );
+      };
+
+      /* The claim failure the deploy's own landing produced, when the chain
+         refused a transaction that had already been submitted. The RECORD is
+         written by the handler that sets this — not by whoever reads it — so a
+         deploy that fails while the claim is busy elsewhere still puts "Try
+         deploying again" on the Home card, whatever the claim does next.
+
+         Read SYNCHRONOUSLY where the registration fails, so a name refused for
+         its own reasons — taken, rate-limited — is never made to wait on a
+         deploy it has nothing to do with. */
+      let accountDeployFailure: Error | null = null;
+      /* How the registration waits for the account to appear on chain, when
+         this claim submitted it and the chain has not answered yet. */
+      let awaitAccountOnChain: (() => Promise<unknown>) | undefined;
+      /* Whether this claim OWNS the deploy it is watching, and therefore
+         whether it is the one that records how it ended. */
+      let ownsDeploy = false;
+
       try {
         /* (3) The account-custody contract. An existing DEPLOYED record for
            this credential and network is reused — a Passport has one contract
@@ -3344,107 +4143,142 @@ export default function PassportDemo() {
         if (!contractAddress) {
           onPhase('attaching-account');
           setContractBusy(true);
-          /* Hoisted out of the try so the catch below knows whether this claim
-             merely waited on somebody else's deploy. A joined deploy is theirs
-             to record; this claim only reads its outcome. */
-          let joinedDeploy = false;
           try {
-            /* Through the shared gate, never straight to `deployPassportContract`:
-               the Home card's retry may already have one running for this
-               credential and network, and a second would be a second contract
-               the user paid for and the records would forget. */
-            const { outcome, joined } = deployPassportContractOnce(
+            /* Through the shared gate, never straight to
+               `submitPassportContract`: the Home card's retry may already have
+               one running for this credential and network, and a second would
+               be a second contract the user paid for and the records would
+               forget. */
+            const { submitted, landed, joined } = deployPassportContractOnce(
               credentialId,
               network,
               () =>
-                deployPassportContract(handle, contractRootSecret, (progress) =>
+                submitPassportContract(handle, contractRootSecret, (progress) =>
                   setContractPhase(progress.phase),
                 ),
             );
-            joinedDeploy = joined;
-            const deployment = await outcome;
-            if (!joinedDeploy) {
-              // The deployed record was written by the gate; this is the claim's
-              // own account of it, which a joining claim must not duplicate.
-              addActivity({
-                /* "Your account is set up", not "the contract deployed":
-                   ruled 2026/08/26. The contract is the machinery; the
-                   account is the thing the user was waiting for. The
-                   transaction is still linked, so nothing is hidden. */
-                label: 'Your account is set up',
-                detail: `It is ${
-                  deployment.ledgerConfirmed ? 'live' : 'submitted'
-                } on ${deployment.network}, ready for ${alias}.night to point at it.`,
-                status: 'complete',
-                source: 'chain',
-                txHash: deployment.deployTxId,
-              });
-              /* The deploy is the long half of onboarding, and since
-                 2026/08/25 it says so on screen the moment it lands rather than
-                 waiting for the name. It is the FIRST transaction this Passport
-                 ever submits and the only one the passkey wallet itself
-                 originates, so it is the one most worth being able to go and
-                 look at — and the indexer has usually not mapped its identifier
-                 to a ledger hash yet, which is what the verifier fallback is
-                 for. */
-              pushToast({
-                tone: 'success',
-                title: 'Your account is set up',
-                body: `${compactAddress(deployment.address)} is ${
-                  deployment.ledgerConfirmed ? 'live' : 'submitted'
-                } on ${deployment.network}. Registering ${alias}.night against it now.`,
-                link: explorerTxLink(
-                  deployment.deployTxId,
-                  deployment.network,
-                  aliasDomainOf(alias),
-                ),
-              });
-              void notify(
-                'Your account is set up',
-                `${deployment.ledgerConfirmed ? 'It is live' : 'It is submitted'} on ${
-                  deployment.network
-                }. Registering ${alias}.night against it now.`,
-                { tag: 'passport-contract-deployed' },
-              );
-            }
-            contractAddress = deployment.address;
-          } catch (cause) {
-            /* The failure is recorded as a failure — that record is what puts
-               the "Try deploying again" affordance on the Home card — and then
-               re-thrown, because the claim must not continue. A deploy this
-               claim merely joined has already been recorded by whoever started
-               it, so only the owner writes. */
-            const message = cause instanceof Error ? cause.message : String(cause);
-            const detail = (cause as { detail?: string })?.detail;
-            if (!joinedDeploy) {
-              savePassportContractRecord({
-                credentialId,
-                network,
-                status: 'failed',
-                failureReason: detail ? `${message} (${detail})` : message,
-                updatedAt: new Date().toISOString(),
-              });
-            }
-            throw new AliasClaimError(
-              'account-contract-failed',
-              /* No machinery in a sentence a person reads. What failed is
-                 the ACCOUNT — the thing they were waiting for — and the reason
-                 the name did not follow is that there was nothing for it to
-                 point at. The parts' own names go in the detail, for a log. */
-              `${alias}.night was not registered: your Passport account could not be set up, so there was nothing for the name to point at.`,
-              /* The inner REASON only. Its message now says the same thing as
-                 the sentence above, and carrying both put one fact on screen
-                 twice with a dash between the copies. */
-              detail ?? message,
+            ownsDeploy = !joined;
+
+            /* THE MOMENT THIS CLAIM STOPS WAITING (2026/08/31). What the name
+               needs from the account is its ADDRESS, and the address is settled
+               when the transaction is built — it is the hash of the initial
+               contract state the constructor produced, so the chain cannot
+               answer with a different one. Waiting for the indexer to serve the
+               deploy before asking for the name cost a full indexer lag
+               (13.2–14.1 s on stagenet, measured 2026/08/31) of doing nothing,
+               and then a further four blocks before the resolver was deployed.
+               So the claim takes the address and carries on; the landing is
+               WATCHED below, and nothing is reported as an account that exists
+               until it lands. */
+            const submission = await submitted;
+            contractAddress = submission.address;
+            awaitAccountOnChain = () => landed;
+
+            /* The landing, watched rather than waited on. Its handlers are
+               attached HERE, before the registration is posted, so the failure
+               flag is already set by the time a `target-missing` refusal
+               travels back up through `awaitAccountOnChain`. */
+            void landed.then(
+              (deployment) => {
+                setContractBusy(false);
+                /* THE OPENING BALANCE, THE MOMENT THERE IS AN ACCOUNT TO PUT IT
+                   IN (2026/09/02).
+                   ------------------------------------------------------------
+                   It used to be fired at step (5), after the registration had
+                   come back, and it was deferred there on 2026/08/31 because
+                   the sponsor ran one spend job at a time and the grant took
+                   the queue in front of the name. The sponsor now puts a
+                   registration ahead of a waiting grant itself, so the deferral
+                   buys nothing and costs the whole registration — a minute and
+                   a half — before the account starts filling. An activation is
+                   ~250 s of the sponsor's own work; started here it overlaps
+                   the name instead of following it.
+
+                   Fired for a JOINED deploy too, and before the `ownsDeploy`
+                   return: the grant is once per contract, not once per claim,
+                   and `fundAccountOnce` owns that. Never awaited — nothing
+                   about the name depends on it. */
+                void fundAccountOnce(deployment.address);
+                if (!ownsDeploy) return;
+                // The deployed record was written by the gate; this is the
+                // claim's own account of it, which a joining claim must not
+                // duplicate.
+                addActivity({
+                  /* "Your account is set up", not "the contract deployed":
+                     ruled 2026/08/26. The contract is the machinery; the
+                     account is the thing the user was waiting for. The
+                     transaction is still linked, so nothing is hidden. */
+                  label: 'Your account is set up',
+                  detail: `It is ${
+                    deployment.ledgerConfirmed ? 'live' : 'submitted'
+                  } on ${deployment.network}, ready for ${alias}.night to point at it.`,
+                  status: 'complete',
+                  source: 'chain',
+                  txHash: deployment.deployTxId,
+                });
+                /* The deploy is the long half of onboarding, and since
+                   2026/08/25 it says so on screen the moment it lands rather
+                   than waiting for the name. It is the FIRST transaction this
+                   Passport ever submits and the only one the passkey wallet
+                   itself originates, so it is the one most worth being able to
+                   go and look at — and the indexer has usually not mapped its
+                   identifier to a ledger hash yet, which is what the verifier
+                   fallback is for. */
+                pushToast({
+                  tone: 'success',
+                  title: 'Your account is set up',
+                  body: `${compactAddress(deployment.address)} is ${
+                    deployment.ledgerConfirmed ? 'live' : 'submitted'
+                  } on ${deployment.network}. Registering ${alias}.night against it now.`,
+                  link: explorerTxLink(
+                    deployment.deployTxId,
+                    deployment.network,
+                    aliasDomainOf(alias),
+                  ),
+                });
+                void notify(
+                  'Your account is set up',
+                  `${deployment.ledgerConfirmed ? 'It is live' : 'It is submitted'} on ${
+                    deployment.network
+                  }. Registering ${alias}.night against it now.`,
+                  { tag: 'passport-contract-deployed' },
+                );
+              },
+              (cause) => {
+                /* Recorded, not thrown: nothing is awaiting this promise on the
+                   happy path, and an unhandled rejection would be a console
+                   error rather than a message to anybody. `accountFailure`
+                   writes the failed record here, once, and the registration
+                   below throws what it returns. */
+                setContractBusy(false);
+                accountDeployFailure = accountFailure(cause, ownsDeploy);
+              },
             );
-          } finally {
-            setContractPhase(null);
+          } catch (cause) {
+            /* The submission itself refused — nothing was signed, nothing was
+               submitted, and there is no landing to watch. */
             setContractBusy(false);
+            throw accountFailure(cause, ownsDeploy);
+          } finally {
+            /* `contractPhase` is the deploy's own sub-label and it belongs to
+               the part of the deploy the reader is watching; the claim's next
+               phase names itself. `contractBusy` is NOT cleared here — it is
+               cleared when the deploy lands or fails, because until then there
+               genuinely is a deploy in flight. The Home card's retry is guarded
+               by `contractDeploysInFlight` in any case, which is the guard that
+               actually holds. */
+            setContractPhase(null);
           }
         }
 
-        /* (4) The claim itself, bound to the contract address the chain gave
-           us — never to a value assembled from anything else.
+        /* (4) The claim itself, bound to the account contract's own address —
+           never to a value assembled from anything else. Since 2026/08/31 that
+           address comes out of the deploy transaction's construction rather
+           than out of the chain's answer about it, which is the same 32 bytes
+           a block earlier: the address IS the hash of the initial contract
+           state, so there is nothing for the chain to disagree with. The chain
+           is still asked, and the registry call still waits for its answer —
+           see `targetPending` below.
 
            Sponsored, and only sponsored: the service registers the name FOR
            this Passport — user's key as owner, this contract as target —
@@ -3458,19 +4292,54 @@ export default function PassportDemo() {
         if (sponsored && FUNDER_URL) {
           onPhase('registering');
           try {
-            claimed = await sponsorAliasRegistration(FUNDER_URL, {
-              alias,
-              ownerKey: await deriveMidnamesOwnerKey(ownerSecret),
-              contractAddress,
-              /* No payment address: the leaf's owner-address half used to carry
-                 the wallet's address, which a resolver honouring it would PAY —
-                 outside the account model. The service zero-fills it; the
-                 registry's authority is the owner key, and the target is the
-                 account (audit finding, 2026/08/25). */
-              network: registryNetwork,
-            });
+            claimed = await sponsorAliasRegistration(
+              FUNDER_URL,
+              {
+                alias,
+                ownerKey: await deriveMidnamesOwnerKey(ownerSecret),
+                contractAddress,
+                /* No payment address: the leaf's owner-address half used to
+                   carry the wallet's address, which a resolver honouring it
+                   would PAY — outside the account model. The service zero-fills
+                   it; the registry's authority is the owner key, and the target
+                   is the account (audit finding, 2026/08/25). */
+                network: registryNetwork,
+                /* Set only where this claim submitted the deploy and is not
+                   waiting for it: the service is being told to check the target
+                   before it REGISTERS rather than before it accepts, which is
+                   the whole of what buys the time. A claim reusing an account
+                   that was already on the record sends nothing, because there
+                   is nothing pending about it. */
+                targetPending: awaitAccountOnChain !== undefined,
+              },
+              {
+                /* The compatibility half, and the correctness one: a service
+                   that has never heard of `targetPending` refuses
+                   `target-missing`, and a service that has may still be asked
+                   about an account whose deploy is genuinely slow. Either way
+                   the answer is to wait for the chain and ask once more. */
+                awaitTarget: awaitAccountOnChain,
+              },
+            );
           } catch (cause) {
+            /* THE DEPLOY'S OWN FAILURE OUTRANKS THE NAME SERVICE'S. Read
+               synchronously — the flag is set by the landing handler attached
+               before this request went out — so a name refused for its own
+               reasons never waits on a deploy, and a name refused BECAUSE the
+               account never landed is reported as the account failing rather
+               than as the registry being unhelpful. */
+            if (accountDeployFailure !== null) throw accountDeployFailure;
             if (!(cause instanceof AliasSponsorRefusal)) throw cause;
+            /* NO NAME, NO GRANT (2026/09/04). The refusal is in hand and the
+               account has one; the grant is once per account for ever, and
+               spending it now buys a Passport nobody can send to by name. The
+               soak of 2026/09/04 did exactly that: refused at the sponsor's
+               hourly ceiling at 17:38:02, funded at 17:38:03. The hold is
+               placed before the throw so it is in place whichever way the race
+               went, and it is lifted where the name registers below. */
+            if (refusalHoldsActivation(cause.code)) {
+              holdActivationGrant(contractAddress, cause.code);
+            }
             if (cause.code === 'name-taken') {
               throw new AliasClaimError('taken', cause.message);
             }
@@ -3487,7 +4356,13 @@ export default function PassportDemo() {
                and retried, never bought from the wallet (ruled 2026/08/25). */
             throw new AliasClaimError(
               'register-rejected',
-              `${cause.message} Passport registers names through its service and does not spend from your account — the name is kept for you to register again shortly.`,
+              /* The service's own sentence, and nothing added to it. What used
+                 to be appended here said the name was kept for a second time
+                 in a row — `aliasRefusalMessage` had already said it — and
+                 volunteered that Passport does not spend from the account,
+                 which the foot of the claim screen says on every state of it.
+                 The card is a heading, one sentence, and two controls. */
+              cause.message,
             );
           }
         }
@@ -3498,27 +4373,44 @@ export default function PassportDemo() {
              this path rather than a gap in it. */
           throw new AliasClaimError(
             'network-unreachable',
-            'The Passport service that registers names is not available right now. Your name is kept for you and can be registered when it is back — Passport does not spend from your account for this.',
+            /* The same sentence the pre-check refusal above uses, from the one
+               place it is written down: two copies of one fact drifted apart
+               once already. */
+            SPONSOR_UNAVAILABLE_SENTENCE,
           );
         }
 
-        /* (5) The opening balance, into the ACCOUNT rather than into the
-           wallet. Fired here because this is the moment the Passport is whole
-           — a deployed contract with a name pointing at it — and deliberately
-           NOT awaited: the sponsor proves two deposits before it answers, it
-           may well answer "syncing" for the first minute or two, and the name's
-           success depends on none of that. `fundAccountOnce` owns the patience
-           (see its own comment); here it is fired and forgotten. */
+        /* (5) The opening balance is normally NOT started here. It was fired
+           the moment the account landed (see the
+           `void fundAccountOnce(deployment.address)` above), and a reused
+           account that never passes through that landing is covered by the
+           wallet-ready effect.
+
+           What IS here is the release. A name that failed to register holds
+           this account's grant — see the refusal above — and a name that has
+           now registered lifts it, which is the whole of what makes the hold
+           safe to place: the queued name's "Register now" runs this same
+           claim, so the retry that finally lands the name is also the thing
+           that funds the account. Asking again costs nothing anywhere else:
+           `fundAccountOnce` is once per contract and returns immediately on a
+           contract already marked, already held, or already in flight. */
+        releaseActivationGrant(contractAddress);
         void fundAccountOnce(contractAddress);
 
-        /* (6) Attach the account to the passkey, so a device that has never
-           seen this Passport can find the contract again. Deliberately NOT
-           awaited: the name is registered and the contract is deployed, and a
-           largeBlob write is a separate assertion the specification will not
-           let us fold into either of them. It must never hold the claim open
-           or be able to fail it — see `rememberAccountOnPasskey`, which does
-           not throw. */
-        void rememberAccountOnPasskey(
+        /* (6) REMEMBER the account, so a device that has never seen this
+           Passport can find the contract again — and remember it WITHOUT
+           asking the user for anything.
+
+           This used to write the blob onto the passkey here, which is a second
+           user-verified assertion the specification will not let us fold into
+           the claim's own. The gesture it was supposed to ride was minutes
+           gone by then, so what it really produced was a passkey prompt on a
+           finished Home screen that nobody had asked for (reported repeatedly;
+           fixed 2026/08/31). The write now rides the next assertion the user
+           makes — see `noteAccountForPasskey` and
+           `unlockLocalPassportProfile`. Still not awaited, and still unable to
+           fail the claim: it is a storage write that swallows its own error. */
+        void noteAccountForPasskey(
           activeProfile,
           { address: contractAddress, network },
           alias,
@@ -3529,8 +4421,18 @@ export default function PassportDemo() {
         contractRootSecret.fill(0);
       }
     },
-    [addActivity, deployPassportContractOnce, fundAccountOnce, rememberAccountOnPasskey],
+    [addActivity, deployPassportContractOnce, fundAccountOnce, noteAccountForPasskey],
   );
+
+  /**
+   * {@link runClaimBoundToAccount}, under the name the rest of the app calls.
+   *
+   * It used to raise a flag that kept the activation grant out of the claim's
+   * way, and the flag went with the deferral on 2026/09/02: the grant is now
+   * fired the moment the account lands, deliberately alongside the name, and
+   * there is nothing left to hold back.
+   */
+  const claimAliasBoundToAccount = runClaimBoundToAccount;
 
   /**
    * The real claim, as ONE user action: the account-custody contract is
@@ -3559,6 +4461,7 @@ export default function PassportDemo() {
       try {
         const result = await claimAliasBoundToAccount(handle, activeProfile, alias, setClaimPhase);
         saveAliasRecord({
+          credentialId: activeProfile.passkey.credentialId,
           alias: result.alias,
           domain: result.domain,
           network: result.network,
@@ -3617,6 +4520,19 @@ export default function PassportDemo() {
              itself — see `midSessionCeremonyFailure`. */
           wayOut: isMidSessionWayOut(cause),
         });
+        /* A claim that died part-way used to leave NO record at all, so the
+           name the user picked vanished from the Passport and the Register-now
+           path had nothing to pick up. Persist it queued, carrying the failure
+           as the reason, exactly as the requeue in `registerQueuedAlias` does. */
+        saveAliasRecord({
+          credentialId: activeProfile.passkey.credentialId,
+          alias,
+          domain: aliasDomainOf(alias),
+          network: localWalletNetworkId ?? configuredWalletNetwork ?? selectedNetwork,
+          status: 'queued',
+          queuedReason: detail ? `${message} — ${detail}` : message,
+          updatedAt: new Date().toISOString(),
+        });
         addActivity({
           label: 'Your name could not be registered',
           detail: detail ? `${message} — ${detail}` : message,
@@ -3627,7 +4543,14 @@ export default function PassportDemo() {
         setClaimPhase(null);
       }
     },
-    [addActivity, claimAliasBoundToAccount, profile, refreshLocalBalances],
+    [
+      addActivity,
+      claimAliasBoundToAccount,
+      localWalletNetworkId,
+      profile,
+      refreshLocalBalances,
+      selectedNetwork,
+    ],
   );
 
   /**
@@ -3677,10 +4600,12 @@ export default function PassportDemo() {
    */
   const registerQueuedAlias = useCallback(async (): Promise<void> => {
     if (registerNowBusy) return;
-    const record = loadAliasRecords()[selectedNetwork];
+    const activeProfile = profile;
+    const record = activeProfile
+      ? loadAliasRecord(activeProfile.passkey.credentialId, selectedNetwork)
+      : null;
     if (!record || record.status === 'registered') return;
     const handle = localWalletRef.current;
-    const activeProfile = profile;
     if (!handle || !activeProfile) return; // The card disables the action first.
     setRegisterNowBusy(true);
     setAliasFailure(null);
@@ -3736,6 +4661,7 @@ export default function PassportDemo() {
         setClaimPhase,
       );
       saveAliasRecord({
+        credentialId: activeProfile.passkey.credentialId,
         alias: result.alias,
         domain: result.domain,
         network: result.network,
@@ -3851,7 +4777,7 @@ export default function PassportDemo() {
        all, is genuinely this call's own and is recorded as usual. */
     let joinedDeploy = false;
     try {
-      const [{ deployPassportContract, checkPassportContractFunds }, { deriveWalletSeed }] =
+      const [{ submitPassportContract, checkPassportContractFunds }, { deriveWalletSeed }] =
         await Promise.all([
           import('./identity/passportContract.js'),
           import('./lib/localWallet.js'),
@@ -3880,14 +4806,23 @@ export default function PassportDemo() {
            check at the top of this function cannot cover the awaits since —
            the imports, the funds probe, the passkey derivation — so a claim may
            have started a deploy in the meantime. If so this joins it rather
-           than issuing a second one for the same credential and network. */
-        const { outcome, joined } = deployPassportContractOnce(credentialId, network, () =>
-          deployPassportContract(handle, rootSecret, (progress) =>
+           than issuing a second one for the same credential and network.
+
+           This path waits for the LANDING, unlike a claim: a retry has nothing
+           to do with the address except find out whether it worked, so a
+           submission it did not wait for would be a card that changed its mind
+           twice for no reader's benefit. `submitPassportContract` reports the
+           `confirming` phase itself here, through the same callback. */
+        const { landed, joined } = deployPassportContractOnce(credentialId, network, () =>
+          submitPassportContract(handle, rootSecret, (progress) =>
             setContractPhase(progress.phase),
-          ),
+          ).then((submission) => {
+            setContractPhase('confirming');
+            return submission;
+          }),
         );
         joinedDeploy = joined;
-        deployment = await outcome;
+        deployment = await landed;
       } finally {
         // The root secret's only job is done; nothing retains it.
         rootSecret.fill(0);
@@ -3904,7 +4839,10 @@ export default function PassportDemo() {
          from the store rather than from render state, because this callback
          must not be rebuilt every time a record changes. It is only a fallback
          link target. */
-      const deployedDomain = loadAliasRecord(deployment.network)?.domain ?? null;
+      const deployedCredentialId = profileRef.current?.passkey.credentialId ?? null;
+      const deployedDomain = deployedCredentialId
+        ? loadAliasRecord(deployedCredentialId, deployment.network)?.domain ?? null
+        : null;
       const deployLink = explorerTxLink(
         deployment.deployTxId,
         deployment.network,
@@ -3992,11 +4930,11 @@ export default function PassportDemo() {
       setSelectedNetwork(next);
       if (next === previous) return;
       const held =
-        aliasRecords[previous] ??
-        Object.values(aliasRecords).find((record) => record.status === 'registered') ??
-        Object.values(aliasRecords)[0];
+        aliasByNetwork[previous] ??
+        Object.values(aliasByNetwork).find((record) => record.status === 'registered') ??
+        Object.values(aliasByNetwork)[0];
       if (!held) return;
-      if (aliasRecords[next]) return;
+      if (aliasByNetwork[next]) return;
       void (async () => {
         const availability = await probeAlias(next, held.alias);
         if (availability.status === 'taken') {
@@ -4015,7 +4953,7 @@ export default function PassportDemo() {
         await claimOrQueueAlias(held.alias, next);
       })();
     },
-    [aliasRecords, claimOrQueueAlias, probeAlias, queueAlias, selectedNetwork],
+    [aliasByNetwork, claimOrQueueAlias, probeAlias, queueAlias, selectedNetwork],
   );
 
   const handleReclaimPick = useCallback(
@@ -4053,6 +4991,13 @@ export default function PassportDemo() {
    */
   useEffect(() => {
     if (localWalletStatus !== 'ready' || !localSurfaces || !profile) return;
+    /* A RECOVERY IS STILL RUNNING, so this cannot be decided yet — and this
+       guard deliberately does not latch. The wallet is open before the blob
+       read off the passkey has been acted on, and the name that blob carries
+       is the whole answer to the question below. Resolving here is exactly how
+       a Passport that HAS a name met "Choose your .night name" on a browser
+       whose site data had been cleared (2026/09/03). */
+    if (recoveringAccount) return;
     if (identityStepResolved.current) return;
     identityStepResolved.current = true;
     /* Read before it is cleared: this is the one signal that says the Passport
@@ -4062,7 +5007,12 @@ export default function PassportDemo() {
        the wallet this effect waits on has opened. */
     const passportJustCreated = identityStepArmed.current;
     identityStepArmed.current = false;
-    if (loadAliasRecords()[selectedNetwork]) return;
+    if (loadAliasRecord(profile.passkey.credentialId, selectedNetwork)) return;
+    /* A name recovered from the passkey, before any of it reaches the alias
+       store — a second reading of the same fact, because the cost of getting
+       this wrong is asking somebody to claim a name they already own. */
+    const recoveredNote = profile.accountOnPasskey;
+    if (recoveredNote?.alias && recoveredNote.network === selectedNetwork) return;
     /* Only a DONE resolution suppresses the step. 'skipped' deliberately does
        not any more: a skip used to be remembered per credential forever, so a
        passkey that skipped once landed on Home with no name and no account on
@@ -4076,9 +5026,23 @@ export default function PassportDemo() {
     setIdentityStep(
       passportJustCreated && !welcomeSeen(profile.passkey.credentialId) ? 'welcome' : 'alias',
     );
-  }, [localSurfaces, localWalletStatus, profile, selectedNetwork]);
+  }, [localSurfaces, localWalletStatus, profile, recoveringAccount, selectedNetwork]);
 
   const signOutPassport = async () => {
+    /* THE SILENT RESTORE IS STOPPED FIRST (2026/09/04).
+       The §2.2 restore runs on mount and is several awaits long — reading the
+       wrapped seed, building a wallet, opening a socket — and it ends by
+       setting the profile and the wallet handle. A sign-out pressed while it
+       was still in flight tore down state the restore then put straight back,
+       and the user was returned to the Home screen they had just left. Caught
+       in a browser on 2026/09/04, on the very journey somebody stuck on an
+       orphaned Passport takes to escape it: Sign out, and nothing happens.
+
+       Every user-initiated ceremony already does this — see
+       `runLocalOnboarding` — and sign-out is one. `superseded()` inside the
+       restore reads the same flag, so the restore abandons itself rather than
+       racing. */
+    cancelSessionRestore();
     // Sign-out is the boundary of the §2.2 session stopgap: the wrapped seed
     // and its wrapping key are removed before anything else is torn down.
     await clearPersistedWalletSession();
@@ -4111,10 +5075,16 @@ export default function PassportDemo() {
     setOnboardingError(null);
     setUnusableCredential(null);
     setKeylessPasskey(null);
+    setUnusableDevice(null);
     // The identity steps re-decide on the next sign-in. The alias records
     // themselves are NOT cleared: the same passkey re-derives the same wallet,
     // so the name it registered is still that wallet's name.
     setIdentityStep(null);
+    /* The search belongs to the session that started it. A sign-out ends both;
+       what it does NOT touch is the profile note, which is how the next
+       sign-in on this browser still knows where to look. */
+    setAccountSearch(null);
+    setRecoveringAccount(false);
     setClaimPhase(null);
     setAliasFailure(null);
     setReclaim(null);
@@ -4124,6 +5094,214 @@ export default function PassportDemo() {
     // sign-in, and lands on the dashboard. The stored per-credential
     // resolution is deliberately left in place for the same reason.
     identityStepArmed.current = false;
+  };
+
+  /**
+   * SET UP A NEW PASSPORT ON THIS DEVICE — the way out of an orphaned Passport,
+   * and the control that did not exist (2026/09/04).
+   *
+   * THE STATE IT ANSWERS. A reviewer on Android could not get out of a Passport
+   * that was half made: "there is no way I can recreate an account or create a
+   * new one. I'm stuck with the orphan key that does not contain the contract
+   * attached… Even deleting and recreating the passkeys under different
+   * accounts doesn't do the job." Every record that made the app believe this
+   * browser's Passport was already set up outlived the passkey it belonged to,
+   * so a new passkey inherited the old name, found no account behind it, and
+   * had nothing on any screen that could clear it. The per-credential keying
+   * that landed alongside this stops NEW Passports being made that way; this is
+   * the control for the ones already in that state, and for every future state
+   * nobody has thought of, because "start again on this device" is the answer to
+   * all of them.
+   *
+   * WHAT IT REMOVES, and it is only ever THIS DEVICE'S MEMORY of one credential:
+   * that credential's names, its account records, its profile and encrypted
+   * state, its name-step and welcome markers, and the open session.
+   *
+   * WHAT IT CANNOT AND DOES NOT TOUCH, said plainly because a person pressing
+   * this is afraid of exactly these two things:
+   *
+   *   - THE PASSKEY. No web page can delete a passkey, and this one does not
+   *     try. It stays in the keychain, and signing in with it later is still a
+   *     way back to the account it holds — the blob and the name are both still
+   *     on it.
+   *   - THE CHAIN. The account contract and the registered name are on Midnight.
+   *     They are not this browser's to release and nothing here releases them.
+   *
+   * Another credential's records are untouched, which is what makes this safe on
+   * a phone holding two Passports.
+   *
+   * It ends by running the create path, so the person lands where they were
+   * trying to get to rather than on an empty landing screen having pressed a
+   * button that appeared to do nothing.
+   */
+  const startFreshPassportOnThisDevice = async (): Promise<void> => {
+    if (onboardingRunning.current) return;
+    /* The credential to forget: the one signed in, or — on the landing screen,
+       which is where this is offered — the one the single button would have
+       tried. Null means this browser holds nothing to forget, and the create
+       path below is then simply a create. */
+    const target =
+      profileRef.current ?? (await resolveDefaultLocalProfile().catch(() => null));
+    /* Whether any OTHER Passport in this browser could own an unlabelled
+       record. Read before the profile is deleted, because deleting it is what
+       would otherwise make the answer trivially yes. */
+    const others = (await listLocalProfiles().catch(() => []))
+      .filter((candidate) => candidate.subjectId !== target?.subjectId);
+    if (target) {
+      const credentialId = target.passkey.credentialId;
+      forgetAliasRecordsForCredential(credentialId);
+      /* AND THE RECORDS THAT NAME NOBODY, when nobody else could own them.
+         `forgetAliasRecordsForCredential` only removes records naming this
+         credential, so a name claimed before 2026/09/04 survived it — and the
+         new passkey that follows is then the only Passport here, which is one
+         of the two claims `adoptLegacyAliasRecords` accepts. The person who
+         asked to start clean would have been handed the old name straight
+         back. Left alone where another Passport is present: an unlabelled
+         record's owner is unknown, and it might be theirs. */
+      if (others.length === 0) forgetLegacyAliasRecords();
+      forgetPassportContractRecordsForCredential(credentialId);
+      forgetNameStep(credentialId);
+      forgetWelcomeSeen(credentialId);
+      await deleteDemoProfile(target.subjectId).catch(() => {});
+      try {
+        if (window.localStorage.getItem(LAST_PASSKEY_STORAGE_KEY) === credentialId) {
+          window.localStorage.removeItem(LAST_PASSKEY_STORAGE_KEY);
+        }
+      } catch {
+        // The preference is a convenience; it cannot hold this up.
+      }
+    }
+    /* Everything the session was holding goes with it. `signOutPassport`
+       deliberately keeps names and notes — the same passkey re-derives the
+       same Passport — so it cannot be the whole of this, but it is exactly the
+       right teardown once the records are already gone. */
+    await signOutPassport();
+    setLocalPassportKnown(false);
+    addActivity({
+      label: 'Starting again on this device',
+      detail:
+        'This device has forgotten what it held for that passkey. The passkey itself is still on your device, and anything already on Midnight is still there.',
+      status: 'complete',
+      source: 'local',
+    });
+    /* Enrol DELIBERATELY. Not the one-button path: that discovers first, and
+       discovery would offer the very passkey whose records were just cleared —
+       which would rebind a profile to it and put the person back where they
+       started. */
+    startPasskeyOnboarding('enrol-new');
+  };
+
+  /**
+   * FINDING AN EXISTING PASSPORT BY ITS `.night` NAME, and the platform that
+   * made it compulsory (2026/09/04).
+   *
+   * Every recovery this app had went through the WebAuthn largeBlob extension:
+   * a claim writes the account's address onto the credential, and a browser
+   * that holds nothing reads it back on the next sign-in. Android does not
+   * implement it. Google Password Manager's passkeys give PRF — which is where
+   * the wallet seed comes from, so the Passport works perfectly — and no
+   * largeBlob at all, so on the platform the reviewers were actually holding
+   * there was never a blob to write, nothing to read back, and consequently NO
+   * way to return to an existing Passport on a browser that had forgotten it.
+   * What that person met was the name step, over a Passport that already had a
+   * name.
+   *
+   * So there is a second door, and it needs nothing from the credential but the
+   * one thing every platform gives: the PRF output.
+   *
+   *   1. THE NAME IS THE QUESTION. It is resolved against the registry to the
+   *      account-custody contract it points at. A name is public and proves
+   *      nothing — anybody can resolve anybody's — so nothing is restored on
+   *      the strength of it.
+   *   2. THE ACCOUNT IS THE ANSWER. This passkey's device secret is derived
+   *      from its PRF output and the contract is asked, on chain, whether that
+   *      device is one of its active devices. That is `accountHoldsDevice`, the
+   *      same proof a restored backup file must pass, and for the same reason:
+   *      the device set inside the contract is the only thing that answers "can
+   *      this Passport spend from it".
+   *
+   * ONE CEREMONY, and it is asked for. `withAccountDeviceSecret` raises a
+   * single assertion, and only after somebody has typed a name and pressed a
+   * button — nothing here prompts a user who asked for nothing.
+   *
+   * A name that resolves to anything other than a contract is treated as not
+   * ours rather than as an error: Passport binds names to account-custody
+   * contracts, and a name pointing at a bare wallet address is somebody else's
+   * arrangement whatever the registry says about it.
+   */
+  const recoverPassportByName = async (name: string): Promise<NameRecoveryOutcome> => {
+    const activeProfile = profileRef.current;
+    const network = localWalletNetworkId ?? configuredWalletNetwork ?? selectedNetwork;
+    const handle = localWalletRef.current;
+    const indexerHttpUrl = handle?.network.indexerHttpUrl ?? null;
+    if (!activeProfile || !indexerHttpUrl) return nameRecoveryStillOpening();
+    const { MIDNAMES_INDEXER_URLS, resolveAliasTarget } = await import('./identity/midnames.js');
+    const noRegistry = registryUnavailableFor(network, Object.keys(MIDNAMES_INDEXER_URLS));
+    if (noRegistry) return noRegistry;
+    let resolved: Awaited<ReturnType<typeof resolveAliasTarget>>;
+    try {
+      resolved = await resolveAliasTarget(network as keyof typeof MIDNAMES_INDEXER_URLS, name);
+    } catch (cause) {
+      return unreachableBecause(cause);
+    }
+    const settled = nameResolutionOutcome(resolved);
+    if (settled) return settled;
+    /* Non-null past `nameResolutionOutcome`, which ends the flow for every
+       answer that is not a contract this app could open. */
+    const found = resolved!;
+    const address = found.target.hex;
+    let holds: boolean;
+    try {
+      const { accountHoldsDevice } = await import('./identity/accountCustody.js');
+      holds = await withAccountDeviceSecret((deviceSecret) =>
+        accountHoldsDevice({ indexerHttpUrl }, address, deviceSecret),
+      );
+    } catch (cause) {
+      /* "We could not ask" must never look like "it is not yours". The first is
+         a bad minute on somebody's train; the second tells a person their
+         Passport is gone. */
+      return unreachableBecause(cause);
+    }
+    const ownership = nameOwnershipOutcome(found, holds);
+    if (ownership.kind !== 'found') return ownership;
+
+    /* PROVED. The record may now say what a recovery is allowed to say: an
+       address this device has confirmed on chain, no deployment transaction —
+       because this device did not watch one — and `recovered` to mark it. */
+    const credentialId = activeProfile.passkey.credentialId;
+    saveRecoveredAccount(credentialId, { address, network, alias: name });
+    saveAliasRecord({
+      credentialId,
+      alias: name,
+      domain: aliasDomainOf(name),
+      network,
+      status: 'registered',
+      /* Read out of the registry rather than watched being registered, so it
+         carries no transaction ids and says why — the same honesty
+         `aliasFromRecoveredAccount` keeps for a name read off a passkey. */
+      recovered: true,
+      registryConfirmed: true,
+      resolverAddress: found.resolverAddress,
+      resolverTarget: 'contract',
+      resolverTargetHex: address,
+      updatedAt: new Date().toISOString(),
+    });
+    /* The note the next sign-in reads, so this device does not have to be asked
+       the name a second time. It is already on the credential's own terms —
+       nothing is owed to a future largeBlob write, and on Android there could
+       not be one. */
+    await patchProfile(activeProfile, {
+      accountOnPasskey: { address, network, alias: name, written: true },
+    });
+    storeNameStep(credentialId, 'done');
+    setIdentityStep(null);
+    setAccountSearch(null);
+    pushToast({
+      tone: 'success',
+      title: 'Your Passport is back',
+      body: `Midnight confirmed this passkey is part of ${aliasDomainOf(name)}.`,
+    });
+    return ownership;
   };
 
   /* ---------------------------------------------------------------------- */
@@ -4636,10 +5814,115 @@ export default function PassportDemo() {
    * It exists because a name's transfer is genuinely two transactions and the
    * person watching has to be told so — a progress line that hid the second
    * would leave an apparently finished send running for another minute.
+   *
+   * `returning` is the shielded path's fourth state and belongs to a FAILURE
+   * rather than to the transfer: it is the amount being put back into the
+   * sender's own account after the paying leg refused. See
+   * {@link executeShieldedSendToName} for why that path puts money back where
+   * the NIGHT path leaves it at the receiving address for Home to sweep in.
    */
   const [nameSendLeg, setNameSendLeg] = useState<
-    'withdrawing' | 'settling' | 'depositing' | null
+    'withdrawing' | 'settling' | 'depositing' | 'changing' | 'returning' | null
   >(null);
+
+  /**
+   * How many steps the running send has — two, or three when the account's coin
+   * is bigger than the payment and the change has to be put back.
+   *
+   * See `planShieldedSend` in `lib/sendLegs.ts` for why a shielded payment
+   * takes the whole coin out. The count is held here rather than derived in the
+   * sheet because only the orchestrator knows what leg one really withdrew.
+   */
+  const [nameSendSteps, setNameSendSteps] = useState<2 | 3>(2);
+
+  /**
+   * Which attempt at the running leg this is, for the sheet's progress line.
+   *
+   * `null` for a first attempt and for the wait between the legs. A retry is
+   * shown rather than hidden: a step that silently restarted would leave
+   * somebody watching a line that had said the same thing for a minute with no
+   * way to tell patience from a hang.
+   */
+  const [nameSendAttempt, setNameSendAttempt] = useState<number | null>(null);
+
+  /* ---------------------------------------------------------------------- */
+  /* Sends that have not finished                                            */
+  /*                                                                         */
+  /* Keyed by credential, exactly as the trail is, and for the same reason.   */
+  /* The two `localStorage` calls are here rather than in `lib/sendLegs.ts`   */
+  /* because storage cannot be drilled without a fake DOM; the parse that     */
+  /* refuses a record nothing could resume and the writer that drops a        */
+  /* finished one are the halves that CAN be, and both are.                   */
+  /* ---------------------------------------------------------------------- */
+  const [pendingSends, setPendingSends] = useState<PendingSend[]>([]);
+  /* Read by the orchestrator and by the incoming-transfer watch, both of which
+     need the current list without re-subscribing when it changes. */
+  const pendingSendsRef = useRef<PendingSend[]>([]);
+  const pendingSendsLoadedFor = useRef<string | null>(null);
+  /* Which unfinished payment is being carried on right now, so its card says
+     so instead of offering a button that is already being answered. The ref is
+     what the resume itself reads: two runs walking the same legs at once would
+     each prove against a state the other is moving. */
+  const [resumingSendId, setResumingSendId] = useState<string | null>(null);
+  const resumingSendIdRef = useRef<string | null>(null);
+  /* The records this session has already tried by itself. One attempt each:
+     after that the card is back with its Continue and the next move is the
+     reader's. */
+  const autoResumedSends = useRef<Set<string>>(new Set());
+
+  const persistPendingSends = useCallback((next: PendingSend[]) => {
+    pendingSendsRef.current = next;
+    setPendingSends(next);
+    const credentialId = profileRef.current?.passkey?.credentialId ?? null;
+    if (!credentialId) return;
+    try {
+      window.localStorage.setItem(
+        pendingSendsStorageKey(credentialId),
+        serialisePendingSends(next),
+      );
+    } catch {
+      /* A browser that refuses storage is a browser that cannot resume after a
+         reload. Nothing else about the run depends on this write. */
+    }
+  }, []);
+
+  const writePendingSend = useCallback(
+    (record: PendingSend) => {
+      persistPendingSends([
+        record,
+        ...pendingSendsRef.current.filter((entry) => entry.id !== record.id),
+      ]);
+    },
+    [persistPendingSends],
+  );
+
+  const dropPendingSend = useCallback(
+    (id: string) => {
+      persistPendingSends(pendingSendsRef.current.filter((entry) => entry.id !== id));
+    },
+    [persistPendingSends],
+  );
+
+  const pendingSendsCredentialId = profile?.passkey?.credentialId ?? null;
+  useEffect(() => {
+    if (!pendingSendsCredentialId) {
+      pendingSendsRef.current = [];
+      setPendingSends([]);
+      pendingSendsLoadedFor.current = null;
+      return;
+    }
+    if (pendingSendsLoadedFor.current === pendingSendsCredentialId) return;
+    pendingSendsLoadedFor.current = pendingSendsCredentialId;
+    let stored: string | null = null;
+    try {
+      stored = window.localStorage.getItem(pendingSendsStorageKey(pendingSendsCredentialId));
+    } catch {
+      stored = null;
+    }
+    const records = readPendingSends(stored);
+    pendingSendsRef.current = records;
+    setPendingSends(records);
+  }, [pendingSendsCredentialId]);
 
   /**
    * Paying a `.night` name — and why it is two transactions rather than one.
@@ -4684,94 +5967,434 @@ export default function PassportDemo() {
    * one transaction. That is the honest failure, and it is why the first leg
    * pays the sender rather than anywhere cleverer.
    */
-  const executeSendToName = useCallback(
-    async (params: {
-      domain: string;
-      accountAddress: string;
-      amount: bigint;
-    }): Promise<void> => {
+  /**
+   * ONE RUN, WRITTEN DOWN — the orchestrator both name sends go through.
+   *
+   * Until 2026/09/02 there were two of these, one per asset, and every fact
+   * about a run in progress lived in the closure: `withdrawn`, `arrived`,
+   * `heldBefore`, the leg. A reload took all of it, and what was left was value
+   * parked at the sender's own receiving address with nothing on screen
+   * offering to finish the transfer or put it back. Neither path retried
+   * anything, so a fee sponsor whose change was settling — a state that clears
+   * in a block — ended the transfer, and the sheet then said "Nothing was sent"
+   * over a first leg that had landed.
+   *
+   * So the run is a RECORD (`lib/sendLegs.ts`), persisted before the first leg
+   * is submitted and again at every transition, and this walks it:
+   *
+   *   1. `withdraw` — out of the sender's account to their OWN receiving
+   *      address, inside a single passkey ceremony. Up to three attempts on a
+   *      retryable failure, and the secret stays in the closure, so a retry
+   *      costs no second prompt.
+   *   2. `settle` — the wait for the wallet to actually hold what it withdrew.
+   *      For NIGHT that is a RISE of at least the amount above what was held
+   *      before, not a total; for a shielded run it is the note whose nonce was
+   *      not held before (`lib/shieldedNote.ts`). A timeout leaves the record at
+   *      `settle` rather than failing it: the money has moved and the arrival is
+   *      still coming.
+   *   3. `deposit` — the permissionless call into the RECIPIENT's account. No
+   *      ceremony, because it spends nothing of theirs. Three attempts again,
+   *      and only after those does a shielded run put the note back.
+   *
+   * Every failure is classified before it is acted on, and the classification
+   * is the thing that decides whether the same step is attempted again — never
+   * a substring match written here. See `classifyLegError`.
+   */
+  const runNameSend = useCallback(
+    async (initial: PendingSend, options: { resumed?: boolean } = {}): Promise<void> => {
       const account = requireAccount();
-      const ownReceivingAddress = localSurfaces?.unshieldedAddress ?? null;
-      if (!ownReceivingAddress) {
-        throw Object.assign(
-          new Error(
-            'Passport cannot see its own receiving address yet, so it cannot route a payment to a name. Try again in a moment.',
-          ),
-          { code: 'wallet-closed' as const },
+      const {
+        depositNight,
+        depositShielded,
+        prepareAccountDeposit,
+        shieldedCoinFromNote,
+        shieldedCoinOfValue,
+        walletShieldedNotes,
+        withdrawNight,
+        withdrawShielded,
+      } = await import('./identity/accountCustody.js');
+      const { findArrivedNote, shieldedNoteIds } = await import('./lib/shieldedNote.js');
+
+      const amount = BigInt(initial.amount);
+      const amountText = pendingSendAmountLabel(initial, pendingSendAsset(initial));
+      let record = initial;
+      /* THE PLAN, re-read from the record after every save, because leg one is
+         what settles it: a shielded run asks for the whole coin and only then
+         knows how big it was. See `planOfRecord` in `lib/sendLegs.ts`. */
+      let plan = planOfRecord(initial);
+      setNameSendSteps(plan.steps);
+      const save = (patch: Partial<PendingSend>): void => {
+        record = { ...record, ...patch, updatedAt: new Date().toISOString() };
+        plan = planOfRecord(record);
+        setNameSendSteps(plan.steps);
+        writePendingSend(record);
+      };
+
+      /* The record and the feed row are raised TOGETHER, and both of them only
+         once the ceremony has answered on a first run: a cancelled approval
+         signed nothing, so it must leave neither a row in the trail nor a card
+         on Home offering to continue a transfer that never began.
+
+         A resumed run REUSES the row it opened, so a transfer that took three
+         sessions to finish reads as one thing that happened. */
+      const begin = (resumed: boolean): string => {
+        if (record.activityId) {
+          if (resumed) {
+            updateActivity(record.activityId, {
+              status: 'pending',
+              detail: `${amountText}. Carrying on from where it stopped.`,
+            });
+          }
+          return record.activityId;
+        }
+        const entry = addActivity({
+          label: `Sending to ${record.recipient.label}`,
+          detail: `${amountText}, in ${plan.steps === 3 ? 'three' : 'two'} steps.`,
+          status: 'pending',
+          source: 'wallet',
+        });
+        save({ activityId: entry.id });
+        return entry.id;
+      };
+
+      /* What the Send sheet is handed. `legLanded` is the one fact its copy
+         turns on: "nothing was sent" over a landed first leg is a false
+         statement about where somebody's money is — and `recipientPaid` is the
+         second, for a three-step run that only fell over on the change. */
+      const failure = (cause: unknown, message: string, legLanded: boolean): Error =>
+        Object.assign(new Error(message, { cause }), {
+          code: 'name-send-failed' as const,
+          legLanded,
+          recipientPaid: Boolean(record.depositTxHash),
+        });
+
+      let activityId = record.activityId ?? '';
+      let settledNote: WalletShieldedNote | null = null;
+      /* WHAT THE CHAIN HAS SEEN OF LEG ONE. `txIdResolved` is an indexer answer
+         FOR that transaction, so a resolved hash IS the landing; an unresolved
+         one leaves the 33-byte identifier, which the indexer can be asked about
+         directly and cheaply while the wait runs. */
+      let withdrawLanded = false;
+      let withdrawIdentifier: string | null = null;
+      /* LEG TWO'S CONNECTION, OPENED WHILE LEG ONE CONFIRMS (2026/09/03).
+         Nothing about it depends on leg one: the recipient's account address
+         was resolved before the send began, and `deposit_night` /
+         `deposit_shielded` are permissionless, so the private state is empty.
+         What it buys is the expensive half of reaching a contract — the
+         compiled artefact, the providers, and `findDeployedContract`'s
+         verifier-key read against the deployed build — off the critical path,
+         so leg two's proof starts as soon as the note is there rather than a
+         connection later. The fee gate is deliberately NOT prewarmed: it is
+         one cached probe (`lib/sponsor.ts`, 30-second TTL) and a fresher
+         answer is worth more than the round trip it would save.
+
+         A failure here is absorbed, never propagated: the unprepared path
+         still works, and a prewarm that could break a send would cost more
+         than the wait it saves. */
+      let depositConnection: Promise<PreparedAccountCall | null> | null = null;
+      const prepareDeposit = (): void => {
+        if (depositConnection !== null) return;
+        depositConnection = prepareAccountDeposit(
+          account.handle,
+          record.recipient.accountAddress,
+        ).catch((cause) => {
+          console.info('[send] leg two could not be opened ahead of time', cause);
+          return null;
+        });
+      };
+      /* LEG THREE'S CONNECTION, OPENED WHILE LEG TWO PROVES. Same argument as
+         above and the same absorbed failure — the difference is only which
+         contract: leg three pays the change back into the SENDER's own
+         account, so this one is opened against `account.address`. It is
+         started when leg two starts, because the two cannot overlap: the
+         wallet holds ONE note at that point and its coin selection cannot
+         fund two spends out of it, so leg three's own transaction has to wait
+         for leg two's change. Its connection does not. */
+      let changeConnection: Promise<PreparedAccountCall | null> | null = null;
+      const prepareChange = (): void => {
+        if (changeConnection !== null) return;
+        changeConnection = prepareAccountDeposit(account.handle, account.address).catch(
+          (cause) => {
+            console.info('[send] leg three could not be opened ahead of time', cause);
+            return null;
+          },
         );
-      }
-      const amountText = formatNightUnits(params.amount);
-      try {
-        const { depositNight, nightColourHex, withdrawNight } = await import(
-          './identity/accountCustody.js'
-        );
-        const colourHex = nightColourHex();
-        await withAccountDeviceSecret(async (deviceSecret) => {
-          /* Raised only now the ceremony has answered: a cancelled approval
-             signed nothing, so it writes no activity row either. */
-          const entry = addActivity({
-            label: `Sending to ${params.domain}`,
-            detail: `${amountText} NIGHT, in two steps.`,
-            status: 'pending',
-            source: 'wallet',
-          });
-          let withdrawn = false;
+      };
+      /* A RESUME GETS A FRESH BUDGET. The counts are what the record remembers
+         about the run that stopped; carrying them into a new press would spend
+         a person's Continue on a single attempt. */
+      if (options.resumed) save({ attempts: { withdraw: 0, deposit: 0, change: 0 } });
+
+      const runWithdraw = async (deviceSecret: Uint8Array): Promise<void> => {
+        activityId = begin(false);
+        /* WHAT THE WALLET ALREADY HELD, read before anything is submitted and
+           written down before it is used. Both halves matter: a shielded run
+           identifies its note by the nonce that was NOT here, and a NIGHT run
+           waits for a rise above this figure rather than for a total. */
+        const expectedNote =
+          record.kind === 'shielded'
+            ? { heldBeforeIds: [...shieldedNoteIds(await walletShieldedNotes(account.handle))] }
+            : {
+                unshieldedBefore: (
+                  atomicNightFromFormatted(
+                    (await account.handle.getBalances()).unshieldedBalance,
+                  ) ?? 0n
+                ).toString(),
+              };
+        save({ expectedNote });
+        for (let attempt = record.attempts.withdraw; ; attempt += 1) {
+          setNameSendLeg('withdrawing');
+          setNameSendAttempt(attempt + 1);
           try {
-            setNameSendLeg('withdrawing');
-            const out = await withdrawNight(
-              account.handle,
-              deviceSecret,
-              {
-                contractAddress: account.address,
-                colourHex,
-                amount: params.amount,
-                recipientAddress: ownReceivingAddress,
-              },
-              (progress) => setAccountPhase(progress.phase),
-            );
-            withdrawn = true;
-            updateActivity(entry.id, {
-              detail: `${amountText} NIGHT left your account. Paying it into ${params.domain}’s account next.`,
+            const out =
+              record.kind === 'night'
+                ? await withdrawNight(
+                    account.handle,
+                    deviceSecret,
+                    {
+                      contractAddress: account.address,
+                      colourHex: record.colourHex,
+                      amount,
+                      recipientAddress: record.ownReceivingAddress,
+                    },
+                    (progress) => setAccountPhase(progress.phase),
+                  )
+                : await withdrawShielded(
+                    account.handle,
+                    deviceSecret,
+                    {
+                      contractAddress: account.address,
+                      colourHex: record.tokenType ?? record.colourHex,
+                      amount,
+                      recipientShieldedAddress: record.ownReceivingAddress,
+                      /* THE WHOLE COIN, and the reason is the deployed
+                         contract's: a partial `withdraw_shielded` re-registers
+                         its change, and the node refuses every later
+                         withdrawal against what it leaves behind. See
+                         `planShieldedSend` in `lib/sendLegs.ts`. */
+                      whole: true,
+                    },
+                    (progress) => setAccountPhase(progress.phase),
+                  );
+            withdrawLanded = out.txIdResolved;
+            withdrawIdentifier = out.txIdResolved ? null : out.txId;
+            /* WHAT REALLY CAME OUT, which the account decided and not this
+               client: the plan's third leg is sized from it. Absent on the
+               NIGHT path, which withdraws exactly what it was asked for. */
+            const withdrawn =
+              'amount' in out && typeof out.amount === 'bigint' ? out.amount : null;
+            save({
+              leg: 'settle',
+              withdrawTxHash: out.txId,
+              ...(withdrawn === null ? {} : { withdrawAmount: withdrawn.toString() }),
+              attempts: { ...record.attempts, withdraw: attempt + 1 },
+              lastError: undefined,
+            });
+            updateActivity(activityId, {
+              detail: `${amountText} left your account. Paying it into ${record.recipient.label}’s account next.`,
               source: 'chain',
               txHash: out.txId,
             });
-
-            /* The wait between the legs. `deposit_night` is balanced from what
-               the wallet really holds, so a deposit built before the arrival
-               has synced fails inside the SDK rather than against a check we
-               wrote — and that failure is unreadable. Two minutes is generous
-               against a transaction the indexer has already reported. */
-            setNameSendLeg('settling');
-            const settleBy = Date.now() + 120_000;
-            for (;;) {
-              const balances = await account.handle.getBalances();
-              const held = atomicNightFromFormatted(balances.unshieldedBalance);
-              if (held !== null && held >= params.amount) break;
-              if (Date.now() > settleBy) {
-                throw Object.assign(
-                  new Error(
-                    'The amount left your account but has not arrived at your receiving address yet, so the second step did not run.',
-                  ),
-                  { code: 'settling-timeout' as const },
-                );
-              }
-              await pause(4_000);
+            return;
+          } catch (cause) {
+            const verdict = classifyLegError(cause);
+            save({
+              attempts: { ...record.attempts, withdraw: attempt + 1 },
+              lastError: { message: verdict.message, retryable: verdict.retryable },
+            });
+            if (!verdict.retryable || attempt + 1 >= SEND_LEG_ATTEMPTS) {
+              /* THE PANEL GETS A SENTENCE, THE CONSOLE GETS THE CAUSE. This is
+                 the refusal a user was shown as "The account contract rejected
+                 withdraw_shielded — SubmissionError: 1010: Invalid
+                 Transaction: Custom error: 239": three machinery words, a
+                 circuit name, and a number, none of it theirs to act on.
+                 Nothing has left the account when leg one refuses, which is
+                 what makes `sendRefusalText`'s claim a true one here. */
+              console.debug('[send] the first step was refused', cause);
+              throw failure(cause, sendRefusalText(cause), false);
             }
+            await pause(retryDelayMs(attempt));
+          }
+        }
+      };
 
-            setNameSendLeg('depositing');
-            const paid = await depositNight(
-              account.handle,
-              {
-                contractAddress: params.accountAddress,
-                colourHex,
-                amount: params.amount,
-              },
-              (progress) => setAccountPhase(progress.phase),
-            );
-            updateActivity(entry.id, {
-              status: 'complete',
-              label: `Sent to ${params.domain}`,
-              detail: `${amountText} NIGHT is now in ${params.domain}’s account.`,
+      /**
+       * ONE LOOK at the sender's own wallet for a shielded note of exactly
+       * `wanted` that was not there before the run began. No network: this
+       * reads the state the wallet's live sync has applied.
+       *
+       * `wanted` is a parameter because the run looks TWICE. Leg one pays in
+       * the whole coin, so the first look is for that figure; leg two spends
+       * it and the wallet's own balancing returns the difference, so the third
+       * leg's look is for the CHANGE. Both are notes that were not held before
+       * leg one, and the amount is what tells them apart.
+       */
+      const lookForNote = async (
+        wanted: bigint,
+      ): Promise<{ arrived: false } | { arrived: true; note: WalletShieldedNote }> => {
+        const expectation = record.expectedNote;
+        const heldBefore = new Set(
+          expectation && 'heldBeforeIds' in expectation ? expectation.heldBeforeIds : [],
+        );
+        const arrived = findArrivedNote(await walletShieldedNotes(account.handle), {
+          tokenType: record.tokenType ?? record.colourHex,
+          amount: wanted,
+          heldBefore,
+        });
+        return arrived === null ? { arrived: false } : { arrived: true, note: arrived };
+      };
+
+      /**
+       * ONE LOOK at the sender's own wallet for what leg one paid in. No
+       * network: this reads the state the wallet's live sync has applied.
+       */
+      const lookForArrival = async (): Promise<
+        { arrived: false } | { arrived: true; note: WalletShieldedNote | null }
+      > => {
+        const expectation = record.expectedNote;
+        if (record.kind === 'shielded') return lookForNote(plan.withdraw);
+        /* THE ARRIVAL, NOT THE TOTAL. This compared the wallet's whole
+           unshielded balance against the amount until 2026/09/02, so a wallet
+           that already held enough went straight on to the paying leg and
+           built it against money that had not arrived — which fails inside the
+           SDK, unreadably. */
+        const before =
+          expectation && 'unshieldedBefore' in expectation
+            ? BigInt(expectation.unshieldedBefore)
+            : 0n;
+        const held = atomicNightFromFormatted(
+          (await account.handle.getBalances()).unshieldedBalance,
+        );
+        return held !== null && held >= before + amount
+          ? { arrived: true, note: null }
+          : { arrived: false };
+      };
+
+      /**
+       * THE WAIT BETWEEN THE LEGS — 20 to 30 seconds of a 54-second NIGHT send
+       * until 2026/09/03, and most of it spent not asking.
+       *
+       * It was a flat two-or-three-second sleep around the look above, so the
+       * arrival was noticed up to a whole tick after it happened, and the tick
+       * had been chosen for a client that never asked the CHAIN anything. It
+       * asks now: `withdrawIdentifier` is leg one's own transaction identifier
+       * and one indexer point lookup answers whether it has landed, at which
+       * moment the wallet is re-read immediately and thereafter every 400 ms —
+       * see `watchForSettlement` in `lib/sendLegs.ts` for the two cadences and
+       * why they are what they are.
+       *
+       * The deadline behaviour is unchanged and deliberate: a wait that runs
+       * out leaves the record at `settle` rather than failing it, because the
+       * money has moved and the arrival is still coming.
+       */
+      const runSettle = async (): Promise<WalletShieldedNote | null> => {
+        setNameSendLeg('settling');
+        setNameSendAttempt(null);
+        /* Leg two's connection, started before the first look rather than
+           after the last one. */
+        prepareDeposit();
+        /* The chain's own answer about leg one: one point lookup of the
+           identifier the withdrawal came back with. Absent where leg one
+           already resolved its ledger hash, which is the same evidence. */
+        const identifier = withdrawIdentifier;
+        let confirmLanded: (() => Promise<boolean>) | undefined;
+        if (identifier !== null) {
+          const { resolveDeployTxHashOnce } = await import('./identity/passportContract.js');
+          confirmLanded = async () =>
+            (await resolveDeployTxHashOnce(
+              account.handle.network.indexerHttpUrl,
+              identifier,
+            )) !== null;
+        }
+        const outcome = await watchForSettlement<WalletShieldedNote | null>({
+          readWallet: lookForArrival,
+          landed: withdrawLanded,
+          confirmLanded,
+          /* The surfaces catch up with the chain rather than with the next
+             render: the amount has demonstrably left the account by now, and
+             Home was showing the figure from before it did. */
+          onLanded: () => {
+            void refreshLocalBalances();
+          },
+          now: () => Date.now(),
+          sleep: pause,
+          deadlineMs: SETTLE_DEADLINE_MS,
+        });
+        if (outcome.settled) return outcome.note;
+        /* Left at `settle`, not failed: the amount has moved and the arrival
+           is still coming. Home offers to look again. */
+        const message = `${amountText} left your account and has not reached your Passport yet.`;
+        save({ leg: 'settle', lastError: { message, retryable: true } });
+        throw failure(new Error(message), message, true);
+      };
+
+      const runDeposit = async (note: WalletShieldedNote | null): Promise<void> => {
+        save({ leg: 'deposit' });
+        /* Whatever the prewarm managed, or nothing — a resumed run that skipped
+           the wait never started one, and the deposit opens its own.
+
+           FIRST ATTEMPT ONLY. A retryable refusal is a REBUILD (see
+           `classifyLegError`): the state it was proved against has moved, so
+           the next attempt opens the contract again rather than reusing a
+           connection made before the failure. The prewarm's whole value is on
+           the attempt that follows the wait, which is the one that succeeds. */
+        let prepared = depositConnection === null ? null : await depositConnection;
+        /* Leg three's connection, opened while leg two proves. Only for a run
+           that HAS a third leg — a whole-coin payment has nothing to put back
+           and would be opening a contract for no reason. */
+        if (plan.change !== null) prepareChange();
+        for (let attempt = record.attempts.deposit; ; attempt += 1) {
+          setNameSendLeg('depositing');
+          setNameSendAttempt(attempt + 1);
+          try {
+            const paid =
+              record.kind === 'night'
+                ? await depositNight(
+                    account.handle,
+                    {
+                      contractAddress: record.recipient.accountAddress,
+                      colourHex: record.colourHex,
+                      amount,
+                      prepared,
+                    },
+                    (progress) => setAccountPhase(progress.phase),
+                  )
+                : await depositShielded(
+                    account.handle,
+                    {
+                      contractAddress: record.recipient.accountAddress,
+                      /* THE WHOLE NOTE where the payment is the whole coin, and
+                         a coin of exactly what is owed where it is not. The
+                         second is a new coin rather than a note handed over
+                         intact: the wallet's own balancing spends the note leg
+                         one paid in, funds this, and returns the difference —
+                         which leg three puts back. */
+                      coin:
+                        plan.change === null
+                          ? shieldedCoinFromNote(note as WalletShieldedNote)
+                          : shieldedCoinOfValue(record.tokenType ?? record.colourHex, plan.pay),
+                      prepared,
+                    },
+                    (progress) => setAccountPhase(progress.phase),
+                  );
+            save({
+              /* PAID. A run with change still owes the sender their own money
+                 back, so it is not `done` until leg three has run — and the
+                 hash is written down, so a reload knows the recipient has been
+                 paid and never pays them twice. */
+              leg: plan.change === null ? 'done' : 'change',
+              depositTxHash: paid.txId,
+              attempts: { ...record.attempts, deposit: attempt + 1 },
+              lastError: undefined,
+            });
+            if (plan.change === null) dropPendingSend(record.id);
+            updateActivity(activityId, {
+              status: plan.change === null ? 'complete' : 'pending',
+              label: `Sent to ${record.recipient.label}`,
+              detail:
+                plan.change === null
+                  ? `${amountText} is now in ${record.recipient.label}’s account.`
+                  : `${amountText} is now in ${record.recipient.label}’s account. Putting your change back next.`,
               source: 'chain',
               txHash: paid.txId,
             });
@@ -4779,58 +6402,351 @@ export default function PassportDemo() {
               tone: 'success',
               /* Accepted, not yet included — the same claim every other
                  transfer on this surface makes. */
-              title: `${params.domain} paid — confirming`,
-              body: 'The fee sponsor covered both network fees.',
+              title: `${record.recipient.label} paid — confirming`,
+              body: 'The fee sponsor covered every network fee.',
               link: explorerTxLink(paid.txId, paid.network),
             });
             void refreshLocalBalances();
+            return;
           } catch (cause) {
-            const message = cause instanceof Error ? cause.message : String(cause);
-            updateActivity(entry.id, {
-              status: 'error',
-              label: withdrawn ? `${params.domain} was not paid` : `Nothing was sent`,
-              /* WHERE THE MONEY IS. A half-finished transfer is the one state
-                 where saying only "it failed" would be a lie by omission. */
-              detail: withdrawn
-                ? `${message} The ${amountText} NIGHT left your account and is sitting at your receiving address — Home offers to move it back in.`
-                : message,
-              source: 'local',
+            const verdict = classifyLegError(cause);
+            prepared = null;
+            save({
+              attempts: { ...record.attempts, deposit: attempt + 1 },
+              lastError: { message: verdict.message, retryable: verdict.retryable },
             });
-            if (withdrawn) {
-              pushToast({
-                tone: 'error',
-                title: `${params.domain} was not paid`,
-                body: `Your ${amountText} NIGHT is safe at your receiving address. Move it back into your account from Home.`,
-              });
-              void refreshLocalBalances();
+            if (!verdict.retryable || attempt + 1 >= SEND_LEG_ATTEMPTS) {
+              throw failure(cause, verdict.message, true);
             }
-            throw cause;
+            await pause(retryDelayMs(attempt));
           }
+        }
+      };
+
+      /**
+       * LEG THREE — the sender's own change, going back into their account.
+       *
+       * It exists because the deployed contract cannot be asked for part of a
+       * coin without poisoning the account (see `planShieldedSend`), so leg one
+       * takes the whole thing and this is the half that was never the
+       * recipient's. The recipient HAS been paid by the time this runs, which
+       * is what makes every failure here a smaller thing than it looks: the
+       * payment is finished, the change is in the sender's own wallet, and the
+       * record left at `change` is what Home offers to carry on.
+       *
+       * The change note is found the same way leg one's was — a note of exactly
+       * this size that the wallet did not hold before the run began — and it
+       * exists at all because the wallet's own balancing produced it when leg
+       * two spent the bigger note. It cannot be built before leg two lands, so
+       * this waits; only the CONNECTION was opened early.
+       */
+      const runChange = async (): Promise<void> => {
+        const owed = plan.change;
+        /* Never reached with no change: the caller checks the plan first. This
+           is the type narrowing, not a second decision. */
+        if (owed === null) return;
+        save({ leg: 'change' });
+        setNameSendLeg('changing');
+        setNameSendAttempt(null);
+        const identifier = record.depositTxHash;
+        const outcome = await watchForSettlement<WalletShieldedNote>({
+          readWallet: () => lookForNote(owed),
+          /* Leg two's transaction is the one the change comes out of, so the
+             indexer is asked about that and not about leg one. A resolved hash
+             is already an indexer answer, so the record's hash starts this
+             landed either way — the wallet is simply re-read until the change
+             appears. */
+          landed: true,
+          now: () => Date.now(),
+          sleep: pause,
+          deadlineMs: SETTLE_DEADLINE_MS,
         });
+        if (!outcome.settled) {
+          const waiting = 'Your change has not come back to your wallet yet.';
+          save({ leg: 'change', lastError: { message: waiting, retryable: true } });
+          throw failure(new Error(waiting), waiting, true);
+        }
+        let prepared = changeConnection === null ? null : await changeConnection;
+        for (let attempt = record.attempts.change; ; attempt += 1) {
+          setNameSendLeg('changing');
+          setNameSendAttempt(attempt + 1);
+          try {
+            const back = await depositShielded(
+              account.handle,
+              {
+                contractAddress: account.address,
+                coin: shieldedCoinFromNote(outcome.note),
+                prepared,
+              },
+              (progress) => setAccountPhase(progress.phase),
+            );
+            save({
+              leg: 'done',
+              attempts: { ...record.attempts, change: attempt + 1 },
+              lastError: undefined,
+            });
+            dropPendingSend(record.id);
+            updateActivity(activityId, {
+              status: 'complete',
+              label: `Sent to ${record.recipient.label}`,
+              detail: `${amountText} is now in ${record.recipient.label}’s account, and your change is back in yours.`,
+              source: 'chain',
+              txHash: back.txId,
+            });
+            void refreshLocalBalances();
+            return;
+          } catch (cause) {
+            const verdict = classifyLegError(cause);
+            prepared = null;
+            save({
+              attempts: { ...record.attempts, change: attempt + 1 },
+              lastError: { message: verdict.message, retryable: verdict.retryable },
+            });
+            if (!verdict.retryable || attempt + 1 >= SEND_LEG_ATTEMPTS) {
+              throw failure(cause, verdict.message, true);
+            }
+            await pause(retryDelayMs(attempt));
+          }
+        }
+      };
+
+      try {
+        if (!record.withdrawTxHash) {
+          await withAccountDeviceSecret((deviceSecret) => runWithdraw(deviceSecret));
+        } else {
+          activityId = begin(options.resumed ?? false);
+          /* A run being carried on submitted its first leg in an earlier pass
+             of this function — a reload ago at least — so the chain has had it
+             for longer than any block time. Nothing is gained by asking the
+             indexer whether a minutes-old transaction landed, and the record
+             keeps the resolved HASH rather than the identifier the lookup takes. */
+          withdrawLanded = true;
+        }
+        /* A RUN CARRIED ON FROM THE THIRD LEG has already paid the recipient,
+           and there is exactly one thing left to do. Running the first two
+           again would pay them a second time. */
+        if (record.leg === 'change') {
+          await runChange();
+        } else {
+          /* A shielded run needs the note itself however far it had got: the
+             deposit consumes one specific note and only this can name it. A
+             NIGHT run past `settle` has already seen its arrival. */
+          if (record.kind === 'shielded' || record.leg === 'settle') {
+            settledNote = await runSettle();
+          }
+          await runDeposit(settledNote);
+          if (plan.change !== null) await runChange();
+        }
       } catch (cause) {
+        const legLanded = Boolean(record.withdrawTxHash);
+        /* THE RECIPIENT HAS THEIR MONEY. A three-step run that stopped on the
+           change is a FINISHED payment with the sender's own remainder still
+           in their wallet, and every sentence below has to say so — "they were
+           not paid" over that would send somebody chasing a payment that
+           happened. */
+        const recipientPaid = Boolean(record.depositTxHash);
         const message = cause instanceof Error ? cause.message : String(cause);
-        const code =
-          typeof cause === 'object' && cause !== null &&
-          typeof (cause as { code?: unknown }).code === 'string'
-            ? (cause as { code: string }).code
-            : null;
-        if (code === 'wallet-closed') {
-          pushToast({ tone: 'error', title: 'Nothing was sent', body: message });
+
+        /* THE LAST RESORT, and only now the paying leg has had its three
+           attempts: the note goes back into the sender's own account, where it
+           is spendable again. The NIGHT path needs no equivalent — Home's
+           "Money outside your account" card sweeps unshielded value in on one
+           press, and that card cannot see a note. */
+        let returned = false;
+        if (record.kind === 'shielded' && record.leg === 'deposit' && settledNote !== null) {
+          try {
+            setNameSendLeg('returning');
+            await depositShielded(
+              account.handle,
+              { contractAddress: account.address, coin: shieldedCoinFromNote(settledNote) },
+              (progress) => setAccountPhase(progress.phase),
+            );
+            returned = true;
+          } catch (returnCause) {
+            /* The ORIGINAL failure is what the reader is told about; this one
+               only changes which sentence says where the money is. The record
+               keeps the note's identity either way, so the run is still
+               resumable from Home. */
+            console.info(
+              '[send] the shielded amount could not be returned to the account',
+              returnCause,
+            );
+          }
+        }
+
+        if (returned || !legLanded) {
+          /* Nothing of theirs is anywhere it should not be: either the note is
+             back in the account, or the first leg never spent. Neither is a
+             thing to offer a Continue button over. */
+          dropPendingSend(record.id);
+        } else if (record.leg !== 'settle' && record.leg !== 'change') {
+          save({ leg: 'failed' });
+        }
+
+        if (activityId) {
+          updateActivity(activityId, {
+            status: 'error',
+            label: recipientPaid
+              ? `Sent to ${record.recipient.label}`
+              : legLanded
+                ? `${record.recipient.label} was not paid yet`
+                : 'Nothing was sent',
+            /* WHERE THE MONEY IS. A half-finished transfer is the one state
+               where saying only "it failed" would be a lie by omission. */
+            detail: recipientPaid
+              ? `${amountText} reached ${record.recipient.label}. Your change has not come back to your account yet — Home offers to finish that.`
+              : returned
+                ? `${message} Nothing was paid to ${record.recipient.label}, and the ${amountText} is back in your account.`
+                : legLanded
+                  ? `${message} The ${amountText} is waiting at your Passport — Home offers to carry the payment on.`
+                  : message,
+            source: 'local',
+          });
+        }
+        if (legLanded) {
+          pushToast({
+            tone: recipientPaid ? 'success' : 'error',
+            title: recipientPaid
+              ? `${record.recipient.label} paid`
+              : `${record.recipient.label} was not paid yet`,
+            body: recipientPaid
+              ? 'Your change has not come back to your account yet. Finish that from Home.'
+              : returned
+                ? `Your ${amountText} is back in your account.`
+                : `Your ${amountText} is safe. Carry the payment on from Home.`,
+          });
+          void refreshLocalBalances();
         }
         throw cause;
       } finally {
         setNameSendLeg(null);
+        setNameSendAttempt(null);
         setAccountPhase(null);
       }
     },
     [
       addActivity,
-      localSurfaces,
+      dropPendingSend,
+      pendingSendAsset,
       refreshLocalBalances,
       requireAccount,
       updateActivity,
       withAccountDeviceSecret,
+      writePendingSend,
     ],
+  );
+
+  /**
+   * Carrying on a run that stopped — the Home card's Continue, and the resume
+   * that no longer waits for it.
+   *
+   * A PRESENCE CEREMONY stands in front of a PRESSED continue, because a resume
+   * the reader started is one they should be asked to confirm. Which ceremony
+   * depends on what is left to do: leg two is permissionless and needs only the
+   * confirmation, while a run that never spent has to raise the account's own
+   * assertion — and the orchestrator raises that one itself, so asking for a
+   * confirmation first would be two prompts for one press.
+   *
+   * `prompt: false` is the automatic resume below, and it asks for nothing: the
+   * assertion that sent leg one covered the whole run, and there is nobody
+   * there to confirm anything to. See `resumesWithoutPrompt` for which records
+   * qualify.
+   *
+   * One at a time, whichever way it started. Two runs walking the same legs at
+   * once would each build a transaction against a contract state the other is
+   * moving, and the second would be refused by the node for it.
+   */
+  const continuePendingSend = useCallback(
+    async (id: string, options: { prompt?: boolean } = {}): Promise<void> => {
+      const record = pendingSendsRef.current.find((entry) => entry.id === id);
+      if (!record) return;
+      if (resumingSendIdRef.current !== null) return;
+      resumingSendIdRef.current = id;
+      setResumingSendId(id);
+      try {
+        if ((options.prompt ?? true) && record.withdrawTxHash) {
+          await confirmLocalApproval(`Continue sending to ${record.recipient.label}`);
+        }
+        await runNameSend(record, { resumed: true });
+      } catch (cause) {
+        /* The trail row and the toast are the orchestrator's, and a refused
+           ceremony has its own. Nothing here says any of it twice. */
+        console.info('[send] carrying the payment on did not finish', cause);
+      } finally {
+        resumingSendIdRef.current = null;
+        setResumingSendId(null);
+      }
+    },
+    [confirmLocalApproval, runNameSend],
+  );
+
+  /**
+   * THE RESUME NOBODY HAS TO PRESS (2026/09/04).
+   *
+   * A reload mid-send used to leave the card sitting on Home behind
+   * `Continue`. The 2026/09/04 stability audit reloaded 33 seconds into a mUSD
+   * send and the card waited three minutes, doing nothing, until the button was
+   * pressed — at which point the payment finished exactly as it would have. The
+   * money was at the sender's own Passport the whole time and every leg left
+   * was permissionless, so the wait bought nothing and cost the recipient three
+   * minutes.
+   *
+   * So a record that can be carried on without asking anybody is carried on.
+   * `resumesWithoutPrompt` decides which — a run whose first leg landed, which
+   * is one the sender already authorised — and the card shows it working rather
+   * than offering a button.
+   *
+   * THE SHORT DELAY IS NOT COSMETIC. A page that has just loaded is still
+   * opening its wallet, and a leg submitted against a wallet mid-sync is a leg
+   * that fails for a reason that has nothing to do with the payment. The gate
+   * is the session and the account contract both being there; the delay is the
+   * beat after that for the first balances to land.
+   *
+   * ONCE PER RECORD PER SESSION. If the automatic attempt does not finish the
+   * run, the card is back with its `Continue` and the next move is the
+   * reader's — retrying by itself forever would be a screen that never admits
+   * something is wrong.
+   */
+  useEffect(() => {
+    if (!localSessionActive || !accountContractAddress) return;
+    const record = pendingSends.find(
+      (entry) => resumesWithoutPrompt(entry) && !autoResumedSends.current.has(entry.id),
+    );
+    if (!record) return;
+    autoResumedSends.current.add(record.id);
+    const handle = window.setTimeout(() => {
+      void continuePendingSend(record.id, { prompt: false });
+    }, PENDING_SEND_AUTO_RESUME_DELAY_MS);
+    return () => window.clearTimeout(handle);
+  }, [accountContractAddress, continuePendingSend, localSessionActive, pendingSends]);
+
+  const executeSendToName = useCallback(
+    async (params: {
+      domain: string;
+      accountAddress: string;
+      amount: bigint;
+    }): Promise<void> => {
+      const ownReceivingAddress = localSurfaces?.unshieldedAddress ?? null;
+      if (!ownReceivingAddress) {
+        throw Object.assign(
+          new Error(
+            'Passport cannot see its own receiving address yet, so it cannot route a payment there. Try again in a moment.',
+          ),
+          { code: 'wallet-closed' as const },
+        );
+      }
+      const { nightColourHex } = await import('./identity/accountCustody.js');
+      await runNameSend(
+        newPendingSend({
+          kind: 'night',
+          recipient: { label: params.domain, accountAddress: params.accountAddress },
+          amount: params.amount,
+          colourHex: nightColourHex(),
+          ownReceivingAddress,
+        }),
+      );
+    },
+    [localSurfaces, runNameSend],
   );
 
   /**
@@ -4889,17 +6805,40 @@ export default function PassportDemo() {
             source: 'wallet',
           });
           try {
-            const result = await withdrawShielded(
-              account.handle,
-              deviceSecret,
-              {
-                contractAddress: account.address,
-                colourHex: params.tokenType,
-                amount: params.amount,
-                recipientShieldedAddress: params.recipientAddress,
-              },
-              (progress) => setAccountPhase(progress.phase),
-            );
+            /* ONE REBUILD, AND ONLY ONE (2026/09/03). A node refusal means the
+               transaction was proved against a state that has moved, so the
+               same bytes earn the same answer and a fresh build is worth a try
+               — `withdrawShielded` re-reads the account from chain before it
+               builds anything, so the second attempt is against the state as it
+               is now. It costs no second passkey ceremony: the device secret is
+               already held by the block around this.
+
+               ONLY ONE, because a refusal that survives a rebuild has been
+               measured to survive every rebuild — three attempts, three
+               `Custom error: 239`s, live on stagenet — and the attempts after
+               the first buy a person forty more seconds of watching a sheet
+               before being told the same thing. */
+            const withdrawOnce = () =>
+              withdrawShielded(
+                account.handle,
+                deviceSecret,
+                {
+                  contractAddress: account.address,
+                  colourHex: params.tokenType,
+                  amount: params.amount,
+                  recipientShieldedAddress: params.recipientAddress,
+                },
+                (progress) => setAccountPhase(progress.phase),
+              );
+            let result;
+            try {
+              result = await withdrawOnce();
+            } catch (firstAttempt) {
+              if (!classifyLegError(firstAttempt).rebuild) throw firstAttempt;
+              console.debug('[send] the shielded withdrawal is being built again', firstAttempt);
+              await new Promise((resolve) => setTimeout(resolve, retryDelayMs(0)));
+              result = await withdrawOnce();
+            }
             updateActivity(entry.id, {
               status: 'complete',
               label: 'Sent a shielded token',
@@ -4918,25 +6857,44 @@ export default function PassportDemo() {
             });
             void refreshLocalBalances();
           } catch (cause) {
+            /* THE PANEL GETS A SENTENCE, THE CONSOLE GETS THE CAUSE
+               (2026/09/03). A user's second mUSD send showed them "The account
+               contract rejected withdraw_shielded — SubmissionError: 1010:
+               Invalid Transaction: Custom error: 239": three machinery words, a
+               circuit name, and a number, none of it theirs to act on. The
+               chain is logged whole — as the error, not a string of it, so its
+               causes survive — and the row says what happened to the money.
+               See `sendRefusalText` in `lib/sendLegs.ts`. */
+            console.debug('[send] the shielded withdrawal was refused', cause);
             updateActivity(entry.id, {
               status: 'error',
-              detail: cause instanceof Error ? cause.message : String(cause),
+              detail: sendRefusalText(cause),
               source: 'local',
             });
             throw cause;
           }
         });
       } catch (cause) {
-        const message = cause instanceof Error ? cause.message : String(cause);
         const code =
           typeof cause === 'object' && cause !== null &&
           typeof (cause as { code?: unknown }).code === 'string'
             ? (cause as { code: string }).code
             : null;
         if (code === 'wallet-closed') {
-          pushToast({ tone: 'error', title: 'Nothing was sent', body: message });
+          pushToast({
+            tone: 'error',
+            title: 'Nothing was sent',
+            body: cause instanceof Error ? cause.message : String(cause),
+          });
         }
-        throw cause;
+        /* A CODED refusal is this app's own and was written for a reader —
+           "Passport cannot see its own receiving address yet" is a thing to do
+           something about. Everything else is rethrown as the sentence rather
+           than as the machinery: the sheet renders whatever reaches it, and
+           what reached it was the SDK's. The original is on the console above,
+           and on the row. */
+        if (code !== null) throw cause;
+        throw Object.assign(new Error(sendRefusalText(cause)), { cause });
       } finally {
         setAccountPhase(null);
       }
@@ -4948,6 +6906,123 @@ export default function PassportDemo() {
       updateActivity,
       withAccountDeviceSecret,
     ],
+  );
+
+  /**
+   * Paying a `.night` name in a SHIELDED asset — a Passport-to-Passport
+   * shielded transfer.
+   *
+   * WHY THIS IS TWO TRANSACTIONS, AND WHAT IT WOULD TAKE TO MAKE IT ONE
+   * -------------------------------------------------------------------
+   * Both halves of the pair already exist in `account.compact` and neither can
+   * be made to reach the other in a single call:
+   *
+   *   - `withdraw_shielded(recipient: ZswapCoinPublicKey, colour, amount)`
+   *     sends through `left<ZswapCoinPublicKey, ContractAddress>(recipient)`.
+   *     The recipient is a USER key BY TYPE, so a recipient account cannot be
+   *     named with it at all. Unlike the NIGHT withdrawal this fails CLOSED
+   *     rather than silently: the address decoder refuses anything that is not
+   *     an `mn_shield-addr…`, and the transaction builder refuses to resolve an
+   *     encryption key for contract bytes before anything is submitted.
+   *   - `deposit_shielded(coin: ShieldedCoinInfo)` calls no `require_device()`,
+   *     so it is permissionless exactly as `deposit_night` is — anyone may pay
+   *     into a stranger's account. What it takes is one WHOLE note, nonce and
+   *     all, because `receiveShielded` consumes that specific note.
+   *
+   * The two cannot be batched into one transaction either: batching is scoped
+   * to a single contract by design, and the two legs are two different
+   * accounts. One transaction would need a NEW circuit on the account contract
+   * making a cross-contract call — send in the caller, receive in the callee —
+   * and adding any circuit to `account.compact` invalidates every account
+   * already deployed, because opening a contract verifies EVERY local circuit's
+   * verifier key against the deployed state. That is a migration for every
+   * existing Passport, and it is not this unit's to spend.
+   *
+   * So the pair, mirroring {@link executeSendToName} step for step:
+   *
+   *   1. `withdraw_shielded` out of the sender's account to the SENDER's own
+   *      shielded address, for EXACTLY the transfer amount — because a note is
+   *      deposited whole, and a note larger than the amount cannot be split on
+   *      the way in. One passkey ceremony, because this is the only leg that
+   *      spends from an account;
+   *   2. wait for the wallet to hold the note, and identify it by NONCE rather
+   *      than by colour and value. A wallet that already held a note of the
+   *      same colour and the same size would otherwise offer two candidates and
+   *      the wrong one strands the new one — see `lib/shieldedNote.ts`, which
+   *      holds that rule and is drilled directly;
+   *   3. `deposit_shielded` that exact note into the RECIPIENT's account. No
+   *      ceremony, and the recipient's own `coins` ledger is credited, which is
+   *      what makes the value theirs to spend.
+   *
+   * IF THE PAYING LEG FAILS the money is put BACK into the sender's account,
+   * which is where this path departs from the NIGHT one. That is not cleverness
+   * for its own sake: the NIGHT path can leave the amount at the receiving
+   * address because Home's "Money outside your account" card sweeps unshielded
+   * value back in on one press, and that card cannot see a shielded note. With
+   * no card to hand the reader, the honest thing is to undo the leg that did
+   * run — one more permissionless deposit, no ceremony — and say so. If the
+   * return ALSO fails, or the note never arrived to return, the row says
+   * exactly where the value is rather than claiming it came back.
+   *
+   * PRIVACY, said plainly because the contract's own header admits it: value
+   * held by an account is PUBLIC ledger state. This hides the sender and the
+   * recipient from the shielded pool, and it does not hide the amount from
+   * anybody reading either account. Nothing in the copy implies otherwise.
+   */
+  const executeShieldedSendToName = useCallback(
+    async (params: {
+      domain: string;
+      accountAddress: string;
+      tokenType: string;
+      amount: bigint;
+    }): Promise<void> => {
+      const ownShieldedAddress = localSurfaces?.shieldedAddress ?? null;
+      if (!ownShieldedAddress) {
+        throw Object.assign(
+          new Error(
+            'Passport cannot see its own receiving address yet, so it cannot route a payment there. Try again in a moment.',
+          ),
+          { code: 'wallet-closed' as const },
+        );
+      }
+      /* WHAT THE ACCOUNT HOLDS OF THIS COLOUR, so the sheet can say "of 3"
+         from its first line rather than switching the count under somebody
+         mid-send. It is an estimate and it is treated as one: leg one reads
+         the figure again as it builds, and the record is corrected to whatever
+         really came out. A read that fails costs the count and nothing else —
+         the run then starts as a two-step one and leg one corrects it. */
+      const account = requireAccount();
+      let held: bigint | undefined;
+      try {
+        const { readAccountState } = await import('./identity/accountCustody.js');
+        const state = await readAccountState(account.handle.network, account.address);
+        /* MATCHED ON THE NORMALISED COLOUR, not on the raw string. The account's
+           own map is keyed by the ledger's bytes; the colour the picker chose
+           came from the sponsor. They have always agreed, and a count that
+           silently fell back to two the day they did not would be a worse
+           screen than one that costs a comparison. */
+        const wanted = normalisedColourHex(params.tokenType);
+        for (const [colour, amount] of state.shieldedCoins) {
+          if (normalisedColourHex(colour) === wanted) held = amount;
+        }
+      } catch (cause) {
+        console.info('[send] the account balance could not be read before the send', cause);
+      }
+      const plan =
+        held === undefined ? null : planShieldedSend({ held, amount: params.amount });
+      await runNameSend(
+        newPendingSend({
+          kind: 'shielded',
+          recipient: { label: params.domain, accountAddress: params.accountAddress },
+          amount: params.amount,
+          tokenType: params.tokenType,
+          colourHex: params.tokenType,
+          ownReceivingAddress: ownShieldedAddress,
+          ...(plan === null ? {} : { withdrawAmount: plan.withdraw }),
+        }),
+      );
+    },
+    [localSurfaces, requireAccount, runNameSend],
   );
 
   /**
@@ -5043,8 +7118,15 @@ export default function PassportDemo() {
              a promise nothing behind it could keep. */
           resolveName: resolveRecipientName,
           onSendToName: executeSendToName,
+          /* The shielded half of paying a name. Supplied separately from
+             `onSendToName` because it is a different pair of circuits, and a
+             build that had one and not the other must refuse the combination
+             it cannot make rather than quietly route it to the other one. */
+          onSendShieldedToName: executeShieldedSendToName,
           phase: accountPhase,
           nameLeg: nameSendLeg,
+          nameLegAttempt: nameSendAttempt,
+          nameLegSteps: nameSendSteps,
         }
       : null;
 
@@ -5119,22 +7201,72 @@ export default function PassportDemo() {
    * there is no link at all rather than one that goes nowhere — the same rule
    * the success toasts follow, and for the same reason.
    */
-  const homeActivity = useMemo<ActivityFeedItem[]>(
+  const homeActivity = useMemo<ActivityFeedItem[]>(() => {
+    /* THE ONE ROW THAT IS STILL FIXABLE (2026/09/02). The opening grant has its
+       own ten-minute schedule and can run out of it — a Passport then has its
+       name and its stablecoin on the trail and no NIGHT, with the row that says
+       so and nothing to press. The marker is only ever written on evidence the
+       grant landed, so `fundAccountOnce` will genuinely ask again; which row
+       carries the control is decided by `activationRetryRowId`, and it is at
+       most one. No account, no control: there would be nothing to fund. */
+    const retryRowId = accountContractAddress ? activationRetryRowId(activity) : null;
+    const address = accountContractAddress;
+    return activity.map((entry) => {
+      const link = explorerTxLink(entry.txHash, entry.network ?? selectedNetwork);
+      return {
+        id: entry.id,
+        label: entry.label,
+        detail: entry.detail,
+        status: entry.status,
+        createdAt: entry.createdAt,
+        ...(entry.txHash ? { txHash: entry.txHash } : {}),
+        ...(entry.network ? { network: entry.network } : {}),
+        ...(link ? { link } : {}),
+        ...(address !== null && entry.id === retryRowId
+          ? {
+              retry: {
+                label: 'Retry',
+                busy: grantRetryBusy,
+                run: () => {
+                  setGrantRetryBusy(true);
+                  void fundAccountOnce(address).finally(() => setGrantRetryBusy(false));
+                },
+              },
+            }
+          : {}),
+      };
+    });
+  }, [accountContractAddress, activity, fundAccountOnce, grantRetryBusy, selectedNetwork]);
+
+  /**
+   * The unfinished payments Home offers to carry on.
+   *
+   * Every record that is not `done` earns a card: a run at `settle` is waiting
+   * for the amount to reach this Passport, one at `deposit` or `failed` has
+   * money here that has not been paid on, and one still at `withdraw` never
+   * spent — which is the only one there is anything to forget about.
+   *
+   * NO MACHINERY IN ANY OF THESE SENTENCES. The step lines say what happened to
+   * the money, in the same two-step language the Send sheet uses.
+   */
+  const homePendingSends = useMemo(
     () =>
-      activity.map((entry) => {
-        const link = explorerTxLink(entry.txHash, entry.network ?? selectedNetwork);
-        return {
-          id: entry.id,
-          label: entry.label,
-          detail: entry.detail,
-          status: entry.status,
-          createdAt: entry.createdAt,
-          ...(entry.txHash ? { txHash: entry.txHash } : {}),
-          ...(entry.network ? { network: entry.network } : {}),
-          ...(link ? { link } : {}),
-        };
-      }),
-    [activity, selectedNetwork],
+      pendingSends.map((record) => ({
+        id: record.id,
+        label: record.leg === 'change'
+          ? `Your change from paying ${record.recipient.label}`
+          : `Sending ${pendingSendAmountLabel(record, pendingSendAsset(record))} to ${record.recipient.label}`,
+        step: pendingSendStepLine(record),
+        reason: record.lastError?.message ?? null,
+        /* Carrying on by itself, so the card says so. The step line above it
+           advances as each leg is written down, which is the progress. */
+        busy: resumingSendId === record.id,
+        onContinue: () => void continuePendingSend(record.id),
+        ...(record.withdrawTxHash
+          ? {}
+          : { onGiveUp: () => dropPendingSend(record.id) }),
+      })),
+    [continuePendingSend, dropPendingSend, pendingSendAsset, pendingSends, resumingSendId],
   );
 
   const homeLegacyFunds =
@@ -5347,7 +7479,7 @@ export default function PassportDemo() {
      public network at all — there is then no per-network record to read, and
      the enrolled passkey's label is the honest answer. */
   const passkeyDisplayName =
-    (configuredWalletNetwork ? aliasRecords[configuredWalletNetwork]?.domain : null) ??
+    (configuredWalletNetwork ? aliasByNetwork[configuredWalletNetwork]?.domain : null) ??
     profile?.passkey.label ??
     null;
   const sessionDisplayName = passkeyDisplayName;
@@ -5368,7 +7500,7 @@ export default function PassportDemo() {
    * greeting falls back to the display name, because claiming a name on
    * preview says nothing about who holds it on pre-production.
    */
-  const activeAliasRecord = aliasRecords[selectedNetwork] ?? null;
+  const activeAliasRecord = aliasByNetwork[selectedNetwork] ?? null;
   const aliasLabel = activeAliasRecord?.alias ?? null;
   /**
    * Why "Register now" cannot run right now, or null when it can. The demo
@@ -5484,8 +7616,13 @@ export default function PassportDemo() {
              otherwise read "Deploying…" over a contract that is simply there. */
           busy:
             contractBusy ||
-            (claimPhase !== null && activeContractRecord?.status !== 'deployed'),
-          phase: contractPhase,
+            (claimPhase !== null && activeContractRecord?.status !== 'deployed') ||
+            /* Looking for an account read off the passkey. There is no record
+               to show yet and the card would otherwise render nothing at all,
+               which is the same screen as "you have no account" — and the
+               person does have one. */
+            accountSearch?.phase === 'checking',
+          phase: accountSearch?.phase === 'checking' ? 'confirming' : contractPhase,
           disabledReason:
             activeContractRecord?.status === 'failed' ? contractDeployDisabledReason : null,
         }
@@ -5502,6 +7639,25 @@ export default function PassportDemo() {
        the name waits (ruled 2026/08/25). */
     queueAlias(alias, selectedNetwork, reason);
     if (profile) storeNameStep(profile.passkey.credentialId, 'done');
+    setIdentityStep(null);
+  };
+
+  /**
+   * Leaves the name step for Home. ONE handler, two offers.
+   *
+   * The claim screen's host escape hatch (a network Passport cannot register
+   * on) and its failure card's "Continue to Home" do exactly the same thing —
+   * the step is settled, the failure is dropped, and the dashboard comes up —
+   * so they are the same function rather than two copies that can drift. The
+   * name is not lost either way: a claim that failed persisted it as queued,
+   * and Home's card carries "Register now" for it.
+   *
+   * The resolution is remembered per credential, so a reload — or the next
+   * sign-in — never asks again; Home keeps the "Claim a name" entry point.
+   */
+  const leaveNameStepForHome = () => {
+    setAliasFailure(null);
+    if (profile) storeNameStep(profile.passkey.credentialId, 'skipped');
     setIdentityStep(null);
   };
 
@@ -5593,6 +7749,33 @@ export default function PassportDemo() {
           unusableCredential={unusableCredential}
           keylessPasskey={keylessPasskey}
           onCreateNewPasskey={() => startPasskeyOnboarding('enrol-new')}
+          /* And the third, which is deliberately NOT wired to
+             `onCreateNewPasskey`: the passkey this device makes is the thing
+             that failed, so making another is the loop rather than the
+             remedy. The panel explains and points off the device. */
+          unusableDevice={unusableDevice}
+          /* And the way out of a Passport that is WRONG rather than
+             unreachable — the orphaned name with no account behind it that a
+             reviewer could not escape on Android. It forgets this device's
+             records for that credential and creates from scratch; the passkey
+             and the chain are untouched. See
+             `startFreshPassportOnThisDevice`. */
+          onStartFresh={() => void startFreshPassportOnThisDevice()}
+        />
+      ) : accountSearch?.phase === 'not-found' ? (
+        /* THE END OF THE SEARCH, and the reason it has one. A passkey named an
+           account, the chain never answered for it, and what used to happen at
+           this point was nothing: no record, no name, and the name step in
+           front of somebody who already had a name. Two controls, and neither
+           of them sets anything up on its own. See `AccountRecovery.tsx`. */
+        <AccountRecoveryScreen
+          name={accountSearch.alias ? `${accountSearch.alias}.night` : null}
+          onTryAgain={() =>
+            setAccountSearch((current) =>
+              current ? { ...current, attempt: 0, phase: 'checking' } : current,
+            )
+          }
+          onStartOver={() => void startNewAccountAfterSearch()}
         />
       ) : identityStep === 'welcome' ? (
         /* What Passport IS, said once to a Passport that has just been made
@@ -5619,13 +7802,13 @@ export default function PassportDemo() {
           checkAvailability={checkAliasOnActiveNetwork}
           onClaim={(alias) => claimOrQueueAlias(alias, selectedNetwork)}
           onQueue={queueFromClaimScreen}
-          onSkip={() => {
-            setAliasFailure(null);
-            // Remembered per credential, so a reload — or the next sign-in —
-            // never asks again. Home keeps the "Claim a name" entry point.
-            if (profile) storeNameStep(profile.passkey.credentialId, 'skipped');
-            setIdentityStep(null);
-          }}
+          onSkip={leaveNameStepForHome}
+          /* The failure card's second control. It runs the same handler as the
+             skip above because the two land in the same place, but it is a
+             different OFFER and the screen says so: a claim that failed has
+             already saved its name as queued (see `claimOrQueueAlias`), so
+             Home is where that name is waiting with "Register now" on it. */
+          onContinueHome={leaveNameStepForHome}
           claimPhase={claimPhase}
           error={aliasFailure?.message ?? null}
           /* The name step has no sign-out in its header, so when a passkey
@@ -5633,6 +7816,17 @@ export default function PassportDemo() {
              can be. See `midSessionCeremonyFailure`. */
           errorIsPasskeyWayOut={aliasFailure?.wayOut === true}
           onSignOut={() => void signOutPassport()}
+          /* THE OTHER DOOR, and on Android the only one. A passkey there
+             carries no largeBlob, so a browser that has forgotten this
+             Passport can recover nothing from the credential and lands
+             here — on a naming ceremony the person has already been
+             through. See `recoverPassportByName`. */
+          onFindExisting={() => setIdentityStep('recover')}
+        />
+      ) : identityStep === 'recover' ? (
+        <RecoverByNameScreen
+          onFind={recoverPassportByName}
+          onBack={() => setIdentityStep('alias')}
         />
       ) : identityStep === 'backup' ? (
         /* Off the onboarding chain since 2026/08/06 — reached on demand from
@@ -5679,6 +7873,9 @@ export default function PassportDemo() {
                  itself. */
               account={homeAccount}
               legacyFunds={homeLegacyFunds}
+              /* Payments that left this Passport and have not arrived. See
+                 `runNameSend` for why a two-leg send is written down. */
+              pendingSends={homePendingSends}
               error={error}
               onDismissError={() => setError(null)}
               onRefresh={refreshMobile}
@@ -5712,6 +7909,9 @@ export default function PassportDemo() {
               network={selectedNetwork}
               onSelectNetwork={handleSelectNetwork}
               onRefresh={refreshMobile}
+              /* The same trail Home reads, so this shelf can say what is on
+                 its way but has not landed. */
+              activity={homeActivity}
             />
           ) : (
             <AppsScreen

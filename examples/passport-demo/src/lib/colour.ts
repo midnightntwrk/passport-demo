@@ -58,6 +58,28 @@ export const NIGHT_COLOUR_HEX = '0'.repeat(64);
 export const MUSD_COLOUR_HEX =
   '1a2917fbed8b5ce44d12ebc7d337689045f6c96a6bbd39cf3d8691ab310ef6a6';
 
+/**
+ * The swap desk's own colour on stagenet — what Passport Swap pays out.
+ *
+ * A SEPARATE COLOUR FROM mUSD, and not a cosmetic choice: the deployed account
+ * contract refuses a `deposit_shielded` of a colour the account already holds
+ * in some states, and every activated Passport already holds mUSD, so a swap
+ * that paid mUSD was refused by the node with `1010: Invalid Transaction`. The
+ * balancer therefore mints the swap's payout under its own domain separator,
+ * `passport-swap-musd`, against the same stagenet faucet `4fc92e15…be78e92f`
+ * — `rawTokenType(separator, faucet)`, printed by
+ * `passport-balancer/ops/gift-nft.ts --separator passport-swap-musd --dry-run`
+ * on the droplet on 2026/09/03 and pinned by `test/swap.test.ts` on the other
+ * side of the boundary, so the two cannot drift.
+ *
+ * It is NAMED here rather than left anonymous because it is a currency: a
+ * hundred of them is a balance somebody spends down, not a one-of-a-kind, and
+ * {@link classifyHolding} files a named colour on the token table however
+ * little of it is held. That is exactly what naming it is for.
+ */
+export const SUSD_COLOUR_HEX =
+  'a62e273dda9a4a288068dec91c3b6ce8ca10fd085703469ac371b7c415884d3b';
+
 /** What a colour is called on screen. */
 export interface TokenIdentity {
   /** What leads the row — a ticker, or `Token · 1a29…` for a colour we cannot name. */
@@ -79,11 +101,18 @@ export interface TokenIdentity {
   known: boolean;
 }
 
-/** Colours Passport can name without asking anybody. */
+/**
+ * Colours Passport can name without asking anybody.
+ *
+ * Zero decimals for every shielded colour here, for the reason
+ * {@link TokenIdentity.decimals} gives: a shielded colour carries no decimal
+ * scale anywhere on the ledger, so an amount is a whole count of its own units.
+ */
 const KNOWN_COLOURS: Readonly<Record<string, { symbol: string; name: string; decimals: number }>> =
   {
     [NIGHT_COLOUR_HEX]: { symbol: 'NIGHT', name: 'native token', decimals: 6 },
     [MUSD_COLOUR_HEX]: { symbol: 'mUSD', name: 'stablecoin', decimals: 0 },
+    [SUSD_COLOUR_HEX]: { symbol: 'sUSD', name: 'Swap dollar', decimals: 0 },
   };
 
 /**
@@ -287,4 +316,74 @@ export function splitHoldings<T extends ColourHolding>(
 export function nftTitle(symbol: string): string {
   const prefix = 'Token · ';
   return symbol.startsWith(prefix) ? `Item · ${symbol.slice(prefix.length)}` : symbol;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Items with art (2026/09/03)                                                */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * What a known item looks like on its card.
+ *
+ * `image` is a path under `public/`, never a remote URL: an item card that
+ * waited on somebody else's CDN would be a blank rectangle on the one screen
+ * whose whole job is to show the thing, and a Passport that is installed and
+ * offline still has to render it.
+ */
+export interface ItemArt {
+  /** What the card leads with, in place of `Item · a1b2…`. */
+  title: string;
+  /** A path under `public/` — same-origin, so it survives being offline. */
+  image: string;
+  /** One line under the title, saying what the thing is. */
+  description: string;
+}
+
+/**
+ * The Midnight Genesis Pass's colour, as the sponsor's faucet computes it.
+ *
+ * Not guessed and not chosen: `rawTokenType(separator, faucet)` with the
+ * separator `midnight-genesis-pass` (ASCII, zero-padded to 32 bytes) against
+ * the stagenet faucet `4fc92e15…be78e92f`, printed by
+ * `passport-balancer/ops/gift-nft.ts --account …` on the droplet on
+ * 2026/09/03. The tool prints it before it mints anything, so this entry and
+ * the coin that lands are computed by one function against one faucet address
+ * and cannot drift apart. A different faucet is a different colour, and the
+ * card would correctly fall back to the anonymous one.
+ */
+export const GENESIS_PASS_COLOUR_HEX =
+  '815183a74a98593bf16344ef6e920313f9c57ccb2feef3f9fe944ba5c4079e26';
+
+/**
+ * Items Passport can show a picture of.
+ *
+ * DELIBERATELY NOT `KNOWN_COLOURS`. A colour in that table has a NAME, and a
+ * named colour is a token however little of it is held — {@link classifyHolding}
+ * says so, and it says so for a good reason. Putting the Genesis Pass there
+ * would move it off the item shelf and onto the balance table as a row reading
+ * "1", which is the opposite of what naming it is for. The two tables answer
+ * different questions: one is "what currency is this?", the other is "what does
+ * this one-of-a-kind thing look like?", and an entry here changes nothing about
+ * how the holding is classified.
+ */
+const KNOWN_ITEMS: Readonly<Record<string, ItemArt>> = {
+  [GENESIS_PASS_COLOUR_HEX]: {
+    title: 'Midnight Genesis Pass',
+    image: '/nft/genesis-pass.svg',
+    description: 'Midnight Passport · genesis edition',
+  },
+};
+
+/**
+ * The art for a colour, or `null` for an item nobody has drawn.
+ *
+ * `null` is the ordinary answer, not a failure: the item shelf's rule is "one
+ * unit of a colour nothing can name", which is satisfied by colours this build
+ * has never heard of and will keep being satisfied by them. A caller that gets
+ * `null` shows the generic card it showed before this registry existed.
+ */
+export function describeItem(colourHex: string): ItemArt | null {
+  const normalised = normalisedColourHex(colourHex);
+  if (!normalised) return null;
+  return KNOWN_ITEMS[normalised] ?? null;
 }

@@ -19,6 +19,17 @@
  *
  * WHAT IS OUT, AND WHY — `src/lib`
  * --------------------------------
+ * `src/lib/accountOnPasskey.ts` went IN on 2026/08/31, the day it was written,
+ * and it is in the denominator because it decides whether somebody is asked to
+ * touch an authenticator. It is the rule that replaced a blob write fired at
+ * the end of a name claim — a whole user-verified assertion, which arrived as
+ * a passkey prompt sitting on top of a finished Home screen that the reader
+ * had pressed nothing to summon. Every branch in it is either a way of asking
+ * for a ceremony nobody wanted or a way of silently never writing at all, and
+ * both have been met. It holds no DOM, no React, no storage, and no WebAuthn:
+ * a profile in, a decision out, drilled directly in
+ * `src/lib/accountOnPasskey.test.ts`.
+ *
  * `src/lib/appBusy.ts` went IN on 2026/08/26, the day it was written. It is the
  * counter that answers "is Passport in the middle of something?" for the
  * service-worker update path in `src/pwa.tsx`, and getting that answer wrong in
@@ -27,6 +38,78 @@
  * deployment. It holds no DOM, no React, and no timers — it is a counter, a
  * listener set, and the rule that a release only counts once — so every one of
  * those branches is drilled directly in `src/lib/appBusy.test.ts`.
+ *
+ * `src/lib/balanceWatch.ts` went IN on 2026/09/03, the day it was written. It
+ * decides WHEN this app reads the account's ledger again, and the defect it was
+ * written for is a reviewer watching an opening balance sit at zero until they
+ * reloaded the page themselves — with the recipient of a transfer seeing the
+ * same thing from the other side. Every branch in it is a way of lying about
+ * somebody's money by omission: a chase that never starts leaves the figure
+ * stale, one that never ends turns a Passport left open into a load generator,
+ * one that mistakes a failed read for an arrival stops early, and one that runs
+ * in a backgrounded tab is a schedule the browser will throttle into
+ * dishonesty. It holds no DOM, no React, no `fetch`, and no clock of its own —
+ * the timers and the clock are injected — so all of it is drilled on a
+ * hand-wound clock in `src/lib/balanceWatch.test.ts`. Its React wiring is
+ * `src/screens/useBalanceWatch.ts`, which is out for the same reason every
+ * other module in `src/screens` is: it imports React, and there is no jsdom
+ * here to render a hook into. That file holds the watch's lifetime, a
+ * `visibilitychange` listener, and two refs — no decisions.
+ *
+ * `src/lib/sheetHistory.ts` went IN on 2026/09/04, the day it was written. It
+ * decides which history entry belongs to which of Passport's sheets, and
+ * whether a closing sheet still owes the stack an entry — three answers, and
+ * each of the wrong ones is a way of taking somebody out of the app. A mark it
+ * read too loosely closes a sheet on a `popstate` that belonged to somebody
+ * else; an entry it unwound after the back gesture had already popped it
+ * navigates the document away, which is the defect it was written for arrived
+ * at from the other side; an entry it failed to unwind is a back press the
+ * reader makes and sees nothing happen to. It holds no DOM and no React — the
+ * `pushState`, the listener, and the lifetime are all in
+ * `src/screens/useSheetBackButton.ts`, which stays out with the rest of
+ * `src/screens` because it imports React and there is no jsdom here to render
+ * a hook into. That file holds no decisions.
+ *
+ * `src/lib/zkArtefactCache.ts` went IN on 2026/09/03, the day it was written,
+ * and it is in the denominator because it is a RULE about somebody's memory
+ * budget, measured rather than guessed. midnight-js asks a ZK config provider
+ * for a circuit's artefacts three times per contract call — `lookupKey`,
+ * `check` (whose payload uses the IR alone and discards the prover key), and
+ * `prove` — and neither `ZKConfigRegistry` nor `FetchZkConfigProvider` holds
+ * the bytes between them. For `withdraw_shielded` that is 19.5 MB a time, and
+ * one mUSD send to a name is two such legs: six downloads and six SHA-256
+ * integrity passes, 117 MB, for a transaction that needs 39 MB. Measured live
+ * on stagenet against bf5a527 the same day, that is the whole of the renderer's
+ * memory profile — 330 MB at rest, 711 MB across leg one's artefact reads,
+ * 787 MB across leg two's — and it is the window a headless browser running two
+ * Passports died in at 16:30:46 UTC.
+ *
+ * Every way this module can be wrong is a way of making that worse or of
+ * breaking a proof: an artefact served for the wrong circuit proves the wrong
+ * thing; a remembered REJECTION makes one bad moment on the network permanent
+ * for the life of the tab; a memo that never releases trades a peak for a
+ * resting 39 MB that never comes back; and a wrapper that reimplemented
+ * midnight-js's `get` and `getVerifierKeys` instead of inheriting them is a
+ * second copy of somebody else's composition rules, waiting to drift. All four
+ * are drilled, the last against a provider carrying those compositions on its
+ * prototype. It holds no DOM, no React, no `fetch`, and no clock of its own —
+ * the provider and the clock are injected — so all of it is drilled directly in
+ * `src/lib/zkArtefactCache.test.ts`. The `FetchZkConfigProvider` it wraps, and
+ * the one place it is wrapped, stay out in `src/identity/contractRuntime.ts`
+ * with the rest of the midnight-js plumbing.
+ *
+ * `src/lib/installPrompt.ts` went IN on 2026/09/03, the day it was written. It
+ * decides whether a person is offered a way to install Passport and which of
+ * the two offers they get, and it exists because a reviewer running the app in
+ * an ordinary browser tab could find no way to install it at all. Both ways of
+ * getting it wrong are user-visible and opposite: offering nothing to somebody
+ * who could install, or offering a button on iOS Safari — which fires no
+ * install event and never will — that could only do nothing when pressed. The
+ * "already installed" test is two questions rather than one for the same
+ * reason, since iOS answers only its own. It reads a plain object rather than
+ * `window`, so every rule is drilled against real user-agent strings in
+ * `src/lib/installPrompt.test.ts`. The control that renders its answer,
+ * `src/screens/InstallPassport.tsx`, stays out with the rest of the `.tsx`.
  *
  * `src/identity/claimWarmup.ts` went IN on 2026/08/26, the day it was written,
  * and it belongs in the denominator more than most: it is the module that
@@ -65,6 +148,82 @@
  * stays in the screen, because it is a timer and not a rule; what is drilled
  * here is what the screen is allowed to say with it.
  *
+ * `src/lib/claimFailure.ts` went IN on 2026/09/02, the day it was written, and
+ * it is in the denominator because it is the rule that decides whether somebody
+ * whose claim did not complete is offered a way on or only an explanation. It
+ * exists because of a live acceptance run that night: the account was already
+ * deployed, the service refused the name with a 500 during a forced blackout of
+ * the read side, and the failure card said the name was being kept and then
+ * stopped — no retry, and no mention of the "Register now" that was sitting on
+ * Home for exactly that name. The card had been furnished for one failure only,
+ * the passkey one, and bare for every other.
+ *
+ * Every way it can be wrong is a way of stranding somebody or of costing them
+ * more than it gives them: a card with no controls at all (the reported
+ * defect); BOTH pairs on one card, which is two "Try again" buttons and an
+ * ambiguous control in a real browser; a retry offered with no name to claim,
+ * which can only fail; and a retry offered mid-claim, which is how a second
+ * passkey ceremony gets started on top of the first. It holds no DOM, no React,
+ * no storage, and no clock — four facts in, a shape out — so all of it is
+ * drilled directly in `src/lib/claimFailure.test.ts`. The two buttons the
+ * screen paints from its answer stay out with the rest of the `.tsx`.
+ *
+ * `src/lib/waitingGame.ts` went IN on 2026/09/03, the day it was written, and
+ * it is in the denominator for a reason that has nothing to do with the game:
+ * it is the module that promises a diversion offered beside a claim can never
+ * become a reason the claim goes wrong. The screen pauses the game by taking
+ * its state out of `running`, and the guarantee it leans on is that a tick on
+ * a state which is not running returns that same state, unadvanced — so "stop
+ * the instant the passkey prompt appears" is one call rather than a race with
+ * a frame loop. That property, and the frame clamp beside it, are the two
+ * drills that matter: a backgrounded tab hands the loop a gap of seconds on
+ * return, and a runner integrated through it lands on the far side of an
+ * obstacle it never touched.
+ *
+ * The rest of it is in the denominator because it can be: it holds no canvas,
+ * no `requestAnimationFrame`, no clock, no `Math.random`, and no keyboard. The
+ * elapsed milliseconds are handed in and the obstacle sizes come from a seeded
+ * generator carried in the state, so a run replays exactly and the collision
+ * rule is drilled rather than eyeballed, on a hand-wound clock in
+ * `src/lib/waitingGame.test.ts`. Its other half — a canvas, a frame loop, and
+ * two listeners, holding no rules at all — is `src/screens/WaitingGame.tsx`,
+ * out with the rest of the `.tsx`.
+ *
+ * `src/lib/companionLink.ts` went IN on 2026/09/03, the day it was written. It
+ * is four lines of rule behind a link out to a Telegram chat, and it is in the
+ * denominator because it is the only part of that control anybody can get
+ * wrong. Passport does not talk to the Companion, holds nothing for it, and
+ * learns nothing back — the whole of the interaction is an address opened in a
+ * new tab — so the address IS the feature. Both ways of getting it wrong put a
+ * reader somewhere nobody chose: ignoring a `VITE_COMPANION_URL` an operator
+ * deliberately set, or forwarding a half-configured one — blank, unparseable,
+ * or on a scheme no browser should follow from a link this app renders. It
+ * reads a plain value rather than `import.meta.env`, so every case is drilled
+ * directly in `src/lib/companionLink.test.ts`. The two shapes the control is
+ * painted in, `src/screens/Companion.tsx`, stay out with the rest of the
+ * `.tsx`.
+ *
+ * `src/lib/endpoints.ts` went IN on 2026/08/31, the day it was written, and it
+ * belongs in the denominator because it is the rule that decides WHERE a
+ * transaction gets proved and who pays for it. Until that day proving, fee
+ * sponsorship, sponsored name registration, and activation grants all rode one
+ * droplet; two of those four now take an ordered list of providers, and this is
+ * the part of that which is a decision rather than a network call. Every way it
+ * can be wrong is a way of making the demo LESS reliable than the single URL it
+ * replaced: an order silently reshuffled would make "gateway first" untestable,
+ * an endpoint dropped from the list would be a single point of failure nobody
+ * knows they have, a refusal swallowed rather than carried would strip the
+ * error a caller needs to tell a busy sponsor from a dead one, and — the worst
+ * of them — a fallback that reported success when nothing served would claim a
+ * covered fee that was never covered. It holds no `fetch`, no clock, and no
+ * environment: an array in, a decision out, with the asking injected. So the
+ * ordering, the skip-unready case, the fall-through-on-failure case, the
+ * all-refused case, and the single-endpoint compatibility case are all drilled
+ * directly in `src/lib/endpoints.test.ts`. The HTTP either side of it — the
+ * `/wallet-status` probe, the `/balance-only` POST, and the proof server's
+ * `/prove` — stays out with the rest of the network calls, and is drilled
+ * against the real 1AM stagenet gateway and our own balancer instead.
+ *
  * `src/lib/activityFeed.ts` went IN on 2026/08/30, the day it was written, and
  * it is in the denominator because it is the only place a person can go back and
  * check what happened to their own money. Every function in it is a way of
@@ -79,6 +238,22 @@
  * is drilled directly in `src/lib/activityFeed.test.ts`. The `window.localStorage`
  * call between its parse and its writer is two lines in `App.tsx` and stays out
  * with the rest of the app shell.
+ *
+ * `src/lib/activationHold.ts` went IN on 2026/09/04, the day it was written,
+ * and it is in the denominator because it is the rule that decides whether a
+ * grant coin is spent. The sponsor soak of that day recorded the defect it
+ * closes: a registration refused at the sponsor's hourly ceiling at 17:38:02
+ * and a `/fund-account` posted for the same account a second later, which
+ * succeeded — leaving a Passport holding NIGHT and a stablecoin balance with no
+ * name against it, and a grant that is once per account for ever spent on it.
+ * Every branch in it is a way of getting that wrong in one of the two
+ * directions: a refusal code read as harmless funds a nameless account, and a
+ * hold that never lifts leaves a Passport that has its name unfunded for good.
+ * It holds no DOM, no React, and no clock — a code in, a decision out, and
+ * three `window.localStorage` calls whose every failure mode is drilled against
+ * an in-memory store in `src/lib/activationHold.test.ts`. The sequencing that
+ * consults it is four lines in `App.tsx` and stays out with the rest of the app
+ * shell.
  *
  * `src/lib/recipientName.ts` went IN on 2026/08/30, the day it was written. It
  * decides which of two completely different things happens to what somebody
@@ -127,6 +302,21 @@
  * amount field it drives, and the review rows stay out with the rest of the
  * `.tsx`.
  *
+ * `src/lib/shieldedNote.ts` went IN on 2026/08/31, the day it was written, and
+ * it is in the denominator because getting it wrong loses somebody money
+ * quietly. It decides WHICH shielded note the second leg of a Passport-to-
+ * Passport transfer deposits, and the deposit takes a note WHOLE — so a wallet
+ * that already held a note of the same colour and the same size offers two
+ * candidates the moment the first leg lands, and picking the older one pays the
+ * recipient out of money the sender had put aside and strands the note the
+ * transfer produced. Every branch in it is either a way of matching on
+ * resemblance instead of identity or a way of acting on a note that cannot be
+ * read at all, and both are met. It holds no DOM, no React, no network, and no
+ * wallet SDK — the notes are read in `identity/accountCustody.ts` and handed
+ * in — so all of it is drilled directly in `src/lib/shieldedNote.test.ts`. The
+ * poll that calls it, its deadline, and the transfer's two submissions stay out
+ * in `App.tsx` with the rest of the app shell.
+ *
  * `src/lib/passkeyRecovery.ts` went IN on 2026/08/30, the day it was written,
  * and it is in the denominator because it is the rule that decides whether a
  * person who cannot sign in is offered a way forward or only an explanation.
@@ -149,6 +339,43 @@
  * a screen — is drivable on a fake clock. The React that consumes it is three
  * lines of `useEffect` in `SendSheet.tsx`, which stays out with the rest of the
  * `.tsx`.
+ *
+ * `src/lib/sendLegs.ts` and `src/lib/walletProver.ts` went IN on 2026/09/02.
+ * Both were written on 2026/09/02 WITH their drills — `sendLegs.test.ts` and
+ * `walletProver.test.ts` — and both were left out of this list, which is worse
+ * than an exclusion with a reason: their coverage was being measured and then
+ * thrown away, so the 100% bar was a percentage of a denominator that quietly
+ * did not include the two newest rules in `src/lib`.
+ *
+ * `sendLegs.ts` is the record a two-leg payment survives a reload in, and every
+ * function in it decides what happens to value that has already left somebody's
+ * account: which stored rows may be resumed, whether a failed leg is worth
+ * retrying, how long to wait, and what the person is told about where their
+ * money is. Dropping a row is losing a payment; retrying an unretryable one is
+ * spending twice. It holds no React, no DOM, no `fetch`, no storage, and no
+ * clock — the orchestrator in `App.tsx` does all of that and hands it what came
+ * back — so all of it is drilled directly.
+ *
+ * Admitting it cost one test. `walletProver.ts` was already whole, but
+ * `sendLegs.ts` came in at 98.54% of branches: `serialisePendingSends` writes
+ * its optional keys as conditional spreads, and the run that omits BOTH
+ * `withdrawTxHash` and `expectedNote` — a `withdraw` record written before the
+ * first leg is submitted, the one moment in a payment where nothing has been
+ * spent yet — was the only shape no drill had. That is not an accident of
+ * counting: it is the record that decides whether a person who reloads mid-pay
+ * is offered their money back, so `sendLegsRecord.test.ts` — a file this
+ * change writes, beside the module's existing suite rather than inside it —
+ * closes it. The other three optional keys were already covered by the drills
+ * around it, and the existing suite is left exactly as its author wrote it.
+ *
+ * `walletProver.ts` is the wallet's own proving path: it is the module that
+ * keeps the proof server's URL PATH, which is the whole of the shielded-send
+ * failure it was written to fix, and it carries the failover between proof
+ * servers for the wallet's circuits. Its network is injected as a
+ * `ProvingProviderLike`, so the rules — the path, the order servers are tried
+ * in, the provider being built once, and the refusal that tells midnight-js the
+ * server resolves the protocol builtins itself — are drilled against a local
+ * HTTP server rather than a real prover.
  *
  *   assert-shim.ts      A three-line stand-in for Node's `assert`, aliased in
  *                       by `vite.config.ts` for @subsquid/scale-codec. It has
@@ -183,21 +410,52 @@
  *                       either make the gate unmeetable or make it meaningless.
  *                       The moving half is drilled against stagenet by
  *                       `e2e/stagenet.live.spec.ts`.
- *   midnames.ts         MIXED, on the same rule. The read-side helpers —
+ *   midnames.ts         MIXED, on the same rule. The naming rules it used to
+ *                       hold are now `./midnamesText.ts`, which IS in the
+ *                       denominator above. The read-side helpers —
  *                       `normalizePassportAlias`, `aliasCostAtomicNight`,
  *                       `decodeDomainTarget`, `formatNight`,
  *                       `deriveMidnamesOwnerKey`, `suggestAliasAlternatives` —
  *                       are drilled in `src/identity/midnames.test.ts`. The
  *                       rest is registry reads against a network's own indexer.
+ * `src/identity/midnamesText.ts` went IN on 2026/09/01, the day it was split
+ * out of `midnames.ts`, and it is in the denominator because it is now the ONLY
+ * definition of what a Passport name may be: the label grammar, the reserved
+ * list, the `.night` suffix, and the alternatives offered when a name is taken.
+ * Every way it can be wrong is permanent — a label that normalises to something
+ * other than what the registry will store is a name registered, publicly and
+ * irreversibly, to a string the user did not type, and a reserved name that
+ * slips through is `midnight.night` reading as an official account. It exists
+ * as a separate file precisely so it can be imported without a ledger, so it
+ * holds no DOM, no React, no network, no clock, and — by construction — no
+ * imports at all. The drills did not move either: `midnames.test.ts` exercises
+ * every one of these through `midnames.ts`'s re-export, which is where the rest
+ * of the app still reads them from.
+ *
+ * `src/identity/aliasStore.ts` went IN on 2026/09/04, and it is the clearest
+ * case yet of a file that was excluded for what it looked like rather than for
+ * what it decided. It sat with the other two thin stores above on the grounds
+ * that it was `localStorage` records with a few invariants, exercised for real
+ * by `backup.test.ts`. What that missed is that its KEY was a decision about
+ * identity: it was keyed by network alone, so the answer to "what is this
+ * Passport's name" did not depend on which passkey was asking. A credential
+ * enrolled seconds earlier read the previous one's name, the name step saw a
+ * record and skipped itself, and Home printed a name over an account that
+ * belonged to a different passkey — the Android orphan reported that day, which
+ * a user could not escape by any means the app offered. The store now decides
+ * two genuinely hard things — whose record a reader may see, and which
+ * credential may adopt a record written before any of them were labelled — and
+ * `aliasStore.test.ts` holds both at 100%.
+ *
  * `src/identity/timestamps.ts` went IN on 2026/08/26 with the module itself: it
  * is the ISO-8601 reader `backup.ts` and `incentiveStore.ts` now share, it is
  * four lines of pure decision, and both of its answers are drilled by
  * `backup.test.ts`.
  *
- *   aliasStore.ts,      Thin `window.localStorage` records. They are exercised
- *   incentiveStore.ts,  for real (not mocked) by `backup.test.ts`, which
- *   passportContract-   restores through their own save functions so their
- *   Store.ts            invariants are the ones enforced.
+ *   incentiveStore.ts,  Thin `window.localStorage` records. They are exercised
+ *   passportContract-   for real (not mocked) by `backup.test.ts`, which
+ *   Store.ts            restores through their own save functions so their
+ *                       invariants are the ones enforced.
  *   callbackLaunch.ts,  The dApp callback protocol: `window.opener`,
  *   callbackProtocol.ts `postMessage`, and cross-origin handshakes.
  *   contractRuntime.ts  Loads the compiled contract modules and the ledger
@@ -241,13 +499,21 @@ export default mergeConfig(
         /* The denominator. See the module header for every module that is not
            in it and the reason it is not. */
         include: [
+          'src/lib/accountOnPasskey.ts',
           'src/lib/activation.ts',
+          'src/lib/activationHold.ts',
           'src/lib/activityFeed.ts',
           'src/lib/address.ts',
           'src/lib/appBusy.ts',
+          'src/lib/balanceWatch.ts',
+          'src/lib/claimFailure.ts',
           'src/lib/claimSteps.ts',
+          'src/lib/companionLink.ts',
           'src/lib/colour.ts',
+          'src/lib/endpoints.ts',
           'src/lib/feeReadinessPoll.ts',
+          'src/lib/installPrompt.ts',
+          'src/lib/nameRecovery.ts',
           'src/lib/networks.ts',
           'src/lib/notifications.ts',
           'src/lib/passkeyRecovery.ts',
@@ -255,9 +521,17 @@ export default mergeConfig(
           'src/lib/qrScan.ts',
           'src/lib/recipientName.ts',
           'src/lib/sendAssets.ts',
+          'src/lib/sendLegs.ts',
+          'src/lib/sheetHistory.ts',
+          'src/lib/shieldedNote.ts',
           'src/lib/sponsor.ts',
+          'src/lib/walletProver.ts',
+          'src/lib/waitingGame.ts',
+          'src/lib/zkArtefactCache.ts',
+          'src/identity/aliasStore.ts',
           'src/identity/backup.ts',
           'src/identity/claimWarmup.ts',
+          'src/identity/midnamesText.ts',
           'src/identity/sponsoredAlias.ts',
           'src/identity/timestamps.ts',
         ],

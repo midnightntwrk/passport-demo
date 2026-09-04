@@ -80,19 +80,29 @@ import {
   contractProviders,
   createContractProofProvider,
   hexToBytes,
+  isConfirmationTimeout,
   managedBuildPath,
   nativeColourBytes,
   publicDataProviderFor,
+  queryIndexerHeight,
   rawContractAddress,
   resolveTransactionHash,
   transactionIdentifier,
   wait,
   type ContractProvingMode,
 } from './contractRuntime.js';
-import type { BalancerWallet } from './wallet.js';
+import { progress } from './reservation.js';
+import { isSubmissionTimeout } from './submission.js';
+import {
+  isDustShortfall,
+  isEffectivelySynced,
+  isWalletCallTimeout,
+  type BalancerWallet,
+} from './wallet.js';
+import { isCoinContention } from './coinReservation.js';
 
 /** Attempts, {@link CONFIRM_INTERVAL_MS} apart, to watch the credit appear. */
-const CONFIRM_ATTEMPTS = 45;
+const CONFIRM_ATTEMPTS = 180;
 
 /**
  * Attempts, {@link CONFIRM_INTERVAL_MS} apart, to watch a freshly minted coin
@@ -103,7 +113,7 @@ const CONFIRM_ATTEMPTS = 45;
  * on the first poll; a wallet that is momentarily behind the indexer would take
  * longer, and giving up early would strand a coin that was about to appear.
  */
-const MINT_VISIBLE_ATTEMPTS = 90;
+const MINT_VISIBLE_ATTEMPTS = 360;
 
 /**
  * The mUSD faucet's domain separator, as the drills used it: 32 zero bytes with
@@ -202,6 +212,327 @@ export type AccountFundingErrorCode =
   | 'asset-deposit-failed'
   /** The deposit landed, but the account's `coins` map never showed the credit. */
   | 'asset-confirmation-failed';
+
+/* -------------------------------------------------------------------------- */
+/* Rebuilding a transaction the node refused                                  */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The two shapes a node rejection arrives in.
+ *
+ * On 2026/09/02 at 15:35:43 a `deposit_night` came back as
+ * `RpcError: 1010: Invalid Transaction: Custom error: 231`, five seconds after
+ * the registration in front of it had landed. The wallet had balanced against
+ * the dust state as it stood BEFORE that block, so the transaction it built was
+ * one event behind the chain and the node was right to refuse it.
+ */
+const NODE_REJECTION = /invalid transaction|rpcerror:\s*1010|\b1010:/i;
+
+/** Walks the whole `cause` chain — the SDK wraps its rejections several deep. */
+export function isNodeRejection(cause: unknown): boolean {
+  let current: unknown = cause;
+  for (let depth = 0; depth < 8 && current; depth += 1) {
+    const message = current instanceof Error ? `${current.name}: ${current.message}` : String(current);
+    if (NODE_REJECTION.test(message)) return true;
+    current = current instanceof Error ? (current as { cause?: unknown }).cause : undefined;
+  }
+  return false;
+}
+
+/**
+ * A transaction that LANDED and was NOT APPLIED.
+ *
+ * midnight-js throws `CallTxFailedError` (and `DeployTxFailedError`) after
+ * `submitTx` whenever the finalised status is not `SucceedEntirely`. Two such
+ * statuses exist. `FailFallible`: the guaranteed segment — the fee — was
+ * applied and every fallible segment, the contract call among them, was
+ * discarded. `FailEntirely`: nothing was applied at all. In both, the effect
+ * this service was paying for did not happen, which is what makes a rebuild
+ * safe: the name is still unregistered, the grant still uncredited, and the
+ * confirmation each caller runs afterwards is what says so, not this predicate.
+ *
+ * On 2026/09/03 at 02:50:09 `register_domain_for` for hcmtkxcwhntzz.night
+ * landed at block 293959 as `FailFallible`, segment map `{0: SegmentSuccess,
+ * 1: SegmentSuccess, 61517: SegmentFail}`, fees paid in full. The proof had
+ * been built against a view of the registry the chain had since moved past —
+ * the same family as the `1010: Custom error: 231` refusal, except that here
+ * the node accepted the bytes and the conflict only showed at execution. The
+ * caller reported it as a rejection by the registry, which it was not.
+ *
+ * Matched structurally first — the SDK error carries `finalizedTxData.status`
+ * — and by message second, for the copies that have been re-wrapped into a
+ * plain `Error` on their way here. The message form is the JSON the SDK
+ * serialises into `TxFailedError.message`.
+ */
+const LANDED_FAILURE = /"status":\s*"(?:FailFallible|FailEntirely)"/;
+const LANDED_STATUSES = new Set(['FailFallible', 'FailEntirely']);
+
+export function isLandedFailure(cause: unknown): boolean {
+  let current: unknown = cause;
+  for (let depth = 0; depth < 8 && current; depth += 1) {
+    if (typeof current === 'object') {
+      const status = (current as { finalizedTxData?: { status?: unknown } }).finalizedTxData?.status;
+      if (typeof status === 'string' && LANDED_STATUSES.has(status)) return true;
+    }
+    const message = current instanceof Error ? current.message : String(current);
+    if (LANDED_FAILURE.test(message)) return true;
+    current = current instanceof Error ? (current as { cause?: unknown }).cause : undefined;
+  }
+  return false;
+}
+
+/**
+ * How a rebuildable failure should be NAMED in the log and the step. Three
+ * failures share one remedy; they must not share one description, because the
+ * person reading the journal is trying to tell them apart.
+ */
+export function describeRebuildCause(cause: unknown): {
+  verb: string;
+  step: string;
+} {
+  if (isNodeRejection(cause)) return { verb: 'the node refused', step: 'a node refusal' };
+  if (isLandedFailure(cause)) {
+    return { verb: 'the chain landed but did not apply', step: 'an on-chain failure' };
+  }
+  if (isCoinContention(cause)) {
+    return { verb: 'another job holds a coin of', step: 'a coin held elsewhere' };
+  }
+  return { verb: 'this service gave up waiting on', step: 'a timeout' };
+}
+
+/**
+ * Is this a failure a REBUILD could fix?
+ *
+ * A node rejection is the original case, and a bounded wait that expired is the
+ * new one. They are different failures with the same remedy: in both, the bytes
+ * this service built are not going to become a landed transaction, and the
+ * coins they select were chosen against a view that has since moved on. The
+ * distinction the caller has already drawn by the time this is asked is the
+ * important one — a `ConfirmationTimeout` is only thrown after the indexer has
+ * been asked directly and said the transaction is NOT there, and a
+ * `SubmissionTimeout` only after the same check in `submitTx`. A transaction
+ * that landed AND APPLIED is never rebuilt; one that landed and was discarded
+ * by the ledger — {@link isLandedFailure} — is the third case, added
+ * 2026/09/03, and has applied nothing that a second build could double.
+ */
+export function isRebuildable(cause: unknown): boolean {
+  return (
+    isNodeRejection(cause) ||
+    isLandedFailure(cause) ||
+    /* A built transaction that would spend a coin another job holds — see
+       `CoinContention`. Nothing was submitted; once the wallet has caught up
+       the other job's spend is applied or reverted, and a rebuild selects
+       afresh. */
+    isCoinContention(cause) ||
+    isConfirmationTimeout(cause) ||
+    isSubmissionTimeout(cause) ||
+    /* Nothing has been submitted when one of these is thrown — the fee
+       estimate, the balancing, and the signing all happen before the fee leg is
+       proved, let alone sent — so a rebuild is not merely safe here, it is the
+       only thing left to try. */
+    isWalletCallTimeout(cause)
+  );
+}
+
+/**
+ * The block a failed build was invalidated by, when the failure says.
+ *
+ * A `CallTxFailedError` carries `finalizedTxData.blockHeight`: the block that
+ * landed the transaction and discarded it, and the block the registry view the
+ * next proof is built against must include. Nothing else carries a height —
+ * a `1010` is refused before any block — so the caller supplies the chain's
+ * height at the moment of refusal instead (`chainHeight`).
+ */
+/**
+ * Crumb DUST inputs a grant's fee leg carries from its FIRST attempt.
+ *
+ * `deposit_night` is a small transaction that costs real compute, and the
+ * node's fee rule (`FeeCalculation.OutsideTimeToDismiss`, `231`) refuses it
+ * with one DUST input: too little size for its processing time. The
+ * threshold was found by climbing on 2026/09/03 — the grant for `a6f08aff…`
+ * was refused with two and three DUST inputs and landed with four, at 07:28:03,
+ * on its third submission. Four crumbs plus the covering coin, one crumb of
+ * margin over what landed, so the first submission is the one that lands.
+ * The climb in `./wallet.ts` remains behind it.
+ */
+export const GRANT_DUST_PADDING = 4;
+
+export function landedHeight(cause: unknown): number | null {
+  let current: unknown = cause;
+  for (let depth = 0; depth < 8 && current; depth += 1) {
+    if (typeof current === 'object') {
+      const height = (current as { finalizedTxData?: { blockHeight?: unknown } }).finalizedTxData
+        ?.blockHeight;
+      if (typeof height === 'number' && Number.isFinite(height)) return height;
+      if (typeof height === 'bigint') return Number(height);
+    }
+    const message = current instanceof Error ? current.message : String(current);
+    const match = /"blockHeight":\s*"?(\d+)"?/.exec(message);
+    if (match) return Number(match[1]);
+    current = current instanceof Error ? (current as { cause?: unknown }).cause : undefined;
+  }
+  return null;
+}
+
+export interface NodeRejectionRetryOptions {
+  /** Builds and submits the transaction. Called afresh on every attempt. */
+  label: string;
+  /** `true` once the wallet has caught up with the block that refused it. */
+  synced: () => Promise<boolean>;
+  /**
+   * The indexer's latest block. When given, a rebuild does not start until
+   * this has reached the height that invalidated the previous build — see
+   * {@link landedHeight} — or `heightWaitMs` has passed, in which case the
+   * rebuild goes ahead with a journal line saying so.
+   */
+  indexerHeight?: () => Promise<number | null>;
+  /**
+   * The node's height now. Read at the moment of a `1010` refusal, which
+   * carries no height of its own, and used as the target the indexer must
+   * reach before that refusal is worth rebuilding against.
+   */
+  chainHeight?: () => Promise<number | null>;
+  /** The bound on the indexer wait. One minute by default. */
+  heightWaitMs?: number;
+  attempts?: number;
+  /** How long to wait for that, before giving up and reporting the rejection. */
+  budgetMs?: number;
+  pollMs?: number;
+  wait?: (ms: number) => Promise<void>;
+  log?: (line: string) => void;
+  /** Reports a step of the running spend job. Injectable for the tests. */
+  progress?: (step: string) => void;
+}
+
+/**
+ * Rebuilds and retries a transaction the NODE refused, once the wallet has
+ * caught up with the chain that refused it.
+ *
+ * TWO THINGS THIS DOES THAT A PLAIN RETRY WOULD NOT, and both are the whole
+ * point:
+ *
+ *   1. It WAITS FOR THE WALLET TO RE-SYNC first. The rejection means the coins
+ *      the transaction spends were selected against a stale view, so retrying
+ *      immediately produces the same refusal. The wallet flapped
+ *      `WALLET_SYNCING` at 15:35:50 and 15:36:50 and the client's own retry
+ *      landed at 15:39:26, once it had caught up — this does that deliberately
+ *      instead of by luck.
+ *   2. It REBUILDS rather than resubmits. The bytes are what the node refused;
+ *      a fresh `findDeployedContract` and `callTx` selects coins against the
+ *      state as it now stands. Resending the same transaction would fail
+ *      identically for ever.
+ *
+ * Anything that is not a node rejection is rethrown untouched on the first
+ * attempt: a missing contract, a refused circuit, or an unreachable prover are
+ * not made better by waiting.
+ *
+ * Before this, a rejected first deposit answered the client 502 `deposit-failed`
+ * and the client's own ladder carried the wait — 229 s to NIGHT and 519 s to
+ * mUSD on 2026/09/02. The wait belongs here, where the rebuild is possible.
+ */
+export async function withNodeRejectionRetry<T>(
+  build: () => Promise<T>,
+  options: NodeRejectionRetryOptions,
+): Promise<T> {
+  const attempts = options.attempts ?? 3;
+  const budgetMs = options.budgetMs ?? 120_000;
+  const pollMs = options.pollMs ?? 1_000;
+  const pause = options.wait ?? wait;
+  const log = options.log ?? ((line: string) => console.warn(line));
+
+  let last: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await build();
+    } catch (cause) {
+      last = cause;
+      if (!isRebuildable(cause) || attempt === attempts) throw cause;
+      const named = describeRebuildCause(cause);
+      log(
+        `[retry] ${named.verb} ${options.label} (${cause instanceof Error ? cause.message : String(cause)}) — waiting for this wallet to catch up with the chain, then rebuilding (attempt ${attempt + 1} of ${attempts})`,
+      );
+      /* Reported as a STEP, not only as a log line. This wait is up to
+         `budgetMs` — two minutes — with nothing at the prover, which is exactly
+         the shape the stall watchdog aborts on. A job rebuilding after a
+         refusal is healthy and must say so, or the watchdog takes its lane away
+         for doing the right thing. Measured on the deployed service on
+         2026/09/03: a grant sat 115 s at `fee leg proved` through one of these
+         and recovered on its own, 35 s inside the window. */
+      const step = options.progress ?? progress;
+      step(`rebuilding after ${named.step}`);
+      /* THE INDEXER FIRST, THEN THE WALLET. `synced` says the wallet has applied
+         everything the indexer has; it does not say the indexer has the block
+         that made the last build wrong. On stagenet the indexer trails the node
+         by 13–14 s, and on 2026/09/03 a rebuild against a registry view that
+         had not yet seen block 293959 failed exactly as the build before it
+         had. So the height that invalidated the last build — carried by a
+         landed failure, or read from the node at a refusal — is waited for at
+         the indexer, bounded, before the wallet wait begins. */
+      if (options.indexerHeight) {
+        const target =
+          landedHeight(cause) ?? (options.chainHeight ? await options.chainHeight() : null);
+        if (target !== null) {
+          const heightWaitMs = options.heightWaitMs ?? 60_000;
+          const heightDeadline = Date.now() + heightWaitMs;
+          let reached = false;
+          for (;;) {
+            let seen: number | null = null;
+            try {
+              seen = await options.indexerHeight();
+            } catch {
+              // An unreachable indexer has not reached anything; asked again below.
+            }
+            if (seen !== null && seen >= target) {
+              reached = true;
+              break;
+            }
+            step(`waiting for the indexer to reach block ${target}`);
+            if (Date.now() >= heightDeadline) break;
+            await pause(pollMs);
+          }
+          if (!reached) {
+            log(
+              `[retry] ${options.label}: the indexer has not reached block ${target} within ${Math.round(heightWaitMs / 1_000)} s — rebuilding anyway, against whatever view it has`,
+            );
+          }
+        }
+      }
+      const deadline = Date.now() + budgetMs;
+      for (;;) {
+        let caught = false;
+        try {
+          caught = await options.synced();
+        } catch {
+          // An unreadable wallet is not a synced one; asked again below.
+        }
+        if (caught) break;
+        /* Every poll, because the wait is the silence being explained. */
+        step('waiting for this wallet to catch up');
+        if (Date.now() >= deadline) {
+          log(
+            `[retry] ${options.label}: this wallet has not caught up within ${Math.round(budgetMs / 1_000)} s — reporting the rejection rather than rebuilding against a view that is still stale`,
+          );
+          throw last;
+        }
+        await pause(pollMs);
+      }
+    }
+  }
+  /* Unreachable: the loop either returns or throws. */
+  throw last;
+}
+
+export interface EnsureSpareCoinOptions {
+  /**
+   * Whether the spend queue has nothing waiting on it.
+   *
+   * Passed in rather than read, because the queue's depth belongs to
+   * `./server.ts` and this module has no business knowing about HTTP
+   * admission. Absent means "do not ask", which is what the tests and the
+   * start-up call use.
+   */
+  queueIdle?: () => boolean;
+}
 
 export class AccountFundingError extends Error {
   constructor(
@@ -315,6 +646,17 @@ export interface AccountFunder {
    * `/balance-only` is queued behind.
    */
   fundAsset(contractAddress: string): Promise<AssetFunding>;
+  /**
+   * Mints one grant-sized asset coin AHEAD of the next activation, if there is
+   * not one ready already, so the asset leg is a single `deposit_shielded`
+   * rather than a mint plus the three minutes it takes this wallet to see its
+   * own coin. Called on the registration loop's minute tick and after every
+   * grant; never throws. Resolves `true` when it really attempted a mint, which
+   * spends this wallet's DUST and so has to be recorded as a spend.
+   */
+  ensureSpareCoin(options?: EnsureSpareCoinOptions): Promise<boolean>;
+  /** What the spare is doing, for the start-up log and `/status`. */
+  spareState(): 'ready' | 'minting' | 'none' | 'unsupported';
 }
 
 /**
@@ -352,6 +694,58 @@ export async function createAccountFunder(
   );
   const reader = await publicDataProviderFor(config);
   const colour = nativeColourBytes();
+
+  /**
+   * Has this wallet caught up with the chain that refused a transaction?
+   *
+   * `isSynced` AND `dust.complete`, not either alone: the rejection is about
+   * the DUST coins the balancing selected, so a wallet whose shielded and
+   * unshielded halves are current but whose dust wallet is still replaying
+   * would rebuild against exactly the stale view that was refused.
+   */
+  /**
+   * Caught up ENOUGH to rebuild a transaction the node refused.
+   *
+   * Three terms, and the third was measured on 2026/09/03. The first two are
+   * the original rule: the refusal is about the DUST the balancing selected, so
+   * the wallet must have walked the block that refused it and finished its dust
+   * scan. The third is that this service must have NOTHING OF ITS OWN still in
+   * flight.
+   *
+   * At 02:14:19 UTC an activation grant was refused with `Custom error: 231`
+   * and rebuilt twice more, at 02:14:46 and 02:14:56, and refused both times —
+   * because a registration of this sponsor's was submitted and unlanded
+   * throughout, and a rebuild that spends this wallet's DUST while another of
+   * its transactions is pending selects against a view the node has already
+   * moved past. Three attempts of proving, balancing, and a lane went to
+   * transactions that could not land, on a wallet with one fee-capable coin,
+   * and the two name claims behind them reached Home at 146.5 s against a bar
+   * of 120.
+   *
+   * Waiting for the pending one costs a block or two. Not waiting cost a
+   * minute of somebody's onboarding.
+   */
+  const caughtUp = async (): Promise<boolean> => {
+    const walked = await wallet.progress();
+    /* EFFECTIVELY synced — applied at or past the indexer's last relevant
+       announcement counts. The strict flag is false for 27–179 s after every
+       spend of this wallet's own (measured 2026/09/03), which is exactly when
+       a rebuild is waiting here, and three of them ran the whole 120 s budget
+       out on it. */
+    if (!isEffectivelySynced(walked)) return false;
+    /* NOT "and nothing of ours pending". That term dated from the morning of
+       2026/09/03, when a rebuild against a stale coin view was the failure;
+       the coin reservation now keeps in-flight coins out of every selection,
+       and under three sign-ups at once something of this wallet's is always
+       pending — at 11:28 three grants each made one refused submission and
+       then waited the whole 120 s budget out on this line, never rebuilding. */
+    return true;
+  };
+  /** The rebuild's wait on the indexer, for every retry in this module. */
+  const heightGate = {
+    indexerHeight: () => queryIndexerHeight(config.indexerHttpUrl),
+    chainHeight: () => wallet.nodeHeight(),
+  };
 
   /* ------------------------------------------------------------------------ */
   /* The asset side                                                           */
@@ -536,6 +930,177 @@ export async function createAccountFunder(
     };
   };
 
+  /* -------------------------------------------------------------------------- */
+  /* The spare mUSD coin                                                        */
+  /* -------------------------------------------------------------------------- */
+
+  /**
+   * One minted, spendable mUSD coin of exactly the grant size, held ready so an
+   * activation's asset leg is a single `deposit_shielded`.
+   *
+   * The leg used to be mint → wait for the coin to become spendable → deposit,
+   * and the middle step is a wallet catching up with its own transaction: about
+   * three of the roughly four minutes an activation took. Minting one coin
+   * AHEAD of the request — at start-up, and again after each grant — takes that
+   * wait out of the user's onboarding entirely and puts it on a quiet service.
+   *
+   * Never more than one, so this cannot drift into minting money in a loop, and
+   * never minted while a spend job holds the wallet, so it cannot queue itself
+   * in front of somebody's fee.
+   */
+  let spareCoin: { nonce: string; value: bigint; mintTx: string } | null = null;
+  let spareInFlight: Promise<void> | null = null;
+
+  /** Mints one grant-sized coin to this wallet and waits for it to be spendable. */
+  const mintAssetCoin = async (): Promise<{ nonce: string; value: bigint; mintTx: string }> => {
+    const { tokenType, faucetAddress } = requireAsset();
+    const recipientBytes = await wallet.shieldedCoinPublicKeyBytes();
+    /* The nonce is what makes the minted coin identifiable in a wallet that
+       may already hold other coins of the same colour — a coin stranded by an
+       earlier deposit that failed, say. Everything below matches on it rather
+       than on the value, so two grants of the same size can never be confused
+       for one another. */
+    const mintNonce = new Uint8Array(randomBytes(32));
+    const mintNonceHex = bytesToHex(mintNonce);
+
+    let mintTx: string;
+    try {
+      mintTx = await wallet.exclusive(async () => {
+        /* Built INSIDE the job, so the job closes it. Built outside, as it was
+           until 2026/09/03, its indexer client belonged to nobody: the balancer
+           mints a spare at start-up and after every grant, and each of those
+           left an Apollo client and a WebSocket behind for the life of the
+           process. `contractProviders` says so in the journal when it happens,
+           which is how this one was found. */
+        const faucetProviders = await contractProviders(config, {
+          privateStateId: 'passport-balancer-faucet',
+          initialPrivateState: {},
+          zkConfigProvider: faucetZkConfigProvider as never,
+          proofProvider: faucetProofProvider,
+          /* Explicitly zero, though zero is now the default: this job must
+             never be the one that holds a lane waiting for a coin. If there is
+             no DUST free when the mint reaches its fee estimate, it gives the
+             lane back within a second and the next minute tick asks again. */
+          walletProvider: wallet.contractWalletProvider({
+            waitForDustMs: 0,
+            initialDustPadding: GRANT_DUST_PADDING,
+          }),
+        });
+        const found = await findDeployedContract(faucetProviders as never, {
+          compiledContract: compiledFaucet,
+          contractAddress: faucetAddress,
+        } as never);
+        const callTx = (found as { callTx: Record<string, (...args: unknown[]) => Promise<unknown>> })
+          .callTx;
+        const mint = await callTx.mint_shielded(MUSD_DOMAIN_SEPARATOR, config.assetGrant, mintNonce, {
+          bytes: recipientBytes,
+        });
+        return transactionIdentifier(mint);
+      }, { label: `the spare ${ASSET_SYMBOL} mint` });
+    } catch (cause) {
+      throw new AccountFundingError(
+        'mint-failed',
+        `The ${ASSET_SYMBOL} grant could not be minted, so nothing was deposited.`,
+        cause instanceof Error ? cause.message : String(cause),
+      );
+    }
+
+    /* Outside the spend lock deliberately. This is the balancer's own wallet
+       catching up with a transaction it has just made, and holding the queue
+       through it would stall `/balance-only` for no reason. */
+    for (let attempt = 0; attempt < MINT_VISIBLE_ATTEMPTS; attempt += 1) {
+      try {
+        const coins = await wallet.availableShieldedCoins(tokenType);
+        const found = coins.find(
+          (candidate) =>
+            candidate.nonce.replace(/^0x/, '').toLowerCase() === mintNonceHex &&
+            candidate.value === config.assetGrant,
+        );
+        if (found) return { nonce: found.nonce, value: found.value, mintTx };
+      } catch {
+        // A momentary wallet-state timeout; asked again below.
+      }
+      await wait(CONFIRM_INTERVAL_MS);
+    }
+    throw new AccountFundingError(
+      'mint-not-visible',
+      `The ${ASSET_SYMBOL} grant was minted but has not become spendable in the balancer's wallet yet.`,
+      `mint ${mintTx}, nonce ${mintNonceHex}`,
+    );
+  };
+
+  /**
+   * Makes sure one spare coin is ready, minting if there is none.
+   *
+   * Never throws at its caller: a spare that could not be minted costs an
+   * activation the three minutes it used to cost anyway, and a start-up or a
+   * post-grant housekeeping task is no place to fail a request from.
+   */
+  const ensureSpareCoin = async (options: EnsureSpareCoinOptions = {}): Promise<boolean> => {
+    if (!assetAvailable || spareCoin || spareInFlight) return false;
+    /* Never in front of somebody's fee or somebody's grant. There is always a
+       next call — the next minute tick, or the end of the next activation. */
+    if (wallet.isBusy()) return false;
+    /* Nor while anybody is so much as WAITING to be served. On 2026/09/02 this
+       job entered the queue at 15:49:03 with a request behind it and held it
+       until 15:59:07: a `/balance-only`, which bypasses the queue, had taken
+       the coins in between and the fee estimate then sat out its whole budget
+       inside the job. The budget is gone — see `waitForDustMs` below — and so
+       is the reason to start at all with a queue that is not empty. */
+    if (options.queueIdle && !options.queueIdle()) return false;
+    /* And never on the LAST free coin. A mint is housekeeping; taking the only
+       coin a caller's registration could have used, to save a future caller
+       three minutes, is the wrong trade in every case. Two is the floor rather
+       than one because this wallet's coin selection sweeps the small coin plus
+       a large one for a single fee. */
+    try {
+      if ((await wallet.dustUtxoCount()) < 2) return false;
+    } catch {
+      return false;
+    }
+    spareInFlight = (async () => {
+      try {
+        const minted = await mintAssetCoin();
+        spareCoin = minted;
+        console.log(`[asset] spare ${ASSET_SYMBOL} coin ready (mint ${minted.mintTx})`);
+      } catch (cause) {
+        console.warn(
+          `[asset] no spare ${ASSET_SYMBOL} coin: ${cause instanceof Error ? cause.message : String(cause)} — the next activation will mint its own`,
+        );
+      } finally {
+        spareInFlight = null;
+      }
+    })();
+    await spareInFlight;
+    /* True whether or not a coin arrived: the attempt spent this wallet's DUST
+       either way, and the caller needs to know that so a shortfall read in the
+       next thirty seconds is reported as settling rather than as an empty
+       balancer. */
+    return true;
+  };
+
+  /** Takes the spare if there is one, and mints inline if there is not. */
+  const takeAssetCoin = async (): Promise<{
+    nonce: string;
+    value: bigint;
+    mintTx: string;
+    fromSpare: boolean;
+  }> => {
+    const take = (): { nonce: string; value: bigint; mintTx: string } | null => {
+      const taken = spareCoin;
+      spareCoin = null;
+      return taken;
+    };
+    const ready = take();
+    if (ready) return { ...ready, fromSpare: true };
+    /* A mint already under way is worth waiting for — it is minutes ahead of
+       starting a second one, and two would leave a coin stranded. */
+    if (spareInFlight) await spareInFlight.catch(() => undefined);
+    const arrived = take();
+    if (arrived) return { ...arrived, fromSpare: true };
+    return { ...(await mintAssetCoin()), fromSpare: false };
+  };
+
   return {
     assetsPath: managedPath,
     grantAtomic: config.accountGrantAtomic,
@@ -575,21 +1140,41 @@ export async function createAccountFunder(
 
       let depositTx: string;
       try {
-        const found = await findDeployedContract(providers as never, {
-          compiledContract,
-          contractAddress: address,
-          privateStateId,
-          initialPrivateState: {},
-        } as never);
-        const callTx = (found as { callTx: Record<string, (...args: unknown[]) => Promise<unknown>> })
-          .callTx;
-        /* The paid call. `receiveUnshielded` inside the circuit makes the
-           transaction owe the contract `grantAtomic` of the native colour, and
-           the balancer's own wallet provider balances that from the balancer's
-           own NIGHT — the same mechanism that pays Midnames its COST. */
-        const deposit = await callTx.deposit_night(colour, config.accountGrantAtomic);
-        depositTx = transactionIdentifier(deposit);
+        /* Rebuilt and retried if the NODE refuses it, which is the failure this
+           leg actually has: a deposit balanced one block behind the
+           registration in front of it was refused with `Custom error: 231` on
+           2026/09/02, answered the client 502, and cost 229 s of the client's
+           own retry ladder to land. Everything inside is rebuilt each attempt —
+           a fresh `findDeployedContract` selects coins against the state as it
+           now stands, where resending the refused bytes would fail identically
+           for ever. */
+        depositTx = await withNodeRejectionRetry(
+          async () => {
+            const found = await findDeployedContract(providers as never, {
+              compiledContract,
+              contractAddress: address,
+              privateStateId,
+              initialPrivateState: {},
+            } as never);
+            const callTx = (
+              found as { callTx: Record<string, (...args: unknown[]) => Promise<unknown>> }
+            ).callTx;
+            /* The paid call. `receiveUnshielded` inside the circuit makes the
+               transaction owe the contract `grantAtomic` of the native colour,
+               and the balancer's own wallet provider balances that from the
+               balancer's own NIGHT — the same mechanism that pays Midnames its
+               COST. */
+            const deposit = await callTx.deposit_night(colour, config.accountGrantAtomic);
+            return transactionIdentifier(deposit);
+          },
+          { label: `deposit_night into ${address}`, synced: caughtUp, ...heightGate },
+        );
       } catch (cause) {
+        /* A DUST shortfall is not a failed deposit — nothing was built, nothing
+           was submitted, and nothing was credited. It travels out untouched so
+           `./server.ts` can wait for a coin and rebuild this leg rather than
+           telling the caller its grant failed. */
+        if (isDustShortfall(cause)) throw cause;
         throw new AccountFundingError(
           'deposit-failed',
           `The activation grant could not be deposited into ${address}; nothing was credited.`,
@@ -607,6 +1192,7 @@ export async function createAccountFunder(
           const held = mirroredNight(await readAccount(address));
           if (held >= target) {
             balanceAfter = held;
+            progress('confirmed');
             break;
           }
         } catch {
@@ -633,106 +1219,57 @@ export async function createAccountFunder(
       };
     },
 
+    ensureSpareCoin,
+
+    spareState(): 'ready' | 'minting' | 'none' | 'unsupported' {
+      if (!assetAvailable) return 'unsupported';
+      if (spareCoin) return 'ready';
+      return spareInFlight ? 'minting' : 'none';
+    },
+
     async fundAsset(contractAddress: string): Promise<AssetFunding> {
-      const { colourBytes, tokenType, faucetAddress } = requireAsset();
+      const { colourBytes } = requireAsset();
       const address = rawContractAddress(contractAddress);
       /* The same baseline discipline as the NIGHT leg: the confirmation below
          is "THIS deposit's credit is visible", not "the map is non-empty". */
       const before = heldAsset(await readAccount(address));
 
       /* ------------------------------------------------------------------ */
-      /* 1. Mint the coin to the balancer's OWN shielded address             */
+      /* 1. Take a grant-sized coin — the spare if one is ready              */
       /* ------------------------------------------------------------------ */
 
-      const recipientBytes = await wallet.shieldedCoinPublicKeyBytes();
-      /* The nonce is what makes the minted coin identifiable in a wallet that
-         may already hold other coins of the same colour — a coin stranded by an
-         earlier deposit that failed, say. Everything below matches on it rather
-         than on the value, so two grants of the same size can never be
-         confused for one another. */
-      const mintNonce = new Uint8Array(randomBytes(32));
-      const mintNonceHex = bytesToHex(mintNonce);
-
-      const faucetProviders = await contractProviders(config, {
-        privateStateId: 'passport-balancer-faucet',
-        initialPrivateState: {},
-        zkConfigProvider: faucetZkConfigProvider as never,
-        proofProvider: faucetProofProvider,
-        walletProvider: wallet.contractWalletProvider(),
-      });
-
-      let mintTx: string;
-      try {
-        mintTx = await wallet.exclusive(async () => {
-          const found = await findDeployedContract(faucetProviders as never, {
-            compiledContract: compiledFaucet,
-            contractAddress: faucetAddress,
-          } as never);
-          const callTx = (
-            found as { callTx: Record<string, (...args: unknown[]) => Promise<unknown>> }
-          ).callTx;
-          const mint = await callTx.mint_shielded(MUSD_DOMAIN_SEPARATOR, config.assetGrant, mintNonce, {
-            bytes: recipientBytes,
-          });
-          return transactionIdentifier(mint);
-        });
-      } catch (cause) {
-        throw new AccountFundingError(
-          'mint-failed',
-          `The ${ASSET_SYMBOL} grant could not be minted, so nothing was deposited into ${address}.`,
-          cause instanceof Error ? cause.message : String(cause),
-        );
-      }
+      /* This is where the activation's time went. A coin minted on demand is
+         only spendable once this wallet has seen its own transaction, which is
+         about three minutes of a caller's onboarding; a spare minted ahead of
+         the request makes the leg one `deposit_shielded`. */
+      const coin = await takeAssetCoin();
+      const mintTx = coin.mintTx;
+      console.log(
+        `[asset] ${coin.fromSpare ? 'using the spare' : 'minted a'} ${ASSET_SYMBOL} coin for ${address} (mint ${mintTx})`,
+      );
 
       /* ------------------------------------------------------------------ */
-      /* 2. Wait for the coin to be SPENDABLE in this wallet                 */
-      /* ------------------------------------------------------------------ */
-
-      /* Outside the spend lock deliberately. This is the balancer's own wallet
-         catching up with a transaction it has just made, and holding the queue
-         through it would stall `/balance-only` for no reason. */
-      let coin: { nonce: string; value: bigint } | null = null;
-      for (let attempt = 0; attempt < MINT_VISIBLE_ATTEMPTS; attempt += 1) {
-        try {
-          const coins = await wallet.availableShieldedCoins(tokenType);
-          const found = coins.find(
-            (candidate) =>
-              candidate.nonce.replace(/^0x/, '').toLowerCase() === mintNonceHex &&
-              candidate.value === config.assetGrant,
-          );
-          if (found) {
-            coin = found;
-            break;
-          }
-        } catch {
-          // A momentary wallet-state timeout; asked again below.
-        }
-        await wait(CONFIRM_INTERVAL_MS);
-      }
-      if (!coin) {
-        throw new AccountFundingError(
-          'mint-not-visible',
-          `The ${ASSET_SYMBOL} grant was minted but has not become spendable in the balancer's wallet yet, so it could not be deposited into ${address}.`,
-          `mint ${mintTx}, nonce ${mintNonceHex}`,
-        );
-      }
-
-      /* ------------------------------------------------------------------ */
-      /* 3. deposit_shielded — the coin into the ACCOUNT                     */
+      /* 2. deposit_shielded — the coin into the ACCOUNT                     */
       /* ------------------------------------------------------------------ */
 
       const privateStateId = `passport-balancer-account-${address}`;
-      const accountProviders = await contractProviders(config, {
-        privateStateId,
-        initialPrivateState: {},
-        zkConfigProvider: zkConfigProvider as never,
-        proofProvider,
-        walletProvider: wallet.contractWalletProvider(),
-      });
 
       let depositTx: string;
       try {
-        depositTx = await wallet.exclusive(async () => {
+        depositTx = await withNodeRejectionRetry(
+          () => wallet.exclusive(async () => {
+          /* Built INSIDE the job, so the job closes it — and built afresh on
+             each rebuild, which is what a rebuild is for. Built once outside,
+             as it was until 2026/09/03, its indexer client belonged to no job
+             and was never disposed; the journal named this exact private state
+             in a `built outside any spend job` line. */
+          const accountProviders = await contractProviders(config, {
+            privateStateId,
+            initialPrivateState: {},
+            zkConfigProvider: zkConfigProvider as never,
+            proofProvider,
+            walletProvider: wallet.contractWalletProvider(),
+          });
           const found = await findDeployedContract(accountProviders as never, {
             compiledContract,
             contractAddress: address,
@@ -752,7 +1289,9 @@ export async function createAccountFunder(
             value: coin.value,
           });
           return transactionIdentifier(deposit);
-        });
+          }, { label: `deposit_shielded into ${address}` }),
+          { label: `deposit_shielded into ${address}`, synced: caughtUp, ...heightGate },
+        );
       } catch (cause) {
         throw new AccountFundingError(
           'asset-deposit-failed',
@@ -762,7 +1301,7 @@ export async function createAccountFunder(
       }
 
       /* ------------------------------------------------------------------ */
-      /* 4. Read the credit back off the chain                               */
+      /* 3. Read the credit back off the chain                               */
       /* ------------------------------------------------------------------ */
 
       const target = before + config.assetGrant;
@@ -772,6 +1311,7 @@ export async function createAccountFunder(
           const held = heldAsset(await readAccount(address));
           if (held >= target) {
             balanceAfter = held;
+            progress('confirmed');
             break;
           }
         } catch {
@@ -786,6 +1326,12 @@ export async function createAccountFunder(
           `mint ${mintTx}, deposit ${depositTx}, held ${before} before`,
         );
       }
+
+      /* Mint the NEXT one now, while nobody is waiting on it. Not awaited: the
+         caller's grant is already on chain and confirmed, and the three minutes
+         a mint takes to become spendable is precisely what this keeps off the
+         next caller's onboarding. */
+      void ensureSpareCoin();
 
       const [mintResolved, depositResolved] = await Promise.all([
         resolveTransactionHash(config.indexerHttpUrl, mintTx),

@@ -59,6 +59,7 @@ import {
   installNetworkBoundary,
   PASSPORT_ACCOUNT_ADDRESS,
   RESOLVABLE_NAME,
+  sponsorRoute,
   type NetworkBoundary,
 } from './mocks.js';
 import { installVirtualAuthenticator } from './passkey.js';
@@ -156,7 +157,23 @@ test('a passkey is welcomed, and the welcome leads to the name step', async () =
      would leave, not merely of the word "Skip". */
   await expect(page.getByRole('button', { name: /skip|later|not now|maybe/i })).toHaveCount(0);
   const buttons = await page.getByRole('button').allInnerTexts();
-  expect(buttons.filter((label) => label.trim().length > 0)).toEqual(['Claim your name']);
+  /* TWO CONTROLS SINCE 2026/09/04, and the second one is not a skip — it is
+     the opposite of one. "Find my Passport" leads to a step that RESTORES an
+     account that already exists, proving ownership on chain before it does, so
+     it can only end on a Home that has an account. The rule this list enforces
+     is that nothing here reaches Home WITHOUT one, and both of these honour it.
+
+     It is on this screen because this screen is where a returning Passport
+     wrongly ends up. Recovery went entirely through the passkey's largeBlob,
+     and an Android passkey has none — Google Password Manager implements PRF
+     and not largeBlob — so on that platform a browser with cleared site data
+     recovered nothing and was put here, in front of a naming ceremony, over a
+     Passport that already had a name. Claiming from here would have set up a
+     second account and paid for a second name. See `e2e/android-recovery.spec.ts`. */
+  expect(buttons.filter((label) => label.trim().length > 0)).toEqual([
+    'Claim your name',
+    'I already have a name — find my Passport',
+  ]);
 
   // And the wallet has not been asked for a transaction: only reads so far.
   expect(network.calls.filter((call) => call.includes('register-alias'))).toHaveLength(0);
@@ -212,6 +229,27 @@ test('the availability line quotes no price, no balance, and no faucet', async (
   expect(text).not.toMatch(/\bDUST\b/);
 });
 
+test('every sponsor call this build makes is answered here, and none leaves the box', async () => {
+  /* THE ONE THING A MOCKED TIER CANNOT ASSERT BY PASSING.
+     `import.meta.env` is a compile-time substitution, so the sponsor origin is
+     baked into the bundle `previewEnv` builds. If that origin and the route
+     globs in `mocks.ts` ever name different hosts, every interception here
+     misses, the app talks to a real machine on the internet, and the specs go
+     on passing — quietly graded against whatever that machine happened to say.
+     That is exactly what this tier had been doing against a host deleted on
+     2026/08/27 whose address is now somebody else's.
+
+     Interception and the network are mutually exclusive in Playwright: a
+     fulfilled route opens no socket. So the two counters agreeing is the proof
+     that nothing reached the network, and the count being above zero is the
+     proof that the walk so far — the sponsorship probe and the fee-sponsor
+     readiness read behind the availability line — asked the sponsor anything
+     at all. Both halves are needed: zero and zero also "agree". */
+  const traffic = network.sponsorTraffic();
+  expect(traffic.intercepted).toBeGreaterThan(0);
+  expect(traffic.requests).toBe(traffic.intercepted);
+});
+
 test('with no sponsor, the screen promises a queue and never a payment', async () => {
   /* The sponsor is the only thing that registers a name. When it stands down,
      the honest answer is a QUEUE — and the sentence under the field changes to
@@ -222,7 +260,7 @@ test('with no sponsor, the screen promises a queue and never a payment', async (
   /* A sponsor that takes its time, and stands down. Both halves matter: the
      delay is what makes the second stage long enough to read, and the refusal
      is what proves the gate still stops the claim before any ceremony. */
-  await page.route('**/funder.midnightpassport.com/**/status', async (route) => {
+  await page.route(sponsorRoute('/status'), async (route) => {
     /* Slower than the registry below, deliberately. The two probes now run
        CONCURRENTLY — removing that serialisation is half of the fix — so the
        second stage is only long enough to observe when the sponsor is the
@@ -261,7 +299,7 @@ test('with no sponsor, the screen promises a queue and never a payment', async (
 
   /* Put the sponsoring answer back, so the rest of the walk runs against the
      service as it really behaves. */
-  await page.route('**/funder.midnightpassport.com/**/status', (route) =>
+  await page.route(sponsorRoute('/status'), (route) =>
     route.fulfill({
       json: { network: 'stagenet', aliasSponsorship: 'available', assetSymbol: 'mUSD' },
     }),
@@ -287,7 +325,7 @@ test('a slow registry is narrated in stages, and never as an unexplained spinner
   /* A sponsor that takes its time, and stands down. Both halves matter: the
      delay is what makes the second stage long enough to read, and the refusal
      is what proves the gate still stops the claim before any ceremony. */
-  await page.route('**/funder.midnightpassport.com/**/status', async (route) => {
+  await page.route(sponsorRoute('/status'), async (route) => {
     /* Slower than the registry below, deliberately. The two probes now run
        CONCURRENTLY — removing that serialisation is half of the fix — so the
        second stage is only long enough to observe when the sponsor is the
@@ -381,6 +419,39 @@ test('a slow registry is narrated in stages, and never as an unexplained spinner
     page.getByText(/The Passport service that registers names is not available right now/i),
   ).toBeVisible();
 
+  /* THE CARD THAT DEAD-ENDED (live acceptance, 2026/09/02).
+     The account was already live, the service refused the name, and this card
+     carried the sentence above and NOTHING ELSE — no way to run the claim
+     again, and no mention of the "Register now" that was waiting for this very
+     name on Home. Both controls are on it now, with the sentence between them
+     that says where the name went. */
+  const refusal = page.locator('.mnid-panel[role="alert"]');
+  await expect(refusal.getByRole('button', { name: 'Try again' })).toBeEnabled();
+  await expect(refusal.getByRole('button', { name: 'Continue to Home' })).toBeEnabled();
+  /* NOT the passkey pair, and never both: this failure is the service's, and
+     leaving the session is no answer to it. Two "Try again" buttons on one card
+     would be an ambiguous control in a real browser. */
+  await expect(refusal.getByRole('button', { name: 'Sign out' })).toHaveCount(0);
+  await expect(refusal.getByRole('button', { name: 'Try again' })).toHaveCount(1);
+  // And no machinery in the way out, on the screen where that rule is hardest.
+  const refusalText = await refusal.innerText();
+  expect(refusalText).not.toMatch(/\bwallet\b|\bDUST\b|\bcontract\b|\bindexer\b/i);
+
+  /* ONE HEADING, ONE SENTENCE, TWO CONTROLS (copy fix, 2026/09/03).
+     This card used to say the name was kept three times over — the service's
+     refusal, a clause `App.tsx` appended to it, and a note under the buttons
+     describing the buttons — with the heading running into the first of them
+     unpunctuated: "The claim did not complete alice.night was not registered".
+     Held here as a count rather than as a string, because the sentence itself
+     varies with the refusal and the DUPLICATION is the defect. */
+  expect(refusalText).toMatch(/The claim did not complete\./);
+  expect(refusalText.match(/kept for you/gi) ?? []).toHaveLength(1);
+  expect(refusalText).not.toMatch(/carry on to your Passport/i);
+  expect(refusalText).not.toMatch(/register again shortly/i);
+  /* Two sentence ends on the card, one of them the heading's: everything else
+     on it is a button label. */
+  expect(refusalText.match(/\.(?=\s|$)/g) ?? []).toHaveLength(2);
+
   /* THE STAGES, in the order they happened. Two distinct sentences before the
      refusal, each naming what the running step is doing: this is the whole of
      the defect, which was ONE unchanging label — "Deploying your name's
@@ -396,17 +467,94 @@ test('a slow registry is narrated in stages, and never as an unexplained spinner
   // And not one of them claims a step that had not started.
   expect(labels.some((label) => /Deploying your name's resolver/.test(label))).toBe(false);
 
-  // NOT ONE passkey prompt for a claim that was always going to be refused.
+  /* TRY AGAIN RUNS THE SAME CLAIM. The card stands down while it runs — the
+     host clears the failure before the first phase — and comes back with the
+     same refusal, because the service is still stood down. That is the whole
+     contract of the control: the claim that was pressed, pressed again. */
+  const before = labels.length;
+  await refusal.getByRole('button', { name: 'Try again' }).click();
+  /* The observer above is still watching, so a claim that really ran narrates
+     itself again — that, rather than a card that blinked, is the proof. */
+  await expect
+    .poll(
+      () => page.evaluate(() => (window as unknown as { __labels: string[] }).__labels.length),
+      { timeout: 60_000 },
+    )
+    .toBeGreaterThan(before);
+  await expect(page.getByText(/The claim did not complete/i)).toBeVisible({ timeout: 60_000 });
+
+  // NOT ONE passkey prompt for a claim that was always going to be refused —
+  // the retry included, because the refusal still lands before any ceremony.
   expect(await page.evaluate(() => (window as unknown as { __prompts: number }).__prompts)).toBe(0);
   // And nothing was asked of the registration endpoint either.
   expect(network.calls.filter((call) => call.includes('register-alias'))).toHaveLength(0);
 
   network.setRegistryDelay(0);
-  await page.route('**/funder.midnightpassport.com/**/status', (route) =>
+  await page.route(sponsorRoute('/status'), (route) =>
     route.fulfill({
       json: { network: 'stagenet', aliasSponsorship: 'available', assetSymbol: 'mUSD' },
     }),
   );
+});
+
+test('a claim that failed keeps the name, and the reload lands on Home with a retry', async () => {
+  /* WHAT CHANGED, AND WHY THE OLD ASSERTION WAS WORSE.
+     Until 6ad9bbc a claim that died part-way persisted nothing: the name the
+     user had chosen vanished, and a Passport that had already stored its name
+     step as done reloaded into a dashboard with no name and no way back to
+     one — bricked, for that Passport, for ever. The catch now writes the same
+     QUEUED record the requeue in `registerQueuedAlias` writes, carrying the
+     failure as its reason, so the reload below is no longer a return to the
+     naming screen. It is a return to a Passport that still knows what its
+     owner picked and offers to try again, which is the better answer.
+
+     The claim it is reading is the sponsorless one refused in the test above:
+     nothing extra is arranged for this. */
+  await page.reload();
+
+  // Home, not the naming screen — the name step is resolved, it just is not
+  // on chain.
+  await expect(page.getByRole('heading', { name: new RegExp(NAME, 'i') })).toBeVisible({
+    timeout: 60_000,
+  });
+  await expect(page.getByText(/Choose your .night name/i)).toHaveCount(0);
+
+  /* THE NAME IS STILL THERE, said as queued rather than as registered, with
+     the reason the claim gave for it. A queued name that read as registered
+     would be the more damaging bug of the two. */
+  const identity = page.locator('.mnid-card').first();
+  await expect(identity).toContainText(`${NAME}.night`);
+  await expect(identity).toContainText(/Queued — not registered yet/i);
+  await expect(identity).toContainText(
+    /The Passport service that registers names is not available right now/i,
+  );
+
+  /* AND IN PLAIN WORDS, whichever way the claim failed. This row carries the
+     claim's own failure sentence, and until 2026/09/02 that sentence was
+     whatever the registration service had said — so a claim refused because
+     the sponsor's only fee-capable DUST coin was booked put "The .night
+     registry rejected the registration of …" here: machinery, and the wrong
+     party blamed for a registration that was never asked for. The client owns
+     the sentence now (`identity/sponsoredAlias.ts#aliasRefusalMessage`), and
+     what is held here is the property rather than one wording — over the whole
+     row, because the row is what a person reads. */
+  await expect(identity).not.toContainText(/registry|resolver|indexer|\bDUST\b/i);
+
+  /* AND A WAY TO TRY AGAIN, on the row the queued name is on. It is not
+     clicked here: "Register now" is the REAL claim re-run — the deploy, the
+     prover, and the registry write — which this tier cannot complete and
+     `claim-progress.spec.ts` and `stagenet.live.spec.ts` drive between them.
+     What is owed here is that the control exists and is offered, because
+     without it the queued record is a dead end wearing a name. */
+  const retry = identity.getByRole('button', { name: 'Register now' });
+  await expect(retry).toBeVisible();
+  await expect(retry).toBeEnabled();
+
+  /* The walk goes on from a Passport with no name at all, which is the state
+     the tests below are written against. Dropping the record is a fixture
+     reset — the same store, through the same key — and not a claim about the
+     app: what the app does with the record is everything asserted above. */
+  await page.evaluate(() => localStorage.removeItem('passport-alias:v1'));
 });
 
 test('the claim shows three steps, and the long wait is one of them — not three more', async () => {
@@ -427,7 +575,7 @@ test('the claim shows three steps, and the long wait is one of them — not thre
      `setRegistryDelay` holds the indexer's answer back exactly as a poor link
      does. The sponsor is stood down, so the walk still costs no ceremony. */
   test.setTimeout(200_000);
-  await page.route('**/funder.midnightpassport.com/**/status', (route) =>
+  await page.route(sponsorRoute('/status'), (route) =>
     route.fulfill({ json: { network: 'stagenet', aliasSponsorship: 'paused' } }),
   );
   await page.reload();
@@ -478,8 +626,24 @@ test('the claim shows three steps, and the long wait is one of them — not thre
   // The claim is refused for want of a sponsor, before any ceremony.
   await expect(page.getByText(/The claim did not complete/i)).toBeVisible({ timeout: 30_000 });
 
+  /* AND THE SECOND CONTROL, WALKED THE WHOLE WAY. "Continue to Home" is the
+     half of the fix a unit test cannot see: it has to LAND somewhere, and the
+     somewhere is the Passport with this name already queued on it and the
+     "Register now" that finishes the job. Before 2026/09/02 the card named no
+     destination at all, so the only way to that control was to guess it
+     existed. */
+  await page
+    .locator('.mnid-panel[role="alert"]')
+    .getByRole('button', { name: 'Continue to Home' })
+    .click();
+  await expect(page.getByText(/Choose your .night name/i)).toHaveCount(0);
+  const landed = page.locator('.mnid-card').first();
+  await expect(landed).toContainText(`${stepperName}.night`, { timeout: 60_000 });
+  await expect(landed).toContainText(/Queued — not registered yet/i);
+  await expect(landed.getByRole('button', { name: 'Register now' })).toBeVisible();
+
   network.setRegistryDelay(0);
-  await page.route('**/funder.midnightpassport.com/**/status', (route) =>
+  await page.route(sponsorRoute('/status'), (route) =>
     route.fulfill({
       json: { network: 'stagenet', aliasSponsorship: 'available', assetSymbol: 'mUSD' },
     }),
@@ -487,6 +651,11 @@ test('the claim shows three steps, and the long wait is one of them — not thre
 });
 
 test('a reload mid-onboarding returns to the name step, never to Home', async () => {
+  /* The claim above was refused too, so it left its own queued record — and a
+     queued name is a resolved name step, which the test above is what holds.
+     The state THIS test is about is the other one: a Passport with no name at
+     all, which is what the 2026/08/24 sighting was, so the record goes first. */
+  await page.evaluate(() => localStorage.removeItem('passport-alias:v1'));
   await page.reload();
 
   /* The session is restored from this device, and the step is re-armed. A
@@ -1499,9 +1668,22 @@ test('a claim whose passkey will not answer offers a retry, a way out, and a way
     /* And a working Passport at the end of it. The authenticator still holds
        the credential this browser has a record for, so the enrolment is refused
        by exclusion and the user is signed back into the Passport they had —
-       which is why this lands on the name step rather than on the welcome. */
-    await expect(stalled.getByText(/Choose your .night name/i)).toBeVisible({ timeout: 180_000 });
+       never a fresh one, which is what the absent welcome says.
+
+       That the same Passport comes back is now VISIBLE rather than merely
+       implied: since 6ad9bbc the claim abandoned above left the name queued
+       rather than dropping it, so what returns is the Passport WITH the name
+       its owner picked, offered for another attempt. Before that record
+       existed this landed on an empty naming screen, which was the same
+       Passport but could not be told apart from a new one. */
+    await expect(stalled.getByRole('heading', { name: new RegExp(claimName, 'i') })).toBeVisible({
+      timeout: 180_000,
+    });
     await expect(stalled.getByRole('heading', { name: /Welcome to Passport/i })).toHaveCount(0);
+    const recovered = stalled.locator('.mnid-card').first();
+    await expect(recovered).toContainText(`${claimName}.night`);
+    await expect(recovered).toContainText(/Queued — not registered yet/i);
+    await expect(recovered.getByRole('button', { name: 'Register now' })).toBeVisible();
   } finally {
     await authenticator.remove().catch(() => {});
     await context.close();

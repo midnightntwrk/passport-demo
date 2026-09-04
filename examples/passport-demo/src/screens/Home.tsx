@@ -20,6 +20,16 @@ import { createPortal } from 'react-dom'
 import type { AliasRecord } from '../identity/aliasStore.js'
 import type { PassportIncentiveRecord } from '../identity/incentiveStore.js'
 import ActivityFeed, { type ActivityFeedItem } from './ActivityFeed.js'
+/* What has been announced but has not landed yet, derived from the same trail
+   this screen already renders below. Pure — see `assetsOnTheWay.ts`. */
+import { assetsOnTheWay, assetsOnTheWayLine } from './assetsOnTheWay.js'
+/* Whether the opening balance is still coming. Pure — see `lib/activation.ts`. */
+import { openingBalanceOnTheWay } from '../lib/activation.js'
+/* When to read the account again, so a figure that moves on the chain moves on
+   this screen without a reload. Rules in `lib/balanceWatch.ts`, wiring in
+   `useBalanceWatch.ts`. */
+import { holdingsSignature, openingBalanceLegsHeld } from '../lib/balanceWatch.js'
+import { useBalanceWatch } from './useBalanceWatch.js'
 /* Naming a colour, and the order a balance list puts colours in. Pure, drilled,
    and free of the wallet SDK — see `lib/colour.ts`. */
 import {
@@ -36,12 +46,21 @@ import type { FeeReadiness, LocalWalletProvingMode } from '../lib/localWallet.js
    see `lib/qrPayload.ts` for why both directions live in one place. */
 import { encodeReceivePayload } from '../lib/qrPayload.js'
 import { FeaturedApps, type AppsScreenProps, type FeaturedAppsProps } from './Apps.js'
+import CompanionLink from './Companion.js'
 import { EcosystemIdentity } from './Ecosystem.js'
-import NetworkSwitcher, { type PassportNetwork } from './NetworkSwitcher.js'
+/* "Install Passport", in the bar where a person looks for it. Renders nothing
+   at all when Passport is already installed, or in a browser that cannot
+   install it — see `lib/installPrompt.ts`. */
+import InstallPassport from './InstallPassport.js'
+import { type PassportNetwork } from './NetworkSwitcher.js'
 import NotificationToggle from './NotificationToggle.js'
 import PassportContractCard, { type PassportContractCardProps } from './PassportContract.js'
 import SendSheet, { type SendSheetHolding, type SendSheetProps } from './SendSheet.js'
 import ThemeToggle from './ThemeToggle.js'
+/* The back gesture, which on a phone is how anything gets dismissed. Without
+   it a sheet over Home is the one thing a back swipe does not close — see
+   `lib/sheetHistory.ts` for what it closed instead. */
+import { useSheetBackButton } from './useSheetBackButton.js'
 import './home.css'
 
 /* NO FAUCET ON RECEIVE, and no dead branch for one either (2026/08/25). A
@@ -158,13 +177,56 @@ export interface HomeScreenProps {
     onMove: () => void
   } | null
   /**
+   * Payments that left this Passport and have not reached the recipient yet.
+   *
+   * Paying another Passport is two transactions, and until 2026/09/02 a run
+   * that stopped between them left nothing on screen at all: the amount was at
+   * the sender's own receiving address, the tab that knew about it had gone,
+   * and a shielded amount had no control anywhere that could see it. This is
+   * that control — one card per unfinished payment, each saying which step it
+   * reached and offering to carry it on.
+   *
+   * The host supplies only runs that are genuinely unfinished; an empty array
+   * or omission renders nothing.
+   */
+  pendingSends?: {
+    id: string
+    /** "Sending 10 mUSD to alice.night". */
+    label: string
+    /** Which step it reached, in the same two-step language the Send sheet uses. */
+    step: string
+    /** Why it stopped, when there is a reason worth reading. */
+    reason?: string | null
+    /**
+     * Being carried on right now — by the reader's press, or by itself.
+     *
+     * A run whose first leg has landed needs no signature for what is left, so
+     * since 2026/09/04 it resumes without anybody pressing anything. The card
+     * then has to SAY that: a `Continue` sitting under a payment that is
+     * already moving is a button offering to start what has started.
+     */
+    busy?: boolean
+    onContinue: () => void
+    /**
+     * Offered ONLY for a run that never spent anything — there is nothing to
+     * forget about a payment that has moved money, and a control that appeared
+     * to discard one would be the worst button on this screen.
+     */
+    onGiveUp?: () => void
+  }[]
+  /**
    * Live wallet sync progress, 0–100, as the on-device wallet reports it.
    * null = no figure known.
    */
   syncPercent?: number | null
   /** Selected network context; filters the app grid, does not move the wallet. */
   network: PassportNetwork
-  onSelectNetwork: (network: PassportNetwork) => void
+  /**
+   * Accepted and ignored since 2026/09/03, when the network switcher went.
+   * Kept so the host does not have to change to stop passing it; nothing on
+   * this screen can change the network any more. See `NetworkSwitcher.tsx`.
+   */
+  onSelectNetwork?: (network: PassportNetwork) => void
   /** Failure from any control on this screen — copy, send, refresh. */
   error?: string | null
   onDismissError?: () => void
@@ -206,10 +268,18 @@ export interface HomeScreenProps {
      */
     resolveName?: SendSheetProps['resolveName']
     onSendToName?: SendSheetProps['onSendToName']
+    /**
+     * Paying a name in a SHIELDED asset. Separate from `onSendToName` because
+     * it is a different pair of circuits, and a host that has one and not the
+     * other must have the combination it cannot make refused rather than
+     * quietly routed to the other one.
+     */
+    onSendShieldedToName?: SendSheetProps['onSendShieldedToName']
     /** The live phase of the account call, narrated by the sheet. */
     phase?: 'checking' | 'connecting' | 'submitting' | 'confirming' | null
     /** Which of a name transfer's two legs is running. See the Send sheet. */
     nameLeg?: SendSheetProps['nameLeg']
+    nameLegAttempt?: SendSheetProps['nameLegAttempt']
   } | null
   /**
    * The activity trail, newest first — every row Passport has written for this
@@ -267,9 +337,9 @@ export default function HomeScreen(props: HomeScreenProps) {
     passportContract,
     account,
     legacyFunds,
+    pendingSends,
     syncPercent,
     network,
-    onSelectNetwork,
     error,
     onDismissError,
     onRefresh,
@@ -377,11 +447,47 @@ export default function HomeScreen(props: HomeScreenProps) {
       icon: row.icon,
       label: identities[index].symbol,
       value: row.value,
+      /* The line beneath: what kind of thing this is, or the shortened colour
+         for one nothing can name. */
       unit: identities[index].name,
+      /* Which of those two it is, so a WORD is set like a label and DATA is
+         set like data. The Assets tab has made this distinction since it was
+         written; the strip had not, and upper-cased a hex tail. */
+      unitIsColour: !identities[index].known,
     }))
   }, [account])
 
   const visibleTokens = showAllTokens ? tokenRows : tokenRows.slice(0, TOKENS_VISIBLE)
+
+  /* One line under the balances for whatever has been announced and has not
+     landed — including the opening balance, which is on its way from the
+     moment this Passport HAS an account for it to land in and stays there
+     until BOTH halves of the grant have arrived. It is never a settled figure:
+     the line says something is coming, the balance above it keeps saying what
+     is actually there. */
+  const openingLegs = openingBalanceLegsHeld(account ?? null)
+  const onTheWay = assetsOnTheWay(activity, {
+    openingBalance: openingBalanceOnTheWay({
+      hasAccount: Boolean(account),
+      holdsOpeningNight: openingLegs.night,
+      holdsOpeningStablecoin: openingLegs.stablecoin,
+      entries: activity ?? [],
+    }),
+  })
+  const onTheWayLine = assetsOnTheWayLine(onTheWay)
+
+  /* Read the account again on its own, so an opening balance that lands a beat
+     after the sponsor answers — and an amount somebody else sends while this
+     screen is open — appear without anybody reloading the page. */
+  useBalanceWatch({
+    active: Boolean(account),
+    refresh: onRefresh,
+    signature: holdingsSignature(account ?? null),
+    /* Anything announced starts a chase: a change in what is on the way, or a
+       new row at the head of the trail (a send that just completed, a grant
+       the sponsor has just confirmed). */
+    chaseKey: `${onTheWay.length}|${activity?.[0]?.id ?? ''}|${activity?.[0]?.status ?? ''}`,
+  })
 
   /**
    * The shielded colours this screen is already showing, handed to the Send
@@ -412,6 +518,14 @@ export default function HomeScreen(props: HomeScreenProps) {
     }
     return held.filter((entry) => entry.amount > 0n)
   }, [account])
+
+  /* And the back gesture closes whichever sheet is on top, which is what a
+     phone user reaches for before either of them. One entry per sheet, taken
+     back off the stack when the sheet closes some other way: `lib/sheetHistory.ts`.
+     Only one of these can be open at a time — both are opened from the same
+     row and each covers the screen — so the two entries never nest. */
+  useSheetBackButton('send', sendOpen, useCallback(() => setSendOpen(false), []))
+  useSheetBackButton('receive', receiveOpen, useCallback(() => setReceiveOpen(false), []))
 
   // Escape closes the Receive sheet, mirroring the scrim click.
   useEffect(() => {
@@ -458,8 +572,14 @@ export default function HomeScreen(props: HomeScreenProps) {
 
   /* The account's own read, in the vocabulary the cards already speak: a
      figure still being read is 'Syncing', a read that failed is 'Unavailable',
-     and neither is ever a zero. */
-  const balancesLoading = account?.status === 'loading' || account?.status === 'idle'
+     and neither is ever a zero.
+     ONLY WHILE THERE IS NOTHING TO SHOW (2026/09/03). The account is now
+     re-read on a timer, and every read passes through 'loading' — so a screen
+     that treated 'loading' as "no figure yet" flashed every card into a
+     skeleton twice a minute, over figures it was already holding. A read in
+     flight over a KNOWN balance is not the reader's business. */
+  const balancesLoading =
+    account?.status === 'idle' || (account?.status === 'loading' && account.nightBalance === null)
 
   /* The failed read's own words, to the console and nowhere else. Logged once
      per distinct message rather than on every render, so a screen that
@@ -541,12 +661,20 @@ export default function HomeScreen(props: HomeScreenProps) {
         <img className="mnhome-wordmark" src="/midnight-wordmark.svg" alt="Midnight" />
         <span className="mn-beta-badge">Beta</span>
         <div className="mnhome-bar-actions">
-          <NetworkSwitcher network={network} onSelect={onSelectNetwork} />
+          {/* The network switcher went 2026/09/03. It offered three networks
+              this build cannot sign on and needed two footnotes to say so;
+              Passport is a stagenet demo and now reads as one. */}
           {/* The address pill was cut 2026/08/19. A Passport user's visible
               identity is their `.night` name, not a truncated address in the
               chrome; the address they receive at lives inside Receive. */}
           {/* Standard 34px size, matching the icon buttons beside it. */}
           <ThemeToggle />
+          <InstallPassport />
+          {/* The Companion, as the same 34px circle as its neighbours. It is
+              a link out and nothing else — see `Companion.tsx`. The full
+              control lives on the Apps tab; this is the shortcut for somebody
+              already on Home. */}
+          <CompanionLink variant="icon" />
           <button
             type="button"
             className="mnhome-icon-button"
@@ -659,23 +787,58 @@ export default function HomeScreen(props: HomeScreenProps) {
             machinery, and fees are the sponsor's. */}
         {account ? (
           <>
-            <div className="mnhome-assets">
-              {visibleTokens.map((row) => (
-                <BalanceCard
-                  key={row.key}
-                  icon={row.icon}
-                  label={row.label}
-                  value={row.value}
-                  unit={row.unit}
-                  loading={balancesLoading}
-                />
-              ))}
-            </div>
+            {/* LINE ITEMS, NOT CARDS (2026/09/01), and the same line items the
+                Assets tab uses. "We show them like line items, so it's a
+                table" was said of the Assets page, but the strip here was the
+                same two-up grid of boxes — and a token that rendered as a card
+                on one tab and a row on the other would read as two different
+                facts about the same money.
+
+                The column headings are for assistive technology only: this
+                strip has never had a visible heading of its own, and giving it
+                one now to label two columns would be furniture. */}
+            <table className="mnhome-assets">
+              <caption className="mnhome-sr">
+                What your Passport holds, and how much of each.
+              </caption>
+              <thead>
+                <tr>
+                  <th scope="col" className="mnhome-sr">
+                    Token
+                  </th>
+                  <th scope="col" className="mnhome-sr">
+                    Balance
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {visibleTokens.map((row) => (
+                  <TokenLine
+                    key={row.key}
+                    icon={row.icon}
+                    label={row.label}
+                    value={row.value}
+                    unit={row.unit}
+                    unitIsColour={row.unitIsColour}
+                    loading={balancesLoading}
+                  />
+                ))}
+              </tbody>
+            </table>
             {/* THE CAP. An account with a dozen colours in it used to render a
                 dozen cards, pushing the name, the account, and the apps off the
                 bottom of a phone — "that's not a scalable way to display them",
                 2026/08/26. Five, then the rest ON REQUEST and in place: a
                 separate screen for the remainder would be a place nobody goes. */}
+            {/* MONEY THAT IS ANNOUNCED BUT HAS NOT LANDED. Between a grant or
+                an incoming transfer being reported and the figure above
+                changing, this strip said nothing, and a person reading it
+                fairly concluded nothing was happening. One quiet line, from
+                the trail already on this screen, and it is gone the moment the
+                balance itself says it. */}
+            {onTheWayLine ? (
+              <p className="mnhome-onway">{onTheWayLine}</p>
+            ) : null}
             {tokenRows.length > TOKENS_VISIBLE ? (
               <button
                 type="button"
@@ -726,6 +889,48 @@ export default function HomeScreen(props: HomeScreenProps) {
             </button>
           </article>
         ) : null}
+
+        {/* Payments that left this Passport and have not arrived yet. Above
+            Identity and below the money cards, because it is about money that
+            is in motion — and because a person who has just watched a send stop
+            should not have to scroll to find the way to finish it. */}
+        {(pendingSends ?? []).map((pending) => (
+          <article className="mnhome-card mnhome-pending-send" key={pending.id}>
+            <p className="mnhome-card-head">
+              <SendHorizontal size={14} aria-hidden="true" />
+              <span className="mnhome-micro">Payment not finished</span>
+            </p>
+            <p className="mnhome-card-unit">{pending.label}</p>
+            <p className="mnhome-pending-send-step">{pending.step}</p>
+            {pending.reason ? (
+              <p className="mnhome-pending-send-reason">{pending.reason}</p>
+            ) : null}
+            <div className="mnhome-pending-send-actions">
+              {/* Rendered and disabled rather than removed, so the card does
+                  not change shape underneath somebody reaching for it. The
+                  step line above says which leg is running. */}
+              <button
+                type="button"
+                className="mnhome-send-primary"
+                onClick={pending.onContinue}
+                disabled={pending.busy === true}
+                aria-busy={pending.busy === true}
+              >
+                <span>{pending.busy === true ? 'Carrying on…' : 'Continue'}</span>
+              </button>
+              {pending.onGiveUp ? (
+                <button
+                  type="button"
+                  className="mnhome-send-secondary"
+                  onClick={pending.onGiveUp}
+                  disabled={pending.busy === true}
+                >
+                  <span>Forget it</span>
+                </button>
+              ) : null}
+            </div>
+          </article>
+        ))}
 
         {/* Identity: the name held on this network, its real registration
             transactions or the reason it is only queued, and what has been
@@ -784,11 +989,15 @@ export default function HomeScreen(props: HomeScreenProps) {
             {...(send.onSendShielded ? { onSendShielded: send.onSendShielded } : {})}
             {...(send.resolveName ? { resolveName: send.resolveName } : {})}
             {...(send.onSendToName ? { onSendToName: send.onSendToName } : {})}
+            {...(send.onSendShieldedToName
+              ? { onSendShieldedToName: send.onSendShieldedToName }
+              : {})}
             /* The sponsor's own name for its colour, so the picker and the
                balance list call the same colour the same thing. */
             sponsoredToken={sponsoredToken}
             phase={send.phase ?? null}
             nameLeg={send.nameLeg ?? null}
+            nameLegAttempt={send.nameLegAttempt ?? null}
             /* The sheet's approval is a passkey assertion, so it can hit the
                same mid-session dead end the name step reported on 2026/08/31.
                Home already holds the sign-out; the sheet offers it only beside
@@ -943,27 +1152,57 @@ export default function HomeScreen(props: HomeScreenProps) {
   )
 }
 
-interface BalanceCardProps {
+interface TokenLineProps {
   icon: ReactNode
   label: string
   value: string | null
   unit: string
+  /** True when `unit` is a shortened colour rather than a word about the row. */
+  unitIsColour: boolean
   loading: boolean
 }
 
-function BalanceCard(props: BalanceCardProps) {
-  const { icon, label, value, unit, loading } = props
+/**
+ * ONE TOKEN, ONE LINE — the same row the Assets tab draws.
+ *
+ * The name on the left with its subtitle under it, the balance hard right in
+ * tabular figures. Right-aligned and tabular together are what let a column of
+ * balances be COMPARED at a glance: the digits land on the same grid, so the
+ * eye reads magnitude off the length of the number rather than off the words
+ * beside it.
+ *
+ * The `<th scope="row">` is not decoration. It is what makes a screen reader
+ * announce "NIGHT, 0.002" rather than "0.002" on its own.
+ */
+function TokenLine(props: TokenLineProps) {
+  const { icon, label, value, unit, unitIsColour, loading } = props
   const unknown = value === null
   return (
-    <article className="mnhome-card">
-      <p className="mnhome-card-head">
-        {icon}
-        <span className="mnhome-micro">{label}</span>
-      </p>
-      <p className={`mnhome-card-value${unknown ? ' mnhome-card-value-muted' : ''}`}>
+    <tr className="mnhome-token-row">
+      <th scope="row" className="mnhome-token-name">
+        <span className="mnhome-token-name-inner">
+          <span className="mnhome-token-icon" aria-hidden="true">
+            {icon}
+          </span>
+          <span className="mnhome-token-text">
+            <span className="mnhome-token-label">{label}</span>
+            <span
+              className={
+                unitIsColour ? 'mnhome-token-unit mnhome-token-unit-colour' : 'mnhome-token-unit'
+              }
+              /* A colour is an identifier, not prose. Marked so a browser's
+                 page translation leaves it alone — a "translated" hex string
+                 would be a different colour. */
+              {...(unitIsColour ? { translate: 'no' as const } : {})}
+            >
+              {unit}
+            </span>
+          </span>
+        </span>
+      </th>
+      <td className={`mnhome-token-value${unknown ? ' mnhome-token-value-muted' : ''}`}>
         {unknown ? (loading ? 'Syncing' : 'Unavailable') : value}
-      </p>
-      <p className="mnhome-card-unit">{unknown ? ' ' : unit}</p>
-    </article>
+      </td>
+    </tr>
   )
 }
