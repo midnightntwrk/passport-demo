@@ -72,7 +72,7 @@ jobs:
       # fetch-depth: 0 — `git merge-base --is-ancestor` below needs real
       # history, and a shallow clone has none.
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
