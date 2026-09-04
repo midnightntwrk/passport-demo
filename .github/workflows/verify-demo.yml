@@ -163,7 +163,7 @@ jobs:
 
       - name: Restore the pinned ZK artefacts
         id: zk-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           key: zk-artefacts-${{ hashFiles('examples/passport-balancer/contracts-stagenet/managed/*/compiler/contract-manifest.json') }}
           path: |
