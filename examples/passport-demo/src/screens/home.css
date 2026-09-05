@@ -41,9 +41,8 @@
   background: var(--mn-surface-page);
 }
 .mnhome-wordmark {
-  width: 96px;
-  height: auto;
-  filter: var(--mn-wordmark-filter);
+  width: 44px;
+  height: 44px;
 }
 .mnhome-bar-actions {
   margin-left: auto;

@@ -18,13 +18,13 @@
             r.removeAttribute('data-theme');
             r.style.colorScheme = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
           } else {
-            r.setAttribute('data-theme', 'light');
-            r.style.colorScheme = 'light';
+            r.setAttribute('data-theme', 'dark');
+            r.style.colorScheme = 'dark';
           }
         } catch (e) {}
       })();
     </script>
-    <meta name="theme-color" content="#e9e9e9" />
+    <meta name="theme-color" content="#0a0a14" />
     <meta name="application-name" content="Midnight Passport" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
@@ -35,8 +35,14 @@
       name="description"
       content="Your Midnight wallet, encrypted Passport state, and account permissions in one installable client."
     />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Barlow:ital,wght@0,400;0,500;0,600;0,700;0,800;0,900;1,700;1,800;1,900&display=swap"
+      rel="stylesheet"
+    />
     <link rel="manifest" href="/manifest.webmanifest" />
-    <link rel="icon" href="/midnight-symbol.svg" type="image/svg+xml" />
+    <link rel="icon" href="/skunk/mark.svg" type="image/svg+xml" />
     <link rel="icon" href="/icons/favicon-32.png" sizes="32x32" type="image/png" />
     <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" sizes="180x180" />
     <title>Midnight Passport</title>
@@ -56,23 +62,22 @@
         align-items: center;
         justify-content: center;
         gap: 18px;
-        background: #ffffff;
+        background: #0a0a14;
         transition: opacity 0.32s ease;
       }
-      :root[data-theme='dark'] #mn-splash { background: #0a0b0d; }
+      :root[data-theme='light'] #mn-splash { background: #f7f5f2; }
       #mn-splash.mn-splash-done { opacity: 0; pointer-events: none; }
-      #mn-splash img { width: 148px; height: auto; }
-      :root[data-theme='dark'] #mn-splash img { filter: invert(1); }
+      #mn-splash img { width: 172px; height: auto; }
       #mn-splash .mn-splash-kicker {
         margin: 0;
-        color: #5b616e;
-        font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
+        color: #8b8899;
+        font-family: 'Barlow', Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
         font-size: 11px;
         font-weight: 600;
         letter-spacing: 0.08em;
         text-transform: uppercase;
       }
-      :root[data-theme='dark'] #mn-splash .mn-splash-kicker { color: #8a919e; }
+      :root[data-theme='light'] #mn-splash .mn-splash-kicker { color: #6c6877; }
       #mn-splash .mn-splash-pulse { animation: mn-splash-pulse 1.6s ease-in-out infinite; }
       @keyframes mn-splash-pulse {
         0%, 100% { opacity: 1; }
@@ -84,7 +89,7 @@
       }
     </style>
     <div id="mn-splash" role="status" aria-label="Midnight Passport is loading">
-      <img class="mn-splash-pulse" src="/midnight-wordmark.svg" alt="" />
+      <img class="mn-splash-pulse" src="/skunk/logo.svg" alt="" />
       <p class="mn-splash-kicker">Passport</p>
     </div>
     <script>window.__mnSplashShownAt = Date.now();</script>

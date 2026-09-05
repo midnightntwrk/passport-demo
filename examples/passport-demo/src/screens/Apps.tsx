@@ -288,7 +288,7 @@ export default function AppsScreen(props: AppsScreenProps) {
         <header className="mnapps-bar">
           <img
             className="mnapps-wordmark"
-            src="/midnight-wordmark.svg"
+            src="/skunk/mark.svg"
             alt="Midnight"
           />
           <div className="mnapps-bar-actions">

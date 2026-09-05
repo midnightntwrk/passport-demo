@@ -154,7 +154,7 @@ export default function OnboardingScreen(props: OnboardingProps) {
       <header className="mnob-bar">
         <img
           className="mnob-wordmark"
-          src="/midnight-wordmark.svg"
+          src="/skunk/mark.svg"
           alt="Midnight"
         />
         <span className="mnob-bar-label">Passport</span>

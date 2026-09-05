@@ -78,7 +78,7 @@ export default function WelcomeScreen({ onChooseName }: WelcomeProps) {
   return (
     <section className="mnid-screen">
       <header className="mnid-bar">
-        <img className="mnid-wordmark" src="/midnight-wordmark.svg" alt="Midnight" />
+        <img className="mnid-wordmark" src="/skunk/mark.svg" alt="Midnight" />
         <span className="mnid-step">Welcome</span>
       </header>
 

@@ -266,7 +266,7 @@ export default function EcosystemScreen(props: EcosystemProps) {
   return (
     <section className="mnid-screen">
       <header className="mnid-bar">
-        <img className="mnid-wordmark" src="/midnight-wordmark.svg" alt="Midnight" />
+        <img className="mnid-wordmark" src="/skunk/mark.svg" alt="Midnight" />
         <span className="mnid-step">You&apos;re in</span>
         <ThemeToggle size="sm" className="mnid-theme" />
       </header>

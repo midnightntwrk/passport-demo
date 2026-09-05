@@ -38,9 +38,8 @@
   border-bottom: var(--mn-hairline) solid var(--mn-border-hairline);
 }
 .mnob-wordmark {
-  width: 104px;
-  height: auto;
-  filter: var(--mn-wordmark-filter);
+  width: 48px;
+  height: 48px;
 }
 .mnob-bar-label {
   margin-left: auto;

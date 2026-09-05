@@ -38,9 +38,8 @@
   background: var(--mn-surface-page);
 }
 .mnapps-wordmark {
-  width: 96px;
-  height: auto;
-  filter: var(--mn-wordmark-filter);
+  width: 44px;
+  height: 44px;
 }
 .mnapps-bar-actions {
   margin-left: auto;
@@ -342,7 +341,7 @@
 }
 .mnapps-icon-letter {
   /* Near-black to match the always-light plate, in both themes. */
-  color: #0a0b0d;
+  color: #0a0a14;
   font-family: var(--mn-font-display);
   font-size: 19px;
   font-weight: 700;

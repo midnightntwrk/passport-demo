@@ -43,9 +43,8 @@
   border-bottom: var(--mn-hairline) solid var(--mn-border-hairline);
 }
 .mnid-wordmark {
-  width: 104px;
-  height: auto;
-  filter: var(--mn-wordmark-filter);
+  width: 48px;
+  height: 48px;
 }
 .mnid-step {
   margin-left: auto;

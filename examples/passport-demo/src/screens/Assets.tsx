@@ -194,7 +194,7 @@ export default function AssetsScreen(props: AssetsScreenProps) {
   return (
     <section className="mnassets-screen" aria-busy={balancesLoading}>
       <header className="mnassets-bar">
-        <img className="mnassets-wordmark" src="/midnight-wordmark.svg" alt="Midnight" />
+        <img className="mnassets-wordmark" src="/skunk/mark.svg" alt="Midnight" />
         <div className="mnassets-bar-actions">
           {network && onSelectNetwork ? (
             <NetworkSwitcher network={network} onSelect={onSelectNetwork} />

@@ -174,7 +174,7 @@ export default function BackupScreen(props: BackupProps) {
   return (
     <section className="mnid-screen">
       <header className="mnid-bar">
-        <img className="mnid-wordmark" src="/midnight-wordmark.svg" alt="Midnight" />
+        <img className="mnid-wordmark" src="/skunk/mark.svg" alt="Midnight" />
         {/* Off the onboarding chain since 2026/08/06 — it is reached on
             demand, so it no longer numbers itself against a wizard. */}
         <span className="mnid-step">Optional</span>

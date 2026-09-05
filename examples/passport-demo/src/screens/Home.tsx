@@ -538,7 +538,7 @@ export default function HomeScreen(props: HomeScreenProps) {
   return (
     <section className="mnhome-screen" aria-busy={balancesLoading}>
       <header className="mnhome-bar">
-        <img className="mnhome-wordmark" src="/midnight-wordmark.svg" alt="Midnight" />
+        <img className="mnhome-wordmark" src="/skunk/mark.svg" alt="Midnight" />
         <span className="mn-beta-badge">Beta</span>
         <div className="mnhome-bar-actions">
           <NetworkSwitcher network={network} onSelect={onSelectNetwork} />

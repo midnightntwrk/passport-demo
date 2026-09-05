@@ -32,12 +32,12 @@ export const THEME_STORAGE_KEY = 'passport-theme'
 /**
  * The preference used when nothing has been recorded.
  *
- * Light, deliberately: Passport's default look is the light one, and a visitor
- * whose operating system happens to be dark should still meet the light
- * interface first. 'system' remains one tap away in the theme control, and is
- * honoured fully once chosen.
+ * Dark, deliberately: the skunk works at night. The night ground is the
+ * default look, and a visitor whose operating system happens to be light
+ * should still meet the night interface first. 'system' remains one tap away
+ * in the theme control, and is honoured fully once chosen.
  */
-export const DEFAULT_THEME: ThemePreference = 'light'
+export const DEFAULT_THEME: ThemePreference = 'dark'
 
 const DARK_QUERY = '(prefers-color-scheme: dark)'
 
@@ -112,7 +112,7 @@ function applyToDocument(preference: ThemePreference): void {
   const resolved = resolveTheme(preference)
   root.style.colorScheme = resolved
   const meta = document.querySelector('meta[name="theme-color"]')
-  if (meta) meta.setAttribute('content', resolved === 'dark' ? '#0a0a0a' : '#e9e9e9')
+  if (meta) meta.setAttribute('content', resolved === 'dark' ? '#0a0a14' : '#f7f5f2')
 }
 
 function notify(preference: ThemePreference): void {
