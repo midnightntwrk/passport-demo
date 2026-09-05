@@ -56,52 +56,13 @@ export const FALLBACK_APPS: readonly RegistryApp[] = [
   { id: 'zkmint', name: 'ZKMint', url: 'https://zkmint.1am.xyz', stale: true },
 ]
 
-/** The port `examples/raffle-demo` pins in its own `vite.config.ts`. */
-const RAFFLE_FALLBACK_URL = 'http://localhost:5177'
-
-/**
- * Local demo entry for the separate-origin Midnight Raffle example dApp —
- * decided 2026/08/05, replacing the earlier Atlas entry. This is the entry
- * that demonstrably completes the Passport profile handshake end-to-end.
- *
- * Unlike {@link LOCAL_DEV_APP} this entry always exists: with `VITE_RAFFLE_URL`
- * unset it falls back to the pinned local port, so a plain `npm run demo` still
- * shows the handshake. Both halves of the entry read from the environment on
- * the same terms the local-app slot uses — `VITE_RAFFLE_URL`/`VITE_RAFFLE_NAME`
- * against `VITE_LOCAL_APP_URL`/`VITE_LOCAL_APP_NAME` — because a build that
- * moves the raffle to a deployed origin (the release deployment, or the
- * break-glass `npm run deploy:passport:manual`) must be able to rename it there
- * too, rather than shipping a label naming a demo the configured origin may no
- * longer serve.
- */
-export const RAFFLE_DEMO_APP: RegistryApp = {
-  id: 'raffle-demo',
-  name: optionalString(import.meta.env.VITE_RAFFLE_NAME) ?? 'Midnight Raffle',
-  description:
-    'Connect your Passport to claim a race-weekend perk and a demo raffle ticket',
-  url: webUrl(import.meta.env.VITE_RAFFLE_URL, true) ?? RAFFLE_FALLBACK_URL,
-  category: 'other',
-  // The raffle runs against whichever network Passport's wallet is on, because
-  // the only thing it asks Passport for is a profile and (when an operator
-  // address is configured) a transfer that Passport itself signs. Declaring it
-  // on one fixed network hid it from the grid the moment the build moved —
-  // found on 2026/08/06 while trialling a pre-production build, where the grid
-  // filters to preprod and a preview-only entry simply vanishes.
-  networks: walletNetwork() ? [walletNetwork() as RegistryNetwork] : ['stagenet'],
-  featured: true,
-}
-
 /**
  * Generic local-development entry — added 2026/08/06.
  *
- * `VITE_RAFFLE_URL` above is the slot third-party developers were being told to
- * use to see their own app in the grid, and the name asks them to pretend their
- * app is a raffle. This is the same mechanism under a name that says what it is:
- * set `VITE_LOCAL_APP_URL` to whatever your dev server is serving, optionally
+ * Set `VITE_LOCAL_APP_URL` to whatever your dev server is serving, optionally
  * `VITE_LOCAL_APP_NAME` for the label. `null` when the variable is unset, so a
  * build that does not set it behaves exactly as it did before this entry
- * existed. `VITE_RAFFLE_URL` keeps working, unchanged, and both entries can be
- * present at once.
+ * existed.
  */
 export const LOCAL_DEV_APP: RegistryApp | null = buildLocalDevApp()
 
@@ -128,12 +89,13 @@ function buildLocalDevApp(): RegistryApp | null {
 }
 
 /**
- * Prepends the locally configured entries — the generic `VITE_LOCAL_APP_URL`
- * one when it is configured, and the Midnight Raffle demo — to a fetched
- * registry list. Both, when both are present; neither replaces the other.
+ * Prepends the locally configured entry — the generic `VITE_LOCAL_APP_URL`
+ * one — to a fetched registry list, when it is configured. The raffle demo
+ * entry that used to sit beside it left with the raffle (identity-first
+ * redesign, P1).
  */
 export function withLocalApps(apps: RegistryApp[]): RegistryApp[] {
-  const local = LOCAL_DEV_APP ? [LOCAL_DEV_APP, RAFFLE_DEMO_APP] : [RAFFLE_DEMO_APP]
+  const local = LOCAL_DEV_APP ? [LOCAL_DEV_APP] : []
   const localIds = new Set(local.map((app) => app.id))
   return [...local, ...apps.filter((app) => !localIds.has(app.id))]
 }

@@ -1,0 +1,46 @@
+@import './tokens.css';
+
+/* Stamps screen — prefix "mnstamps-". Hosts the activity trail (see
+   Stamps.tsx). The trail itself keeps its mnhome-activity classes from
+   ActivityFeed.tsx; home.css carries their styling and is loaded wherever
+   Home is, which is every session that can reach this tab. */
+
+.mnstamps-screen {
+  min-height: 100svh;
+  padding: 0 20px calc(var(--mn-nav-height) + 40px);
+  color: var(--mn-text-primary);
+  background: var(--mn-surface-page);
+  color-scheme: var(--mn-color-scheme);
+  font-family: var(--mn-font-body);
+}
+
+.mnstamps-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 64px;
+  padding-top: env(safe-area-inset-top);
+}
+.mnstamps-wordmark { width: 44px; height: 44px; }
+.mnstamps-bar-actions { display: flex; align-items: center; gap: 8px; }
+
+.mnstamps-head { margin: 10px 0 20px; }
+.mnstamps-kicker {
+  margin: 0 0 6px;
+  color: var(--mn-text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.mnstamps-title {
+  margin: 0 0 8px;
+  font-family: var(--mn-font-display);
+  font-size: 30px;
+  font-weight: 900;
+  font-style: italic;
+  letter-spacing: -.02em;
+}
+.mnstamps-lede { margin: 0; color: var(--mn-text-secondary); font-size: 14px; }
+
+body:has(.mnstamps-screen) { background: var(--mn-surface-page); }

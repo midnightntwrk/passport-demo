@@ -605,7 +605,11 @@ test('the activity trail shows what really happened, and survives a reload', asy
      read. What is asserted here is that the rows on screen are rows THIS RUN
      really wrote — the refused claims above, which are the only outcome a
      sponsorless mocked tier can genuinely produce — rather than anything
-     seeded for the test. */
+     seeded for the test.
+
+     The trail lives on the STAMPS tab since the identity-first redesign:
+     Home is the document, Stamps is where it has been. */
+  await page.getByRole('button', { name: 'Stamps' }).click();
   const trail = page.locator('.mnhome-activity');
   await expect(trail).toBeVisible({ timeout: 60_000 });
   const failedClaim = trail.getByText('Your name could not be registered').first();
@@ -633,11 +637,15 @@ test('the activity trail shows what really happened, and survives a reload', asy
   const before = await trail.locator('.mnhome-activity-row').count();
   expect(before).toBeGreaterThan(0);
   await page.reload();
+  /* A reload lands on the Passport tab; the trail is one tap away, exactly
+     where it was before the reload. */
+  await page.getByRole('button', { name: 'Stamps' }).click();
   await expect(page.locator('.mnhome-activity')).toBeVisible({ timeout: 60_000 });
   await expect(page.locator('.mnhome-activity-row')).toHaveCount(before);
   await expect(
     page.locator('.mnhome-activity').getByText('Your name could not be registered').first(),
   ).toBeVisible();
+  await page.getByRole('button', { name: 'Passport' }).click();
 });
 
 test('every token on the balance list is named, and none of them is 64 characters', async () => {

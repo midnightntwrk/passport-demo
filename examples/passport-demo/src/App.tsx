@@ -53,7 +53,6 @@ import WelcomeScreen from './screens/Welcome.js';
 import HomeScreen from './screens/Home.js';
 import AliasClaimScreen from './screens/AliasClaim.js';
 import BackupScreen from './screens/Backup.js';
-import EcosystemScreen from './screens/Ecosystem.js';
 import AliasReclaimModal from './screens/AliasReclaimModal.js';
 import {
   loadAliasRecord,
@@ -62,12 +61,6 @@ import {
   subscribeAliasRecords,
   type AliasRecord,
 } from './identity/aliasStore.js';
-import {
-  loadIncentives,
-  saveIncentive,
-  subscribeIncentives,
-  type PassportIncentiveRecord,
-} from './identity/incentiveStore.js';
 import type {
   AliasAvailability,
   AliasClaimProgress,
@@ -98,8 +91,8 @@ import {
   storeNetwork,
   type PassportNetwork,
 } from './screens/NetworkSwitcher.js';
-import AppsScreen from './screens/Apps.js';
-import AssetsScreen from './screens/Assets.js';
+import AccessScreen from './screens/Access.js';
+import StampsScreen from './screens/Stamps.js';
 import PassportNav, { type MobileTab } from './screens/Nav.js';
 import PassportToasts, { pushToast } from './screens/ToastStack.js';
 // In-app notifications only — a closed Passport notifies nobody. The module's
@@ -598,7 +591,7 @@ const PASSPORT_CONTRACT_SCOPE = { appId: APP_ID, accountId: 'passport-contract-v
  * this session created. See `WelcomeScreen` for what it says and why it is
  * shown once.
  */
-type IdentityStep = 'welcome' | 'alias' | 'backup' | 'ecosystem' | null;
+type IdentityStep = 'welcome' | 'alias' | 'backup' | null;
 
 /**
  * How long a WebAuthn ceremony may sit unanswered before Passport stops
@@ -1074,7 +1067,7 @@ export default function PassportDemo() {
   const [profile, setProfile] = useState<DemoPassportProfile | null>(null);
   const [activity, setActivity] = useState<ActivityEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [mobileTab, setMobileTab] = useState<MobileTab>('home');
+  const [mobileTab, setMobileTab] = useState<MobileTab>('passport');
   // One-button onboarding (2026/08/05): there is no separate "choose" step
   // any more, so the screen only distinguishes idle from working.
   const [onboardingIntent, setOnboardingIntent] = useState<OnboardingIntent | null>(null);
@@ -1138,7 +1131,6 @@ export default function PassportDemo() {
   /* Identity — the .night name, per network                                */
   /* ---------------------------------------------------------------------- */
   const [aliasRecords, setAliasRecords] = useState<Record<string, AliasRecord>>(loadAliasRecords);
-  const [incentives, setIncentives] = useState<PassportIncentiveRecord[]>(loadIncentives);
   const [identityStep, setIdentityStep] = useState<IdentityStep>(null);
   const [claimPhase, setClaimPhase] = useState<AliasClaimProgress['phase'] | null>(null);
   /**
@@ -2763,7 +2755,6 @@ export default function PassportDemo() {
   // The stores are the seam every writer shares: Contract R's connector calls
   // `saveIncentive` directly, and this subscription is what re-renders Home.
   useEffect(() => subscribeAliasRecords(setAliasRecords), []);
-  useEffect(() => subscribeIncentives(setIncentives), []);
   useEffect(() => subscribePassportContractRecords(setContractRecords), []);
 
   /**
@@ -4105,7 +4096,7 @@ export default function PassportDemo() {
     setProfile(null);
     setActivity([]);
     setError(null);
-    setMobileTab('home');
+    setMobileTab('passport');
     setOnboardingIntent(null);
     setOnboardingBusyLabel(null);
     setOnboardingError(null);
@@ -4166,20 +4157,6 @@ export default function PassportDemo() {
     void refreshLocalBalances();
   };
 
-  /** Shared by Home's embedded apps grid and the Apps tab: feed plus toast. */
-  const handleProfileShared = (appName: string, fields: string[]) => {
-    addActivity({
-      label: 'Profile shared',
-      detail: `${appName} received ${fields.join(', ')}.`,
-      status: 'complete',
-      source: 'local',
-    });
-    pushToast({
-      tone: 'success',
-      title: `${appName} connected`,
-      body: `${fields.length} profile ${fields.length === 1 ? 'field' : 'fields'} shared.`,
-    });
-  };
 
   /* ---------------------------------------------------------------------- */
   /* The app-to-account seam — a framed dApp asking Passport to pay          */
@@ -5146,29 +5123,6 @@ export default function PassportDemo() {
         }
       : null;
 
-  /**
-   * Records something an app says it granted. Passport never invents these:
-   * the only writer is an app's own incentive report, and the store keys by id
-   * so a repeated report updates one row rather than adding another.
-   */
-  const handleIncentiveRedeemed = useCallback(
-    (incentive: { id: string; app: string; label: string; txId?: string }) => {
-      saveIncentive({
-        id: incentive.id,
-        app: incentive.app,
-        label: incentive.label,
-        ...(incentive.txId ? { txId: incentive.txId } : {}),
-        network: localWalletNetworkId ?? selectedNetwork,
-        redeemedAt: new Date().toISOString(),
-      });
-      pushToast({
-        tone: 'success',
-        title: 'Added to your Passport',
-        body: incentive.label,
-      });
-    },
-    [localWalletNetworkId, selectedNetwork],
-  );
 
   /**
    * Private-state backup, both directions.
@@ -5407,7 +5361,6 @@ export default function PassportDemo() {
   };
   const homeIdentity = {
     record: activeAliasRecord,
-    incentives,
     onClaimName: () => {
       setAliasFailure(null);
       setIdentityStep('alias');
@@ -5505,19 +5458,6 @@ export default function PassportDemo() {
     setIdentityStep(null);
   };
 
-  const appsProfile = sessionActive
-    ? {
-        displayName: sessionDisplayName,
-        // The network travels with the address: a localnet deployment must not
-        // be shared with a dApp as though it lived on preview.
-        passportContract: consentPassportContract,
-        midnightAddresses: {
-          unshielded: activeSurfaces?.unshieldedAddress ?? null,
-          shielded: activeSurfaces?.shieldedAddress ?? null,
-          dust: activeSurfaces?.dustAddress ?? null,
-        },
-      }
-    : null;
 
   const overlays = (
     <>
@@ -5645,24 +5585,9 @@ export default function PassportDemo() {
           onRestore={restorePassportState}
           onDone={() => setIdentityStep(null)}
         />
-      ) : identityStep === 'ecosystem' ? (
-        /* Entry to the ecosystem: the name, its real transactions, and
-           everything redeemed so far. */
-        <EcosystemScreen
-          network={selectedNetwork}
-          record={activeAliasRecord}
-          incentives={incentives}
-          variant="screen"
-          onContinue={() => setIdentityStep(null)}
-          onClaimName={() => {
-            setAliasFailure(null);
-            setIdentityStep('alias');
-          }}
-          {...registerNowProps}
-        />
       ) : (
         <>
-          {mobileTab === 'home' ? (
+          {mobileTab === 'passport' ? (
             <HomeScreen
               displayName={homeDisplayName}
               aliasLabel={aliasLabel}
@@ -5686,15 +5611,6 @@ export default function PassportDemo() {
                  Passport has no account contract, which is what makes Home
                  render no Send control at all. */
               send={homeSend}
-              /* Everything Passport has recorded for this credential, under
-                 the apps grid. An empty array is a real answer and gets the
-                 section's one quiet line. */
-              activity={homeActivity}
-              appsProfile={appsProfile}
-              onProfileShared={handleProfileShared}
-              executeTransfer={appTransferSeam}
-                    transferContext={appTransferContext}
-              onIncentiveRedeemed={handleIncentiveRedeemed}
               supportUrl={(import.meta.env.VITE_TELEGRAM_URL as string | undefined) ?? null}
               /* The only route to the Backup screen. It is offered whenever a
                  Passport exists here, because restoring is exactly what a
@@ -5702,27 +5618,25 @@ export default function PassportDemo() {
               onOpenBackup={profile ? () => setIdentityStep('backup') : undefined}
               onSignOut={() => void signOutPassport()}
             />
-          ) : mobileTab === 'assets' ? (
-            /* The Assets shelf. Fed from the SAME `homeAccount` Home's balance
-               strip reads, so the two screens cannot disagree about what this
-               Passport holds — and `null` there means no account yet, which
-               the screen says in one line rather than filling with zeros. */
-            <AssetsScreen
-              account={homeAccount}
-              network={selectedNetwork}
-              onSelectNetwork={handleSelectNetwork}
-              onRefresh={refreshMobile}
+          ) : mobileTab === 'access' ? (
+            /* Who may act with this Passport, and how far. Connections are
+               the scoped-grant surface to come; the keys row is real today
+               and opens the backup/restore screen, which is where a key is
+               saved and a Passport is restored from one. */
+            <AccessScreen
+              keysSummary={
+                sessionActive
+                  ? 'The passkey on this device'
+                  : profile
+                    ? 'A passkey this browser knows'
+                    : null
+              }
+              onOpenKeys={profile ? () => setIdentityStep('backup') : undefined}
             />
           ) : (
-            <AppsScreen
-              profile={appsProfile}
-              onProfileShared={handleProfileShared}
-              network={selectedNetwork}
-              onSelectNetwork={handleSelectNetwork}
-              executeTransfer={appTransferSeam}
-                    transferContext={appTransferContext}
-              onIncentiveRedeemed={handleIncentiveRedeemed}
-            />
+            /* Where this Passport has been — the same trail `addActivity`
+               writes, under its own roof. */
+            <StampsScreen entries={homeActivity} />
           )}
           <PassportNav active={mobileTab} onSelect={setMobileTab} />
         </>

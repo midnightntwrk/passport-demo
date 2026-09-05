@@ -1,0 +1,103 @@
+@import './tokens.css';
+
+/* Access screen — prefix "mnaccess-". The scoped-grant surface (see
+   Access.tsx). Shell matches the other mobile screens: token surfaces,
+   floating nav clearance at the foot. */
+
+.mnaccess-screen {
+  min-height: 100svh;
+  padding: 0 20px calc(var(--mn-nav-height) + 40px);
+  color: var(--mn-text-primary);
+  background: var(--mn-surface-page);
+  color-scheme: var(--mn-color-scheme);
+  font-family: var(--mn-font-body);
+}
+
+.mnaccess-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 64px;
+  padding-top: env(safe-area-inset-top);
+}
+.mnaccess-wordmark { width: 44px; height: 44px; }
+.mnaccess-bar-actions { display: flex; align-items: center; gap: 8px; }
+
+.mnaccess-head { margin: 10px 0 20px; }
+.mnaccess-kicker {
+  margin: 0 0 6px;
+  color: var(--mn-text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.mnaccess-title {
+  margin: 0 0 8px;
+  font-family: var(--mn-font-display);
+  font-size: 30px;
+  font-weight: 900;
+  font-style: italic;
+  letter-spacing: -.02em;
+}
+.mnaccess-lede { margin: 0; color: var(--mn-text-secondary); font-size: 14px; }
+
+.mnaccess-section-title {
+  margin: 0 0 10px;
+  color: var(--mn-text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.mnaccess-empty {
+  padding: 22px 20px;
+  border: 1px dashed var(--mn-border-medium);
+  border-radius: var(--mn-radius);
+  background: var(--mn-surface-card);
+}
+.mnaccess-empty-lead { margin: 0 0 6px; font-size: 15px; font-weight: 700; }
+.mnaccess-empty-body {
+  margin: 0;
+  color: var(--mn-text-secondary);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.mnaccess-keysrow {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 16px;
+  padding: 16px;
+  border: var(--mn-hairline) solid var(--mn-border-hairline);
+  border-radius: var(--mn-radius);
+  color: var(--mn-text-primary);
+  background: var(--mn-surface-card);
+  font-family: var(--mn-font-body);
+  text-align: left;
+}
+.mnaccess-keysrow:disabled { opacity: .55; }
+.mnaccess-keysrow-icon {
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  border-radius: var(--mn-radius-md);
+  color: var(--mn-accent-ink);
+  background: var(--mn-accent-soft);
+}
+.mnaccess-keysrow-text { flex: 1; min-width: 0; }
+.mnaccess-keysrow-text b { display: block; font-size: 15px; }
+.mnaccess-keysrow-text span {
+  display: block;
+  margin-top: 2px;
+  color: var(--mn-text-muted);
+  font-size: 12.5px;
+}
+.mnaccess-keysrow-chevron { color: var(--mn-text-muted); flex: 0 0 auto; }
+
+body:has(.mnaccess-screen) { background: var(--mn-surface-page); }

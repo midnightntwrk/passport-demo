@@ -1,7 +1,6 @@
 import { ArrowRight, ArrowUpRight, Loader2, Sparkles, Tag } from 'lucide-react'
 
 import type { AliasRecord } from '../identity/aliasStore.js'
-import type { PassportIncentiveRecord } from '../identity/incentiveStore.js'
 import { explorerTxUrl } from '../lib/networks.js'
 import { NETWORK_LABELS, type PassportNetwork } from './NetworkSwitcher.js'
 import ThemeToggle from './ThemeToggle.js'
@@ -33,7 +32,6 @@ export interface EcosystemProps {
   network: PassportNetwork
   /** The claim record for `network`, or null when no name is held there. */
   record: AliasRecord | null
-  incentives: PassportIncentiveRecord[]
   variant?: 'screen' | 'card'
   /** Entry view only: continue into Passport. */
   onContinue?: () => void
@@ -106,7 +104,6 @@ export function EcosystemIdentity(props: EcosystemProps) {
   const {
     network,
     record,
-    incentives,
     variant = 'card',
     onClaimName,
     onRegisterNow,
@@ -202,44 +199,6 @@ export function EcosystemIdentity(props: EcosystemProps) {
         ) : null}
       </article>
 
-      {/* On Home the empty state is noise — the section appears there once
-          something has genuinely been redeemed. The full ecosystem view always
-          shows it, so the surface is never a mystery. */}
-      {embedded && incentives.length === 0 ? null : (
-      <section className="mnid-section" aria-label="Redeemed incentives">
-        <div className="mnid-section-head">
-          <p className="mnid-kicker">Redeemed incentives</p>
-        </div>
-        {incentives.length === 0 ? (
-          <p className="mnid-empty">Nothing redeemed yet.</p>
-        ) : (
-          <ul className="mnid-list">
-            {incentives.map((incentive) => {
-              const url = incentive.txId ? explorerUrl(incentive.network, incentive.txId) : null
-              return (
-                <li key={incentive.id} className="mnid-item">
-                  <span className="mnid-item-app">{incentive.app}</span>
-                  <strong>{incentive.label}</strong>
-                  <small>
-                    {formatDate(incentive.redeemedAt)} · {incentive.network}
-                    {incentive.txId ? ' · ' : ''}
-                    {incentive.txId ? (
-                      url ? (
-                        <a href={url} target="_blank" rel="noreferrer">
-                          {shortHash(incentive.txId)}
-                        </a>
-                      ) : (
-                        <code>{shortHash(incentive.txId)}</code>
-                      )
-                    ) : null}
-                  </small>
-                </li>
-              )
-            })}
-          </ul>
-        )}
-      </section>
-      )}
     </>
   )
 }
@@ -260,47 +219,3 @@ function StatusPill({ record, network }: { record: AliasRecord; network: Passpor
   return <span className="mnid-pill mnid-pill-failed">Not registered</span>
 }
 
-/** The full-screen entry view shown at the end of onboarding. */
-export default function EcosystemScreen(props: EcosystemProps) {
-  const { onContinue, record } = props
-  return (
-    <section className="mnid-screen">
-      <header className="mnid-bar">
-        <img className="mnid-wordmark" src="/skunk/mark.svg" alt="Midnight" />
-        <span className="mnid-step">You&apos;re in</span>
-        <ThemeToggle size="sm" className="mnid-theme" />
-      </header>
-
-      <div className="mnid-body">
-        <p className="mnid-kicker">Welcome to Midnight</p>
-        {/* The name itself belongs to the card below; the hero greets the
-            person so the two are not the same sentence twice. */}
-        <h1 className="mnid-title">
-          {record ? `Welcome, ${record.alias}` : 'Your Passport is ready'}
-        </h1>
-        <p className="mnid-lede">
-          {record
-            ? 'Your name, its registration, and everything you redeem across the ecosystem live here.'
-            : 'Your Passport is ready. Claim a name whenever you like — apps will recognise it once you do.'}
-        </p>
-
-        <EcosystemIdentity {...props} variant="screen" />
-
-        <div className="mnid-actions" data-toast-clear>
-          <button type="button" className="mnid-primary" onClick={onContinue}>
-            <ArrowRight size={17} aria-hidden="true" />
-            Enter Passport
-          </button>
-        </div>
-
-        <p className="mnid-foot">
-          <Sparkles size={13} aria-hidden="true" />
-          <span>
-            Registrations and redemptions shown here are read from the chain, or plainly
-            labelled as queued when they are not on it yet.
-          </span>
-        </p>
-      </div>
-    </section>
-  )
-}

@@ -1,4 +1,4 @@
-import { Gem, House, LayoutGrid } from 'lucide-react'
+import { BookUser, KeyRound, Stamp } from 'lucide-react'
 import './nav.css'
 
 /**
@@ -13,23 +13,25 @@ import './nav.css'
  * it, painted in the page surface. Scrolled content disappears cleanly at the
  * strip's top hairline instead of slicing through the gaps around the card.
  *
- * THREE tabs since 2026/08/31. Assets sits in the middle, between the screen a
- * person lands on and the screen they go out from — what you hold is the thing
- * both of the others act on, and it was previously readable only as a strip of
- * cards on Home with no shelf of its own.
+ * PASSPORT / ACCESS / STAMPS since the identity-first redesign: Passport is
+ * the document (who you are), Access is who may act with it and how far, and
+ * Stamps is where it has been. There is deliberately no Assets tab — money
+ * lives in the Pocket, a sheet off the Passport page, because Passport is an
+ * identity that happens to hold money, not a wallet that happens to have a
+ * name.
  */
 
-export type MobileTab = 'home' | 'assets' | 'apps'
+export type MobileTab = 'passport' | 'access' | 'stamps'
 
 export interface PassportNavProps {
   active: MobileTab
   onSelect: (tab: MobileTab) => void
 }
 
-const TABS: { key: MobileTab; label: string; icon: typeof House }[] = [
-  { key: 'home', label: 'Home', icon: House },
-  { key: 'assets', label: 'Assets', icon: Gem },
-  { key: 'apps', label: 'Apps', icon: LayoutGrid },
+const TABS: { key: MobileTab; label: string; icon: typeof BookUser }[] = [
+  { key: 'passport', label: 'Passport', icon: BookUser },
+  { key: 'access', label: 'Access', icon: KeyRound },
+  { key: 'stamps', label: 'Stamps', icon: Stamp },
 ]
 
 export default function PassportNav(props: PassportNavProps) {

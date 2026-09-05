@@ -18,8 +18,6 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react
 import { createPortal } from 'react-dom'
 
 import type { AliasRecord } from '../identity/aliasStore.js'
-import type { PassportIncentiveRecord } from '../identity/incentiveStore.js'
-import ActivityFeed, { type ActivityFeedItem } from './ActivityFeed.js'
 /* Naming a colour, and the order a balance list puts colours in. Pure, drilled,
    and free of the wallet SDK — see `lib/colour.ts`. */
 import {
@@ -35,7 +33,6 @@ import type { FeeReadiness, LocalWalletProvingMode } from '../lib/localWallet.js
 /* The Receive code's payload, written by the same module that reads one back —
    see `lib/qrPayload.ts` for why both directions live in one place. */
 import { encodeReceivePayload } from '../lib/qrPayload.js'
-import { FeaturedApps, type AppsScreenProps, type FeaturedAppsProps } from './Apps.js'
 import { EcosystemIdentity } from './Ecosystem.js'
 import NetworkSwitcher, { type PassportNetwork } from './NetworkSwitcher.js'
 import NotificationToggle from './NotificationToggle.js'
@@ -67,7 +64,6 @@ export interface HomeScreenProps {
    */
   identity?: {
     record: AliasRecord | null
-    incentives: PassportIncentiveRecord[]
     onClaimName?: () => void
     /** Re-runs the real claim for a queued name. See EcosystemProps. */
     onRegisterNow?: () => void
@@ -212,25 +208,6 @@ export interface HomeScreenProps {
     nameLeg?: SendSheetProps['nameLeg']
   } | null
   /**
-   * The activity trail, newest first — every row Passport has written for this
-   * credential, with the explorer link the host resolved where a row has a
-   * transaction behind it. The list itself takes the last ten and groups them
-   * by day; the host hands over everything it holds.
-   *
-   * Omitted only by a caller that has no trail to offer. An EMPTY array is a
-   * real answer — a Passport that has not done anything yet — and gets the one
-   * quiet line the section is designed around.
-   */
-  activity?: readonly ActivityFeedItem[]
-  /** Fed to the embedded apps grid and its in-Passport browser. */
-  appsProfile: AppsScreenProps['profile']
-  /** Notified after the user approves a profile request, for the activity feed. */
-  onProfileShared?: (appName: string, fields: string[]) => void
-  /** The wallet seam the embedded apps grid hands to its in-Passport browser. */
-  executeTransfer?: FeaturedAppsProps['executeTransfer']
-  transferContext?: FeaturedAppsProps['transferContext']
-  onIncentiveRedeemed?: FeaturedAppsProps['onIncentiveRedeemed']
-  /**
    * Telegram support channel. When set, an outlined "Support on Telegram"
    * pill renders in the footer area; when null, no support link is shown.
    */
@@ -274,12 +251,6 @@ export default function HomeScreen(props: HomeScreenProps) {
     onDismissError,
     onRefresh,
     send,
-    activity,
-    appsProfile,
-    onProfileShared,
-    executeTransfer,
-    transferContext,
-    onIncentiveRedeemed,
     supportUrl,
     onOpenBackup,
     onSignOut,
@@ -541,7 +512,9 @@ export default function HomeScreen(props: HomeScreenProps) {
         <img className="mnhome-wordmark" src="/skunk/mark.svg" alt="Midnight" />
         <span className="mn-beta-badge">Beta</span>
         <div className="mnhome-bar-actions">
-          <NetworkSwitcher network={network} onSelect={onSelectNetwork} />
+          {import.meta.env.VITE_SHOW_NETWORK_SWITCHER === '1' ? (
+            <NetworkSwitcher network={network} onSelect={onSelectNetwork} />
+          ) : null}
           {/* The address pill was cut 2026/08/19. A Passport user's visible
               identity is their `.night` name, not a truncated address in the
               chrome; the address they receive at lives inside Receive. */}
@@ -734,7 +707,6 @@ export default function HomeScreen(props: HomeScreenProps) {
           <EcosystemIdentity
             network={network}
             record={identity.record}
-            incentives={identity.incentives}
             variant="card"
             onClaimName={identity.onClaimName}
             onRegisterNow={identity.onRegisterNow}
@@ -747,22 +719,6 @@ export default function HomeScreen(props: HomeScreenProps) {
         {/* Whether the account behind the name is ready — one line, directly
             beneath the name it belongs to. */}
         {passportContract ? <PassportContractCard {...passportContract} /> : null}
-
-        {/* The applications, directly below the wallet summary — the same
-            registry, cards, and in-Passport browser as the Apps tab. */}
-        <FeaturedApps
-          profile={appsProfile}
-          onProfileShared={onProfileShared}
-          network={network}
-          executeTransfer={executeTransfer}
-          transferContext={transferContext}
-          onIncentiveRedeemed={onIncentiveRedeemed}
-        />
-
-        {/* What has happened to this Passport, under the apps rather than over
-            them: the grid is what a person came to Home to USE, and the trail
-            is what they come back to check. */}
-        {activity ? <ActivityFeed entries={activity} /> : null}
 
         {sendOpen && send ? (
           <SendSheet
