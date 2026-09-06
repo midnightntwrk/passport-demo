@@ -322,6 +322,28 @@ body:has(.mnob-screen) {
   background: var(--mn-surface-page);
 }
 
+/* ---------------------------------------------------------------- */
+/* Desktop shell                                                     */
+/* ---------------------------------------------------------------- */
+
+/* On a wide viewport the screens keep a document-width column instead of
+   stretching card furniture across the whole window: the padding does the
+   centring, so no screen carries desktop markup, and every fixed element
+   that floats (the nav pill, the sheets, the modals) is already capped and
+   centred by its own rule. `.passport-experience` in the selector outranks
+   each screen's own padding declaration whatever the sheet order. The
+   onboarding screen is absent deliberately — its bar and body centre
+   themselves at min(100% - 48px, 520px) already. */
+@media (min-width: 760px) {
+  .passport-experience .mnhome-screen,
+  .passport-experience .mnaccess-screen,
+  .passport-experience .mnstamps-screen,
+  .passport-experience .mnassets-screen,
+  .passport-experience .mnid-screen {
+    padding-inline: max(28px, calc((100% - 640px) / 2));
+  }
+}
+
 /* styles.css sets `outline: 2px solid #fff` globally, which disappears on
    a light surface. Re-point it at the accent, scoped to the mobile roots. */
 .mnhome-screen :focus-visible,

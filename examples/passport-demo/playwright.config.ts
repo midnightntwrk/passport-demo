@@ -72,9 +72,15 @@ export default defineConfig({
       name: 'chromium',
       use: {
         ...devices['Desktop Chrome'],
-        /* A phone-shaped viewport: the demo ships `is-mobile` layout and the
-           Home screen's tab bar only exists there. */
-        viewport: { width: 420, height: 900 },
+        /* A phone-shaped viewport by default. PW_VIEWPORT=1440x900 runs the
+           same suite desktop-sized — the desktop shell must keep every
+           control reachable, and this override is how that is proven. */
+        viewport: (() => {
+          const m = process.env.PW_VIEWPORT?.match(/^(\d+)x(\d+)$/);
+          return m
+            ? { width: Number(m[1]), height: Number(m[2]) }
+            : { width: 420, height: 900 };
+        })(),
       },
     },
   ],
