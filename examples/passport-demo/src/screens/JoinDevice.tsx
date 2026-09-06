@@ -1,4 +1,4 @@
-import { ArrowRight, Check, Copy, KeyRound, Search } from 'lucide-react'
+import { ArrowRight, Check, Copy, KeyRound, KeySquare, Search } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
 
 import ThemeToggle from './ThemeToggle.js'
@@ -49,10 +49,33 @@ export interface JoinDeviceState {
   watchLine: string | null
 }
 
+/**
+ * The RESCUE arm — the recovery rehearsal's other half (P3). The show stage
+ * waits for another device to admit this one; when the other device is the
+ * thing that was lost, the wallet-derived recovery key admits this device
+ * ITSELF: sign the fixed message, prove the derived key is on the account,
+ * then the same `add_device` — authorised by the recovery key instead of a
+ * passkey — and the ledger watch above lands the join exactly as if another
+ * device had acted. The screen stays dumb; App.tsx holds the machine and
+ * the one secret, for exactly as long as the ceremony needs it.
+ */
+export interface JoinRescueState {
+  stage: 'idle' | 'signing' | 'confirm' | 'submitting' | 'submitted'
+  /** Set at the confirm beat: the wallet whose key answered. */
+  pending: { ethAddress: string } | null
+  phase: string | null
+  error: string | null
+  /** Starts connect-and-sign. Absent without an injected wallet. */
+  onBegin?: (() => void) | undefined
+  onConfirm: () => void
+  onCancel: () => void
+}
+
 export interface JoinDeviceProps {
   /** The network the lookup runs against, named for the reader. */
   networkLabel: string
   state: JoinDeviceState
+  rescue: JoinRescueState
   onLookup: (typed: string) => void
   /** The passkey ceremony that derives this device's commitment. */
   onMakeKey: () => void
@@ -66,8 +89,12 @@ function accountTailOf(address: string): string {
   return address.length <= 12 ? address : `${address.slice(0, 6)}…${address.slice(-6)}`
 }
 
+function shortEth(address: string): string {
+  return address.length <= 12 ? address : `${address.slice(0, 6)}…${address.slice(-4)}`
+}
+
 export default function JoinDevice(props: JoinDeviceProps) {
-  const { networkLabel, state, onLookup, onMakeKey, onBackToName, onStartFresh } = props
+  const { networkLabel, state, rescue, onLookup, onMakeKey, onBackToName, onStartFresh } = props
   const [typed, setTyped] = useState('')
   const [copied, setCopied] = useState(false)
   const [code, setCode] = useState<{ size: number; path: string } | null>(null)
@@ -246,6 +273,71 @@ export default function JoinDevice(props: JoinDeviceProps) {
               {state.watchLine ? (
                 <p className="mnjoin-watch" role="status" aria-live="polite">
                   {state.watchLine}
+                </p>
+              ) : null}
+            </div>
+
+            {/* The rescue arm: when the other device IS the thing that was
+                lost, the recovery key admits this device itself. */}
+            <div className="mnid-panel">
+              {/* KeySquare, matching the recovery-key panel on the Keys page:
+                  the same key, met on the other side of the loss. */}
+              <p className="mnid-panel-head">
+                <KeySquare size={16} aria-hidden="true" />
+                No other device to hand?
+              </p>
+              {rescue.stage === 'confirm' && rescue.pending ? (
+                <>
+                  <p>
+                    <b>{shortEth(rescue.pending.ethAddress)}</b> signed, and its recovery key IS
+                    on <b>{state.domain}</b>&rsquo;s account. Admitting this device with it puts
+                    this device&rsquo;s commitment — the one in the code above — on chain: a real
+                    transaction, proved and submitted from here.
+                  </p>
+                  <div className="mnid-panel-actions">
+                    <button type="button" className="mnid-primary" onClick={rescue.onConfirm}>
+                      Admit this device with it
+                    </button>
+                    <button type="button" className="mnid-secondary" onClick={rescue.onCancel}>
+                      Cancel
+                    </button>
+                  </div>
+                </>
+              ) : rescue.stage === 'signing' ? (
+                <p>Waiting for the wallet — connect it, then sign the recovery message…</p>
+              ) : rescue.stage === 'submitting' ? (
+                <p>
+                  Admitting this device…
+                  {rescue.phase ? ` (${rescue.phase})` : ''} This proves and submits a real
+                  transaction, and can take a minute.
+                </p>
+              ) : rescue.stage === 'submitted' ? (
+                <p>Submitted and confirmed — the ledger watch above lands this device next.</p>
+              ) : (
+                <>
+                  <p>
+                    If a wallet you hold carries this Passport&rsquo;s recovery key, it can admit
+                    this device itself: sign one fixed message, and you are back in — with the
+                    other device gone.
+                  </p>
+                  {rescue.onBegin ? (
+                    <div className="mnid-panel-actions">
+                      <button type="button" className="mnid-primary" onClick={rescue.onBegin}>
+                        Use your recovery key
+                      </button>
+                    </div>
+                  ) : (
+                    <p className="mnid-keys-unavailable">
+                      No wallet extension was found in this browser. Install the wallet that
+                      holds your recovery key and reload — signing one message admits this
+                      device.
+                    </p>
+                  )}
+                </>
+              )}
+              {rescue.error ? (
+                <p className="mnid-keys-error" role="alert">
+                  {rescue.error}
                 </p>
               ) : null}
             </div>

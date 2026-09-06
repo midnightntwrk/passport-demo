@@ -8,6 +8,7 @@ import {
   type PassportProfileRequest,
   type PassportProfileResponse,
 } from './backend.js';
+import { profileShareScope, type ConnectionApproval } from './identity/connections.js';
 
 interface ProfileConsentProps {
   /**
@@ -27,6 +28,13 @@ interface ProfileConsentProps {
     shielded?: string;
     dust?: string;
   } | null;
+  /**
+   * Reports an approval that actually LEFT — origin and the scope really
+   * shared — so the host can record the connection on the Access tab. Never
+   * called for a denial, an unavailable answer, or a reply that lost the
+   * answer-once race.
+   */
+  onApproved?: (approval: ConnectionApproval) => void;
 }
 
 interface PendingRequest {
@@ -86,6 +94,7 @@ export function PassportProfileConsent({
   displayName,
   passportContract,
   midnightAddresses,
+  onApproved,
 }: ProfileConsentProps) {
   const launch = useMemo(launchParameters, []);
   const [pending, setPending] = useState<PendingRequest | null>(null);
@@ -208,8 +217,15 @@ export function PassportProfileConsent({
     }
     /* The outcome only changes if this reply is the one that left: a window
        that already answered says what it actually said, never what the last
-       button tapped would have said. */
-    if (send({ approved: true, profile })) setOutcome('approved');
+       button tapped would have said. The connection is recorded on the same
+       condition, and from the fields that really left — never the request. */
+    if (send({ approved: true, profile })) {
+      setOutcome('approved');
+      onApproved?.({
+        origin: pending.origin,
+        scopes: [profileShareScope(Object.keys(profile))],
+      });
+    }
   };
 
   const deny = () => {

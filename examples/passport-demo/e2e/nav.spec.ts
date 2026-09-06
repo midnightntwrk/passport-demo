@@ -328,6 +328,75 @@ test('a pasted join code reaches the confirm beat only for THIS Passport', async
   await expect(page.locator('.mnpcard')).toBeVisible();
 });
 
+test('approved connections wear their scopes on Access, and revoke removes for real', async () => {
+  /* The Access surface renders the connections STORE — written only by real
+     consent approvals in the app, and seeded here the way the walk's alias
+     and contract records were: the returning-user path, through the same
+     components with the same props. Two tenants: an app with two C10 scope
+     lines, and an agent, so the AGENT tag is proven to come from the
+     record's own kind rather than from anything the screen invents. */
+  const seeded = await page.evaluate(() => {
+    const credentialId = localStorage.getItem('passport-last-passkey');
+    if (!credentialId) return false;
+    const now = new Date().toISOString();
+    localStorage.setItem(
+      `mn-passport:connections:${credentialId}`,
+      JSON.stringify({
+        'https://nightfi.example': {
+          origin: 'https://nightfi.example',
+          name: 'nightfi.example',
+          kind: 'app',
+          scopes: [
+            {
+              operation: 'authenticate',
+              object: 'sees your name, your account',
+              bound: 'asks every time',
+            },
+            { operation: 'pay', object: 'NIGHT from the pocket', bound: 'asks every time' },
+          ],
+          connectedAt: now,
+          lastUsedAt: now,
+          uses: 3,
+        },
+        'https://companion.example': {
+          origin: 'https://companion.example',
+          name: 'companion.example',
+          kind: 'agent',
+          scopes: [{ operation: 'read', object: 'pocket balances', bound: 'asks every time' }],
+          connectedAt: now,
+          lastUsedAt: now,
+          uses: 1,
+        },
+      }),
+    );
+    return true;
+  });
+  expect(seeded).toBe(true);
+  await page.reload();
+  await expect(page.locator('.mnpcard')).toBeVisible({ timeout: 90_000 });
+  await tabs().nth(1).click();
+
+  const cards = page.locator('.mnaccess-app');
+  await expect(cards).toHaveCount(2);
+  await expect(page.getByText('sees your name, your account')).toBeVisible();
+  await expect(page.getByText('NIGHT from the pocket')).toBeVisible();
+  /* The bound tells the truth about today — every act still asks — and it is
+     a legal C10 bound, so the day a real cap exists only the string changes. */
+  await expect(page.locator('.mnaccess-scope-bound').first()).toHaveText('asks every time');
+  await expect(page.locator('.mnaccess-agent-tag')).toHaveCount(1);
+  /* The closing line names WHOSE promise the stronger rule is. */
+  await expect(page.getByText(/revoked means revoked, held by the contract/)).toBeVisible();
+
+  // Revoke one: its card goes, the other stays.
+  await page.getByRole('button', { name: 'Revoke nightfi.example' }).click();
+  await expect(cards).toHaveCount(1);
+  await expect(page.locator('.mnaccess-app', { hasText: 'nightfi.example' })).toHaveCount(0);
+
+  // Revoke the last: the honest empty state returns, unchanged.
+  await page.getByRole('button', { name: 'Revoke companion.example' }).click();
+  await expect(page.getByText('Nothing may act for you yet.')).toBeVisible();
+});
+
 test('the way out is on every tab', async () => {
   /* Sign out lived only in Home's bar after the P1 cut, so a person reading
      Stamps had no way to leave without first finding their way back

@@ -103,6 +103,44 @@ test('one ceremony draws the code, and the watch line tells the truth', async ()
   await expect(page.getByText(/the other device has not admitted this one yet/)).toBeVisible({
     timeout: 30_000,
   });
+
+  /* The rescue arm is offered honestly: this headless browser injects no
+     wallet, so the panel says so in prose and offers no button for an act
+     the browser cannot perform. */
+  await expect(page.getByText('No other device to hand?')).toBeVisible();
+  await expect(page.getByText(/Install the wallet that holds your recovery key/)).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Use your recovery key' })).toHaveCount(0);
+});
+
+test('the rescue arm signs, checks the ledger, and refuses a key that opens nothing', async () => {
+  /* The recovery rehearsal's honest gate. A stub wallet signs happily — a
+     wrong wallet always does — and the derived key is checked against the
+     REAL recorded account state before anything is offered. Nothing on that
+     account answers to this signature, and the screen must say so instead of
+     offering a submit that could only fail. */
+  await page.addInitScript(() => {
+    (window as unknown as { ethereum: unknown }).ethereum = {
+      request: async ({ method }: { method: string }) => {
+        if (method === 'eth_requestAccounts') return ['0xc0ffee0000000000000000000000000000005a5a'];
+        if (method === 'personal_sign') return `0x${'42'.repeat(65)}`;
+        throw new Error(`unexpected wallet call: ${method}`);
+      },
+    };
+  });
+  await page.reload();
+  await expect(
+    page.getByRole('heading', { name: 'Show this to your other device' }),
+  ).toBeVisible({ timeout: 90_000 });
+
+  const begin = page.getByRole('button', { name: 'Use your recovery key' });
+  await expect(begin).toBeVisible();
+  await begin.click();
+  await expect(
+    page.getByText(/No recovery key from 0xc0ff…5a5a is on iamtester\.night's account/),
+  ).toBeVisible({ timeout: 30_000 });
+  // Refused before confirm: nothing was offered, nothing was submitted.
+  await expect(page.getByRole('button', { name: 'Admit this device with it' })).toHaveCount(0);
+  await expect(begin).toBeVisible();
 });
 
 test('a reload lands back on the join, never on the name step', async () => {

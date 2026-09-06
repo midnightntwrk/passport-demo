@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { profileShareScope, type ConnectionApproval } from '../identity/connections.js';
 import { AlertTriangle, ArrowRight, Check, ExternalLink, Loader2, ShieldCheck, X } from 'lucide-react';
 import {
   buildPassportCallbackPayload,
@@ -81,6 +82,12 @@ interface CallbackConsentProps {
     getPublicKey(): TaggedKeyMaterial;
     signData(data: Uint8Array): TaggedKeyMaterial;
   } | null;
+  /**
+   * Reports an approval as the redirect leaves — origin and the scope really
+   * shared — so the host can record the connection on the Access tab. Never
+   * called for a denial.
+   */
+  onApproved?: (approval: ConnectionApproval) => void;
 }
 
 /**
@@ -193,6 +200,7 @@ export function PassportCallbackConsent({
   passportContract,
   midnightAddresses,
   getSigningKeystore,
+  onApproved,
 }: CallbackConsentProps) {
   /**
    * THE PIN. Captured once, on first render, and never recomputed. Everything
@@ -319,6 +327,12 @@ export function PassportCallbackConsent({
       };
     }
     const envelope = sealPassportCallbackResponse(encoded, bytes, signer);
+    /* Recorded from the fields that really left, before the navigation takes
+       the tab away — a redirect flow gets no second chance to write. */
+    onApproved?.({
+      origin: pinned.callbackOrigin,
+      scopes: [profileShareScope(Object.keys(profile))],
+    });
     leave(passportCallbackSuccessUrl(pinned, envelope), 'shared');
   };
 

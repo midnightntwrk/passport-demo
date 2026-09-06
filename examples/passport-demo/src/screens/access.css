@@ -115,3 +115,100 @@
 }
 
 body:has(.mnaccess-screen) { background: var(--mn-surface-page); }
+
+/* --- Connection cards (P3): C10 triples with the C11 chrome ----------------- */
+
+.mnaccess-apps {
+  display: grid;
+  gap: 12px;
+  margin: 0 0 18px;
+  padding: 0;
+  list-style: none;
+}
+.mnaccess-app {
+  padding: 14px 16px;
+  border: var(--mn-hairline) solid var(--mn-border-medium);
+  border-radius: var(--mn-radius-card, 16px);
+  background: var(--mn-surface-raised);
+}
+.mnaccess-app-top {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.mnaccess-app-text { flex: 1; min-width: 0; }
+.mnaccess-app-text b { display: block; font-size: 15px; }
+.mnaccess-app-origin {
+  display: block;
+  color: var(--mn-text-muted);
+  font-size: 12px;
+}
+/* The cheek-pink tag the design gives agents — worn only when a record says
+   so, and no record says so until the agent slice writes one. */
+.mnaccess-agent-tag {
+  flex: 0 0 auto;
+  padding: 3px 8px;
+  border-radius: var(--mn-radius-pill);
+  color: #16161f;
+  background: var(--mn-cheek);
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: .06em;
+}
+.mnaccess-revoke {
+  flex: 0 0 auto;
+  padding: 6px 12px;
+  border: var(--mn-hairline) solid var(--mn-border-medium);
+  border-radius: var(--mn-radius-pill);
+  color: var(--mn-text-primary);
+  background: transparent;
+  font-family: var(--mn-font-body);
+  font-size: 12.5px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.mnaccess-revoke:hover { border-color: var(--mn-cheek); color: var(--mn-cheek); }
+
+/* One triple per row: verb, object, bound — the bound right-aligned in mono,
+   the way a cap reads. */
+.mnaccess-scopes {
+  display: grid;
+  gap: 5px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.mnaccess-scope {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--mn-text-secondary);
+}
+.mnaccess-scope-verb {
+  flex: 0 0 auto;
+  min-width: 92px;
+  font-weight: 700;
+  color: var(--mn-text-primary);
+}
+.mnaccess-scope-object { flex: 1; min-width: 0; }
+.mnaccess-scope-bound {
+  flex: 0 0 auto;
+  margin-left: auto;
+  font-family: var(--mn-font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  color: var(--mn-text-muted);
+}
+.mnaccess-app-meta {
+  display: flex;
+  gap: 14px;
+  margin: 10px 0 0;
+  color: var(--mn-text-muted);
+  font-size: 11.5px;
+}
+.mnaccess-promise {
+  margin: 0 0 18px;
+  color: var(--mn-text-muted);
+  font-size: 12.5px;
+  line-height: 1.55;
+}

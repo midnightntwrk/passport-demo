@@ -73,6 +73,14 @@ import {
 } from './identity/secondDevice.js';
 import { classifyRecipientInput } from './lib/recipientName.js';
 import { encodeAddDevicePayload, type QrPayload } from './lib/qrPayload.js';
+import {
+  loadConnections,
+  recordConnection,
+  revokeConnection,
+  subscribeConnections,
+  type ConnectionApproval,
+  type ConnectionRecord,
+} from './identity/connections.js';
 import HomeScreen from './screens/Home.js';
 import AliasClaimScreen from './screens/AliasClaim.js';
 import BackupScreen from './screens/Backup.js';
@@ -1186,6 +1194,19 @@ export default function PassportDemo() {
   useEffect(() => {
     setSecondDevice(profile ? loadSecondDeviceRecord(profile.passkey.credentialId) : null);
   }, [profile]);
+  /* The Access tab's tenants — written only by real approvals in the three
+     consent flows, read live so a revoke and a new approval both land on the
+     screen without a reload. See `identity/connections.ts`. */
+  const [connections, setConnections] = useState<ConnectionRecord[]>([]);
+  useEffect(() => {
+    if (!profile) {
+      setConnections([]);
+      return undefined;
+    }
+    const credentialId = profile.passkey.credentialId;
+    setConnections(loadConnections(credentialId));
+    return subscribeConnections(credentialId, setConnections);
+  }, [profile]);
   /* The two P3 handoff machines, declared HERE — beside the records they
      write — because effects above and below read them in their dependency
      arrays, and a useState further down is a temporal dead zone at render
@@ -1204,6 +1225,18 @@ export default function PassportDemo() {
   >({ stage: 'idle' });
   const [admitError, setAdmitError] = useState<string | null>(null);
   const [admitPhase, setAdmitPhase] = useState<string | null>(null);
+  /* The rescue machine — the recovery rehearsal's landing half: on the join
+     screen's show stage, the wallet-derived recovery key admits THIS device
+     itself. The derived secret lives in the ref between the beats, never in
+     state, and is zeroed on every exit path. */
+  const [joinRescue, setJoinRescue] = useState<
+    | { stage: 'idle' }
+    | { stage: 'signing' }
+    | { stage: 'confirm' | 'submitting' | 'submitted'; ethAddress: string }
+  >({ stage: 'idle' });
+  const [joinRescueError, setJoinRescueError] = useState<string | null>(null);
+  const [joinRescuePhase, setJoinRescuePhase] = useState<string | null>(null);
+  const joinRescueSecret = useRef<Uint8Array | null>(null);
   // One-button onboarding (2026/08/05): there is no separate "choose" step
   // any more, so the screen only distinguishes idle from working.
   const [onboardingIntent, setOnboardingIntent] = useState<OnboardingIntent | null>(null);
@@ -5094,6 +5127,171 @@ export default function PassportDemo() {
   }, [addActivity, admitEnrol, requireAccount, selectedNetwork, withAccountDeviceSecret]);
 
   /* ---------------------------------------------------------------------- */
+  /* The rescue (P3): the recovery key admits this device itself            */
+  /*                                                                        */
+  /* The recovery rehearsal's landing half. The wipe half is the forget     */
+  /* control; the re-entry is the join flow; and when the other device is   */
+  /* the thing that was lost, this arm replaces it: the wallet signs the    */
+  /* same frozen message it signed at enrolment, the derived key is CHECKED */
+  /* against the account's device set before anything is offered, and the   */
+  /* same `add_device` runs — authorised by the recovery secret instead of  */
+  /* a passkey, because the wallet's own signing ceremony IS the user       */
+  /* verification here. The ledger watch above lands the join unchanged.    */
+  /* ---------------------------------------------------------------------- */
+
+  /** Zeroes and drops the held recovery secret — every exit path's duty. */
+  const disposeJoinRescueSecret = useCallback(() => {
+    joinRescueSecret.current?.fill(0);
+    joinRescueSecret.current = null;
+  }, []);
+
+  /** Connect-and-sign, then PROVE the key is on the account before offering. */
+  const beginJoinRescue = useCallback(async () => {
+    if (joinFlow.stage !== 'show') return;
+    const { domain, accountAddress } = joinFlow;
+    setJoinRescueError(null);
+    const provider = getEthereumProvider();
+    if (!provider) {
+      setJoinRescueError('No wallet extension answered. Install one and reload.');
+      return;
+    }
+    const handle = localWalletRef.current;
+    if (!handle) {
+      setJoinRescueError('The Passport signing session closed. Sign in again, then retry.');
+      return;
+    }
+    setJoinRescue({ stage: 'signing' });
+    try {
+      const { ethAddress, signature } = await requestRecoverySignature(provider);
+      const [{ recoverySecretFromSignature }, { deriveDeviceCommitment, readAccountState }] =
+        await Promise.all([
+          import('./identity/recoveryKey.js'),
+          import('./identity/accountCustody.js'),
+        ]);
+      const secret = await recoverySecretFromSignature(signature);
+      let enrolled: boolean;
+      try {
+        const [commitment, state] = await Promise.all([
+          deriveDeviceCommitment(secret),
+          readAccountState(handle.network, accountAddress),
+        ]);
+        enrolled = state.activeDeviceCommitments.has(commitment);
+      } catch (cause) {
+        secret.fill(0);
+        throw cause;
+      }
+      if (!enrolled) {
+        /* The honest refusal, and the important one: a wrong wallet account
+           signs happily and derives a perfectly-formed key that opens
+           nothing. Said before anything is offered, not after a submit. */
+        secret.fill(0);
+        setJoinRescue({ stage: 'idle' });
+        setJoinRescueError(
+          `No recovery key from ${ethAddress.slice(0, 6)}…${ethAddress.slice(-4)} is on ${domain}'s account. If the wallet holds several accounts, pick the one you enrolled with and try again.`,
+        );
+        return;
+      }
+      /* Held for the confirm beat only — the ref, never state, and zeroed by
+         cancel, by success, and by the cleanup when the screen goes away. */
+      disposeJoinRescueSecret();
+      joinRescueSecret.current = secret;
+      setJoinRescue({ stage: 'confirm', ethAddress });
+    } catch (cause) {
+      setJoinRescue({ stage: 'idle' });
+      setJoinRescueError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }, [disposeJoinRescueSecret, joinFlow]);
+
+  /** The chain half — `add_device`, authorised by the RECOVERY secret. */
+  const confirmJoinRescue = useCallback(async () => {
+    if (joinRescue.stage !== 'confirm' || joinFlow.stage !== 'show') return;
+    const { ethAddress } = joinRescue;
+    const { accountAddress, commitmentHex } = joinFlow;
+    const secret = joinRescueSecret.current;
+    if (!secret) {
+      setJoinRescue({ stage: 'idle' });
+      setJoinRescueError('The signed key was cleared. Sign the recovery message again.');
+      return;
+    }
+    const handle = localWalletRef.current;
+    if (!handle) {
+      setJoinRescueError('The Passport signing session closed. Sign in again, then retry.');
+      return;
+    }
+    setJoinRescueError(null);
+    setJoinRescue({ stage: 'submitting', ethAddress });
+    try {
+      const { addDevice } = await import('./identity/accountCustody.js');
+      await addDevice(
+        handle,
+        secret,
+        { contractAddress: accountAddress, newDeviceCommitment: BigInt(`0x${commitmentHex}`) },
+        (progress) => setJoinRescuePhase(progress.phase),
+      );
+      /* Done with the secret the moment the call lands. The WATCH is what
+         finishes the join — this machine only reports the submit honestly. */
+      disposeJoinRescueSecret();
+      setJoinRescue({ stage: 'submitted', ethAddress });
+      addActivity({
+        label: 'Recovered with your recovery key',
+        detail: `The key derived from ${ethAddress.slice(0, 6)}…${ethAddress.slice(-4)} admitted this device to your account — no other device involved.`,
+        status: 'complete',
+        source: 'chain',
+      });
+    } catch (cause) {
+      /* Back to CONFIRM with the secret still held: retrying the submission
+         must not cost another wallet ceremony. */
+      setJoinRescue({ stage: 'confirm', ethAddress });
+      setJoinRescueError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setJoinRescuePhase(null);
+    }
+  }, [addActivity, disposeJoinRescueSecret, joinFlow, joinRescue]);
+
+  /* The secret's backstop: whenever the show stage is left — the join landed,
+     the exit was taken, the session closed — whatever the ref still holds is
+     zeroed and the machine resets. The updater form keeps the mount-time run
+     from re-rendering an already-idle machine. */
+  useEffect(() => {
+    if (identityStep === 'join' && joinFlow.stage === 'show') return;
+    disposeJoinRescueSecret();
+    setJoinRescue((current) => (current.stage === 'idle' ? current : { stage: 'idle' }));
+    setJoinRescueError((current) => (current === null ? current : null));
+    setJoinRescuePhase((current) => (current === null ? current : null));
+  }, [disposeJoinRescueSecret, identityStep, joinFlow.stage]);
+
+  /* ---------------------------------------------------------------------- */
+  /* Connections (P3): what the consent flows approved, on Access           */
+  /* ---------------------------------------------------------------------- */
+
+  /**
+   * The one writer the consent flows share. Reads the profile from the ref
+   * because an approval can land while a render is in flight — and refuses
+   * to write with no profile, since a connection must belong to a credential.
+   */
+  const recordApprovedConnection = useCallback((approval: ConnectionApproval) => {
+    const activeProfile = profileRef.current;
+    if (!activeProfile) return;
+    recordConnection(activeProfile.passkey.credentialId, approval);
+  }, []);
+
+  /** Revoke, with the trail told what it means TODAY — see the store's doc. */
+  const revokeAccessConnection = useCallback(
+    (origin: string) => {
+      const activeProfile = profileRef.current;
+      if (!activeProfile) return;
+      revokeConnection(activeProfile.passkey.credentialId, origin);
+      addActivity({
+        label: 'Access revoked',
+        detail: `${origin} was disconnected. Its next request asks from the start, like a stranger's.`,
+        status: 'complete',
+        source: 'local',
+      });
+    },
+    [addActivity],
+  );
+
+  /* ---------------------------------------------------------------------- */
   /* Sending to a `.night` name                                             */
   /*                                                                        */
   /* "A name, not an address" is the second promise the welcome screen makes */
@@ -6290,6 +6488,7 @@ export default function PassportDemo() {
       <PassportProfileConsent
         sessionActive={sessionActive}
         displayName={sessionActive ? sessionDisplayName : null}
+        onApproved={recordApprovedConnection}
         passportContract={consentPassportContract}
         midnightAddresses={
           activeSurfaces?.unshieldedAddress
@@ -6313,6 +6512,7 @@ export default function PassportDemo() {
         launch={passportCallbackLaunch}
         sessionActive={sessionActive}
         displayName={sessionActive ? sessionDisplayName : null}
+        onApproved={recordApprovedConnection}
         passportContract={consentPassportContract}
         midnightAddresses={
           activeSurfaces?.unshieldedAddress
@@ -6336,6 +6536,7 @@ export default function PassportDemo() {
         sessionActive={sessionActive}
         executeTransfer={appTransferSeam}
         transferContext={appTransferContext}
+        onApproved={recordApprovedConnection}
       />
     </>
   );
@@ -6424,6 +6625,24 @@ export default function PassportDemo() {
               watchLine: joinFlow.stage === 'show' ? joinWatchLine : null,
             } satisfies JoinDeviceState
           }
+          rescue={{
+            stage: joinRescue.stage,
+            pending:
+              joinRescue.stage === 'confirm' || joinRescue.stage === 'submitting'
+                ? { ethAddress: joinRescue.ethAddress }
+                : null,
+            phase: joinRescuePhase,
+            error: joinRescueError,
+            /* Offered only with a wallet to sign — the session and the
+               account are given by the show stage this arm renders inside. */
+            onBegin: getEthereumProvider() ? () => void beginJoinRescue() : undefined,
+            onConfirm: () => void confirmJoinRescue(),
+            onCancel: () => {
+              disposeJoinRescueSecret();
+              setJoinRescue({ stage: 'idle' });
+              setJoinRescueError(null);
+            },
+          }}
           onLookup={(typed) => void lookupJoinName(typed)}
           onMakeKey={() => void makeJoinKey()}
           onBackToName={joinBackToName}
@@ -6584,12 +6803,21 @@ export default function PassportDemo() {
             <AccessScreen
               keysSummary={
                 sessionActive
-                  ? 'The passkey on this device'
+                  ? recoveryKeyRecord || secondDevice
+                    ? `The passkey on this device, plus ${[
+                        recoveryKeyRecord ? 'a recovery key' : null,
+                        secondDevice ? 'a second device' : null,
+                      ]
+                        .filter(Boolean)
+                        .join(' and ')}`
+                    : 'The passkey on this device'
                   : profile
                     ? 'A passkey this browser knows'
                     : null
               }
               onOpenKeys={profile ? () => setIdentityStep('keys') : undefined}
+              connections={connections}
+              onRevoke={sessionActive ? revokeAccessConnection : undefined}
               onSignOut={() => void signOutPassport()}
             />
           ) : (

@@ -698,6 +698,80 @@ test.describe('@live the account model on stagenet', () => {
       await contextB.close();
     }
   });
+
+  test('a lost device recovers with the recovery key alone, on chain', async ({ browser }) => {
+    /* THE REHEARSAL, end to end: a device holding NOTHING of this Passport —
+       no records, no passkey of its own yet — gets back in with only the
+       wallet that signed the recovery message at enrolment. Context C is a
+       fresh browser whose stub is the SAME fixed-signature wallet the walk
+       enrolled as its recovery key, so the derived key really is on the
+       account. No other device takes part: the admit transaction is
+       authorised by the recovery secret and submitted from the recovering
+       device itself. 231 WATCH: the same small-transaction shape as every
+       add_device above. */
+    test.setTimeout(45 * 60_000);
+    const contextC = await browser.newContext({
+      viewport: specViewport({ width: 420, height: 900 }),
+    });
+    await contextC.addInitScript(() => {
+      (window as unknown as { ethereum: unknown }).ethereum = {
+        request: async ({ method }: { method: string }) => {
+          if (method === 'eth_requestAccounts') return ['0xc0ffee0000000000000000000000000000005a5a'];
+          if (method === 'personal_sign') return `0x${'5a'.repeat(65)}`;
+          throw new Error(`unexpected wallet call: ${method}`);
+        },
+      };
+    });
+    const deviceC = await contextC.newPage();
+    await installVirtualAuthenticator(contextC, deviceC);
+    deviceC.on('console', (message) => {
+      if (message.type() === 'error') console.log(`[deviceC] ${message.text().slice(0, 200)}`);
+    });
+
+    try {
+      // C: a fresh passkey, the fork, and the walk's own name.
+      await deviceC.goto('/');
+      await deviceC.getByRole('button', { name: /Continue with Passport/i }).click();
+      await expect(deviceC.getByRole('heading', { name: /Welcome to Passport/i })).toBeVisible({
+        timeout: 5 * 60_000,
+      });
+      await deviceC
+        .getByRole('button', { name: 'Add this device to a Passport that already exists' })
+        .click();
+      await deviceC.getByLabel('Your Midnight name').fill(alias);
+      await deviceC.getByRole('button', { name: 'Find my Passport' }).click();
+      await expect(
+        deviceC.getByRole('heading', { name: `${alias}.night` }),
+      ).toBeVisible({ timeout: 5 * 60_000 });
+      await deviceC.getByRole('button', { name: 'Make this device’s key' }).click();
+      await expect(
+        deviceC.getByRole('heading', { name: 'Show this to your other device' }),
+      ).toBeVisible({ timeout: 5 * 60_000 });
+
+      /* The rescue: sign, and the derived key is found on the account BEFORE
+         anything is offered — that read is the gate the mocked tier drills
+         from the refusing side. */
+      await deviceC.getByRole('button', { name: 'Use your recovery key' }).click();
+      await expect(deviceC.getByText(/recovery key IS on/)).toBeVisible({ timeout: 5 * 60_000 });
+      await deviceC.getByRole('button', { name: 'Admit this device with it' }).click();
+
+      // Proving and submitting, authorised by the recovery secret — minutes.
+      await expect(deviceC.getByText(/Submitted and confirmed/)).toBeVisible({
+        timeout: 20 * 60_000,
+      });
+
+      // The ledger watch lands the join; nothing but the chain said so.
+      await expect(deviceC.locator('.mnpcard')).toBeVisible({ timeout: 10 * 60_000 });
+      await expect(deviceC.locator('.mnpcard')).toContainText('GUARDED');
+      const accountC = await storedAccountContract(deviceC);
+      expect(accountC).toBe(await storedAccountContract(page));
+      console.log(
+        `[live] recovered ${alias}.night with the recovery key alone — rehearsal complete`,
+      );
+    } finally {
+      await contextC.close();
+    }
+  });
 });
 
 /**

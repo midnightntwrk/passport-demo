@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { type ConnectionApproval } from './identity/connections.js';
 import { Check, ExternalLink, Loader2, PenLine, Wallet, X } from 'lucide-react';
 import {
   createPassportProfileReady,
@@ -82,6 +83,12 @@ interface TxConsentProps {
   }) => Promise<{ txId: string }>;
   /** The wallet the approval sheet is describing. Null with no local session. */
   transferContext?: PassportTransferContext | null;
+  /**
+   * Reports a payment that was really SUBMITTED — origin and the scope the
+   * act exercised — so the host can record the connection on the Access tab.
+   * Never called for a decline, a refusal, or a failed submission.
+   */
+  onApproved?: (approval: ConnectionApproval) => void;
 }
 
 interface PendingTxRequest {
@@ -126,6 +133,7 @@ export function PassportTxConsent({
   sessionActive,
   executeTransfer,
   transferContext,
+  onApproved,
 }: TxConsentProps) {
   const launch = useMemo(launchParameters, []);
   const [pending, setPending] = useState<PendingTxRequest | null>(null);
@@ -298,6 +306,10 @@ export function PassportTxConsent({
       if (!txId) throw new Error('Passport returned no transaction id.');
       reply(pending, { status: 'submitted', txId });
       setOutcome({ kind: 'submitted', txId });
+      onApproved?.({
+        origin: pending.origin,
+        scopes: [{ operation: 'pay', object: 'NIGHT from the pocket', bound: 'asks every time' }],
+      });
     } catch (cause) {
       /* Cancelling the passkey verification sheet is the user declining, not a
          submission that failed — the app is told exactly that. */
@@ -316,7 +328,7 @@ export function PassportTxConsent({
     } finally {
       setSigning(false);
     }
-  }, [amount, pending, reply, signing]);
+  }, [amount, onApproved, pending, reply, signing]);
 
   if (!launch || !pending) return null;
   /* Neither refused nor ready to show: the wallet is still arriving, and the
