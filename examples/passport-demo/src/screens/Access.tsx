@@ -1,4 +1,4 @@
-import { ChevronRight, KeyRound } from 'lucide-react'
+import { ChevronRight, KeyRound, LogOut } from 'lucide-react'
 
 import ThemeToggle from './ThemeToggle.js'
 import './access.css'
@@ -29,10 +29,16 @@ export interface AccessScreenProps {
   keysSummary: string | null
   /** Opens the keys surface (today: the backup/restore screen). */
   onOpenKeys?: () => void
+  /**
+   * Signs this Passport out. On every tab's bar, not only Home's: the way
+   * out must not depend on which page somebody happens to be reading
+   * (reported missing here 2026/09/06).
+   */
+  onSignOut: () => void
 }
 
 export default function AccessScreen(props: AccessScreenProps) {
-  const { keysSummary, onOpenKeys } = props
+  const { keysSummary, onOpenKeys, onSignOut } = props
 
   return (
     <section className="mnaccess-screen">
@@ -40,6 +46,18 @@ export default function AccessScreen(props: AccessScreenProps) {
         <img className="mnaccess-wordmark" src="/skunk/mark.svg" alt="Midnight" />
         <div className="mnaccess-bar-actions">
           <ThemeToggle size="sm" />
+          {/* Home's 34px icon button; home.css is loaded wherever Home is,
+              which is every session that can reach this tab — the same rule
+              the Stamps trail already leans on. */}
+          <button
+            type="button"
+            className="mnhome-icon-button"
+            onClick={onSignOut}
+            aria-label="Sign out of this Passport"
+            title="Sign out"
+          >
+            <LogOut size={15} aria-hidden="true" />
+          </button>
         </div>
       </header>
 

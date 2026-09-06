@@ -192,6 +192,20 @@ test('the three sections really switch, and none is a dead end', async () => {
   await expect(page.getByRole('heading', { name: 'Connections', level: 2 })).toBeVisible();
 });
 
+test('the way out is on every tab', async () => {
+  /* Sign out lived only in Home's bar after the P1 cut, so a person reading
+     Stamps had no way to leave without first finding their way back
+     (reported 2026/09/06). The control is part of every tab's bar now, and
+     this walk is what keeps it there. */
+  for (const tab of [0, 1, 2]) {
+    await tabs().nth(tab).click();
+    await expect(
+      page.getByRole('button', { name: 'Sign out of this Passport' }),
+    ).toBeVisible();
+  }
+  await tabs().nth(0).click();
+});
+
 test('an item is not left among the balances in the Pocket', async () => {
   /* The split rule, seen from the only money surface left — the Pocket: the
      list carries the account's three balances — NIGHT, the sponsor's colour

@@ -649,7 +649,9 @@ test('the activity trail shows what really happened, and survives a reload', asy
   await expect(
     page.locator('.mnhome-activity').getByText('Your name could not be registered').first(),
   ).toBeVisible();
-  await page.getByRole('button', { name: 'Passport' }).click();
+  /* Exact: the sign-out control's accessible name ("Sign out of this
+     Passport") contains the tab's, and getByRole matches substrings. */
+  await page.getByRole('button', { name: 'Passport', exact: true }).click();
 });
 
 test('every token in the Pocket is named, and none of them is 64 characters', async () => {

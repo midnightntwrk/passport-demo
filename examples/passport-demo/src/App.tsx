@@ -5698,11 +5698,12 @@ export default function PassportDemo() {
                     : null
               }
               onOpenKeys={profile ? () => setIdentityStep('backup') : undefined}
+              onSignOut={() => void signOutPassport()}
             />
           ) : (
             /* Where this Passport has been — the same trail `addActivity`
                writes, under its own roof. */
-            <StampsScreen entries={homeActivity} />
+            <StampsScreen entries={homeActivity} onSignOut={() => void signOutPassport()} />
           )}
           <PassportNav active={mobileTab} onSelect={setMobileTab} />
         </>

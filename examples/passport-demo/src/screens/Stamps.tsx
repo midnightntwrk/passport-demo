@@ -1,3 +1,5 @@
+import { LogOut } from 'lucide-react'
+
 import ThemeToggle from './ThemeToggle.js'
 import ActivityFeed, { type ActivityFeedItem } from './ActivityFeed.js'
 import './stamps.css'
@@ -15,10 +17,16 @@ import './stamps.css'
 
 export interface StampsScreenProps {
   entries: readonly ActivityFeedItem[]
+  /**
+   * Signs this Passport out. On every tab's bar, not only Home's: the way
+   * out must not depend on which page somebody happens to be reading
+   * (reported missing here 2026/09/06).
+   */
+  onSignOut: () => void
 }
 
 export default function StampsScreen(props: StampsScreenProps) {
-  const { entries } = props
+  const { entries, onSignOut } = props
 
   return (
     <section className="mnstamps-screen">
@@ -26,6 +34,17 @@ export default function StampsScreen(props: StampsScreenProps) {
         <img className="mnstamps-wordmark" src="/skunk/mark.svg" alt="Midnight" />
         <div className="mnstamps-bar-actions">
           <ThemeToggle size="sm" />
+          {/* Home's 34px icon button; home.css is loaded wherever Home is —
+              the same rule the trail below already leans on. */}
+          <button
+            type="button"
+            className="mnhome-icon-button"
+            onClick={onSignOut}
+            aria-label="Sign out of this Passport"
+            title="Sign out"
+          >
+            <LogOut size={15} aria-hidden="true" />
+          </button>
         </div>
       </header>
 
