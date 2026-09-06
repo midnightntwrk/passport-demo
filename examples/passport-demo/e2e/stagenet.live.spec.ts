@@ -166,7 +166,7 @@ test.describe('@live the account model on stagenet', () => {
          that arrives in ten seconds should not be found nine minutes later by
          a timeout that says nothing about why. */
       const home = page
-        .getByRole('button', { name: /^Receive$/ })
+        .getByRole('button', { name: /^Show$/ })
         .waitFor({ state: 'visible', timeout: 9 * 60_000 })
         .then(() => 'home' as const)
         .catch(() => 'timeout' as const);
@@ -191,7 +191,7 @@ test.describe('@live the account model on stagenet', () => {
       await page.waitForTimeout(90_000);
     }
 
-    await expect(page.getByRole('button', { name: /^Receive$/ })).toBeVisible();
+    await expect(page.getByRole('button', { name: /^Show$/ })).toBeVisible();
     await expect(page.getByText(`${alias}.night`).first()).toBeVisible();
     console.log(`[live] ${alias}.night registered`);
   });
@@ -201,15 +201,15 @@ test.describe('@live the account model on stagenet', () => {
        address — it says where the name leads in words. So assertion (1) from
        the header is made against the chain itself, through the verifier: the
        registry's decoded answer for this name must be the account whose
-       address the Receive sheet offers. */
+       address Show offers. */
     await expect(
       page.getByText(/People sending to this name reach your account/i),
     ).toBeVisible({ timeout: 2 * 60_000 });
 
     /* The receiving surface offers the account, and only it. Under the
        account model nothing is ever sent to the wallet. */
-    await page.getByRole('button', { name: /^Receive$/ }).click();
-    const addressRow = page.locator('.mnhome-address');
+    await page.getByRole('button', { name: /^Show$/ }).click();
+    const addressRow = page.locator('.mnshow-address');
     await expect(addressRow).toHaveCount(1);
     await expect(addressRow).toContainText('Your account');
     const accountShown = elidedAddress((await addressRow.locator('code').innerText()).trim());
@@ -218,7 +218,7 @@ test.describe('@live the account model on stagenet', () => {
 
     /* The chain's own answer, decoded by the verifier from the registry and
        resolver state. The full account address appears there — an operator
-       surface — and must be the address Receive elides. */
+       surface — and must be the address Show elides. */
     const verifier = await page.context().newPage();
     await verifier.goto(`https://midnightpassport.com/verify/?q=${alias}.night`);
     await expect(verifier.getByText(/register_domain_for/)).toBeVisible({ timeout: 90_000 });
@@ -229,7 +229,7 @@ test.describe('@live the account model on stagenet', () => {
     const resolved = { head: full![0].slice(0, 10), tail: full![0].slice(-6) };
     expect(sameElidedAddress(resolved, accountShown!)).toBe(true);
     console.log(`[live] ${alias}.night → account contract ${resolved.head}…${resolved.tail}`);
-    await page.getByRole('button', { name: /^Receive$/ }).click();
+    await page.getByRole('button', { name: /^Show$/ }).click();
 
     // Nothing about DUST, and no wallet address anywhere on the surface.
     const text = await page.locator('body').innerText();
@@ -296,7 +296,8 @@ test.describe('@live the account model on stagenet', () => {
        take the sponsor between the probe above and the submit. */
     const attempts = 2;
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
-      await page.getByRole('button', { name: /^Send$/ }).first().click();
+      await page.getByRole('button', { name: /^Pocket$/ }).click();
+      await page.getByRole('button', { name: /^Pay$/ }).click();
       // The recipient is a textarea carrying the network's own address prefix.
       await page.getByPlaceholder(/alice\.night|^mn_addr_stagenet1/).fill(RECIPIENT);
       await page.locator('.mnhome-send-amount input').fill(SEND_NIGHT);
@@ -397,8 +398,8 @@ test.describe('@live the account model on stagenet', () => {
        against what the receive row shows: querying an address the screen never
        named would prove something about a different contract. */
     const account = await storedAccountContract(page);
-    await page.getByRole('button', { name: /^Receive$/ }).click();
-    const shown = elidedAddress((await page.locator('.mnhome-address code').innerText()).trim());
+    await page.getByRole('button', { name: /^Show$/ }).click();
+    const shown = elidedAddress((await page.locator('.mnshow-address code').innerText()).trim());
     expect(shown, 'the receive row showed no address').not.toBeNull();
     expect(
       account.startsWith(shown!.head) && account.endsWith(shown!.tail),
@@ -437,7 +438,8 @@ test.describe('@live the account model on stagenet', () => {
 
     const attempts = 2;
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
-      await page.getByRole('button', { name: /^Send$/ }).first().click();
+      await page.getByRole('button', { name: /^Pocket$/ }).click();
+      await page.getByRole('button', { name: /^Pay$/ }).click();
       /* Choosing mUSD over NIGHT is not a control on this sheet — it is the
          ADDRESS. The recipient field is the same textarea the NIGHT send uses,
          carrying the network's unshielded prefix as its placeholder, and what

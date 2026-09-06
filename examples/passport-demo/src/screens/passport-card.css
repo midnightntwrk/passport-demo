@@ -1,0 +1,165 @@
+@import './tokens.css';
+
+/* The passport card — prefix "mnpcard-". A designed object, not a data
+   panel: the gradient plate, the watermark bleeding off the corner, and the
+   MRZ foot are what make it read as a document. Token-driven and readable in
+   both themes; the card leans darker than the page in both, the way a
+   passport's photo page is darker than its paper. */
+
+.mnpcard {
+  position: relative;
+  padding: 20px;
+  border: var(--mn-hairline) solid var(--mn-border-hairline);
+  border-radius: var(--mn-radius-lg);
+  color: var(--mn-text-primary);
+  background:
+    linear-gradient(160deg, var(--mn-surface-raised), var(--mn-surface-card) 60%);
+  box-shadow: var(--mn-shadow-md);
+  overflow: hidden;
+}
+
+/* The watermark: the mark, oversized, bleeding off the bottom-right corner.
+   Decoration at 9% — present the way a watermark is present, never louder
+   than the content over it. */
+.mnpcard-wm {
+  position: absolute;
+  right: -58px;
+  bottom: -46px;
+  width: 230px;
+  height: 230px;
+  opacity: 0.09;
+  pointer-events: none;
+}
+
+.mnpcard-head {
+  display: flex;
+  justify-content: space-between;
+  margin: 0 0 16px;
+  color: var(--mn-text-muted);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.mnpcard-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+/* The portrait plate. `mnpcard-tint-N` is deterministic from the name —
+   see PassportCard.tsx — so the same Passport always wears the same plate. */
+.mnpcard-portrait {
+  flex: 0 0 auto;
+  width: 88px;
+  height: 88px;
+  display: grid;
+  place-items: center;
+  border: var(--mn-hairline) solid var(--mn-border-hairline);
+  border-radius: var(--mn-radius-md);
+  background: var(--mn-surface-sunken);
+}
+.mnpcard-portrait img { width: 72px; height: 72px; }
+.mnpcard-tint-0 { background: linear-gradient(150deg, rgba(167, 0, 255, 0.22), var(--mn-surface-sunken) 70%); }
+.mnpcard-tint-1 { background: linear-gradient(150deg, rgba(255, 121, 252, 0.18), var(--mn-surface-sunken) 70%); }
+.mnpcard-tint-2 { background: linear-gradient(150deg, rgba(44, 79, 250, 0.24), var(--mn-surface-sunken) 70%); }
+.mnpcard-tint-3 { background: linear-gradient(150deg, rgba(22, 233, 216, 0.16), var(--mn-surface-sunken) 70%); }
+.mnpcard-tint-4 { background: linear-gradient(150deg, rgba(255, 186, 54, 0.16), var(--mn-surface-sunken) 70%); }
+.mnpcard-tint-5 { background: linear-gradient(150deg, rgba(6, 255, 137, 0.14), var(--mn-surface-sunken) 70%); }
+
+.mnpcard-id { min-width: 0; }
+.mnpcard-kick {
+  margin: 0;
+  color: var(--mn-text-muted);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.mnpcard-name {
+  margin: 2px 0 2px;
+  font-family: var(--mn-font-display);
+  font-size: clamp(28px, 8.5vw, 38px);
+  font-weight: 900;
+  font-style: italic;
+  letter-spacing: -0.02em;
+  line-height: 1;
+  overflow-wrap: anywhere;
+}
+.mnpcard-name small {
+  font-size: 0.62em;
+  font-weight: 800;
+  color: var(--mn-accent-ink);
+}
+.mnpcard-name-fallback { font-style: normal; font-weight: 800; }
+
+.mnpcard-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px 14px;
+  margin: 14px 0 0;
+}
+.mnpcard-fields dt {
+  margin: 0;
+  color: var(--mn-text-muted);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.mnpcard-fields dd {
+  margin: 1px 0 0;
+  color: var(--mn-text-primary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.mnpcard-pending {
+  margin: 12px 0 0;
+  color: var(--mn-text-secondary);
+  font-size: 12.5px;
+}
+
+/* The guard chip — the recovery gate, worn on the card. */
+.mnpcard-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 14px;
+  padding: 6px 11px;
+  border-radius: var(--mn-radius-pill);
+  font-family: var(--mn-font-body);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+.mnpcard-chip-ok {
+  color: var(--mn-accent-ink);
+  border: var(--mn-hairline) solid rgba(167, 0, 255, 0.4);
+  background: var(--mn-accent-soft);
+}
+/* Unguarded wears the cheek — pink is the rationed mischief-and-warning hue,
+   and a passport not valid yet is both. A button when tappable. */
+.mnpcard-chip-warn {
+  color: var(--mn-cheek);
+  border: var(--mn-hairline) solid rgba(255, 121, 252, 0.4);
+  background: var(--mn-cheek-soft);
+}
+button.mnpcard-chip-warn { cursor: pointer; }
+button.mnpcard-chip-warn:hover { background: rgba(255, 121, 252, 0.22); }
+
+/* The MRZ foot: the account address as a passport number. Machine dress —
+   mono, tracked, clipped rather than wrapped, exactly like the real zone. */
+.mnpcard-mrz {
+  margin: 16px 0 0;
+  padding-top: 12px;
+  border-top: var(--mn-hairline) dashed var(--mn-border-medium);
+  color: var(--mn-text-secondary);
+  font-family: var(--mn-font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.14em;
+  line-height: 1.7;
+  white-space: nowrap;
+  overflow: hidden;
+}

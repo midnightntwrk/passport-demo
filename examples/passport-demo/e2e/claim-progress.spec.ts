@@ -207,7 +207,7 @@ test('nothing the ceremony says names the machinery behind it', async () => {
   expect(text).not.toMatch(/\bindexer\b/i);
   expect(text).not.toMatch(/\bwallet\b/i);
   expect(text).not.toMatch(/\bDUST\b/);
-  // Nor any address: the one address a sender needs lives in Receive, alone.
+  // Nor any address: the one address a sender needs lives in Show, alone.
   expect(text).not.toMatch(/mn_addr|mn_shield/);
   expect(text).not.toMatch(/[0-9a-f]{64}/i);
 

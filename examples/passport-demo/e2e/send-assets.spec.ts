@@ -126,14 +126,20 @@ test.beforeAll(async ({ browser }) => {
   expect(seeded).not.toBeNull();
 
   await page.reload();
-  await expect(page.getByRole('button', { name: /^Send$/ }).first()).toBeVisible({
+  /* Pay lives inside the Pocket since P2; its presence proves the session
+     restored AND there is an account to withdraw from — the same two facts
+     the old Send button's presence proved. */
+  await expect(page.getByRole('button', { name: /^Pocket$/ })).toBeVisible({
     timeout: 90_000,
   });
+  await page.getByRole('button', { name: /^Pocket$/ }).click();
   /* The account's ledger is read after the screen is on. Waited for here rather
      than in each test: every assertion below is about a picker built from it. */
-  await expect(page.locator('.mnhome-assets')).toContainText(/mUSD/i, { timeout: 60_000 });
+  await expect(page.locator('.mnpocket-coins')).toContainText(/mUSD/i, { timeout: 60_000 });
 
-  await page.getByRole('button', { name: /^Send$/ }).first().click();
+  const pay = page.getByRole('button', { name: /^Pay$/ });
+  await expect(pay).toBeVisible({ timeout: 90_000 });
+  await pay.click();
   await expect(page.locator('.mnhome-send')).toBeVisible();
 });
 

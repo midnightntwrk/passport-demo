@@ -1,0 +1,134 @@
+@import './tokens.css';
+
+/* Show — prefix "mnshow-". Full-screen, always on the night plate (the ink
+   scale, theme-independent): presenting a document is a lights-down act, and
+   a camera wants the white code plate on dark, not a themed surface. Sits at
+   z-index 119 with the other overlays, above the nav (100). */
+
+.mnshow {
+  position: fixed;
+  inset: 0;
+  z-index: 119;
+  display: flex;
+  flex-direction: column;
+  padding: calc(16px + env(safe-area-inset-top)) 22px calc(20px + env(safe-area-inset-bottom));
+  color: var(--mn-ink-text);
+  background: var(--mn-ink-page);
+  font-family: var(--mn-font-body);
+}
+
+.mnshow-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.mnshow-kicker {
+  margin: 0;
+  color: var(--mn-ink-text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.mnshow-close {
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: var(--mn-hairline) solid var(--mn-ink-border-medium);
+  border-radius: var(--mn-radius-pill);
+  color: var(--mn-ink-text);
+  background: transparent;
+  cursor: pointer;
+}
+.mnshow-close:hover { background: var(--mn-ink-hover); }
+
+.mnshow-stage {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  text-align: center;
+}
+
+/* The white plate the camera reads. The quiet zone is drawn into the matrix;
+   the padding here is presentation, not the specification's margin. */
+.mnshow-plate {
+  width: min(72vw, 46vh, 340px);
+  aspect-ratio: 1;
+  display: grid;
+  place-items: center;
+  padding: 14px;
+  border-radius: var(--mn-radius-lg);
+  background: #ffffff;
+  box-shadow: var(--mn-ink-shadow-md);
+}
+.mnshow-code { width: 100%; height: 100%; }
+.mnshow-wait {
+  width: 100%;
+  height: 100%;
+  border-radius: var(--mn-radius-md);
+  background: repeating-linear-gradient(45deg, #eeeae4, #eeeae4 8px, #f7f5f2 8px, #f7f5f2 16px);
+}
+
+.mnshow-name {
+  margin: 0;
+  font-family: var(--mn-font-display);
+  font-size: clamp(26px, 8vw, 40px);
+  font-weight: 900;
+  font-style: italic;
+  letter-spacing: -0.02em;
+  overflow-wrap: anywhere;
+}
+.mnshow-note {
+  margin: 0;
+  max-width: 340px;
+  color: var(--mn-ink-text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.mnshow-foot { display: grid; gap: 8px; justify-items: center; }
+.mnshow-address {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border: var(--mn-hairline) solid var(--mn-ink-border-hairline);
+  border-radius: var(--mn-radius-pill);
+  background: var(--mn-ink-card);
+}
+.mnshow-address-label {
+  color: var(--mn-ink-text-muted);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.mnshow-address-value {
+  color: var(--mn-ink-text);
+  font-family: var(--mn-font-mono);
+  font-size: 12.5px;
+}
+.mnshow-copy {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: var(--mn-hairline) solid var(--mn-ink-border-medium);
+  border-radius: var(--mn-radius-pill);
+  color: var(--mn-ink-text);
+  background: transparent;
+  cursor: pointer;
+}
+.mnshow-copy:hover:not(:disabled) { background: var(--mn-ink-hover); }
+.mnshow-copy:disabled { opacity: 0.42; cursor: default; }
+.mnshow-foot-note {
+  margin: 0;
+  color: var(--mn-ink-text-muted);
+  font-size: 11.5px;
+}

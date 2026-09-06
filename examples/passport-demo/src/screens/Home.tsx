@@ -1,21 +1,17 @@
 import {
   AlertTriangle,
-  ArrowDownLeft,
-  Banknote,
-  Check,
+  BookUser,
   Coins,
-  Copy,
   Layers,
   LogOut,
   Moon,
   RefreshCw,
   Send,
-  SendHorizontal,
   ShieldCheck,
+  Wallet,
   X,
 } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
-import { createPortal } from 'react-dom'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 
 import type { AliasRecord } from '../identity/aliasStore.js'
 /* Naming a colour, and the order a balance list puts colours in. Pure, drilled,
@@ -25,19 +21,18 @@ import {
   NIGHT_COLOUR_HEX,
   sortTokenHoldings,
   splitHoldings,
-  TOKENS_VISIBLE,
 } from '../lib/colour.js'
 /* The names this screen shares with the wallet (Contract W). Type-only, and
    only the two that describe the FEE — a fee is still the wallet's to pay. */
 import type { FeeReadiness, LocalWalletProvingMode } from '../lib/localWallet.js'
-/* The Receive code's payload, written by the same module that reads one back —
-   see `lib/qrPayload.ts` for why both directions live in one place. */
-import { encodeReceivePayload } from '../lib/qrPayload.js'
 import { EcosystemIdentity } from './Ecosystem.js'
 import NetworkSwitcher, { type PassportNetwork } from './NetworkSwitcher.js'
 import NotificationToggle from './NotificationToggle.js'
+import PassportCard from './PassportCard.js'
 import PassportContractCard, { type PassportContractCardProps } from './PassportContract.js'
+import PocketSheet, { type PocketRow } from './PocketSheet.js'
 import SendSheet, { type SendSheetHolding, type SendSheetProps } from './SendSheet.js'
+import ShowPassport from './ShowPassport.js'
 import ThemeToggle from './ThemeToggle.js'
 import './home.css'
 
@@ -53,11 +48,22 @@ import './home.css'
 export interface HomeScreenProps {
   displayName: string | null
   /**
-   * The `.night` name held on the active network, without its suffix. When set
-   * the greeting reads "Good morning, alice"; when null it falls back to the
-   * previous greeting-plus-displayName behaviour.
+   * When this Passport's account was issued (ISO) — the card's Issued field.
+   * Today this is the contract record's `updatedAt`, which a ledger re-check
+   * can bump, so the date can drift forward; a real `createdAt` on the record
+   * is the fix and belongs to the store, not this screen. Null renders a dash.
    */
-  aliasLabel?: string | null
+  issuedAt?: string | null
+  /**
+   * The mandatory-recovery gate, worn on the passport card. `guarded` today
+   * means a second way in exists — an encrypted backup was exported or this
+   * Passport was restored from one; the recovery keys of P3 will widen it.
+   * `onGuard` opens the surface where guarding happens (the Backup screen).
+   */
+  guard: {
+    guarded: boolean
+    onGuard?: (() => void) | undefined
+  }
   /**
    * The ecosystem identity card: the name held on this network with its status
    * and everything redeemed. Omit to hide the card.
@@ -223,23 +229,11 @@ export interface HomeScreenProps {
   onSignOut: () => void
 }
 
-function truncateHash(hash: string): string {
-  if (hash.length <= 18) return hash
-  return `${hash.slice(0, 9)}...${hash.slice(-7)}`
-}
-
-/** Date-based time-of-day greeting — no libraries, no locale surprises. */
-function timeOfDayGreeting(date = new Date()): string {
-  const hour = date.getHours()
-  if (hour >= 5 && hour < 12) return 'Good morning'
-  if (hour >= 12 && hour < 18) return 'Good afternoon'
-  return 'Good evening'
-}
-
 export default function HomeScreen(props: HomeScreenProps) {
   const {
     displayName,
-    aliasLabel,
+    issuedAt,
+    guard,
     identity,
     passportContract,
     account,
@@ -256,23 +250,15 @@ export default function HomeScreen(props: HomeScreenProps) {
     onSignOut,
   } = props
 
-  const [copied, setCopied] = useState(false)
-  const [copiedName, setCopiedName] = useState(false)
-  /* The Receive sheet, opened only from the Receive action in the money row.
-     The top-bar address pill that also opened it was cut on 2026/08/19: a
-     Passport user never sees their addresses in the everyday UI — their
-     visible identity is their `.night` name, and everything else is registered
-     to that. Receiving still needs a real address until senders can resolve
-     names, so ONE address survives inside this sheet, beneath the name: the
-     payment address the resolver leaf carries. The shielded and DUST rows that
-     sat under "Technical details" went with the account ruling of
-     2026/08/24 — they describe the wallet, and the wallet is machinery. */
-  const [receiveOpen, setReceiveOpen] = useState(false)
+  /* The three surfaces off this page since P2 of the identity-first redesign:
+     SHOW (full screen — presenting the Passport is how anything is received),
+     the POCKET (the money, in a sheet — see PocketSheet.tsx for why it is
+     deliberately boring), and the Send sheet, reached only through the
+     Pocket's Pay. The Receive modal this screen used to own became Show; its
+     one-address rule moved with it. */
+  const [showOpen, setShowOpen] = useState(false)
+  const [pocketOpen, setPocketOpen] = useState(false)
   const [sendOpen, setSendOpen] = useState(false)
-  /* Whether the balance list is showing everything. Collapsed by default and
-     never remembered: the list is short for almost every Passport, and a
-     preference that outlived the session would be one more thing to explain. */
-  const [showAllTokens, setShowAllTokens] = useState(false)
 
   /**
    * The colour the fee sponsor named for itself, when it named one.
@@ -320,13 +306,13 @@ export default function HomeScreen(props: HomeScreenProps) {
         value: account.stablecoin.amount.toString(),
       })
     }
-    /* ITEMS ARE NOT BALANCES, and since 2026/08/31 they are not on this
-       strip. A one-of-a-kind holding rendered here as a card reading "1"
-       looked like a rounding error beside real balances; it has a shelf of its
-       own on the Assets tab, where it can say what it is. `splitHoldings` is
-       the single authority on which is which — see `lib/colour.ts` — so this
-       strip, that shelf, and the Send picker cannot disagree. Sorted first,
-       split second: the split preserves the order it is given. */
+    /* ITEMS ARE NOT BALANCES, and since 2026/08/31 they are not in this
+       list. A one-of-a-kind holding rendered as a row reading "1" looked
+       like a rounding error beside real balances; it gets a shelf of its own
+       when the Pocket grows one (P4). `splitHoldings` is the single authority
+       on which is which — see `lib/colour.ts` — so this list, that shelf, and
+       the Send picker cannot disagree. Sorted first, split second: the split
+       preserves the order it is given. */
     const { tokens: otherTokens } = splitHoldings(
       sortTokenHoldings(account.otherShielded, sponsored),
       sponsored,
@@ -351,8 +337,6 @@ export default function HomeScreen(props: HomeScreenProps) {
       unit: identities[index].name,
     }))
   }, [account])
-
-  const visibleTokens = showAllTokens ? tokenRows : tokenRows.slice(0, TOKENS_VISIBLE)
 
   /**
    * The shielded colours this screen is already showing, handed to the Send
@@ -384,50 +368,16 @@ export default function HomeScreen(props: HomeScreenProps) {
     return held.filter((entry) => entry.amount > 0n)
   }, [account])
 
-  // Escape closes the Receive sheet, mirroring the scrim click.
-  useEffect(() => {
-    if (!receiveOpen) return undefined
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setReceiveOpen(false)
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [receiveOpen])
-
-  /* Every copy on this screen is a LOCAL clipboard write. The host used to
-     hand down an `onCopyAddress` seam for the engine's unshielded address; it
-     went on 2026/08/25 with the address it copied, because nothing on this
-     surface offers that address any more. No clipboard, no tick — nothing is
-     claimed falsely. */
   /* The account is what the user IS on chain: the contract the `.night` name
-     resolves to. Receive shows it, and only it — the passkey wallet's address
-     is machinery and is never handed out as somewhere to send value. */
+     resolves to. The card's MRZ foot expresses it as the passport number, and
+     Show carries it in full — the passkey wallet's address is machinery and
+     is never handed out as somewhere to send value. */
   const accountAddress =
     (passportContract?.record?.status === 'deployed' ? passportContract.record.address : null) ??
     identity?.record?.resolverTargetHex ??
     null
-  const handleCopyAccount = useCallback(() => {
-    if (!accountAddress) return
-    void navigator.clipboard?.writeText(accountAddress).then(
-      () => {
-        setCopied(true)
-        window.setTimeout(() => setCopied(false), 1_600)
-      },
-      () => undefined,
-    )
-  }, [accountAddress])
 
-  const handleCopyName = useCallback((name: string) => {
-    void navigator.clipboard?.writeText(name).then(
-      () => {
-        setCopiedName(true)
-        window.setTimeout(() => setCopiedName(false), 1_600)
-      },
-      () => undefined,
-    )
-  }, [])
-
-  /* The account's own read, in the vocabulary the cards already speak: a
+  /* The account's own read, in the vocabulary the rows already speak: a
      figure still being read is 'Syncing', a read that failed is 'Unavailable',
      and neither is ever a zero. */
   const balancesLoading = account?.status === 'loading' || account?.status === 'idle'
@@ -443,68 +393,18 @@ export default function HomeScreen(props: HomeScreenProps) {
 
   /* Sending needs a seam. The host withholds it unless a wallet session is
      open AND there is an account contract to withdraw from, so this is one
-     test rather than two. */
+     test rather than two. The act itself lives in the Pocket. */
   const canSend = Boolean(send)
 
   /* The user's visible identity: the `.night` name held on this network. The
-     record carries it whole (`alice.night`); `aliasLabel` is only the bare
-     label, so the record is the source of truth and there is no suffix
-     guessed here. */
+     record carries it whole (`alice.night`), so the record is the source of
+     truth and there is no suffix guessed here. */
   const nightName = identity?.record?.domain ?? null
   /* Only a REGISTERED record actually resolves for a sender. A queued or
      failed one still shows its name — hiding it would be its own confusion —
-     but says plainly that the address below is what works meanwhile. */
+     but the card and Show both say plainly that the address is what works
+     meanwhile. */
   const nameResolves = identity?.record?.status === 'registered'
-
-  /* The Receive code.
-   *
-   * It carries the name and, behind it, the account that name points at — the
-   * one address a sender needs, which is why it lives here and nowhere else.
-   * Putting it inside the square rather than beside it as a second string to
-   * read keeps that rule intact: the sheet still shows one truncated address
-   * and one name, and the full address travels only in a form a camera reads.
-   *
-   * `null` payload means there is no name yet, and no code is drawn — a square
-   * carrying only a raw account is one no Passport can scan, and drawing it
-   * would be this sheet promising something it cannot keep.
-   */
-  const receivePayload = useMemo(
-    () => encodeReceivePayload({ domain: nightName, accountAddress }),
-    [accountAddress, nightName],
-  )
-  const [receiveCode, setReceiveCode] = useState<{ size: number; path: string } | null>(null)
-  useEffect(() => {
-    setReceiveCode(null)
-    if (!receiveOpen || !receivePayload) return undefined
-    let live = true
-    /* Imported only when the sheet is open: a QR generator has no business in
-       the first bundle of a Passport that never opens Receive. It is ten
-       kilobytes with no dependencies of its own, and it is content-hashed, so
-       the second opening — and every offline one after it — is served from the
-       cache rather than the network. */
-    void import('uqr')
-      .then(({ encode }) => {
-        if (!live) return
-        /* `border: 4` is the quiet zone the QR specification asks for, drawn
-           INTO the matrix rather than left to a stylesheet — a camera reads
-           the image, not the CSS around it. */
-        const matrix = encode(receivePayload, { ecc: 'M', border: 4 })
-        let path = ''
-        for (let row = 0; row < matrix.size; row += 1) {
-          for (let column = 0; column < matrix.size; column += 1) {
-            if (matrix.data[row]?.[column]) path += `M${column} ${row}h1v1h-1z`
-          }
-        }
-        setReceiveCode({ size: matrix.size, path })
-      })
-      .catch((cause: unknown) => {
-        // The address row below still works; nothing here claims otherwise.
-        console.warn('[passport] the Receive code could not be drawn:', cause)
-      })
-    return () => {
-      live = false
-    }
-  }, [receiveOpen, receivePayload])
 
   return (
     <section className="mnhome-screen" aria-busy={balancesLoading}>
@@ -571,20 +471,23 @@ export default function HomeScreen(props: HomeScreenProps) {
         {/* TWO COLUMNS THAT ARE NOT THERE ON A PHONE. Both wrappers are
             `display: contents` below 1100px, so the phone layout is exactly
             the single flex column it has always been; on the desktop grid the
-            main column carries the greeting and the money, and the side
-            column carries the identity cards and the housekeeping. See the
-            desktop block in home.css. */}
+            main column carries the card and its acts, and the side column
+            carries the status cards and the housekeeping. See the desktop
+            block in home.css. */}
         <div className="mnhome-col-main">
-        <div className="mnhome-identity">
-          <p className="mnhome-kicker">Passport</p>
-          {/* The greeting carries the user's own name once they hold one: the
-              alias IS their identity here, so it leads. Without an alias the
-              screen keeps its previous greeting-plus-displayName shape. */}
-          <h1 className="mnhome-name">
-            {aliasLabel ? `${timeOfDayGreeting()}, ${aliasLabel}` : timeOfDayGreeting()}
-          </h1>
-          {!aliasLabel && displayName ? <p className="mnhome-person">{displayName}</p> : null}
-        </div>
+        {/* THE PHOTO PAGE. The card replaced the time-of-day greeting in P2
+            of the identity-first redesign: the name on the document is the
+            hero, and a greeting above a passport read as an app talking over
+            its own artefact. */}
+        <PassportCard
+          domain={nightName}
+          nameRegistered={nameResolves}
+          fallbackName={displayName}
+          accountAddress={accountAddress}
+          issuedAt={issuedAt ?? null}
+          network={network}
+          guard={guard}
+        />
 
         {error ? (
           <p className="mnhome-notice" role="alert">
@@ -603,108 +506,37 @@ export default function HomeScreen(props: HomeScreenProps) {
           </p>
         ) : null}
 
-        {/* The money row. Send is present only when there is an account to
-            withdraw from — see the `send` prop. Receive opens the sheet below:
-            the `.night` name to be paid at, and the address beneath it. */}
-        {canSend || accountAddress ? (
+        {/* The card's two acts. SHOW leads — presenting your Passport is how
+            anything is received, money included — and the POCKET is the money,
+            deliberately second. Send lives INSIDE the Pocket now; the page
+            itself offers no wallet verbs. Each act appears only when there is
+            something real behind it: Show needs an identity to present, the
+            Pocket needs an account whose ledger it would show. */}
+        {accountAddress || nightName || account ? (
           <div className="mnhome-actions">
-            {canSend ? (
+            {accountAddress || nightName ? (
               <button
                 type="button"
                 className="mnhome-action mnhome-action-primary"
-                onClick={() => setSendOpen(true)}
+                onClick={() => setShowOpen(true)}
                 aria-haspopup="dialog"
               >
-                <SendHorizontal size={16} aria-hidden="true" />
-                <span>Send</span>
+                <BookUser size={16} aria-hidden="true" />
+                <span>Show</span>
               </button>
             ) : null}
-            {accountAddress ? (
+            {account ? (
               <button
                 type="button"
                 className="mnhome-action"
-                onClick={() => setReceiveOpen(true)}
+                onClick={() => setPocketOpen(true)}
                 aria-haspopup="dialog"
               >
-                <ArrowDownLeft size={16} aria-hidden="true" />
-                <span>Receive</span>
+                <Wallet size={16} aria-hidden="true" />
+                <span>Pocket</span>
               </button>
             ) : null}
           </div>
-        ) : null}
-
-        {/* What this Passport holds — the account contract's own ledger. The
-            DUST battery that used to sit here went with the account ruling of
-            2026/08/24: it described the wallet's fee charge, the wallet is
-            machinery, and fees are the sponsor's. */}
-        {account ? (
-          <>
-            <div className="mnhome-assets">
-              {visibleTokens.map((row) => (
-                <BalanceCard
-                  key={row.key}
-                  icon={row.icon}
-                  label={row.label}
-                  value={row.value}
-                  unit={row.unit}
-                  loading={balancesLoading}
-                />
-              ))}
-            </div>
-            {/* THE CAP. An account with a dozen colours in it used to render a
-                dozen cards, pushing the name, the account, and the apps off the
-                bottom of a phone — "that's not a scalable way to display them",
-                2026/08/26. Five, then the rest ON REQUEST and in place: a
-                separate screen for the remainder would be a place nobody goes. */}
-            {tokenRows.length > TOKENS_VISIBLE ? (
-              <button
-                type="button"
-                className="mnhome-assets-more"
-                onClick={() => setShowAllTokens((shown) => !shown)}
-                aria-expanded={showAllTokens}
-              >
-                {showAllTokens ? 'Show fewer' : `Show all (${tokenRows.length})`}
-              </button>
-            ) : null}
-          </>
-        ) : null}
-
-        {account?.status === 'unavailable' ? (
-          /* FIXED PROSE. The reader's own words go to the console — see
-             `HomeScreenProps.account.error`. */
-          <p className="mnhome-notice">
-            <AlertTriangle size={14} aria-hidden="true" />
-            <span>
-              Your balances could not be read just now. They will refresh once the network
-              answers.
-            </span>
-          </p>
-        ) : null}
-
-        {/* Money that is OUTSIDE the account. Rendered only when the wallet
-            genuinely holds NIGHT — the host gates on a positive balance — and
-            `deposit_night` is the only route that makes it spendable. See the
-            `legacyFunds` prop. */}
-        {legacyFunds ? (
-          <article className="mnhome-card">
-            <p className="mnhome-card-head">
-              <Banknote size={14} aria-hidden="true" />
-              <span className="mnhome-micro">Money outside your account</span>
-            </p>
-            <p className="mnhome-card-unit">
-              {legacyFunds.balance} NIGHT is sitting at your receiving address, outside your
-              Passport account. Your account cannot see it or spend it until it is moved in, and
-              moving it in is one transaction.
-            </p>
-            <button
-              type="button"
-              className="mnhome-send-primary"
-              onClick={legacyFunds.onMove}
-              disabled={legacyFunds.busy}
-            >
-              <span>{legacyFunds.busy ? 'Moving…' : 'Move into your account'}</span>
-            </button>
-          </article>
         ) : null}
 
         </div>
@@ -764,127 +596,41 @@ export default function HomeScreen(props: HomeScreenProps) {
           />
         ) : null}
 
-        {/* Receive. The name leads; the address is the technical detail under
-            it, because until senders resolve names an address is still what a
-            transfer needs. It is the only address on this surface. */}
-        {receiveOpen
-          ? createPortal(
-              <div
-                className="mnhome-addr-scrim"
-                onClick={() => setReceiveOpen(false)}
-                role="presentation"
-              >
-                <div
-                  className="mnhome-addr-modal"
-                  role="dialog"
-                  aria-modal="true"
-                  aria-label="Receive to your Passport"
-                  onClick={(event) => event.stopPropagation()}
-                >
-                  <div className="mnhome-addr-head">
-                    <p className="mnhome-micro">Receive</p>
-                    <button
-                      type="button"
-                      className="mnhome-icon-button"
-                      onClick={() => setReceiveOpen(false)}
-                      aria-label="Close"
-                    >
-                      <X size={15} aria-hidden="true" />
-                    </button>
-                  </div>
+        {/* SHOW replaced the Receive modal in P2: same payload, same
+            one-address rule, but full screen — a document held up to be read,
+            not a wallet's receive sheet. See ShowPassport.tsx. */}
+        {showOpen ? (
+          <ShowPassport
+            domain={nightName}
+            nameRegistered={nameResolves}
+            accountAddress={accountAddress}
+            onClose={() => setShowOpen(false)}
+          />
+        ) : null}
 
-                  {/* The code leads the sheet: it is the fastest way to hand
-                      this Passport to somebody standing next to you, and the
-                      only place the full account address is ever expressed. */}
-                  {receivePayload ? (
-                    <div className="mnhome-recv-qr">
-                      <div className="mnhome-recv-qr-plate">
-                        {receiveCode ? (
-                          <svg
-                            className="mnhome-recv-qr-code"
-                            viewBox={`0 0 ${receiveCode.size} ${receiveCode.size}`}
-                            shapeRendering="crispEdges"
-                            role="img"
-                            aria-label={`QR code for ${nightName ?? 'your Passport'}`}
-                          >
-                            <path d={receiveCode.path} fill="#000000" />
-                          </svg>
-                        ) : (
-                          <div className="mnhome-recv-qr-wait" aria-hidden="true" />
-                        )}
-                      </div>
-                      <p className="mnhome-recv-qr-note">
-                        Scan this from another Passport to send here.
-                      </p>
-                    </div>
-                  ) : null}
-
-                  {nightName ? (
-                    <div className="mnhome-recv-name">
-                      <p className="mnhome-recv-name-row">
-                        <span className="mnhome-recv-name-value">{nightName}</span>
-                        <button
-                          type="button"
-                          className="mnhome-icon-button"
-                          onClick={() => handleCopyName(nightName)}
-                          aria-label="Copy your Passport name"
-                        >
-                          {copiedName ? (
-                            <Check size={14} aria-hidden="true" />
-                          ) : (
-                            <Copy size={14} aria-hidden="true" />
-                          )}
-                        </button>
-                      </p>
-                      <p className="mnhome-recv-name-note">
-                        {nameResolves
-                          ? 'Send to this name from any Passport.'
-                          : 'This name is not registered on this network yet — use the address below until it is.'}
-                      </p>
-                    </div>
-                  ) : null}
-
-                  {/* One address: the account contract the name resolves to.
-                      Not the wallet's — under the account model nothing is
-                      ever sent to the wallet, so nothing here invites it. */}
-                  <ul className="mnhome-addresses">
-                    <li className="mnhome-address">
-                      <span className="mnhome-address-label">Your account</span>
-                      <code className="mnhome-address-value">
-                        {accountAddress ? truncateHash(accountAddress) : 'Not available'}
-                      </code>
-                      <button
-                        type="button"
-                        className="mnhome-icon-button"
-                        onClick={handleCopyAccount}
-                        disabled={!accountAddress}
-                        aria-label="Copy your account address"
-                      >
-                        {copied ? (
-                          <Check size={14} aria-hidden="true" />
-                        ) : (
-                          <Copy size={14} aria-hidden="true" />
-                        )}
-                      </button>
-                    </li>
-                  </ul>
-
-                  <div className="mnhome-addr-foot">
-                    <p className="mnhome-addr-note">
-                      A public receiving address — never the keys behind it.
-                    </p>
-                  </div>
-
-                  {/* The "Technical details" disclosure that held the shielded
-                      and DUST addresses was removed on 2026/08/24. Both belong
-                      to the passkey wallet, which is machinery under the
-                      account ruling; a dApp that genuinely needs one still gets
-                      it through the consent sheet, where the user is asked. */}
-                </div>
-              </div>,
-              document.body,
-            )
-          : null}
+        {/* The Pocket — the money, off the page. Pay closes the pocket and
+            opens the Send sheet: one money surface on screen at a time. */}
+        {pocketOpen && account ? (
+          <PocketSheet
+            rows={tokenRows satisfies PocketRow[]}
+            loading={balancesLoading}
+            unavailable={account.status === 'unavailable'}
+            legacyFunds={legacyFunds ?? null}
+            onShow={() => {
+              setPocketOpen(false)
+              setShowOpen(true)
+            }}
+            onPay={
+              canSend
+                ? () => {
+                    setPocketOpen(false)
+                    setSendOpen(true)
+                  }
+                : undefined
+            }
+            onClose={() => setPocketOpen(false)}
+          />
+        ) : null}
 
         {onOpenBackup ? (
           <button type="button" className="mnhome-support" onClick={onOpenBackup}>
@@ -907,30 +653,5 @@ export default function HomeScreen(props: HomeScreenProps) {
 
       </div>
     </section>
-  )
-}
-
-interface BalanceCardProps {
-  icon: ReactNode
-  label: string
-  value: string | null
-  unit: string
-  loading: boolean
-}
-
-function BalanceCard(props: BalanceCardProps) {
-  const { icon, label, value, unit, loading } = props
-  const unknown = value === null
-  return (
-    <article className="mnhome-card">
-      <p className="mnhome-card-head">
-        {icon}
-        <span className="mnhome-micro">{label}</span>
-      </p>
-      <p className={`mnhome-card-value${unknown ? ' mnhome-card-value-muted' : ''}`}>
-        {unknown ? (loading ? 'Syncing' : 'Unavailable') : value}
-      </p>
-      <p className="mnhome-card-unit">{unknown ? ' ' : unit}</p>
-    </article>
   )
 }

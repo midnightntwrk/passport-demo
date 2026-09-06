@@ -1,0 +1,148 @@
+@import './tokens.css';
+
+/* The Pocket sheet — prefix "mnpocket-". Geometry (scrim, sheet-vs-centred
+   modal, radius) is inherited from .mnhome-addr-scrim/.mnhome-addr-modal in
+   home.css, exactly as the Send sheet inherits it; this file styles only the
+   pocket's own content. Deliberately plain: a list and two buttons. */
+
+/* The modal portals to <body>, outside any screen root, and the global
+   stylesheet paints :root text in ink — right on paper, invisible on the
+   night surfaces. The sheet therefore claims its own text colour once, here,
+   rather than on every element the way the old Receive modal did. */
+.mnpocket {
+  color: var(--mn-text-primary);
+  font-family: var(--mn-font-body);
+}
+
+.mnpocket-sub {
+  margin: 2px 0 14px;
+  color: var(--mn-text-secondary);
+  font-size: 13px;
+}
+
+.mnpocket-coins {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 8px;
+}
+.mnpocket-coin {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border: var(--mn-hairline) solid var(--mn-border-hairline);
+  border-radius: var(--mn-radius-md);
+  background: var(--mn-surface-raised);
+}
+.mnpocket-coin-icon {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  border-radius: var(--mn-radius-pill);
+  color: var(--mn-accent-ink);
+  background: var(--mn-accent-soft);
+}
+.mnpocket-coin-name {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+}
+.mnpocket-coin-name b { font-size: 14px; }
+.mnpocket-coin-name span {
+  color: var(--mn-text-muted);
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.mnpocket-coin-amount {
+  font-family: var(--mn-font-display);
+  font-size: 17px;
+  font-weight: 700;
+  font-variant-numeric: var(--mn-numeric);
+  letter-spacing: -0.01em;
+}
+.mnpocket-coin-amount-muted {
+  color: var(--mn-text-muted);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.mnpocket-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 12px 0 0;
+  color: var(--mn-text-secondary);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.mnpocket-legacy {
+  margin-top: 12px;
+  padding: 14px;
+  border: var(--mn-hairline) solid var(--mn-border-hairline);
+  border-radius: var(--mn-radius-md);
+  background: var(--mn-surface-card);
+}
+.mnpocket-legacy-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 0 8px;
+  color: var(--mn-text-muted);
+}
+.mnpocket-legacy-body {
+  margin: 0 0 12px;
+  color: var(--mn-text-secondary);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.mnpocket-acts {
+  display: flex;
+  gap: 10px;
+  margin-top: 16px;
+}
+.mnpocket-primary {
+  flex: 1;
+  min-height: 48px;
+  padding: 0 18px;
+  border: 0;
+  border-radius: var(--mn-radius-pill);
+  color: var(--mn-accent-text);
+  background: var(--mn-accent);
+  font-family: var(--mn-font-body);
+  font-size: 14.5px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.mnpocket-primary:hover:not(:disabled) { background: var(--mn-accent-hover); }
+.mnpocket-primary:disabled { opacity: 0.55; cursor: default; }
+.mnpocket-ghost {
+  flex: 1;
+  min-height: 48px;
+  padding: 0 18px;
+  border: var(--mn-hairline) solid var(--mn-border-medium);
+  border-radius: var(--mn-radius-pill);
+  color: var(--mn-text-primary);
+  background: transparent;
+  font-family: var(--mn-font-body);
+  font-size: 14.5px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.mnpocket-ghost:hover { background: var(--mn-surface-hover); }
+
+/* The legacy card's button is full-width inside its card, not a flex share. */
+.mnpocket-legacy .mnpocket-primary { width: 100%; }
+
+.mnpocket-note {
+  margin: 12px 0 0;
+  color: var(--mn-text-muted);
+  font-size: 11.5px;
+  text-align: center;
+}

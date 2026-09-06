@@ -95,9 +95,14 @@ test.beforeAll(async ({ browser }) => {
   expect(seeded).not.toBeNull();
 
   await page.reload();
-  await expect(page.getByRole('button', { name: /^Send$/ }).first()).toBeVisible({
-    timeout: 90_000,
-  });
+  /* The card proves the records landed; Pay inside the Pocket proves the
+     session restored (the send seam is withheld without one) — the same two
+     facts the old Send button's presence proved. The Pocket is closed again
+     so every test starts on the plain Passport page. */
+  await expect(page.locator('.mnpcard')).toBeVisible({ timeout: 90_000 });
+  await page.getByRole('button', { name: /^Pocket$/ }).click();
+  await expect(page.getByRole('button', { name: /^Pay$/ })).toBeVisible({ timeout: 90_000 });
+  await page.keyboard.press('Escape');
 });
 
 test.afterAll(async () => {
@@ -179,7 +184,7 @@ test('the three sections really switch, and none is a dead end', async () => {
   await expect(page.locator('.mnaccess-screen')).toHaveCount(0);
 
   await tabs().nth(0).click();
-  await expect(page.getByRole('button', { name: /^Send$/ }).first()).toBeVisible();
+  await expect(page.locator('.mnpcard')).toBeVisible();
 
   /* Back to Access, and the surface is rendered again rather than left behind
      by whichever tab was drawn first. */
@@ -187,17 +192,18 @@ test('the three sections really switch, and none is a dead end', async () => {
   await expect(page.getByRole('heading', { name: 'Connections', level: 2 })).toBeVisible();
 });
 
-test('an item is not left among the balances on Home', async () => {
-  /* The split rule, seen from the only money surface left on screen: the
-     strip carries the account's three balances — NIGHT, the sponsor's colour
+test('an item is not left among the balances in the Pocket', async () => {
+  /* The split rule, seen from the only money surface left — the Pocket: the
+     list carries the account's three balances — NIGHT, the sponsor's colour
      at a real zero, and the recorded stablecoin at 100 — and nothing filed as
      an item. With no item in the recorded account the count is the whole
      assertion: it is what would change the day a single-supply colour arrives
-     and the strip failed to hand it over to the Pocket's shelf (P4). */
+     and the list failed to hand it over to the Pocket's shelf (P4). */
   await tabs().nth(0).click();
-  const strip = page.locator('.mnhome-assets');
+  await page.getByRole('button', { name: /^Pocket$/ }).click();
+  const strip = page.locator('.mnpocket-coins');
   await expect(strip).toBeVisible();
-  await expect(strip.locator('.mnhome-card')).toHaveCount(3);
+  await expect(strip.locator('.mnpocket-coin')).toHaveCount(3);
 
   /* Two rows that would both have read "mUSD" over different money is exactly
      the collision `describeColours` qualifies, and this tier is really in
@@ -205,10 +211,11 @@ test('an item is not left among the balances on Home', async () => {
      recorded account holds. Each row carries four characters of its own
      colour — the four are the qualifier, not a leak, and the sweep above
      bounds them. */
-  const stripText = (await strip.locator('.mnhome-card').allInnerTexts()).join(' ');
+  const stripText = (await strip.locator('.mnpocket-coin').allInnerTexts()).join(' ');
   expect(stripText.match(/MUSD · [0-9A-F]{4}…/gi) ?? []).toHaveLength(2);
 
   /* And the retired shelf really is retired — nothing mounts it. */
   const shelf = await page.evaluate(() => document.querySelectorAll('.mnassets-card').length);
   expect(shelf).toBe(0);
+  await page.keyboard.press('Escape');
 });

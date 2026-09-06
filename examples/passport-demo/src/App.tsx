@@ -761,6 +761,38 @@ function storeNameStep(credentialId: string, resolution: NameStepResolution): vo
  * being introduced to something you already hold reads as an app that has
  * forgotten you.
  */
+/**
+ * Whether this Passport is GUARDED — a second way in exists beyond the one
+ * passkey on this device. Written when an encrypted backup is exported and
+ * when a Passport is restored from one (a restore proves the file exists and
+ * opens); the recovery keys of P3 will widen what counts. The passport card
+ * wears the answer as its validity chip — an unguarded Passport reads NOT
+ * VALID UNTIL GUARDED, the way an unsigned passport does — which is the
+ * mandatory-recovery gate made visible instead of a settings page.
+ *
+ * Per credential and SURVIVES sign-out, like the flags above: the same
+ * passkey re-derives the same Passport, and its backup file does not stop
+ * existing when the session closes. Best-effort in both directions; failing
+ * to record it re-shows the warning chip, which is the harmless way to fail.
+ */
+const GUARDED_STORAGE_PREFIX = 'mn-passport:guarded:';
+
+function storedGuarded(credentialId: string): boolean {
+  try {
+    return window.localStorage.getItem(`${GUARDED_STORAGE_PREFIX}${credentialId}`) !== null;
+  } catch {
+    return false;
+  }
+}
+
+function storeGuarded(credentialId: string): void {
+  try {
+    window.localStorage.setItem(`${GUARDED_STORAGE_PREFIX}${credentialId}`, 'guarded');
+  } catch {
+    // Best-effort: the card keeps asking to be guarded, which is honest.
+  }
+}
+
 const WELCOME_STORAGE_PREFIX = 'mn-passport:welcome:';
 
 function welcomeSeen(credentialId: string): boolean {
@@ -1068,6 +1100,14 @@ export default function PassportDemo() {
   const [activity, setActivity] = useState<ActivityEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [mobileTab, setMobileTab] = useState<MobileTab>('passport');
+  /* Whether the open Passport is guarded — see GUARDED_STORAGE_PREFIX. State
+     rather than a read at render because localStorage is not reactive: the
+     export and restore callbacks flip it the moment the fact changes, and
+     this effect re-reads it whenever the credential does. */
+  const [passportGuarded, setPassportGuarded] = useState(false);
+  useEffect(() => {
+    setPassportGuarded(profile ? storedGuarded(profile.passkey.credentialId) : false);
+  }, [profile]);
   // One-button onboarding (2026/08/05): there is no separate "choose" step
   // any more, so the screen only distinguishes idle from working.
   const [onboardingIntent, setOnboardingIntent] = useState<OnboardingIntent | null>(null);
@@ -5139,17 +5179,27 @@ export default function PassportDemo() {
    * to the subscriptions this component already holds, so Home reflects a
    * restored name or contract without any refresh wiring here.
    */
-  const exportPassportState = useCallback(async (password: string) => {
-    const { exportPassportBackup } = await import('./identity/backup.js');
-    const result = await exportPassportBackup(password);
-    addActivity({
-      label: 'Passport backup exported',
-      detail: `Saved as ${result.fileName}, encrypted under a password Passport never stores. No keys are in it.`,
-      status: 'complete',
-      source: 'local',
-    });
-    return result;
-  }, [addActivity]);
+  const exportPassportState = useCallback(
+    async (password: string) => {
+      const { exportPassportBackup } = await import('./identity/backup.js');
+      const result = await exportPassportBackup(password);
+      addActivity({
+        label: 'Passport backup exported',
+        detail: `Saved as ${result.fileName}, encrypted under a password Passport never stores. No keys are in it.`,
+        status: 'complete',
+        source: 'local',
+      });
+      /* A backup that exists is a second way in: the Passport is now guarded,
+         and the card's validity chip flips. See GUARDED_STORAGE_PREFIX. */
+      const credentialId = profile?.passkey.credentialId;
+      if (credentialId) {
+        storeGuarded(credentialId);
+        setPassportGuarded(true);
+      }
+      return result;
+    },
+    [addActivity, profile],
+  );
 
   /**
    * The chain re-check behind the Backup screen's promise.
@@ -5275,9 +5325,16 @@ export default function PassportDemo() {
         status: 'complete',
         source: 'local',
       });
+      /* A restore is a backup file demonstrably existing and opening — the
+         second way in is proven, not merely saved, so the card flips too. */
+      const credentialId = profile?.passkey.credentialId;
+      if (credentialId) {
+        storeGuarded(credentialId);
+        setPassportGuarded(true);
+      }
       return { ...summary, ledgerCheck };
     },
-    [addActivity, confirmRestoredContracts, withAccountDeviceSecret],
+    [addActivity, confirmRestoredContracts, profile, withAccountDeviceSecret],
   );
 
   /**
@@ -5323,7 +5380,6 @@ export default function PassportDemo() {
    * preview says nothing about who holds it on pre-production.
    */
   const activeAliasRecord = aliasRecords[selectedNetwork] ?? null;
-  const aliasLabel = activeAliasRecord?.alias ?? null;
   /**
    * Why "Register now" cannot run right now, or null when it can. The demo
    * wallet signs on exactly one network — the one this build was configured
@@ -5590,7 +5646,17 @@ export default function PassportDemo() {
           {mobileTab === 'passport' ? (
             <HomeScreen
               displayName={homeDisplayName}
-              aliasLabel={aliasLabel}
+              /* The card's Issued field. The contract record has no createdAt
+                 yet, so the ledger re-check can nudge this forward — noted on
+                 HomeScreenProps.issuedAt; the fix belongs to the record store. */
+              issuedAt={activeContractRecord?.updatedAt ?? null}
+              /* The recovery gate the card wears. Guarded = a second way in
+                 exists (backup exported or restored — see GUARDED_STORAGE_PREFIX);
+                 the chip opens the Backup screen until it does. */
+              guard={{
+                guarded: passportGuarded,
+                onGuard: profile ? () => setIdentityStep('backup') : undefined,
+              }}
               identity={homeIdentity}
               passportContract={homePassportContract}
               network={selectedNetwork}

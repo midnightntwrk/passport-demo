@@ -492,9 +492,10 @@ test('a reload mid-onboarding returns to the name step, never to Home', async ()
 
   /* The session is restored from this device, and the step is re-armed. A
      Passport that reloaded here used to land on Home with no name and no
-     account — seen live 2026/08/24 — and a stored skip now means "ask again". */
+     account — seen live 2026/08/24 — and a stored skip now means "ask again".
+     The passport card is Home's hero since P2, so its absence is Home's. */
   await expect(page.getByText(/Choose your .night name/i)).toBeVisible({ timeout: 60_000 });
-  await expect(page.getByRole('button', { name: /^Send$/ })).toHaveCount(0);
+  await expect(page.locator('.mnpcard')).toHaveCount(0);
 });
 
 test('Home names the account contract, and never the wallet', async () => {
@@ -578,12 +579,14 @@ test('Home names the account contract, and never the wallet', async () => {
   // Nor the machinery the card used to narrate around them.
   expect(identityText).not.toMatch(/deploy|indexer|ledger hash|fee sponsor/i);
 
-  /* The receiving surface. ONE address, and it is the account contract the
-     name resolves to — under the account model nothing is ever sent to the
-     wallet, so nothing here invites it. The shielded and DUST rows that used
-     to sit beside this went with the account ruling on 2026/08/24. */
-  await page.getByRole('button', { name: /^Receive$/ }).click();
-  const accountRow = page.locator('.mnhome-address');
+  /* The receiving surface — SHOW since P2, full screen, because receiving
+     starts with presenting who you are. ONE address, and it is the account
+     contract the name resolves to — under the account model nothing is ever
+     sent to the wallet, so nothing here invites it. The shielded and DUST
+     rows that used to sit beside this went with the account ruling on
+     2026/08/24. */
+  await page.getByRole('button', { name: /^Show$/ }).click();
+  const accountRow = page.locator('.mnshow-address');
   await expect(accountRow).toHaveCount(1);
   await expect(accountRow).toContainText('Your account');
   await expect(accountRow.locator('code')).toContainText('8054fcac');
@@ -649,13 +652,15 @@ test('the activity trail shows what really happened, and survives a reload', asy
   await page.getByRole('button', { name: 'Passport' }).click();
 });
 
-test('every token on the balance list is named, and none of them is 64 characters', async () => {
+test('every token in the Pocket is named, and none of them is 64 characters', async () => {
   /* TOKENS THAT COULD NOT BE TOLD APART.
      The balance list labelled every unnamed colour "Shielded" and put the raw
      64-character colour underneath as its unit — so an account holding several
      showed several identical-looking rows, which is "unusable, and it will
      cause wrong sends" (2026/08/26). Colours Passport can name are now named,
      and one it cannot reads `Token · a1b2…` with the shortened colour beneath.
+     The list lives in the POCKET since P2 — a sheet off the Passport page,
+     because money is the pocket of the document, not the document.
 
      Asserted against the REAL account this tier seeds: it holds 2000 atomic
      NIGHT and 100 units of the sponsor's mUSD colour, recorded from stagenet. */
@@ -663,42 +668,40 @@ test('every token on the balance list is named, and none of them is 64 character
      screen. The balances are read when the account opens, and this is the one
      assertion in the file that depends on that read having happened. */
   await page.goto('/');
-  await expect(page.getByRole('button', { name: /^Send$/ }).first()).toBeVisible({
-    timeout: 60_000,
-  });
-  const assets = page.locator('.mnhome-assets');
-  await expect(assets).toBeVisible({ timeout: 60_000 });
-  /* THE READ LANDS AFTER THE SCREEN DOES, so the strip is briefly one card of
+  const pocket = page.getByRole('button', { name: /^Pocket$/ });
+  await expect(pocket).toBeVisible({ timeout: 60_000 });
+  await pocket.click();
+  const coins = page.locator('.mnpocket-coins');
+  await expect(coins).toBeVisible({ timeout: 60_000 });
+  /* THE READ LANDS AFTER THE SCREEN DOES, so the list is briefly rows of
      "Syncing" and everything below is a SNAPSHOT of whatever was on it at the
      instant it was taken. Waited for with a retrying assertion first — without
      this the file passed alone and failed whenever another spec ran ahead of
      it and the account read came back a moment later (seen 2026/08/31). */
-  await expect(assets).toContainText(/mUSD/i, { timeout: 60_000 });
-  const cards = await assets.innerText();
+  await expect(coins).toContainText(/mUSD/i, { timeout: 60_000 });
+  const rows = await coins.innerText();
 
-  /* Matched case-insensitively: the card's own label is upper-cased in CSS, so
-     `innerText` reports "MUSD" for a symbol the code spells "mUSD". */
-  expect(cards).toMatch(/NIGHT/i);
-  expect(cards).toMatch(/mUSD/i);
-  // The one thing that must never be on a card again.
-  expect(cards).not.toMatch(/\b[0-9a-f]{32,}\b/);
+  expect(rows).toMatch(/NIGHT/i);
+  expect(rows).toMatch(/mUSD/i);
+  // The one thing that must never be on a row again.
+  expect(rows).not.toMatch(/\b[0-9a-f]{32,}\b/);
   // And the balances are the account's own, not zeros against a real account.
-  expect(cards).toContain('0.002');
-  expect(cards).toContain('100');
+  expect(rows).toContain('0.002');
+  expect(rows).toContain('100');
 
-  /* THE CAP does not fire below its threshold. Two tokens is not a list that
-     needs hiding, and a disclosure over two cards would be furniture. The rule
-     itself — five, then the rest on request, NIGHT first and the unnamed by
-     balance — is drilled in `src/lib/colour.test.ts`, where it lives: a browser
-     cannot be given a seven-colour account without a contract state minted for
-     it, and this workspace's Node graph cannot mint one (see the report). */
+  /* THE CAP retired with the strip it capped: a page must not scroll a dozen
+     cards, but a sheet is a list and lists scroll, so the Pocket shows every
+     row. The ordering rule — NIGHT first, named before unnamed, largest
+     holding first — is drilled in `src/lib/colour.test.ts`, where it lives. */
   await expect(page.getByRole('button', { name: /^Show all \(\d+\)$/ })).toHaveCount(0);
 });
 
 test('the Send sheet is a withdrawal from the account, and never mentions DUST', async () => {
-  const send = page.getByRole('button', { name: /^Send$/ }).first();
-  await expect(send).toBeVisible({ timeout: 30_000 });
-  await send.click();
+  /* Pay lives INSIDE the Pocket since P2 — the page itself offers no wallet
+     verbs. The Pocket is still open from the test above. */
+  const pay = page.getByRole('button', { name: /^Pay$/ });
+  await expect(pay).toBeVisible({ timeout: 30_000 });
+  await pay.click();
 
   /* Every sentence the sheet can show. `feeNote` is the one that used to name
      the fee's own token; since 2026/08/24 the fee's token and the sponsor's

@@ -1,5 +1,5 @@
 /**
- * The Receive code, and reading one back without a camera.
+ * The Show code, and reading one back without a camera.
  *
  * "The UI also has a QR code that, when scanned with the scanner, automatically
  * inserts my name and address there" (2026/08/31). Half of that ask is pure and
@@ -9,7 +9,7 @@
  *
  * WHAT A BROWSER PROVES THAT A UNIT TEST CANNOT
  * --------------------------------------------
- * That the square Receive actually paints DECODES. Every part of that sentence
+ * That the square Show actually paints DECODES. Every part of that sentence
  * is a place to be wrong that no assertion about a string can reach: a matrix
  * transposed row-for-column, a quiet zone left to a stylesheet, a `path` built
  * with a rounding error, an accent colour that looks handsome and reads as
@@ -20,7 +20,7 @@
  * And that a code READS on a machine with no camera at all. That is the whole
  * reason the image path exists: until 2026/08/31 the scanner was `getUserMedia`
  * and nothing else, which is why it had only ever worked on a phone. The walk
- * below never grants a camera. It drops a PNG of a real Receive code onto the
+ * below never grants a camera. It drops a PNG of a real Show code onto the
  * scan sheet, and the Send sheet's recipient fills in.
  *
  * THE CROSS-CHECK IS DRILLED HERE TOO
@@ -162,7 +162,7 @@ test.beforeAll(async ({ browser }) => {
   await installNetworkBoundary(page);
   await installVirtualAuthenticator(context, page);
 
-  /* A Passport that already exists — the state Receive is opened in. The
+  /* A Passport that already exists — the state Show is opened in. The
      ceremony itself is drilled by `onboarding.spec.ts`. */
   await page.goto('/');
   await page.getByRole('button', { name: /Continue with Passport/i }).click();
@@ -216,9 +216,13 @@ test.beforeAll(async ({ browser }) => {
   expect(seeded).not.toBeNull();
 
   await page.reload();
-  await expect(page.getByRole('button', { name: /^Send$/ }).first()).toBeVisible({
-    timeout: 90_000,
-  });
+  /* The card proves the records landed; Pay inside the Pocket proves the
+     session restored — the same two facts the old Send button's presence
+     proved. The Pocket is closed again so the first test starts clean. */
+  await expect(page.locator('.mnpcard')).toBeVisible({ timeout: 90_000 });
+  await page.getByRole('button', { name: /^Pocket$/ }).click();
+  await expect(page.getByRole('button', { name: /^Pay$/ })).toBeVisible({ timeout: 90_000 });
+  await page.keyboard.press('Escape');
 });
 
 test.afterAll(async () => {
@@ -228,31 +232,34 @@ test.afterAll(async () => {
 /** This Passport's own code, as the browser painted it. Kept for the drop walk. */
 let ownCode: Raster;
 
-test('Receive draws a code, and the code decodes to the name and the account', async () => {
-  await page.getByRole('button', { name: /^Receive$/ }).first().click();
-  await expect(page.locator('.mnhome-recv-qr-code')).toBeVisible({ timeout: 30_000 });
+test('Show draws a code, and the code decodes to the name and the account', async () => {
+  /* SHOW replaced Receive in P2 — same payload, same one-address rule, full
+     screen. Receiving starts with presenting who you are. */
+  await page.getByRole('button', { name: /^Show$/ }).first().click();
+  await expect(page.locator('.mnshow-code')).toBeVisible({ timeout: 30_000 });
 
-  ownCode = await rasteriseOnScreen('.mnhome-recv-qr-code');
+  ownCode = await rasteriseOnScreen('.mnshow-code');
   expect(decode(ownCode)).toBe(`midnight:${NAME}.night?account=${PASSPORT_ACCOUNT_ADDRESS}`);
 
-  /* THE ADDRESS IS IN THE SQUARE AND NOT ON THE PAGE. Receive is the one
+  /* THE ADDRESS IS IN THE SQUARE AND NOT ON THE PAGE. Show is the one
      surface that expresses the account address at all, and it expresses it
      truncated — the full string travels only in a form a camera reads. */
-  const sheet = await page.locator('.mnhome-addr-modal').innerText();
+  const sheet = await page.locator('.mnshow').innerText();
   expect(sheet).not.toContain(PASSPORT_ACCOUNT_ADDRESS);
   expect(sheet).toContain(`${NAME}.night`);
   // And no engine vocabulary crept in beside it.
   expect(sheet).not.toMatch(/\b(wallet|contract|registry|indexer|resolver|dust)\b/i);
 
-  await page.locator('.mnhome-addr-modal').getByRole('button', { name: /^Close$/ }).click();
-  await expect(page.locator('.mnhome-recv-qr-code')).toHaveCount(0);
+  await page.locator('.mnshow').getByRole('button', { name: /^Close$/ }).click();
+  await expect(page.locator('.mnshow-code')).toHaveCount(0);
 });
 
 test('a code dropped as an image fills the recipient, with no camera', async () => {
   /* THE DESKTOP CASE. No camera is ever granted in this walk: the scan sheet
      opens, reports honestly that it has none, and the image path underneath is
      what does the work — which is the whole point of it existing. */
-  await page.getByRole('button', { name: /^Send$/ }).first().click();
+  await page.getByRole('button', { name: /^Pocket$/ }).click();
+  await page.getByRole('button', { name: /^Pay$/ }).click();
   await openScanner();
   await dropCode(ownCode, 'passport-code.png');
 
@@ -275,9 +282,12 @@ test('an image with no code in it says so, and keeps the sheet open', async () =
   });
 
   await expect(page.locator('.mnhome-qrscan')).toBeVisible();
-  await expect(page.locator('.mnhome-qrscan .mnhome-send-error')).toContainText(
-    /No QR code was found/i,
-  );
+  /* Named by its text: the sheet can be showing its camera notice beside this
+     one (this walk never grants a camera), and the assertion is about the
+     no-code answer, not about how many notices the sheet carries. */
+  await expect(
+    page.locator('.mnhome-qrscan .mnhome-send-error', { hasText: /No QR code was found/i }),
+  ).toBeVisible();
   await page.locator('.mnhome-qrscan').getByRole('button', { name: /^Close$/ }).click();
   await expect(page.locator('.mnhome-qrscan')).toHaveCount(0);
 });
