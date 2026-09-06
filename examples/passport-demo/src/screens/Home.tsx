@@ -58,16 +58,17 @@ export interface HomeScreenProps {
   /**
    * The mandatory-recovery gate, worn on the passport card and climbed on
    * the guard meter. `backup` = an encrypted backup exists (exported or
-   * restored from); `recoveryKey` = a MetaMask-derived device is enrolled on
-   * the account (P3). Either one makes the card GUARDED — each is a second
-   * way in. `onGuard` opens the Backup screen; `onRecoveryKey` opens the
-   * Keys screen, where the recovery key is enrolled.
+   * restored from); `secondKey` = another key is on the account — a
+   * MetaMask-derived recovery key, or a second device admitted through the
+   * join code (P3). Either one makes the card GUARDED — each is a second
+   * way in. `onGuard` opens the Backup screen; `onSecondKey` opens the
+   * Keys screen, where both kinds are added.
    */
   guard: {
     backup: boolean
-    recoveryKey: boolean
+    secondKey: boolean
     onGuard?: (() => void) | undefined
-    onRecoveryKey?: (() => void) | undefined
+    onSecondKey?: (() => void) | undefined
   }
   /**
    * The ecosystem identity card: the name held on this network with its status
@@ -491,7 +492,7 @@ export default function HomeScreen(props: HomeScreenProps) {
           accountAddress={accountAddress}
           issuedAt={issuedAt ?? null}
           network={network}
-          guard={{ guarded: guard.backup || guard.recoveryKey, onGuard: guard.onGuard }}
+          guard={{ guarded: guard.backup || guard.secondKey, onGuard: guard.onGuard }}
         />
 
         {error ? (
@@ -550,9 +551,9 @@ export default function HomeScreen(props: HomeScreenProps) {
             See GuardMeter.tsx. */}
         <GuardMeter
           backup={guard.backup}
-          recoveryKey={guard.recoveryKey}
+          secondKey={guard.secondKey}
           onGuard={guard.onGuard}
-          onRecoveryKey={guard.onRecoveryKey}
+          onSecondKey={guard.onSecondKey}
         />
 
         </div>

@@ -21,7 +21,7 @@
 
 import { expect, test, type Page } from '@playwright/test';
 
-import { installNetworkBoundary, PASSPORT_ACCOUNT_ADDRESS } from './mocks.js';
+import { installNetworkBoundary, PASSPORT_ACCOUNT_ADDRESS, RESOLVABLE_NAME } from './mocks.js';
 import { installVirtualAuthenticator } from './passkey.js';
 import { specViewport } from './viewport.js';
 
@@ -265,6 +265,67 @@ test('a stubbed wallet drives sign-to-derive to the confirm beat, and cancel tou
   );
   expect(record).toEqual([]);
   await page.getByRole('button', { name: 'Done' }).click();
+});
+
+test('a pasted join code reaches the confirm beat only for THIS Passport', async () => {
+  /* The ADMIT half of the add-device handoff (P3). The seeded account IS the
+     account `iamtester.night` really resolves to in the recorded registry, so
+     the whole checking beat — the registry's answer compared against the open
+     account — runs here against real recordings, offline. The submit itself
+     is the live tier's to prove; what this walk holds still is the gate in
+     front of it: no code reaches CONFIRM unless the registry says it was
+     drawn for THIS Passport, and cancelling leaves no record anywhere. */
+  const commitment = 'ab12'.repeat(16);
+  const codeFor = (name: string, network: string) =>
+    `midnight:add_device?v=1&name=${name}&network=${network}&commitment=${commitment}`;
+  await tabs().nth(1).click();
+  await page.getByRole('button', { name: /Keys/ }).click();
+  await expect(page.getByRole('heading', { name: 'Keys', level: 1 })).toBeVisible();
+  await expect(page.getByText('Another device')).toBeVisible();
+
+  const paste = page.getByLabel('Paste a join code');
+  const readIt = page.getByRole('button', { name: 'Read it' });
+
+  // Garbage is refused in words, before any machinery runs.
+  await paste.fill('hello world');
+  await readIt.click();
+  await expect(page.getByText(/not a Passport code/)).toBeVisible();
+
+  // A payment code is a real Passport code and still not a join code.
+  await paste.fill(`midnight:${RESOLVABLE_NAME}.night`);
+  await readIt.click();
+  await expect(page.getByText(/payment code, not a join code/)).toBeVisible();
+
+  // A code drawn for another network is refused naming the mismatch.
+  await paste.fill(codeFor(`${RESOLVABLE_NAME}.night`, 'preview'));
+  await readIt.click();
+  await expect(page.getByText(/drawn for preview/)).toBeVisible();
+
+  // A code for a name nobody holds is refused with the registry's answer.
+  await paste.fill(codeFor('nobodyatall.night', 'stagenet'));
+  await readIt.click();
+  await expect(page.getByText(/nobody holds that name/i)).toBeVisible({ timeout: 30_000 });
+
+  /* The real thing reaches CONFIRM: the Passport is named, the commitment
+     tail is named as the ONLY thing going on chain, and the admitted
+     device's full power is said out loud rather than softened. */
+  await paste.fill(codeFor(`${RESOLVABLE_NAME}.night`, 'stagenet'));
+  await readIt.click();
+  await expect(page.getByText(/asks to join/)).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText(new RegExp(`…${commitment.slice(-6)}`))).toBeVisible();
+  await expect(page.getByText(/spend, grant, and admit more devices/)).toBeVisible();
+
+  // Cancel: back to the reader, nothing enrolled, nothing remembered.
+  await page.getByRole('button', { name: 'Cancel' }).click();
+  await expect(page.getByRole('button', { name: 'Scan a join code' })).toBeVisible();
+  const records = await page.evaluate(() =>
+    Object.keys(localStorage).filter((key) => key.startsWith('mn-passport:second-device:')),
+  );
+  expect(records).toEqual([]);
+  // Done returns to the tab the Keys page was entered from — Access.
+  await page.getByRole('button', { name: 'Done' }).click();
+  await tabs().nth(0).click();
+  await expect(page.locator('.mnpcard')).toBeVisible();
 });
 
 test('the way out is on every tab', async () => {

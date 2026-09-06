@@ -569,6 +569,12 @@ export default function SendSheet(props: SendSheetProps) {
     domain: string
     accountHex: string
   } | null>(null)
+  /* The scanner read a real Passport code that is not a DESTINATION — an
+     add-device join code, today. Said under the field in the refusal's own
+     words rather than dropped, because a camera that closes on a code and
+     then shows nothing reads as a scan that silently failed. Cleared on the
+     next keystroke or scan, like the claim above. */
+  const [scanRefusal, setScanRefusal] = useState<string | null>(null)
 
   const recipientRef = useRef<HTMLTextAreaElement | null>(null)
   const feePollRef = useRef<FeeReadinessPoll | null>(null)
@@ -1176,6 +1182,7 @@ export default function SendSheet(props: SendSheetProps) {
                   setRecipient(event.target.value)
                   // Typed into: whatever was scanned no longer describes it.
                   setScannedClaim(null)
+                  setScanRefusal(null)
                 }}
                 /* The placeholder follows the CHOSEN asset too. It offered
                    `alice.night` whatever was selected, which invited into the
@@ -1197,6 +1204,10 @@ export default function SendSheet(props: SendSheetProps) {
               {recipientError ? (
                 <span className="mnhome-send-error" id="mnhome-send-recipient-error" role="alert">
                   {recipientError}
+                </span>
+              ) : scanRefusal ? (
+                <span className="mnhome-send-error" role="alert">
+                  {scanRefusal}
                 </span>
               ) : nameState.status === 'resolving' ? (
                 <span className="mnhome-send-hint mnhome-send-resolving" role="status">
@@ -1560,6 +1571,17 @@ export default function SendSheet(props: SendSheetProps) {
       <Suspense fallback={null}>
         <QrScanSheet
           onResult={(payload) => {
+            /* An add-device code is a real Passport code and NOT a payment:
+               it names a device to admit, not anyone to pay. Refused in
+               words, with the field untouched — filling it with the code's
+               name would quietly turn "admit my new device" into "pay me". */
+            if (payload.kind === 'add-device') {
+              setScanRefusal(
+                'That code admits a new device to a Passport — it is not something you can pay. Use it on the Keys page instead.',
+              )
+              setScanning(false)
+              return
+            }
             /* A name goes into the field as a NAME, so the registry read and
                the confirmation chip happen exactly as they would for a typed
                one. The account the code carried, if it carried one, is kept
@@ -1570,6 +1592,7 @@ export default function SendSheet(props: SendSheetProps) {
                 ? { domain: payload.domain, accountHex: payload.accountHex }
                 : null,
             )
+            setScanRefusal(null)
             setScanning(false)
           }}
           onClose={() => setScanning(false)}

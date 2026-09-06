@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { encodeReceivePayload, normalisedAccountHex, parseQrPayload } from './qrPayload.js';
+import {
+  encodeAddDevicePayload,
+  encodeReceivePayload,
+  normalisedAccountHex,
+  parseQrPayload,
+} from './qrPayload.js';
 
 /* A real preview unshielded address, as the drills produce them. */
 const ADDR = 'mn_addr_preview1x5wntqr8xxgmpj09n3f38rjegx70apzrqzeldefvzmzuga3k9xqqdqu8vk';
@@ -207,5 +212,76 @@ describe('parseQrPayload — everything else keeps the camera scanning', () => {
   it('refuses an mn_ fragment with no separator or data', () => {
     expect(parseQrPayload('mn_addr_preview')).toBeNull();
     expect(parseQrPayload('mn_')).toBeNull();
+  });
+});
+
+describe('encodeAddDevicePayload → parseQrPayload', () => {
+  const COMMITMENT = '12ab'.repeat(16);
+
+  it('round-trips the join code exactly', () => {
+    const payload = encodeAddDevicePayload({
+      domain: 'alice.night',
+      network: 'stagenet',
+      commitmentHex: COMMITMENT,
+    });
+    expect(payload).toBe(
+      `midnight:add_device?v=1&name=alice.night&network=stagenet&commitment=${COMMITMENT}`,
+    );
+    expect(parseQrPayload(payload)).toEqual({
+      kind: 'add-device',
+      domain: 'alice.night',
+      network: 'stagenet',
+      commitmentHex: COMMITMENT,
+    });
+  });
+
+  it('round-trips through an all-upper scan, as QR alphanumeric mode produces', () => {
+    const payload = encodeAddDevicePayload({
+      domain: 'alice',
+      network: 'stagenet',
+      commitmentHex: COMMITMENT,
+    });
+    expect(parseQrPayload(payload.toUpperCase())).toEqual({
+      kind: 'add-device',
+      domain: 'alice.night',
+      network: 'stagenet',
+      commitmentHex: COMMITMENT,
+    });
+  });
+
+  it('refuses to encode a part that is not what it claims', () => {
+    expect(() =>
+      encodeAddDevicePayload({ domain: 'not a name', network: 'stagenet', commitmentHex: COMMITMENT }),
+    ).toThrow(/name/i);
+    expect(() =>
+      encodeAddDevicePayload({ domain: 'alice', network: 'stage net', commitmentHex: COMMITMENT }),
+    ).toThrow(/network/i);
+    expect(() =>
+      encodeAddDevicePayload({ domain: 'alice', network: 'stagenet', commitmentHex: 'short' }),
+    ).toThrow(/64 hex/i);
+  });
+});
+
+describe('parseQrPayload — add-device codes', () => {
+  const COMMITMENT = 'ab12'.repeat(16);
+  const CODE = `midnight:add_device?v=1&name=alice.night&network=stagenet&commitment=${COMMITMENT}`;
+
+  it('requires every part — a broken code keeps the camera scanning', () => {
+    expect(parseQrPayload(CODE.replace(`&commitment=${COMMITMENT}`, ''))).toBeNull();
+    expect(parseQrPayload(CODE.replace('&network=stagenet', ''))).toBeNull();
+    expect(parseQrPayload(CODE.replace('&name=alice.night', ''))).toBeNull();
+    expect(parseQrPayload(CODE.replace('commitment=', 'commitment=zz'))).toBeNull();
+  });
+
+  it('refuses a version this build does not speak, rather than half-reading it', () => {
+    expect(parseQrPayload(CODE.replace('v=1', 'v=2'))).toBeNull();
+  });
+
+  it('never reads the body as a name or an address', () => {
+    /* The underscore is the guard: a build that predates this shape
+       classifies `add_device` as nothing at all. What this drills is that
+       THE SAME rule holds here — the body alone, without its query, is not
+       a payload of any kind. */
+    expect(parseQrPayload('midnight:add_device')).toBeNull();
   });
 });

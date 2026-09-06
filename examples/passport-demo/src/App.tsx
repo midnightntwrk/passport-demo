@@ -62,6 +62,17 @@ import {
   saveRecoveryKeyRecord,
   type RecoveryKeyRecord,
 } from './identity/recoveryKey.js';
+import JoinDevice, { type JoinDeviceState } from './screens/JoinDevice.js';
+import {
+  clearJoinIntent,
+  loadJoinIntent,
+  loadSecondDeviceRecord,
+  saveJoinIntent,
+  saveSecondDeviceRecord,
+  type SecondDeviceRecord,
+} from './identity/secondDevice.js';
+import { classifyRecipientInput } from './lib/recipientName.js';
+import { encodeAddDevicePayload, type QrPayload } from './lib/qrPayload.js';
 import HomeScreen from './screens/Home.js';
 import AliasClaimScreen from './screens/AliasClaim.js';
 import BackupScreen from './screens/Backup.js';
@@ -611,8 +622,40 @@ const PASSPORT_CONTRACT_SCOPE = { appId: APP_ID, accountId: 'passport-contract-v
  *
  * 'keys' (P3) is the keys sub-page behind Access's keys row and the meter's
  * third rung — on demand, like 'backup', never scheduled.
+ *
+ * 'join' (P3) is the OTHER journey out of 'welcome': this device holds a
+ * fresh passkey for a Passport that already exists elsewhere, and asks to be
+ * admitted rather than naming a new one. Re-raised across reloads by the
+ * stored join intent (`identity/secondDevice.ts`) until it lands or the user
+ * takes the choose-a-name exit — a half-made join must never fall through to
+ * the name step, whose claim would deploy a SECOND account.
  */
-type IdentityStep = 'welcome' | 'alias' | 'guard' | 'keys' | 'backup' | null;
+type IdentityStep = 'welcome' | 'alias' | 'guard' | 'keys' | 'backup' | 'join' | null;
+
+/**
+ * Where a join (this device asking an existing Passport to admit it) has got
+ * to. Everything in it is PUBLIC — the name, the account it resolved to, the
+ * key COMMITMENT — which is what lets the whole flow be resumed from the
+ * stored intent after a reload without a single ceremony repeated.
+ */
+type JoinFlow =
+  | { stage: 'name'; busy: boolean }
+  | {
+      stage: 'found';
+      busy: boolean;
+      domain: string;
+      accountAddress: string;
+      resolverAddress?: string;
+      deviceCount: number | null;
+    }
+  | {
+      stage: 'show';
+      domain: string;
+      accountAddress: string;
+      resolverAddress?: string;
+      commitmentHex: string;
+      payload: string;
+    };
 
 /**
  * How long a WebAuthn ceremony may sit unanswered before Passport stops
@@ -1136,6 +1179,31 @@ export default function PassportDemo() {
   useEffect(() => {
     setRecoveryKeyRecord(profile ? loadRecoveryKeyRecord(profile.passkey.credentialId) : null);
   }, [profile]);
+  /* The device PAIRING record — the third second-way-in: another device
+     holds its own passkey to this account, admitted through the join code
+     or the one that admitted this device. Same discipline as the two above. */
+  const [secondDevice, setSecondDevice] = useState<SecondDeviceRecord | null>(null);
+  useEffect(() => {
+    setSecondDevice(profile ? loadSecondDeviceRecord(profile.passkey.credentialId) : null);
+  }, [profile]);
+  /* The two P3 handoff machines, declared HERE — beside the records they
+     write — because effects above and below read them in their dependency
+     arrays, and a useState further down is a temporal dead zone at render
+     time (the recoveryKeyRecord lesson of 2026/09/06). The callbacks that
+     drive them live with the recovery machine below. */
+  const [joinFlow, setJoinFlow] = useState<JoinFlow>({ stage: 'name', busy: false });
+  const [joinError, setJoinError] = useState<string | null>(null);
+  /* The watcher's status line, OUTSIDE joinFlow on purpose: the poll effect
+     keys on the flow, and a status line written into the flow would restart
+     the poll that wrote it. */
+  const [joinWatchLine, setJoinWatchLine] = useState<string | null>(null);
+  const [admitEnrol, setAdmitEnrol] = useState<
+    | { stage: 'idle' }
+    | { stage: 'checking' }
+    | { stage: 'confirm' | 'submitting'; domain: string; commitment: bigint; commitmentTail: string }
+  >({ stage: 'idle' });
+  const [admitError, setAdmitError] = useState<string | null>(null);
+  const [admitPhase, setAdmitPhase] = useState<string | null>(null);
   // One-button onboarding (2026/08/05): there is no separate "choose" step
   // any more, so the screen only distinguishes idle from working.
   const [onboardingIntent, setOnboardingIntent] = useState<OnboardingIntent | null>(null);
@@ -4131,6 +4199,36 @@ export default function PassportDemo() {
        the wallet this effect waits on has opened. */
     const passportJustCreated = identityStepArmed.current;
     identityStepArmed.current = false;
+    /* A join in flight OUTRANKS everything below: a half-admitted device that
+       fell through to the name step would claim a SECOND account. The stored
+       intent carries enough to resume at whichever stage it reached — all of
+       it public data the join screen was already showing. */
+    const joinIntent = loadJoinIntent(profile.passkey.credentialId);
+    if (joinIntent) {
+      setJoinFlow(
+        joinIntent.domain && joinIntent.accountAddress && joinIntent.commitmentHex && joinIntent.payload
+          ? {
+              stage: 'show',
+              domain: joinIntent.domain,
+              accountAddress: joinIntent.accountAddress,
+              ...(joinIntent.resolverAddress ? { resolverAddress: joinIntent.resolverAddress } : {}),
+              commitmentHex: joinIntent.commitmentHex,
+              payload: joinIntent.payload,
+            }
+          : joinIntent.domain && joinIntent.accountAddress
+            ? {
+                stage: 'found',
+                busy: false,
+                domain: joinIntent.domain,
+                accountAddress: joinIntent.accountAddress,
+                ...(joinIntent.resolverAddress ? { resolverAddress: joinIntent.resolverAddress } : {}),
+                deviceCount: null,
+              }
+            : { stage: 'name', busy: false },
+      );
+      setIdentityStep('join');
+      return;
+    }
     if (loadAliasRecords()[selectedNetwork]) return;
     /* Only a DONE resolution suppresses the step. 'skipped' deliberately does
        not any more: a skip used to be remembered per credential forever, so a
@@ -4188,6 +4286,20 @@ export default function PassportDemo() {
     setAliasFailure(null);
     setReclaim(null);
     setReclaimError(null);
+    /* The P3 machines reset WITH the session: a confirm-stage enrolment or a
+       half-made join surviving into the NEXT passkey's session would offer
+       one Passport's pending key to another Passport's account. The join
+       INTENT is per-credential storage and deliberately survives — the same
+       passkey signing back in resumes its own half-made join. */
+    setRecoveryEnrol({ stage: 'idle' });
+    setRecoveryEnrolError(null);
+    setRecoveryEnrolPhase(null);
+    setJoinFlow({ stage: 'name', busy: false });
+    setJoinError(null);
+    setJoinWatchLine(null);
+    setAdmitEnrol({ stage: 'idle' });
+    setAdmitError(null);
+    setAdmitPhase(null);
     identityStepResolved.current = false;
     // Signing out does NOT re-arm the name step: the next sign-in is a
     // sign-in, and lands on the dashboard. The stored per-credential
@@ -4285,18 +4397,28 @@ export default function PassportDemo() {
    */
   const guardNagged = useRef<string | null>(null);
   useEffect(() => {
-    /* Unguarded means NO second way in of either kind — the backup file or
-       the enrolled recovery key. Either one quiets the nag. */
-    const guarded = passportGuarded || recoveryKeyRecord !== null;
+    /* Unguarded means NO second way in of any kind — the backup file, the
+       enrolled recovery key, or a paired second device. Any one quiets it. */
+    const guarded = passportGuarded || recoveryKeyRecord !== null || secondDevice !== null;
     if (!localSessionActive || !profile || guarded || identityStep !== null) return;
     if (guardNagged.current === profile.passkey.credentialId) return;
-    guardNagged.current = profile.passkey.credentialId;
-    pushToast({
-      tone: 'info',
-      title: 'Not valid until guarded',
-      body: 'Your Passport has no spare key yet. Keep a backup before it needs one.',
-    });
-  }, [localSessionActive, profile, passportGuarded, recoveryKeyRecord, identityStep]);
+    const credentialId = profile.passkey.credentialId;
+    /* DEFERRED A BEAT, because "never over the wizard" raced itself: on a
+       fresh session this effect and the identity-step resolution run in the
+       SAME flush, and this one still reads `identityStep === null` while the
+       resolution is setting 'welcome' — so the toast fired over the welcome
+       screen (photographed 2026/09/07). The step change re-runs this effect,
+       and the cleanup below is what actually cancels the premature nag. */
+    const timer = window.setTimeout(() => {
+      guardNagged.current = credentialId;
+      pushToast({
+        tone: 'info',
+        title: 'Not valid until guarded',
+        body: 'Your Passport has no spare key yet. Keep a backup before it needs one.',
+      });
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [localSessionActive, profile, passportGuarded, recoveryKeyRecord, secondDevice, identityStep]);
   /* The two way-out panels hold the screen open in their own right. They have
      to: a failure that suppresses the error banner in favour of its panel
      would otherwise have nothing left keeping onboarding on screen. */
@@ -4560,7 +4682,10 @@ export default function PassportDemo() {
       });
       pushToast({
         tone: 'success',
-        title: 'Guard level 3 of 3',
+        /* The level the meter really shows: the second key is the THIRD rung,
+           and claiming 3 of 3 over a missing backup would out-count the meter
+           on the same screen. */
+        title: passportGuarded ? 'Guard level 3 of 3' : 'Guard level 2 of 3',
         body: 'A second key can now rescue this Passport.',
       });
     } catch (cause) {
@@ -4571,7 +4696,402 @@ export default function PassportDemo() {
     } finally {
       setRecoveryEnrolPhase(null);
     }
-  }, [addActivity, profile, recoveryEnrol, requireAccount, selectedNetwork, withAccountDeviceSecret]);
+  }, [addActivity, passportGuarded, profile, recoveryEnrol, requireAccount, selectedNetwork, withAccountDeviceSecret]);
+
+  /* ---------------------------------------------------------------------- */
+  /* The add-device handoff (P3)                                            */
+  /*                                                                        */
+  /* Two machines, one circuit. JOIN runs on the NEW device: resolve the    */
+  /* name, derive this device's commitment with one passkey ceremony, show  */
+  /* the code, watch the ledger. ADMIT runs on the ENROLLED device: read    */
+  /* the code, check against the registry WHOSE Passport it was drawn for,  */
+  /* confirm what goes on chain, then the same `add_device` seam the        */
+  /* recovery key uses. The ledger is the only witness the join trusts:     */
+  /* nothing on the new device flips until its own commitment is read back  */
+  /* as an active device.                                                   */
+  /* ---------------------------------------------------------------------- */
+
+  /** The welcome screen's second journey: this Passport already exists. */
+  const beginJoin = useCallback(() => {
+    const activeProfile = profileRef.current;
+    if (!activeProfile) return;
+    storeWelcomeSeen(activeProfile.passkey.credentialId);
+    /* The intent is written EMPTY, at the fork: from this moment a reload
+       must land back here rather than on the name step, whose claim would
+       deploy a second account. */
+    saveJoinIntent(activeProfile.passkey.credentialId, {});
+    setJoinError(null);
+    setJoinWatchLine(null);
+    setJoinFlow({ stage: 'name', busy: false });
+    setIdentityStep('join');
+  }, []);
+
+  /** The exit, named as the journey it is: abandon the join, choose a name. */
+  const abandonJoin = useCallback(() => {
+    const activeProfile = profileRef.current;
+    if (activeProfile) clearJoinIntent(activeProfile.passkey.credentialId);
+    setJoinError(null);
+    setJoinWatchLine(null);
+    setJoinFlow({ stage: 'name', busy: false });
+    setIdentityStep('alias');
+  }, []);
+
+  /** Stage 'found' → back to 'name'. No ceremony has been spent. */
+  const joinBackToName = useCallback(() => {
+    setJoinError(null);
+    setJoinFlow({ stage: 'name', busy: false });
+    const activeProfile = profileRef.current;
+    if (activeProfile) saveJoinIntent(activeProfile.passkey.credentialId, {});
+  }, []);
+
+  /**
+   * Which Passport? The registry answers, and then the account's own ledger
+   * is read once — which both proves the target IS an account contract and
+   * says how many keys it holds, so the found screen states facts.
+   */
+  const lookupJoinName = useCallback(
+    async (typed: string) => {
+      setJoinError(null);
+      const input = classifyRecipientInput(typed);
+      if (input.kind !== 'name') {
+        setJoinError(
+          input.kind === 'name-invalid'
+            ? input.reason
+            : 'Type the name of your Passport — alice, or alice.night.',
+        );
+        return;
+      }
+      const handle = localWalletRef.current;
+      if (!handle) {
+        setJoinError('The Passport signing session closed. Sign in again, then retry.');
+        return;
+      }
+      setJoinFlow({ stage: 'name', busy: true });
+      try {
+        const { resolveAliasTarget } = await import('./identity/midnames.js');
+        const resolved = await resolveAliasTarget(selectedNetwork as MidnamesNetwork, input.label);
+        if (!resolved) {
+          setJoinFlow({ stage: 'name', busy: false });
+          setJoinError(`Nobody holds ${input.domain} on ${NETWORK_LABELS[selectedNetwork]}.`);
+          return;
+        }
+        if (resolved.target.kind !== 'contract') {
+          setJoinFlow({ stage: 'name', busy: false });
+          setJoinError(
+            `${input.domain} points at a wallet address, not a Passport account — only an account contract can admit a second device.`,
+          );
+          return;
+        }
+        const accountAddress = resolved.target.hex;
+        /* Throws 'contract-not-found' when the registry points at something
+           that is not one of our accounts — the honest refusal for a name
+           bound to an arbitrary contract. */
+        const { readAccountState } = await import('./identity/accountCustody.js');
+        const state = await readAccountState(handle.network, accountAddress);
+        const activeProfile = profileRef.current;
+        if (activeProfile) {
+          saveJoinIntent(activeProfile.passkey.credentialId, {
+            domain: input.domain,
+            accountAddress,
+            resolverAddress: resolved.resolverAddress,
+          });
+        }
+        setJoinFlow({
+          stage: 'found',
+          busy: false,
+          domain: input.domain,
+          accountAddress,
+          resolverAddress: resolved.resolverAddress,
+          deviceCount: state.deviceCount,
+        });
+      } catch (cause) {
+        setJoinFlow({ stage: 'name', busy: false });
+        setJoinError(cause instanceof Error ? cause.message : String(cause));
+      }
+    },
+    [selectedNetwork],
+  );
+
+  /**
+   * The one ceremony: the passkey assertion whose PRF derives this device's
+   * secret, kept only long enough to derive the PUBLIC commitment the code
+   * carries. The secret is zeroed by `withAccountDeviceSecret` itself.
+   */
+  const makeJoinKey = useCallback(async () => {
+    if (joinFlow.stage !== 'found') return;
+    const found = joinFlow;
+    setJoinError(null);
+    setJoinFlow({ ...found, busy: true });
+    try {
+      const { deriveDeviceCommitment, formatFieldHex } = await import(
+        './identity/accountCustody.js'
+      );
+      const commitment = await withAccountDeviceSecret((deviceSecret) =>
+        deriveDeviceCommitment(deviceSecret),
+      );
+      const commitmentHex = formatFieldHex(commitment);
+      const payload = encodeAddDevicePayload({
+        domain: found.domain,
+        network: selectedNetwork,
+        commitmentHex,
+      });
+      const activeProfile = profileRef.current;
+      if (activeProfile) {
+        saveJoinIntent(activeProfile.passkey.credentialId, {
+          domain: found.domain,
+          accountAddress: found.accountAddress,
+          ...(found.resolverAddress ? { resolverAddress: found.resolverAddress } : {}),
+          commitmentHex,
+          payload,
+        });
+      }
+      setJoinWatchLine(null);
+      setJoinFlow({
+        stage: 'show',
+        domain: found.domain,
+        accountAddress: found.accountAddress,
+        ...(found.resolverAddress ? { resolverAddress: found.resolverAddress } : {}),
+        commitmentHex,
+        payload,
+      });
+    } catch (cause) {
+      setJoinFlow({ ...found, busy: false });
+      setJoinError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }, [joinFlow, selectedNetwork, withAccountDeviceSecret]);
+
+  /**
+   * The landing, written ONLY off a ledger read that found this device's own
+   * commitment active. Every record it writes states what that read proved:
+   * a `recovered` contract record (this device never saw a deployment, so it
+   * has no transaction to carry), the alias the join resolved through, the
+   * pairing itself, and the name step marked done so no wizard re-asks.
+   */
+  const adoptJoin = useCallback(
+    async (join: {
+      domain: string;
+      accountAddress: string;
+      resolverAddress?: string;
+      commitmentHex: string;
+    }) => {
+      const activeProfile = profileRef.current;
+      if (!activeProfile) return;
+      const credentialId = activeProfile.passkey.credentialId;
+      savePassportContractRecord({
+        credentialId,
+        network: selectedNetwork,
+        status: 'deployed',
+        address: join.accountAddress,
+        deviceCommitment: BigInt(`0x${join.commitmentHex}`).toString(),
+        recovered: true,
+        ledgerConfirmed: true,
+        updatedAt: new Date().toISOString(),
+      });
+      const label = join.domain.endsWith('.night')
+        ? join.domain.slice(0, -'.night'.length)
+        : join.domain;
+      saveAliasRecord({
+        alias: label,
+        domain: join.domain,
+        network: selectedNetwork,
+        status: 'registered',
+        ...(join.resolverAddress ? { resolverAddress: join.resolverAddress } : {}),
+        registryConfirmed: true,
+        resolverTarget: 'contract',
+        resolverTargetHex: join.accountAddress,
+        updatedAt: new Date().toISOString(),
+      });
+      const pair: SecondDeviceRecord = {
+        role: 'joined',
+        network: selectedNetwork,
+        contractAddress: join.accountAddress,
+        at: new Date().toISOString(),
+      };
+      saveSecondDeviceRecord(credentialId, pair);
+      setSecondDevice(pair);
+      storeNameStep(credentialId, 'done');
+      clearJoinIntent(credentialId);
+      setJoinWatchLine(null);
+      setJoinFlow({ stage: 'name', busy: false });
+      setIdentityStep(null);
+      addActivity({
+        label: `Joined ${join.domain}`,
+        detail:
+          'Another device admitted this one: its key is on the account now, read back from the ledger.',
+        status: 'complete',
+        source: 'chain',
+      });
+      pushToast({
+        tone: 'success',
+        title: `This device now opens ${join.domain}`,
+        body: 'Admitted by your other device, confirmed on the ledger.',
+      });
+      /* The new passkey should carry its account the way an original does —
+         best effort, its own ceremony, never blocking the landing. */
+      void rememberAccountOnPasskey(
+        activeProfile,
+        { address: join.accountAddress, network: selectedNetwork },
+        label,
+      );
+    },
+    [addActivity, rememberAccountOnPasskey, selectedNetwork],
+  );
+
+  /**
+   * The watch: while the code is on screen, the account's ledger is read
+   * every ten seconds until this device's commitment is an active device.
+   * The LEDGER is the only witness — no message from the other device is
+   * trusted, because none is needed.
+   */
+  useEffect(() => {
+    if (identityStep !== 'join' || joinFlow.stage !== 'show') return undefined;
+    const show = joinFlow;
+    const handle = localWalletRef.current;
+    if (!handle) return undefined;
+    const commitment = BigInt(`0x${show.commitmentHex}`);
+    let live = true;
+    let inFlight = false;
+    let timer: number | undefined;
+    const say = (line: string) =>
+      setJoinWatchLine((current) => (current === line ? current : line));
+    const tick = async () => {
+      if (!live || inFlight) return;
+      inFlight = true;
+      try {
+        const { readAccountState } = await import('./identity/accountCustody.js');
+        const state = await readAccountState(handle.network, show.accountAddress);
+        if (!live) return;
+        if (state.activeDeviceCommitments.has(commitment)) {
+          live = false;
+          if (timer !== undefined) window.clearInterval(timer);
+          await adoptJoin({
+            domain: show.domain,
+            accountAddress: show.accountAddress,
+            ...(show.resolverAddress ? { resolverAddress: show.resolverAddress } : {}),
+            commitmentHex: show.commitmentHex,
+          });
+          return;
+        }
+        say('Watching the ledger — the other device has not admitted this one yet.');
+      } catch {
+        if (!live) return;
+        say('The ledger could not be read just now — still watching.');
+      } finally {
+        inFlight = false;
+      }
+    };
+    void tick();
+    timer = window.setInterval(() => void tick(), 10_000);
+    return () => {
+      live = false;
+      if (timer !== undefined) window.clearInterval(timer);
+    };
+  }, [adoptJoin, identityStep, joinFlow]);
+
+  /**
+   * The admit side's first beat: read a code and find out WHOSE it is. The
+   * registry — not the code — answers which account the named Passport is,
+   * and only a code drawn for THIS account reaches confirm. A code for
+   * someone else's Passport is refused in words, because "scan and something
+   * gets enrolled somewhere" is exactly what this flow must never be.
+   */
+  const takeAdmitCode = useCallback(
+    async (payload: QrPayload) => {
+      setAdmitError(null);
+      if (payload.kind !== 'add-device') {
+        setAdmitError(
+          'That is a Passport payment code, not a join code — the join code is drawn by the NEW device, on its add-this-device screen.',
+        );
+        return;
+      }
+      if (payload.network !== selectedNetwork) {
+        setAdmitError(
+          `That code was drawn for ${payload.network}, and this Passport is on ${selectedNetwork}.`,
+        );
+        return;
+      }
+      setAdmitEnrol({ stage: 'checking' });
+      try {
+        const account = requireAccount();
+        const label = payload.domain.endsWith('.night')
+          ? payload.domain.slice(0, -'.night'.length)
+          : payload.domain;
+        const { resolveAliasTarget } = await import('./identity/midnames.js');
+        const resolved = await resolveAliasTarget(selectedNetwork as MidnamesNetwork, label);
+        if (!resolved) {
+          setAdmitEnrol({ stage: 'idle' });
+          setAdmitError(
+            `That code was drawn for ${payload.domain}, but nobody holds that name on ${NETWORK_LABELS[selectedNetwork]}.`,
+          );
+          return;
+        }
+        if (resolved.target.kind !== 'contract' || resolved.target.hex !== account.address) {
+          setAdmitEnrol({ stage: 'idle' });
+          setAdmitError(`That code was drawn for ${payload.domain}, which is not this Passport.`);
+          return;
+        }
+        setAdmitEnrol({
+          stage: 'confirm',
+          domain: payload.domain,
+          commitment: BigInt(`0x${payload.commitmentHex}`),
+          commitmentTail: payload.commitmentHex.slice(-6),
+        });
+      } catch (cause) {
+        setAdmitEnrol({ stage: 'idle' });
+        setAdmitError(cause instanceof Error ? cause.message : String(cause));
+      }
+    },
+    [requireAccount, selectedNetwork],
+  );
+
+  /** The chain half — the same `add_device` seam as the recovery key. */
+  const confirmAdmit = useCallback(async () => {
+    if (admitEnrol.stage !== 'confirm') return;
+    const { domain, commitment, commitmentTail } = admitEnrol;
+    setAdmitError(null);
+    setAdmitEnrol({ stage: 'submitting', domain, commitment, commitmentTail });
+    try {
+      const account = requireAccount();
+      const { addDevice, formatFieldHex } = await import('./identity/accountCustody.js');
+      await withAccountDeviceSecret((deviceSecret) =>
+        addDevice(
+          account.handle,
+          deviceSecret,
+          { contractAddress: account.address, newDeviceCommitment: commitment },
+          (progress) => setAdmitPhase(progress.phase),
+        ),
+      );
+      const pair: SecondDeviceRecord = {
+        role: 'admitted',
+        network: selectedNetwork,
+        contractAddress: account.address,
+        otherCommitmentHex: formatFieldHex(commitment),
+        at: new Date().toISOString(),
+      };
+      const activeProfile = profileRef.current;
+      if (activeProfile) saveSecondDeviceRecord(activeProfile.passkey.credentialId, pair);
+      setSecondDevice(pair);
+      setAdmitEnrol({ stage: 'idle' });
+      addActivity({
+        label: 'Device admitted',
+        detail: `A new device's key (…${commitmentTail}) is on your account — it can act for ${domain} on its own now.`,
+        status: 'complete',
+        source: 'wallet',
+      });
+      pushToast({
+        tone: 'success',
+        title: 'A second device holds a key',
+        body: 'Its own passkey can open this Passport now — the new device sees it within moments.',
+      });
+    } catch (cause) {
+      /* Back to CONFIRM, not to idle: the code is read and checked, and
+         retrying the submission must not cost another scan. */
+      setAdmitEnrol({ stage: 'confirm', domain, commitment, commitmentTail });
+      setAdmitError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setAdmitPhase(null);
+    }
+  }, [addActivity, admitEnrol, requireAccount, selectedNetwork, withAccountDeviceSecret]);
 
   /* ---------------------------------------------------------------------- */
   /* Sending to a `.night` name                                             */
@@ -5851,6 +6371,9 @@ export default function PassportDemo() {
             if (profile) storeWelcomeSeen(profile.passkey.credentialId);
             setIdentityStep('alias');
           }}
+          /* The other journey (P3): the passkey just made joins a Passport
+             another device already holds, instead of naming a new one. */
+          onAddToExisting={beginJoin}
         />
       ) : identityStep === 'alias' ? (
         /* The name step — the last thing between a new Passport and its
@@ -5879,6 +6402,32 @@ export default function PassportDemo() {
              can be. See `midSessionCeremonyFailure`. */
           errorIsPasskeyWayOut={aliasFailure?.wayOut === true}
           onSignOut={() => void signOutPassport()}
+        />
+      ) : identityStep === 'join' ? (
+        /* Adding THIS device to a Passport that exists elsewhere (P3): name
+           it, derive this device's commitment, show the join code, watch the
+           ledger. The machine above (`joinFlow`) is the authority; the stored
+           intent re-raises this screen across reloads until it lands. */
+        <JoinDevice
+          networkLabel={NETWORK_LABELS[selectedNetwork]}
+          state={
+            {
+              stage: joinFlow.stage,
+              busy: joinFlow.stage !== 'show' && joinFlow.busy,
+              error: joinError,
+              domain: joinFlow.stage !== 'name' ? joinFlow.domain : null,
+              accountAddress: joinFlow.stage !== 'name' ? joinFlow.accountAddress : null,
+              deviceCount: joinFlow.stage === 'found' ? joinFlow.deviceCount : null,
+              payload: joinFlow.stage === 'show' ? joinFlow.payload : null,
+              commitmentTail:
+                joinFlow.stage === 'show' ? joinFlow.commitmentHex.slice(-6) : null,
+              watchLine: joinFlow.stage === 'show' ? joinWatchLine : null,
+            } satisfies JoinDeviceState
+          }
+          onLookup={(typed) => void lookupJoinName(typed)}
+          onMakeKey={() => void makeJoinKey()}
+          onBackToName={joinBackToName}
+          onStartFresh={abandonJoin}
         />
       ) : identityStep === 'guard' ? (
         /* The chapter after the name (2026/09/06): the guard ladder, once,
@@ -5940,6 +6489,33 @@ export default function PassportDemo() {
               setRecoveryEnrolError(null);
             },
           }}
+          admit={{
+            record: secondDevice ? { role: secondDevice.role, at: secondDevice.at } : null,
+            stage: admitEnrol.stage,
+            pending:
+              admitEnrol.stage === 'confirm' || admitEnrol.stage === 'submitting'
+                ? { domain: admitEnrol.domain, commitmentTail: admitEnrol.commitmentTail }
+                : null,
+            phase: admitPhase,
+            error: admitError,
+            /* Offered only when the act is real: a session to authorise with
+               and an account to admit onto. No wallet extension needed here —
+               the other key arrives as a code, not a signature. */
+            onCode:
+              sessionActive && accountContractAddress
+                ? (payload) => void takeAdmitCode(payload)
+                : undefined,
+            unavailableReason: !sessionActive
+              ? 'Sign in with your passkey first — admitting a device is authorised by the passkey.'
+              : !accountContractAddress
+                ? 'Your account is still being set up on this network — a device is admitted onto it once it exists.'
+                : null,
+            onConfirm: () => void confirmAdmit(),
+            onCancel: () => {
+              setAdmitEnrol({ stage: 'idle' });
+              setAdmitError(null);
+            },
+          }}
           onDone={() => setIdentityStep(null)}
         />
       ) : identityStep === 'backup' ? (
@@ -5964,13 +6540,14 @@ export default function PassportDemo() {
                  HomeScreenProps.issuedAt; the fix belongs to the record store. */
               issuedAt={activeContractRecord?.updatedAt ?? null}
               /* The recovery gate the card wears. Guarded = a second way in
-                 exists (backup exported or restored — see GUARDED_STORAGE_PREFIX);
-                 the chip opens the Backup screen until it does. */
+                 exists: the backup (see GUARDED_STORAGE_PREFIX), the enrolled
+                 recovery key, or a paired second device — any one flips the
+                 chip; the chip opens the Backup screen until one does. */
               guard={{
                 backup: passportGuarded,
-                recoveryKey: recoveryKeyRecord !== null,
+                secondKey: recoveryKeyRecord !== null || secondDevice !== null,
                 onGuard: profile ? () => setIdentityStep('backup') : undefined,
-                onRecoveryKey: profile ? () => setIdentityStep('keys') : undefined,
+                onSecondKey: profile ? () => setIdentityStep('keys') : undefined,
               }}
               identity={homeIdentity}
               passportContract={homePassportContract}

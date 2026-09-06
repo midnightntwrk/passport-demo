@@ -953,3 +953,79 @@
   font-size: 13px;
   line-height: 1.5;
 }
+
+/* --- Join screen (add this device) ----------------------------------------- */
+
+/* The code plate is ALWAYS white, both themes, for the same reason Show's is:
+   a camera reads contrast, not CSS, and the quiet zone is drawn into the
+   matrix itself. */
+.mnjoin-show { display: grid; gap: 12px; justify-items: center; }
+.mnjoin-plate {
+  width: min(240px, 70vw);
+  padding: 10px;
+  border-radius: 14px;
+  background: #ffffff;
+}
+.mnjoin-qr { display: block; width: 100%; height: auto; }
+/* Stacked, not a flex row: the app's pill buttons render full-width, and a
+   pill flexed beside the <code> crushed the code to two characters (seen on
+   the first screenshot pass). The code gets the whole line; the button sits
+   under it. */
+.mnjoin-copyrow {
+  display: grid;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+}
+/* The code as TEXT, because two browsers on one machine cannot point a camera
+   at each other: it scrolls in one line rather than wrapping into a wall. */
+.mnjoin-code {
+  min-width: 0;
+  padding: 8px 10px;
+  border: var(--mn-hairline) solid var(--mn-border-medium);
+  border-radius: 10px;
+  background: var(--mn-surface-sunken, var(--mn-surface-raised));
+  font-size: 11px;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+.mnjoin-copy { display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+.mnjoin-note {
+  margin: 0;
+  color: var(--mn-text-muted);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.mnjoin-watch {
+  margin: 0;
+  color: var(--mn-text-primary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* --- Keys: the admit-a-device paste row ------------------------------------- */
+
+/* Text is the second way in for the same reason the scanner has an image
+   zone: two browsers on one machine cannot point a camera at each other. */
+.mnid-admit-paste {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+.mnid-admit-input {
+  flex: 1;
+  min-width: 0;
+  height: 40px;
+  padding: 0 12px;
+  border: var(--mn-hairline) solid var(--mn-border-medium);
+  border-radius: 10px;
+  color: var(--mn-text-primary);
+  background: var(--mn-surface-raised);
+  font-family: var(--mn-font-mono, ui-monospace, monospace);
+  font-size: 12px;
+}
+.mnid-admit-input::placeholder {
+  color: var(--mn-text-muted);
+  font-family: var(--mn-font-body);
+}

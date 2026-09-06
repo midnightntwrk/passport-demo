@@ -128,14 +128,20 @@ test('a passkey is welcomed, and the welcome leads to the name step', async () =
   await expect(page.getByText('Fees are covered for you')).toBeVisible();
   await expect(page.getByText('Prove things privately')).toBeVisible();
 
-  /* ONE control and no more, and it says where it goes.
-     A "Skip" sat under it until 2026/08/30 and led to the same place — the
-     name step, which nothing on it can walk past. A control labelled for an
-     escape the app does not offer costs a tap and teaches the reader that this
-     app's words are approximate, so it is asserted GONE, and as an absence of
-     anything that would read as a way out rather than of one word. */
+  /* TWO controls, and each says where it goes — neither is a skip.
+     A "Skip" sat under the primary until 2026/08/30 and led to the same
+     place — the name step, which nothing on it can walk past. A control
+     labelled for an escape the app does not offer costs a tap and teaches
+     the reader that this app's words are approximate, so anything that
+     reads as a way out is asserted GONE. The second control that stands
+     here since P3 is a different JOURNEY, not an escape: it leads to the
+     join flow, where this device's passkey is admitted to a Passport
+     another device already holds. */
   const welcomeButtons = await page.getByRole('button').allInnerTexts();
-  expect(welcomeButtons.filter((label) => label.trim().length > 0)).toEqual(['Choose my name']);
+  expect(welcomeButtons.filter((label) => label.trim().length > 0)).toEqual([
+    'Choose my name',
+    'Add this device to a Passport that already exists',
+  ]);
   await expect(page.getByRole('button', { name: /skip|later|not now|maybe/i })).toHaveCount(0);
 
   /* And nothing on it claims anything the build does not do — no wallet, no

@@ -88,10 +88,16 @@ export function normalisedAccountHex(value: string | null | undefined): string |
  * `accountHex` on a name is the cross-check described above, and is `null` for
  * every code that did not carry one — a bare `alice.night`, or a Passport code
  * drawn before its account existed.
+ *
+ * `add-device` is the third shape (2026/09/06): the code a NEW device draws to
+ * ask an enrolled one to admit it — see {@link encodeAddDevicePayload}. It is
+ * an INSTRUCTION, not a destination: the Send sheet refuses it in words, and
+ * only the Keys page's admit flow acts on it.
  */
 export type QrPayload =
   | { kind: 'address'; address: string }
-  | { kind: 'name'; domain: string; accountHex: string | null };
+  | { kind: 'name'; domain: string; accountHex: string | null }
+  | { kind: 'add-device'; domain: string; network: string; commitmentHex: string };
 
 /**
  * The exact string a Receive QR encodes, or `null` when there is nothing worth
@@ -116,6 +122,64 @@ export function encodeReceivePayload(parts: {
   if (typed.kind !== 'name') return null;
   const account = normalisedAccountHex(parts.accountAddress);
   return `${SCHEME}${typed.domain}${account ? `?account=${account}` : ''}`;
+}
+
+/**
+ * The URI body that marks an ADD-DEVICE code, and why it is spelled with an
+ * underscore.
+ *
+ * It matches the account contract's own circuit name, which is honest — the
+ * code IS a request to call `add_device` — but the underscore is load-bearing
+ * beyond that: no `.night` label may contain one and no Midnight address
+ * starts this way, so a build that predates this shape classifies the body as
+ * nothing at all and keeps scanning, rather than reading a device code as a
+ * misspelt name.
+ */
+const ADD_DEVICE_BODY = 'add_device';
+
+/** The one version this build draws and reads. See {@link parseQrPayload}. */
+const ADD_DEVICE_VERSION = '1';
+
+/**
+ * A device commitment as {@link parseQrPayload} accepts it: the contract
+ * `Field`, zero-padded to 64 hex characters — `formatFieldHex`'s own spelling
+ * in `identity/accountCustody.ts`. The same shape as an account address and
+ * deliberately not the same function as `normalisedAccountHex`: one names a
+ * contract, the other names a key, and a grep for either must not find the
+ * other's call sites.
+ */
+function normalisedCommitmentHex(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const normalised = value.trim().toLowerCase().replace(/^0x/, '');
+  return /^[0-9a-f]{64}$/.test(normalised) ? normalised : null;
+}
+
+/**
+ * The exact string a new device's join code encodes.
+ *
+ * Everything in it is PUBLIC: the name the device wants to join, the network
+ * that name lives on, and the device's key COMMITMENT — the value `add_device`
+ * puts on chain anyway. The secret the commitment binds never leaves the new
+ * device, so a photographed, logged, or shoulder-surfed code costs nothing by
+ * itself: only a device already enrolled on that account can act on it, and
+ * the admit flow makes it confirm what it is admitting first.
+ *
+ * Throws rather than returning `null`, unlike {@link encodeReceivePayload}:
+ * the join flow constructs every part itself, so a malformed part here is a
+ * caller bug, not a user state the screen should absorb in silence.
+ */
+export function encodeAddDevicePayload(parts: {
+  domain: string;
+  network: string;
+  commitmentHex: string;
+}): string {
+  const typed = classifyRecipientInput(parts.domain);
+  if (typed.kind !== 'name') throw new Error(`Not a Passport name: ${parts.domain}`);
+  const commitment = normalisedCommitmentHex(parts.commitmentHex);
+  if (!commitment) throw new Error('A device commitment must be 64 hex characters.');
+  const network = parts.network.trim().toLowerCase();
+  if (!/^[a-z0-9-]+$/.test(network)) throw new Error(`Not a network id: ${parts.network}`);
+  return `${SCHEME}${ADD_DEVICE_BODY}?v=${ADD_DEVICE_VERSION}&name=${typed.domain}&network=${network}&commitment=${commitment}`;
 }
 
 /**
@@ -149,6 +213,22 @@ export function parseQrPayload(payload: string): QrPayload | null {
   const mark = body.indexOf('?');
   const query = mark === -1 ? '' : body.slice(mark + 1);
   const candidate = (mark === -1 ? body : body.slice(0, mark)).trim();
+
+  /* The add-device shape first, because it is the only body this parser can
+     match EXACTLY. Every part is required and strict — this vocabulary is
+     ours at both ends, so a code missing its commitment is broken, not
+     lenient. A version this build does not know parses to null: an older
+     scanner must keep scanning rather than half-read a newer shape, and the
+     camera's "not a Midnight code" line is the honest report either way. */
+  if (candidate === ADD_DEVICE_BODY) {
+    const params = new URLSearchParams(query);
+    if (params.get('v') !== ADD_DEVICE_VERSION) return null;
+    const commitmentHex = normalisedCommitmentHex(params.get('commitment'));
+    const network = (params.get('network') ?? '').trim().toLowerCase();
+    const typed = classifyRecipientInput(params.get('name') ?? '');
+    if (!commitmentHex || typed.kind !== 'name' || !/^[a-z0-9-]+$/.test(network)) return null;
+    return { kind: 'add-device', domain: typed.domain, network, commitmentHex };
+  }
 
   /* Address first: every Midnight bech32m string starts `mn_` (mn_addr,
      mn_shield-addr, mn_dust…) and no `.night` label may contain an

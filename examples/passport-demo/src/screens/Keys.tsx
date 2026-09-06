@@ -1,13 +1,16 @@
-import { ArrowRight, FileKey2, Fingerprint, KeySquare } from 'lucide-react'
+import { lazy, Suspense, useState } from 'react'
+import { ArrowRight, FileKey2, Fingerprint, KeySquare, MonitorSmartphone, ScanLine } from 'lucide-react'
 
+import { parseQrPayload, type QrPayload } from '../lib/qrPayload.js'
 import ThemeToggle from './ThemeToggle.js'
 import './identity.css'
+
+const QrScanSheet = lazy(() => import('./QrScanSheet.js'))
 
 /**
  * Keys — what can open this Passport, and what can bring it back.
  *
- * The sub-page behind Access's keys row (P3). Three kinds of key, one panel
- * each, every state real:
+ * The sub-page behind Access's keys row (P3). Four panels, every state real:
  *
  *   - THE PASSKEY: what signs everything today.
  *   - THE BACKUP: the encrypted file — level 2 of the guard ladder, managed
@@ -19,10 +22,16 @@ import './identity.css'
  *     beat is labelled: connect-and-sign (the wallet's own prompts), a
  *     CONFIRM step that says exactly what goes on chain before anything
  *     does, then the gated call, passkey-authorised like every other one.
+ *   - ANOTHER DEVICE: the admit half of the join handoff. A NEW device draws
+ *     a join code (`JoinDevice.tsx`); THIS panel reads it — camera, image,
+ *     or pasted text, because two browsers on one machine cannot point a
+ *     camera at each other — and walks the same confirm-then-call beats as
+ *     the recovery key, against the same `add_device` circuit.
  *
- * The screen is dumb; App.tsx owns the enrolment state machine and the
- * chain call. When no injected wallet exists the panel says so in prose —
- * a button for an act this browser cannot perform is not offered.
+ * The screen is dumb; App.tsx owns both enrolment state machines and the
+ * chain calls. When no injected wallet exists (or no session, or no account)
+ * a panel says so in prose — a button for an act this browser cannot perform
+ * is not offered.
  */
 
 export interface KeysRecoveryState {
@@ -42,12 +51,37 @@ export interface KeysRecoveryState {
   onCancel: () => void
 }
 
+/**
+ * The admit half of the join handoff, mirrored on {@link KeysRecoveryState}:
+ * the same stages, because it is the same circuit with a different key
+ * source — a code another device drew instead of a wallet signature.
+ */
+export interface KeysAdmitState {
+  /** The pairing this device remembers, either role. The LEDGER is the authority. */
+  record: { role: 'joined' | 'admitted'; at: string } | null
+  stage: 'idle' | 'checking' | 'confirm' | 'submitting'
+  /** Set at the confirm beat: what admitting will put on chain, and for whom. */
+  pending: { domain: string; commitmentTail: string } | null
+  phase: string | null
+  error: string | null
+  /**
+   * Takes a decoded join code — from the camera, an image, or pasted text.
+   * Absent when this browser cannot admit anything right now.
+   */
+  onCode?: ((payload: QrPayload) => void) | undefined
+  /** Why `onCode` is absent, said plainly — or null when it is present. */
+  unavailableReason: string | null
+  onConfirm: () => void
+  onCancel: () => void
+}
+
 export interface KeysScreenProps {
   /** One line describing the passkey session — never invented. */
   passkeySummary: string | null
   backupKept: boolean
   onOpenBackup: () => void
   recovery: KeysRecoveryState
+  admit: KeysAdmitState
   onDone: () => void
 }
 
@@ -56,7 +90,25 @@ function shortEthAddress(address: string): string {
 }
 
 export default function KeysScreen(props: KeysScreenProps) {
-  const { passkeySummary, backupKept, onOpenBackup, recovery, onDone } = props
+  const { passkeySummary, backupKept, onOpenBackup, recovery, admit, onDone } = props
+  const [scanOpen, setScanOpen] = useState(false)
+  const [pasted, setPasted] = useState('')
+  const [pasteError, setPasteError] = useState<string | null>(null)
+
+  /* The paste funnel: parse locally so garbage gets its sentence at once,
+     hand every REAL payload to the host — whose machine owns the refusal of
+     codes that are real but not admissible (a payment code, a code for a
+     different Passport). */
+  const submitPasted = (): void => {
+    const payload = parseQrPayload(pasted)
+    if (!payload) {
+      setPasteError('That text is not a Passport code. Paste the whole line the other device shows.')
+      return
+    }
+    setPasteError(null)
+    setPasted('')
+    admit.onCode?.(payload)
+  }
 
   return (
     <section className="mnid-screen">
@@ -170,6 +222,126 @@ export default function KeysScreen(props: KeysScreenProps) {
             </p>
           ) : null}
         </div>
+
+        <div className="mnid-panel">
+          <p className="mnid-panel-head">
+            <MonitorSmartphone size={16} aria-hidden="true" />
+            Another device
+          </p>
+
+          {admit.record ? (
+            <p>
+              {admit.record.role === 'admitted'
+                ? 'A second device holds its own passkey to this Passport — admitted from here, enrolled on your account.'
+                : 'This device was admitted by another one, so at least two devices hold keys to this Passport.'}
+            </p>
+          ) : null}
+
+          {admit.stage === 'confirm' && admit.pending ? (
+            <>
+              <p>
+                A device asks to join <b>{admit.pending.domain}</b> — this Passport. Admitting it
+                puts ONLY its public key commitment (…{admit.pending.commitmentTail}) on your
+                account. A device holding that key can then do everything this one can: spend,
+                grant, and admit more devices.
+              </p>
+              <div className="mnid-panel-actions">
+                <button type="button" className="mnid-primary" onClick={admit.onConfirm}>
+                  Admit this device
+                </button>
+                <button type="button" className="mnid-secondary" onClick={admit.onCancel}>
+                  Cancel
+                </button>
+              </div>
+            </>
+          ) : admit.stage === 'checking' ? (
+            <p>Checking that code against the registry — whose Passport it was drawn for…</p>
+          ) : admit.stage === 'submitting' ? (
+            <p>
+              Admitting the device…
+              {admit.phase ? ` (${admit.phase})` : ''} This proves and submits a real
+              transaction, and can take a minute.
+            </p>
+          ) : (
+            <>
+              {!admit.record ? (
+                <p>
+                  A second device — a phone, a laptop — can hold its own passkey to this
+                  Passport. On the new device, choose{' '}
+                  <b>Add this device to a Passport that already exists</b> when it starts, and it
+                  will show you a code to read here.
+                </p>
+              ) : null}
+              {admit.onCode ? (
+                <>
+                  <div className="mnid-panel-actions">
+                    <button
+                      type="button"
+                      className="mnid-primary"
+                      onClick={() => setScanOpen(true)}
+                    >
+                      <ScanLine size={15} aria-hidden="true" />
+                      Scan a join code
+                    </button>
+                  </div>
+                  <form
+                    className="mnid-admit-paste"
+                    onSubmit={(event) => {
+                      event.preventDefault()
+                      submitPasted()
+                    }}
+                  >
+                    <input
+                      className="mnid-admit-input"
+                      value={pasted}
+                      onChange={(event) => {
+                        setPasted(event.target.value)
+                        setPasteError(null)
+                      }}
+                      placeholder="…or paste the code as text"
+                      aria-label="Paste a join code"
+                      autoCapitalize="none"
+                      autoCorrect="off"
+                      spellCheck={false}
+                    />
+                    <button
+                      type="submit"
+                      className="mnid-secondary"
+                      disabled={pasted.trim().length === 0}
+                    >
+                      Read it
+                    </button>
+                  </form>
+                  {pasteError ? (
+                    <p className="mnid-keys-error" role="alert">
+                      {pasteError}
+                    </p>
+                  ) : null}
+                </>
+              ) : (
+                <p className="mnid-keys-unavailable">{admit.unavailableReason}</p>
+              )}
+            </>
+          )}
+
+          {admit.error ? (
+            <p className="mnid-keys-error" role="alert">
+              {admit.error}
+            </p>
+          ) : null}
+        </div>
+
+        {scanOpen && admit.onCode ? (
+          <Suspense fallback={null}>
+            <QrScanSheet
+              onResult={(payload) => {
+                setScanOpen(false)
+                admit.onCode?.(payload)
+              }}
+              onClose={() => setScanOpen(false)}
+            />
+          </Suspense>
+        ) : null}
 
         <div className="mnid-actions" data-toast-clear>
           <button type="button" className="mnid-secondary" onClick={onDone}>

@@ -441,10 +441,12 @@ test.describe('@live the account model on stagenet', () => {
     });
     await page.getByRole('button', { name: /^Done$/ }).click();
 
-    /* The ladder tops out and the card flips: the walk skipped the guard
-       step earlier, so this is the OTHER way to become guarded, proven. */
+    /* The card flips: the walk skipped the guard step earlier, so this is the
+       OTHER way to become guarded, proven. The meter reads 2 of 3, and that is
+       the honest count — the second rung (the backup) is still open; the
+       second KEY alone is what flipped the card. */
     await page.getByRole('button', { name: 'Passport', exact: true }).click();
-    await expect(page.locator('.mnguard')).toContainText('3 of 3');
+    await expect(page.locator('.mnguard')).toContainText('2 of 3');
     await expect(page.locator('.mnpcard')).toContainText('GUARDED');
     await expect(page.locator('.mnpcard')).not.toContainText('NOT VALID');
     console.log('[live] recovery key enrolled — add_device confirmed');
@@ -612,6 +614,89 @@ test.describe('@live the account model on stagenet', () => {
         withdrawal!.transaction.block.height
       }`,
     );
+  });
+
+  test('a second device joins by QR handoff, and the ledger is the witness', async ({ browser }) => {
+    /* THE WHOLE HANDOFF, both devices, one account. Context B is genuinely a
+       second device: its own storage, its own virtual authenticator, its own
+       passkey — nothing shared with the walk's page but the URL. It walks the
+       welcome fork onto the join screen, resolves this walk's name against
+       the real registry, derives its own commitment with one ceremony, and
+       draws the join code. The WALK's device reads that code as text (two
+       browsers cannot point cameras at each other), checks it against the
+       registry, and admits it with a REAL `add_device` — after which B's
+       ledger watch finds its own commitment active and lands on Home wearing
+       the same name and the same account. 231 WATCH: the admit is the same
+       small-transaction shape as the recovery enrolment above. */
+    test.setTimeout(45 * 60_000);
+    const contextB = await browser.newContext({
+      viewport: specViewport({ width: 420, height: 900 }),
+    });
+    const deviceB = await contextB.newPage();
+    await installVirtualAuthenticator(contextB, deviceB);
+    deviceB.on('console', (message) => {
+      if (message.type() === 'error') console.log(`[deviceB] ${message.text().slice(0, 200)}`);
+    });
+
+    try {
+      // B: a fresh passkey, then the fork — this Passport already exists.
+      await deviceB.goto('/');
+      await deviceB.getByRole('button', { name: /Continue with Passport/i }).click();
+      await expect(deviceB.getByRole('heading', { name: /Welcome to Passport/i })).toBeVisible({
+        timeout: 5 * 60_000,
+      });
+      await deviceB
+        .getByRole('button', { name: 'Add this device to a Passport that already exists' })
+        .click();
+      await expect(deviceB.getByRole('heading', { name: 'Which Passport?' })).toBeVisible();
+
+      // B: the walk's name resolves through the real registry to its account.
+      await deviceB.getByLabel('Your Midnight name').fill(alias);
+      await deviceB.getByRole('button', { name: 'Find my Passport' }).click();
+      await expect(
+        deviceB.getByRole('heading', { name: `${alias}.night` }),
+      ).toBeVisible({ timeout: 5 * 60_000 });
+
+      // B: one ceremony, then the code — public parts only.
+      await deviceB.getByRole('button', { name: 'Make this device’s key' }).click();
+      await expect(
+        deviceB.getByRole('heading', { name: 'Show this to your other device' }),
+      ).toBeVisible({ timeout: 5 * 60_000 });
+      const code = (await deviceB.locator('.mnjoin-code').innerText()).trim();
+      expect(code).toMatch(/^midnight:add_device\?v=1&/);
+      console.log(`[live] device B drew its join code`);
+
+      // A: read the code, reach the confirm beat, admit for real.
+      await page.getByRole('button', { name: 'Access', exact: true }).click();
+      await page.getByRole('button', { name: /Keys/ }).click();
+      await expect(page.getByRole('heading', { name: 'Keys', level: 1 })).toBeVisible();
+      await page.getByLabel('Paste a join code').fill(code);
+      await page.getByRole('button', { name: 'Read it' }).click();
+      await expect(page.getByText(/asks to join/)).toBeVisible({ timeout: 5 * 60_000 });
+      await page.getByRole('button', { name: 'Admit this device' }).click();
+
+      // Proving and submitting a gated circuit — minutes on the live tier.
+      await expect(
+        page.getByText(/A second device holds its own passkey to this Passport/),
+      ).toBeVisible({ timeout: 20 * 60_000 });
+      await page.getByRole('button', { name: /^Done$/ }).click();
+      console.log('[live] device B admitted — add_device confirmed on the walk device');
+
+      /* B: the ledger watch finds its own commitment and lands. Nothing on A
+         told B anything — the poll reads the account state every ten seconds,
+         so the landing IS the on-chain read-back. */
+      await expect(deviceB.locator('.mnpcard')).toBeVisible({ timeout: 10 * 60_000 });
+      await expect(deviceB.locator('.mnpcard')).toContainText('GUARDED');
+      await expect(deviceB.getByText(`${alias}.night`).first()).toBeVisible();
+
+      // Same account, read from each device's own record store.
+      const accountA = await storedAccountContract(page);
+      const accountB = await storedAccountContract(deviceB);
+      expect(accountB).toBe(accountA);
+      console.log(`[live] device B opens ${alias}.night on ${accountB} — handoff complete`);
+    } finally {
+      await contextB.close();
+    }
   });
 });
 

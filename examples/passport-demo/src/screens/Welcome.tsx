@@ -36,6 +36,13 @@ import './identity.css'
  *
  * If a name ever becomes optional, the control comes back and means it.
  *
+ * THE SECOND CONTROL THAT IS NOT A SKIP (P3): "Add this device to a Passport
+ * that already exists" is a different JOURNEY, not an escape from this one —
+ * it leads to the join flow, where this device's fresh passkey is admitted
+ * onto an account another device already holds. The doctrine above survives:
+ * every control's label describes exactly where it goes, and both destinations
+ * are real.
+ *
  * It is shown ONLY to a Passport this session created. Signing in on a second
  * device is not a first impression, and being welcomed to something you have
  * been using for a week reads as an app that has forgotten you.
@@ -46,8 +53,16 @@ import './identity.css'
  */
 
 export interface WelcomeProps {
-  /** Continue to the name step. The only thing this screen does. */
+  /** Continue to the name step — the new-Passport journey. */
   onChooseName: () => void
+  /**
+   * The OTHER journey (P3): this person already holds a Passport on another
+   * device, and the passkey just made should be ADMITTED to it rather than
+   * naming a new one. Not a skip — see the doctrine above: a skip promises an
+   * escape from a mandatory step, where this leads somewhere real and
+   * different, and is labelled with exactly where.
+   */
+  onAddToExisting?: (() => void) | undefined
 }
 
 /** The four promises, each one a thing this build does today. */
@@ -74,7 +89,7 @@ const POINTS = [
   },
 ] as const
 
-export default function WelcomeScreen({ onChooseName }: WelcomeProps) {
+export default function WelcomeScreen({ onChooseName, onAddToExisting }: WelcomeProps) {
   return (
     <section className="mnid-screen">
       <header className="mnid-bar">
@@ -111,6 +126,14 @@ export default function WelcomeScreen({ onChooseName }: WelcomeProps) {
             <ArrowRight size={17} aria-hidden="true" />
             Choose my name
           </button>
+          {/* Not the skip that was removed on 2026/08/30 — a second JOURNEY.
+              The person who already holds a Passport elsewhere was, until
+              this control existed, forced through naming a second one. */}
+          {onAddToExisting ? (
+            <button type="button" className="mnid-secondary" onClick={onAddToExisting}>
+              Add this device to a Passport that already exists
+            </button>
+          ) : null}
         </div>
       </div>
     </section>

@@ -14,12 +14,14 @@ import './guard-meter.css'
  *      without one.
  *   2. THE BACKUP — the encrypted file. The first thing that flips the card
  *      to GUARDED.
- *   3. THE RECOVERY KEY — real since P3: a MetaMask-derived device enrolled
- *      on the account contract itself (`identity/recoveryKey.ts`), able to
- *      let its holder back in with this device gone. The rung carries an
- *      action ONLY when the host can open the keys surface; without one it
- *      is a row that says what it is, never a control for an act the build
- *      cannot perform.
+ *   3. THE SECOND KEY — real since P3, and satisfied two ways: a
+ *      MetaMask-derived recovery key (`identity/recoveryKey.ts`), or a
+ *      second DEVICE holding its own passkey, admitted through the join
+ *      code (`identity/secondDevice.ts`). Both are devices on the account
+ *      contract itself, able to let their holder back in with this device
+ *      gone. The rung carries an action ONLY when the host can open the
+ *      keys surface; without one it is a row that says what it is, never a
+ *      control for an act the build cannot perform.
  *
  * Rendered on the Passport page under the card's acts, and inside the guard
  * step of onboarding (GuardStep.tsx) — same component, so the ladder a new
@@ -29,22 +31,22 @@ import './guard-meter.css'
 export interface GuardMeterProps {
   /** Level 2 — a backup exists (exported or restored from). */
   backup: boolean
-  /** Level 3 — a recovery key is enrolled on the account. */
-  recoveryKey: boolean
+  /** Level 3 — a second key is on the account: a recovery key, or another device. */
+  secondKey: boolean
   /**
    * Opens the backup surface. Omit it and level 2 renders without a control
    * — the guard step does this, because its own primary action is the same
    * act and one screen should not offer it twice.
    */
   onGuard?: (() => void) | undefined
-  /** Opens the keys surface, where the recovery key is enrolled. */
-  onRecoveryKey?: (() => void) | undefined
+  /** Opens the keys surface, where a second key is added — either kind. */
+  onSecondKey?: (() => void) | undefined
 }
 
 export default function GuardMeter(props: GuardMeterProps) {
-  const { backup, recoveryKey, onGuard, onRecoveryKey } = props
-  const level = 1 + (backup ? 1 : 0) + (recoveryKey ? 1 : 0)
-  const guarded = backup || recoveryKey
+  const { backup, secondKey, onGuard, onSecondKey } = props
+  const level = 1 + (backup ? 1 : 0) + (secondKey ? 1 : 0)
+  const guarded = backup || secondKey
 
   return (
     <section
@@ -59,7 +61,7 @@ export default function GuardMeter(props: GuardMeterProps) {
       <div className="mnguard-bar" aria-hidden="true">
         <span className="mnguard-seg mnguard-seg-on" />
         <span className={`mnguard-seg${backup ? ' mnguard-seg-on' : ''}`} />
-        <span className={`mnguard-seg${recoveryKey ? ' mnguard-seg-on' : ''}`} />
+        <span className={`mnguard-seg${secondKey ? ' mnguard-seg-on' : ''}`} />
       </div>
 
       <ol className="mnguard-rungs">
@@ -94,11 +96,11 @@ export default function GuardMeter(props: GuardMeterProps) {
 
         <li
           className={`mnguard-rung${
-            recoveryKey ? ' mnguard-rung-done' : backup ? ' mnguard-rung-now' : ' mnguard-rung-next'
+            secondKey ? ' mnguard-rung-done' : backup ? ' mnguard-rung-now' : ' mnguard-rung-next'
           }`}
         >
           <span className="mnguard-rung-mark" aria-hidden="true">
-            {recoveryKey ? (
+            {secondKey ? (
               <Check size={14} strokeWidth={2.6} />
             ) : (
               <span className="mnguard-dot" />
@@ -109,13 +111,13 @@ export default function GuardMeter(props: GuardMeterProps) {
               <KeySquare size={13} aria-hidden="true" /> A second key can rescue it
             </b>
             <span>
-              {recoveryKey
-                ? 'A wallet you hold re-derives this key anywhere, with this device gone.'
-                : 'A key that is not on this device — derived from a wallet you already hold, enrolled on your account.'}
+              {secondKey
+                ? 'A key that is not this device can open this Passport, with this one gone.'
+                : 'A wallet-derived recovery key, or a second device with its own passkey.'}
             </span>
           </span>
-          {!recoveryKey && onRecoveryKey ? (
-            <button type="button" className="mnguard-cta" onClick={onRecoveryKey}>
+          {!secondKey && onSecondKey ? (
+            <button type="button" className="mnguard-cta" onClick={onSecondKey}>
               Add one
             </button>
           ) : null}
