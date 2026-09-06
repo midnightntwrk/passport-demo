@@ -900,3 +900,40 @@
   white-space: nowrap;
   border: 0;
 }
+
+/* --- The danger zone (Backup screen) -------------------------------------- */
+
+/* Forget-this-device. The cheek pink is the house warning hue — the card's
+   NOT VALID chip speaks it — and this is the one place it borders a panel.
+   Two-press ceremony: the ghost arms, the solid one acts. */
+.mnid-danger { border-color: rgba(255, 121, 252, 0.4); }
+
+.mnid-danger-ghost {
+  min-height: 44px;
+  padding: 0 20px;
+  border: var(--mn-hairline) solid rgba(255, 121, 252, 0.5);
+  border-radius: var(--mn-radius-pill);
+  color: var(--mn-cheek);
+  background: transparent;
+  font-family: var(--mn-font-body);
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.mnid-danger-ghost:hover:not(:disabled) { background: var(--mn-cheek-soft); }
+.mnid-danger-ghost:disabled { opacity: .5; cursor: not-allowed; }
+
+.mnid-danger-cta {
+  min-height: 44px;
+  padding: 0 20px;
+  border: 0;
+  border-radius: var(--mn-radius-pill);
+  color: #16161f;
+  background: var(--mn-cheek);
+  font-family: var(--mn-font-body);
+  font-size: 13px;
+  font-weight: 800;
+  cursor: pointer;
+}
+.mnid-danger-cta:hover:not(:disabled) { background: #ff94fd; }
+.mnid-danger-cta:disabled { opacity: .6; cursor: not-allowed; }

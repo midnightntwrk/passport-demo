@@ -57,11 +57,18 @@ export interface BackupProps {
   onExport: (password: string) => Promise<PassportBackupExport>
   /** Opens a picked backup file and writes it into this browser. */
   onRestore: (file: File, password: string) => Promise<PassportBackupSummary>
+  /**
+   * Forgets every Passport record this browser holds and returns to a clean
+   * landing screen. What it cannot touch — the passkey in the keychain, the
+   * name and account on the network — is said beside the control. See
+   * `forgetThisDevice` in App.tsx for exactly what is swept.
+   */
+  onForgetDevice: () => Promise<void> | void
   /** Leaves the screen. Nothing is uploaded, exported, or discarded by it. */
   onDone: () => void
 }
 
-type Busy = 'export' | 'restore' | null
+type Busy = 'export' | 'restore' | 'forget' | null
 
 function errorMessage(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause)
@@ -75,9 +82,14 @@ interface Holdings {
 }
 
 export default function BackupScreen(props: BackupProps) {
-  const { onExport, onRestore, onDone } = props
+  const { onExport, onRestore, onForgetDevice, onDone } = props
 
   const [busy, setBusy] = useState<Busy>(null)
+  /* The forget control is TWO presses: the first arms and reveals exactly
+     what will happen, the second does it. Armed state resets on cancel; it
+     does not reset on a failed export or restore, because those are
+     unrelated acts. */
+  const [forgetArmed, setForgetArmed] = useState(false)
 
   const [password, setPassword] = useState('')
   const [confirmation, setConfirmation] = useState('')
@@ -542,6 +554,56 @@ export default function BackupScreen(props: BackupProps) {
                 : null}
             </div>
           ) : null}
+        </div>
+
+        {/* ═══ the danger zone: start over on this device ═══ */}
+        <div className="mnid-panel mnid-danger">
+          <p className="mnid-panel-head">Forget this Passport on this device</p>
+          <p>
+            Deletes every Passport record this browser holds — the profile, the name and
+            account records, the activity trail, and the saved session — and starts
+            onboarding from scratch.
+          </p>
+          <p>
+            It does not delete the passkey itself, which lives in your browser or keychain
+            and can only be removed there; and it cannot touch your name or account, which
+            live on the network. A backup file you have exported still restores this
+            Passport afterwards.
+          </p>
+          <div className="mnid-panel-actions">
+            {forgetArmed ? (
+              <>
+                <button
+                  type="button"
+                  className="mnid-danger-cta"
+                  disabled={busy !== null}
+                  onClick={() => {
+                    setBusy('forget')
+                    void onForgetDevice()
+                  }}
+                >
+                  {busy === 'forget' ? 'Forgetting…' : 'Forget everything on this device'}
+                </button>
+                <button
+                  type="button"
+                  className="mnid-secondary"
+                  disabled={busy !== null}
+                  onClick={() => setForgetArmed(false)}
+                >
+                  Keep it
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                className="mnid-danger-ghost"
+                disabled={busy !== null}
+                onClick={() => setForgetArmed(true)}
+              >
+                Forget this device…
+              </button>
+            )}
+          </div>
         </div>
 
         <div className="mnid-actions" data-toast-clear>

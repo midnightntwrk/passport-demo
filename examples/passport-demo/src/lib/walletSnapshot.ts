@@ -96,7 +96,9 @@
  *     `./localWallet.ts`, which refuses a walk no browser tab can finish.
  */
 
-const DATABASE = 'passport-wallet-cache';
+/** Exported for the forget-this-device wipe (App.tsx) — see PROFILE_DATABASE. */
+export const SNAPSHOT_DATABASE = 'passport-wallet-cache';
+const DATABASE = SNAPSHOT_DATABASE;
 const STORE = 'snapshots';
 
 /** Bump when the shape of {@link WalletSnapshot} itself changes. */

@@ -258,3 +258,39 @@ test('an item is not left among the balances in the Pocket', async () => {
   expect(shelf).toBe(0);
   await page.keyboard.press('Escape');
 });
+
+test('this device can forget its Passport, and onboarding starts over', async () => {
+  /* LAST IN THE FILE ON PURPOSE — it destroys the walk's state. The forget
+     control is the demo-replay and recovery-rehearsal substrate: two
+     presses, then the landing screen exactly as a clean browser shows it,
+     with not one Passport key left behind. The theme and the selected
+     network survive — device preferences, not identity. The passkey survives too (the platform
+     keychain is not the app's to clear), which is why the landing screen is
+     what is asserted rather than anything about credentials. */
+  await tabs().nth(1).click();
+  await page.getByRole('button', { name: /Keys/ }).click();
+  await expect(page.getByRole('heading', { name: 'Where your Passport lives' })).toBeVisible();
+
+  // Two presses: arm, then act. One press must not be enough.
+  await page.getByRole('button', { name: 'Forget this device' }).click();
+  const doIt = page.getByRole('button', { name: 'Forget everything on this device' });
+  await expect(doIt).toBeVisible();
+  await doIt.click();
+
+  await expect(page.getByRole('button', { name: /Continue with Passport/i })).toBeVisible({
+    timeout: 30_000,
+  });
+
+  const leftovers = await page.evaluate(() =>
+    Object.keys(localStorage).filter(
+      (key) =>
+        key !== 'passport-theme' &&
+        key !== 'passport-network' &&
+        (key.startsWith('passport-') ||
+          key.startsWith('passkey:') ||
+          key.startsWith('mn-passport:') ||
+          key.startsWith('midnight.passport.')),
+    ),
+  );
+  expect(leftovers).toEqual([]);
+});

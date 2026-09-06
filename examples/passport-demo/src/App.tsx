@@ -37,9 +37,12 @@ import {
   localCredentialAccountId,
   localProfileId,
   migrateLegacyLocalProfile,
+  PROFILE_DATABASE,
   saveDemoProfile,
   type DemoPassportProfile,
 } from './publicProfile.js';
+import { SNAPSHOT_DATABASE } from './lib/walletSnapshot.js';
+import { THEME_STORAGE_KEY } from './lib/theme.js';
 import { PassportProfileConsent } from './profileConsent.js';
 /* The URL-callback flow. `callbackLaunch.js` reads the launch parameters at
    MODULE IMPORT time — before the first render, so the request is recorded
@@ -4174,6 +4177,69 @@ export default function PassportDemo() {
     identityStepArmed.current = false;
   };
 
+  /**
+   * Forget every Passport record this browser holds, and start over.
+   *
+   * Sign-out deliberately keeps the records; this deliberately does not. It
+   * exists for two audiences: a demo walked from scratch on the same
+   * machine, and — soon — the recovery rehearsal, whose whole point is a
+   * wiped device that a backup file then revives. What it CANNOT touch is
+   * said on the Backup screen where it is offered: the passkey lives in the
+   * platform keychain, and the name and account live on the network.
+   *
+   * The sweep is by PREFIX rather than by a list of keys, so a store added
+   * later is forgotten by default instead of leaking by default. The theme
+   * and the selected network survive on purpose — device preferences, not
+   * identity (and the app re-writes the network on the very next load, so
+   * sweeping it would only pretend). The
+   * databases are deleted after the wallet is torn down so the deletes are
+   * not blocked by our own open connections; a delete that still reports
+   * blocked is left to finish in the background — the localStorage sweep has
+   * already removed every key that could point at it, and the reload below
+   * severs the last connection.
+   */
+  const forgetThisDevice = async (): Promise<void> => {
+    await clearPersistedWalletSession();
+    void closeLocalWallet();
+    try {
+      const doomed: string[] = [];
+      for (let index = 0; index < window.localStorage.length; index += 1) {
+        const key = window.localStorage.key(index);
+        if (!key || key === THEME_STORAGE_KEY || key === 'passport-network') continue;
+        if (
+          key.startsWith('passport-') ||
+          key.startsWith('passkey:') ||
+          key.startsWith('mn-passport:') ||
+          key.startsWith('midnight.passport.')
+        ) {
+          doomed.push(key);
+        }
+      }
+      doomed.forEach((key) => window.localStorage.removeItem(key));
+    } catch {
+      // Storage unavailable means there is nothing persisted to forget.
+    }
+    await Promise.all(
+      [PROFILE_DATABASE, SESSION_DATABASE, SNAPSHOT_DATABASE].map(
+        (name) =>
+          new Promise<void>((resolve) => {
+            try {
+              const request = window.indexedDB.deleteDatabase(name);
+              request.onsuccess = () => resolve();
+              request.onerror = () => resolve();
+              request.onblocked = () => resolve();
+            } catch {
+              resolve();
+            }
+          }),
+      ),
+    );
+    /* A full navigation rather than state resets: the landing screen must
+       open exactly as a clean browser would open it, and a reload is the
+       only honest way to claim that. */
+    window.location.replace('/');
+  };
+
   /* ---------------------------------------------------------------------- */
   /* Mobile experience                                                      */
   /* ---------------------------------------------------------------------- */
@@ -5706,6 +5772,7 @@ export default function PassportDemo() {
         <BackupScreen
           onExport={exportPassportState}
           onRestore={restorePassportState}
+          onForgetDevice={forgetThisDevice}
           onDone={() => setIdentityStep(null)}
         />
       ) : (

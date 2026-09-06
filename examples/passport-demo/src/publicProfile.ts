@@ -1,6 +1,9 @@
 import type { PassportPasskeyReference } from './backend.js';
 
-const DATABASE = 'midnight-passport';
+/** Exported for the forget-this-device wipe (App.tsx), which must name every
+    database this app creates and would rather import the name than copy it. */
+export const PROFILE_DATABASE = 'midnight-passport';
+const DATABASE = PROFILE_DATABASE;
 const STORE = 'public-profile';
 
 export interface DemoPassportProfile {
