@@ -192,6 +192,31 @@ test('the three sections really switch, and none is a dead end', async () => {
   await expect(page.getByRole('heading', { name: 'Connections', level: 2 })).toBeVisible();
 });
 
+test('an unguarded Passport is nagged, honestly, and the ladder leads somewhere real', async () => {
+  /* THE GUARD METER. This walk's Passport has a name and an account but no
+     backup, so it is unguarded — and the page must say so in three registers
+     at once: the card's chip, the meter's level, and where the one real act
+     leads. The third rung is the level that does not exist yet (P3), and it
+     is drilled as a NON-control: a button for an escape the build does not
+     offer would teach the reader this app's words are approximate. */
+  await tabs().nth(0).click();
+  const meter = page.locator('.mnguard');
+  await expect(meter).toBeVisible();
+  await expect(meter).toContainText('1 of 3');
+  await expect(meter).toContainText('Not valid until guarded');
+  await expect(page.locator('.mnpcard')).toContainText('NOT VALID UNTIL GUARDED');
+
+  // The rung that is next is not tappable — it says so instead.
+  await expect(meter.getByRole('button', { name: /second key/i })).toHaveCount(0);
+  await expect(meter).toContainText('Not here yet');
+
+  // The one act on the ladder opens the real backup surface, and comes back.
+  await meter.getByRole('button', { name: 'Keep a backup' }).click();
+  await expect(page.getByRole('heading', { name: 'Where your Passport lives' })).toBeVisible();
+  await page.getByRole('button', { name: 'Done' }).click();
+  await expect(page.locator('.mnpcard')).toBeVisible();
+});
+
 test('the way out is on every tab', async () => {
   /* Sign out lived only in Home's bar after the P1 cut, so a person reading
      Stamps had no way to leave without first finding their way back

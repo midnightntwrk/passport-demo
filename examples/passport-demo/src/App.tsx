@@ -50,6 +50,7 @@ import { PassportCallbackConsent } from './screens/callbackConsent.js';
 import { PassportTxConsent } from './txConsent.js';
 import OnboardingScreen from './screens/Onboarding.js';
 import WelcomeScreen from './screens/Welcome.js';
+import GuardStep from './screens/GuardStep.js';
 import HomeScreen from './screens/Home.js';
 import AliasClaimScreen from './screens/AliasClaim.js';
 import BackupScreen from './screens/Backup.js';
@@ -590,8 +591,14 @@ const PASSPORT_CONTRACT_SCOPE = { appId: APP_ID, accountId: 'passport-contract-v
  * 2026/08/30: 'welcome' joins it in front of 'alias', and ONLY for a Passport
  * this session created. See `WelcomeScreen` for what it says and why it is
  * shown once.
+ *
+ * 2026/09/06: 'guard' joins it AFTER a landed claim, for a Passport that is
+ * not yet guarded — recovery belongs at creation, not in a settings page.
+ * See `GuardStep` for why this one, unlike the name step, may be walked
+ * past. It is never re-raised by the resolution effect: the card's chip,
+ * the guard meter, and the sign-in nag carry the reminder from there.
  */
-type IdentityStep = 'welcome' | 'alias' | 'backup' | null;
+type IdentityStep = 'welcome' | 'alias' | 'guard' | 'backup' | null;
 
 /**
  * How long a WebAuthn ceremony may sit unanswered before Passport stops
@@ -3632,9 +3639,19 @@ export default function PassportDemo() {
         void refreshLocalBalances();
         // Only record the step as settled when the claim genuinely landed.
         storeNameStep(activeProfile.passkey.credentialId, 'done');
-        // Name, then dashboard (2026/08/06): Backup and Ecosystem have left
-        // the chain, so a landed claim ends the wizard outright.
-        setIdentityStep((current) => (current === 'alias' ? null : current));
+        /* Name, then GUARD, then dashboard (2026/09/06). A landed claim used
+           to end the wizard outright; it now ends on the guard step whenever
+           the Passport has no second way in yet — recovery belongs at
+           creation. Already-guarded (a restore re-claiming, say) goes
+           straight through. Read from the store rather than the state so the
+           decision is the flag's current truth, not this closure's. */
+        setIdentityStep((current) =>
+          current === 'alias'
+            ? storedGuarded(activeProfile.passkey.credentialId)
+              ? null
+              : 'guard'
+            : current,
+        );
       } catch (cause) {
         const message = cause instanceof Error ? cause.message : String(cause);
         const detail = (cause as { detail?: string })?.detail;
@@ -4173,6 +4190,26 @@ export default function PassportDemo() {
    */
   const localSessionActive = localWalletStatus === 'ready' && localSurfaces !== null;
   const sessionActive = localSessionActive;
+
+  /**
+   * The sign-in nag: an unguarded Passport is told so once per session, as a
+   * toast rather than a wall — the guard meter on the page is the standing
+   * reminder, and this is the tap on the shoulder that points at it. Fired
+   * only on the dashboard (never over the wizard, whose guard step says it
+   * better) and once per credential per mount, tracked in a ref so a
+   * re-render is not a re-nag.
+   */
+  const guardNagged = useRef<string | null>(null);
+  useEffect(() => {
+    if (!localSessionActive || !profile || passportGuarded || identityStep !== null) return;
+    if (guardNagged.current === profile.passkey.credentialId) return;
+    guardNagged.current = profile.passkey.credentialId;
+    pushToast({
+      tone: 'info',
+      title: 'Not valid until guarded',
+      body: 'Your Passport has no spare key yet. Keep a backup before it needs one.',
+    });
+  }, [localSessionActive, profile, passportGuarded, identityStep]);
   /* The two way-out panels hold the screen open in their own right. They have
      to: a failure that suppresses the error banner in favour of its panel
      would otherwise have nothing left keeping onboarding on screen. */
@@ -5190,11 +5227,24 @@ export default function PassportDemo() {
         source: 'local',
       });
       /* A backup that exists is a second way in: the Passport is now guarded,
-         and the card's validity chip flips. See GUARDED_STORAGE_PREFIX. */
+         and the card's validity chip flips. The FLIP — not every export —
+         earns the stamp and the applause, so re-exporting a fresher file
+         stays one quiet row. See GUARDED_STORAGE_PREFIX. */
       const credentialId = profile?.passkey.credentialId;
-      if (credentialId) {
+      if (credentialId && !storedGuarded(credentialId)) {
         storeGuarded(credentialId);
         setPassportGuarded(true);
+        addActivity({
+          label: 'Passport guarded',
+          detail: 'A backup can now revive this Passport. Guard level 2 of 3 — next: a second key.',
+          status: 'complete',
+          source: 'local',
+        });
+        pushToast({
+          tone: 'success',
+          title: 'Guarded — level 2 of 3',
+          body: 'A backup can now revive this Passport.',
+        });
       }
       return result;
     },
@@ -5326,11 +5376,19 @@ export default function PassportDemo() {
         source: 'local',
       });
       /* A restore is a backup file demonstrably existing and opening — the
-         second way in is proven, not merely saved, so the card flips too. */
+         second way in is proven, not merely saved, so the card flips too.
+         Stamped on the flip only; the restore rows above already tell the
+         story, and the Backup screen reports the result itself, so no toast. */
       const credentialId = profile?.passkey.credentialId;
-      if (credentialId) {
+      if (credentialId && !storedGuarded(credentialId)) {
         storeGuarded(credentialId);
         setPassportGuarded(true);
+        addActivity({
+          label: 'Passport guarded',
+          detail: 'A backup can revive this Passport — this restore just proved it.',
+          status: 'complete',
+          source: 'local',
+        });
       }
       return { ...summary, ledgerCheck };
     },
@@ -5629,6 +5687,15 @@ export default function PassportDemo() {
              can be. See `midSessionCeremonyFailure`. */
           errorIsPasskeyWayOut={aliasFailure?.wayOut === true}
           onSignOut={() => void signOutPassport()}
+        />
+      ) : identityStep === 'guard' ? (
+        /* The chapter after the name (2026/09/06): the guard ladder, once,
+           in flow. "Guard it now" is the Backup screen — the one act that
+           climbs the ladder today — and the exit is labelled with its
+           consequence. See GuardStep for why this one may be walked past. */
+        <GuardStep
+          onGuard={() => setIdentityStep('backup')}
+          onLater={() => setIdentityStep(null)}
         />
       ) : identityStep === 'backup' ? (
         /* Off the onboarding chain since 2026/08/06 — reached on demand from

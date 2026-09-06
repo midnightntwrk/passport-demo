@@ -1,0 +1,148 @@
+@import './tokens.css';
+
+/* The guard meter — prefix "mnguard-". A ladder, not a warning label: three
+   rungs, the lit segments, one action on the rung that is actually next.
+   Unguarded leans on the cheek pink (the card's NOT VALID chip speaks the
+   same colour); guarded settles into the accent. */
+
+.mnguard {
+  padding: 16px;
+  border: var(--mn-hairline) solid rgba(255, 121, 252, 0.35);
+  border-radius: var(--mn-radius);
+  color: var(--mn-text-primary);
+  background: var(--mn-surface-card);
+}
+.mnguard-ok {
+  border-color: var(--mn-border-hairline);
+}
+
+.mnguard-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.mnguard-title {
+  color: var(--mn-text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.mnguard-count {
+  font-family: var(--mn-font-display);
+  font-size: 15px;
+  font-weight: 800;
+  font-style: italic;
+  letter-spacing: -0.01em;
+}
+
+.mnguard-bar {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 5px;
+  margin-bottom: 14px;
+}
+.mnguard-seg {
+  height: 5px;
+  border-radius: var(--mn-radius-pill);
+  background: var(--mn-surface-skeleton);
+}
+.mnguard-seg-on { background: var(--mn-accent); }
+.mnguard-ok .mnguard-seg-on { background: var(--mn-accent); }
+
+.mnguard-rungs {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 12px;
+}
+.mnguard-rung {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+.mnguard-rung-mark {
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  margin-top: 1px;
+  border-radius: var(--mn-radius-pill);
+  border: var(--mn-hairline) solid var(--mn-border-medium);
+  color: var(--mn-text-muted);
+}
+.mnguard-rung-done .mnguard-rung-mark {
+  border-color: transparent;
+  color: var(--mn-accent-text);
+  background: var(--mn-accent);
+}
+.mnguard-rung-now .mnguard-rung-mark { border-color: var(--mn-cheek); }
+.mnguard-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--mn-radius-pill);
+  background: currentColor;
+}
+.mnguard-rung-now .mnguard-dot { background: var(--mn-cheek); }
+
+.mnguard-rung-text {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+.mnguard-rung-text b {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13.5px;
+}
+.mnguard-rung-text b svg { color: var(--mn-text-muted); flex: 0 0 auto; }
+.mnguard-rung-text > span {
+  color: var(--mn-text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+/* The rung that does not exist yet sits back — readable, plainly next,
+   never mistakable for a control. */
+.mnguard-rung-next .mnguard-rung-text b,
+.mnguard-rung-next .mnguard-rung-text > span {
+  color: var(--mn-text-muted);
+}
+.mnguard-next-tag {
+  padding: 2px 7px;
+  border: var(--mn-hairline) solid var(--mn-border-medium);
+  border-radius: var(--mn-radius-pill);
+  color: var(--mn-text-muted);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.mnguard-cta {
+  flex: 0 0 auto;
+  align-self: center;
+  min-height: 34px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: var(--mn-radius-pill);
+  color: var(--mn-accent-text);
+  background: var(--mn-accent);
+  font-family: var(--mn-font-body);
+  font-size: 12.5px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.mnguard-cta:hover { background: var(--mn-accent-hover); }
+
+.mnguard-foot {
+  margin: 14px 0 0;
+  padding-top: 10px;
+  border-top: var(--mn-hairline) dashed var(--mn-border-hairline);
+  color: var(--mn-text-secondary);
+  font-size: 12px;
+}

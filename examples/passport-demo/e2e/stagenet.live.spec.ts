@@ -161,23 +161,25 @@ test.describe('@live the account model on stagenet', () => {
         }),
       ).toBeVisible({ timeout: 2 * 60_000 });
 
-      /* Then whichever comes first: Home, or the card saying the claim did not
-         complete. Raced rather than waited on in sequence, because a refusal
-         that arrives in ten seconds should not be found nine minutes later by
-         a timeout that says nothing about why. */
-      const home = page
-        .getByRole('button', { name: /^Show$/ })
+      /* Then whichever comes first: the guard step (a landed claim on a
+         fresh, unguarded Passport ends there since 2026/09/06 — recovery at
+         creation), or the card saying the claim did not complete. Raced
+         rather than waited on in sequence, because a refusal that arrives in
+         ten seconds should not be found nine minutes later by a timeout that
+         says nothing about why. */
+      const landed = page
+        .getByRole('heading', { name: /Not valid until guarded/i })
         .waitFor({ state: 'visible', timeout: 9 * 60_000 })
-        .then(() => 'home' as const)
+        .then(() => 'landed' as const)
         .catch(() => 'timeout' as const);
       const refused = page
         .getByText(/The claim did not complete/i)
         .waitFor({ state: 'visible', timeout: 9 * 60_000 })
         .then(() => 'refused' as const)
         .catch(() => 'timeout' as const);
-      const outcome = await Promise.race([home, refused]);
+      const outcome = await Promise.race([landed, refused]);
 
-      if (outcome === 'home') break;
+      if (outcome === 'landed') break;
       const detail =
         outcome === 'refused'
           ? (await page.locator('.mnid-panel[role="alert"]').innerText()).trim()
@@ -191,9 +193,18 @@ test.describe('@live the account model on stagenet', () => {
       await page.waitForTimeout(90_000);
     }
 
+    /* The guard step, honestly: one real act, one exit that carries its
+       consequence, and no control on the rung that does not exist yet. The
+       walk takes the exit — the backup file is a download this headless walk
+       has no use for — and the card must then wear the consequence. */
+    await expect(page.getByRole('button', { name: 'Guard it now' })).toBeVisible();
+    await expect(page.getByRole('button', { name: /second key/i })).toHaveCount(0);
+    await page.getByRole('button', { name: /^Later — it stays marked not valid$/ }).click();
+
     await expect(page.getByRole('button', { name: /^Show$/ })).toBeVisible();
     await expect(page.getByText(`${alias}.night`).first()).toBeVisible();
-    console.log(`[live] ${alias}.night registered`);
+    await expect(page.locator('.mnpcard')).toContainText('NOT VALID UNTIL GUARDED');
+    console.log(`[live] ${alias}.night registered, guard step offered and skipped`);
   });
 
   test('the name resolves to the account contract, and Home says the same address', async () => {

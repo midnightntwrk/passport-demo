@@ -26,6 +26,7 @@ import {
    only the two that describe the FEE — a fee is still the wallet's to pay. */
 import type { FeeReadiness, LocalWalletProvingMode } from '../lib/localWallet.js'
 import { EcosystemIdentity } from './Ecosystem.js'
+import GuardMeter from './GuardMeter.js'
 import NetworkSwitcher, { type PassportNetwork } from './NetworkSwitcher.js'
 import NotificationToggle from './NotificationToggle.js'
 import PassportCard from './PassportCard.js'
@@ -538,6 +539,12 @@ export default function HomeScreen(props: HomeScreenProps) {
             ) : null}
           </div>
         ) : null}
+
+        {/* The guard ladder, right under the acts — the card's chip says
+            whether, this says how far and what is next, and it is the nag
+            that stays after the onboarding guard step has been walked past.
+            See GuardMeter.tsx. */}
+        <GuardMeter guarded={guard.guarded} onGuard={guard.onGuard} />
 
         </div>
 
