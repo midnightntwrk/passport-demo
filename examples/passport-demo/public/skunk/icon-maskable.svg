@@ -1,66 +1,96 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
 <rect width="512" height="512" rx="0" fill="#0a0a14"/>
-<svg x="97" y="97" width="317" height="317" viewBox="76 108 352 352">
-  <!-- Cheeky skunk, manga-ish. Dark-first: designed for #0A0A14 backgrounds. -->
+<svg x="97" y="97" width="318" height="318" viewBox="88 52 444 444">
+  <!-- Cheeky skunk, manga-ish. Dark-first: designed for #0A0A14 backgrounds.
+       Second pass (2026/09/06): the first draft was 90% face and read feline.
+       What says SKUNK is kept deliberately loud here — the wide white crown
+       blaze, the forked back stripe on the flanks, and a plume tail as big as
+       the animal with the white stripe sweeping its whole length. -->
 
-  <!-- ═══ ears: small and round ═══ -->
-  <path d="M162 210 C 150 158, 176 130, 212 142 C 236 150, 238 176, 228 198 Z"
+  <!-- ═══ tail: the plume. Fat, black, bigger than the body, the white
+       stripe sweeping its whole length, root tucked behind the body ═══ -->
+  <path d="M300 455 C 420 452, 496 372, 497 240
+           C 497 160, 448 88, 355 62
+           L 378 92 L 338 86 L 358 120 L 320 106
+           C 355 150, 340 190, 332 235
+           C 318 320, 310 400, 292 440 Z"
         fill="#16161f" stroke="#F7F5F2" stroke-width="6" stroke-linejoin="round"/>
-  <path d="M180 192 C 176 164, 190 152, 210 160 C 222 166, 220 180, 214 190 Z" fill="#A700FF"/>
-  <path d="M338 210 C 350 158, 324 130, 288 142 C 264 150, 262 176, 272 198 Z"
+  <path d="M320 425 C 400 395, 445 320, 448 245 C 450 175, 420 118, 368 90"
+        fill="none" stroke="#F7F5F2" stroke-width="26" stroke-linecap="round"/>
+
+  <!-- ═══ body: small, low-slung, under the head ═══ -->
+  <path d="M125 415 C 125 372, 174 337, 235 337 C 296 337, 345 372, 345 415
+           C 345 462, 296 493, 235 493 C 174 493, 125 462, 125 415 Z"
         fill="#16161f" stroke="#F7F5F2" stroke-width="6" stroke-linejoin="round"/>
-  <path d="M320 192 C 324 164, 310 152, 290 160 C 278 166, 280 180, 286 190 Z" fill="#A700FF"/>
+  <!-- the fork: the crown stripe splitting down both flanks — inboard of
+       the outline, so it reads as markings on the coat, not as edge -->
+  <path d="M178 356 C 166 392, 162 432, 166 468" fill="none"
+        stroke="#F7F5F2" stroke-width="20" stroke-linecap="round"/>
+  <path d="M294 356 C 306 392, 310 430, 306 466" fill="none"
+        stroke="#F7F5F2" stroke-width="20" stroke-linecap="round"/>
 
-  <!-- ═══ head: round with cheek fluff spikes ═══ -->
-  <path d="M250 160
-           C 320 160, 372 204, 384 266
-           L 412 284 L 388 298 L 410 322 L 382 332
-           C 372 392, 322 432, 250 432
-           C 178 432, 128 392, 118 332
-           L 90 322 L 112 298 L 88 284 L 116 266
-           C 128 204, 180 160, 250 160 Z"
-        fill="#16161f" stroke="#F7F5F2" stroke-width="6" stroke-linejoin="round"/>
+  <!-- ═══ the face, scaled to leave the tail its room ═══ -->
+  <g transform="matrix(0.74 0 0 0.74 55 28)">
+    <!-- ears: small and round -->
+    <path d="M162 210 C 150 158, 176 130, 212 142 C 236 150, 238 176, 228 198 Z"
+          fill="#16161f" stroke="#F7F5F2" stroke-width="7" stroke-linejoin="round"/>
+    <path d="M180 192 C 176 164, 190 152, 210 160 C 222 166, 220 180, 214 190 Z" fill="#A700FF"/>
+    <path d="M338 210 C 350 158, 324 130, 288 142 C 264 150, 262 176, 272 198 Z"
+          fill="#16161f" stroke="#F7F5F2" stroke-width="7" stroke-linejoin="round"/>
+    <path d="M320 192 C 324 164, 310 152, 290 160 C 278 166, 280 180, 286 190 Z" fill="#A700FF"/>
 
-  <!-- blaze: nose to crown -->
-  <path d="M238 300 C 232 252, 230 214, 226 172 C 240 157, 260 157, 274 172
-           C 270 214, 268 252, 262 300 C 254 308, 246 308, 238 300 Z"
-        fill="#F7F5F2"/>
+    <!-- head: round with cheek fluff spikes -->
+    <path d="M250 160
+             C 320 160, 372 204, 384 266
+             L 412 284 L 388 298 L 410 322 L 382 332
+             C 372 392, 322 432, 250 432
+             C 178 432, 128 392, 118 332
+             L 90 322 L 112 298 L 88 284 L 116 266
+             C 128 204, 180 160, 250 160 Z"
+          fill="#16161f" stroke="#F7F5F2" stroke-width="7" stroke-linejoin="round"/>
 
-  <!-- ═══ muzzle ═══ -->
-  <path d="M158 356 C 162 318, 202 300, 250 300 C 298 300, 338 318, 342 356
-           C 346 398, 310 426, 250 426 C 190 426, 154 398, 158 356 Z"
-        fill="#F7F5F2"/>
+    <!-- blaze: WIDE at the crown, narrowing to the nose — the stripe -->
+    <path d="M232 304 C 226 252, 216 208, 194 180
+             C 208 166, 228 161, 250 161
+             C 272 161, 292 166, 306 180
+             C 284 208, 274 252, 268 304
+             C 256 313, 244 313, 232 304 Z"
+          fill="#F7F5F2"/>
 
-  <!-- ═══ eyes: half-lidded smug ═══ -->
-  <!-- left -->
-  <ellipse cx="192" cy="282" rx="28" ry="34" fill="#F7F5F2"/>
-  <circle cx="198" cy="290" r="18" fill="#16161f"/>
-  <circle cx="204" cy="283" r="6" fill="#F7F5F2"/>
-  <circle cx="192" cy="297" r="3" fill="#F7F5F2"/>
-  <path d="M156 276 C 174 262, 210 266, 226 282 L 226 236 L 156 236 Z" fill="#16161f"/>
-  <path d="M160 274 C 176 264, 208 268, 222 280" fill="none" stroke="#F7F5F2" stroke-width="7" stroke-linecap="round"/>
-  <!-- right -->
-  <ellipse cx="308" cy="282" rx="28" ry="34" fill="#F7F5F2"/>
-  <circle cx="302" cy="290" r="18" fill="#16161f"/>
-  <circle cx="308" cy="283" r="6" fill="#F7F5F2"/>
-  <circle cx="296" cy="297" r="3" fill="#F7F5F2"/>
-  <path d="M274 282 C 290 266, 326 262, 344 276 L 344 236 L 274 236 Z" fill="#16161f"/>
-  <path d="M278 280 C 292 268, 324 264, 340 274" fill="none" stroke="#F7F5F2" stroke-width="7" stroke-linecap="round"/>
+    <!-- muzzle: a compact patch around the mouth, not a white face -->
+    <path d="M196 354 C 200 322, 224 306, 250 306 C 276 306, 300 322, 304 354
+             C 308 390, 282 412, 250 412 C 218 412, 192 390, 196 354 Z"
+          fill="#F7F5F2"/>
 
-  <!-- brows: left raised -->
-  <path d="M162 208 C 176 194, 200 194, 216 206" fill="none" stroke="#F7F5F2" stroke-width="8" stroke-linecap="round"/>
-  <path d="M286 232 C 300 224, 322 224, 336 232" fill="none" stroke="#F7F5F2" stroke-width="8" stroke-linecap="round"/>
+    <!-- eyes: half-lidded smug -->
+    <ellipse cx="192" cy="282" rx="28" ry="34" fill="#F7F5F2"/>
+    <circle cx="198" cy="290" r="18" fill="#16161f"/>
+    <circle cx="204" cy="283" r="6" fill="#F7F5F2"/>
+    <circle cx="192" cy="297" r="3" fill="#F7F5F2"/>
+    <path d="M156 276 C 174 262, 210 266, 226 282 L 226 236 L 156 236 Z" fill="#16161f"/>
+    <path d="M160 274 C 176 264, 208 268, 222 280" fill="none" stroke="#F7F5F2" stroke-width="7" stroke-linecap="round"/>
+    <ellipse cx="308" cy="282" rx="28" ry="34" fill="#F7F5F2"/>
+    <circle cx="302" cy="290" r="18" fill="#16161f"/>
+    <circle cx="308" cy="283" r="6" fill="#F7F5F2"/>
+    <circle cx="296" cy="297" r="3" fill="#F7F5F2"/>
+    <path d="M274 282 C 290 266, 326 262, 344 276 L 344 236 L 274 236 Z" fill="#16161f"/>
+    <path d="M278 280 C 292 268, 324 264, 340 274" fill="none" stroke="#F7F5F2" stroke-width="7" stroke-linecap="round"/>
 
-  <!-- nose at blaze/muzzle join -->
-  <path d="M236 318 C 236 310, 264 310, 264 318 C 264 328, 254 336, 250 336 C 246 336, 236 328, 236 318 Z" fill="#16161f"/>
+    <!-- brows: left raised, drawn on the white blaze -->
+    <path d="M164 210 C 178 196, 200 196, 216 208" fill="none" stroke="#16161f" stroke-width="8" stroke-linecap="round"/>
+    <path d="M286 234 C 300 226, 322 226, 336 234" fill="none" stroke="#16161f" stroke-width="8" stroke-linecap="round"/>
 
-  <!-- smirk with fang -->
-  <path d="M208 376 Q 250 404, 300 370 Q 312 362, 316 352" fill="none" stroke="#16161f" stroke-width="9" stroke-linecap="round"/>
-  <path d="M280 378 L 291 398 L 302 374 Z" fill="#F7F5F2" stroke="#16161f" stroke-width="5" stroke-linejoin="round"/>
+    <!-- nose: ink on the blaze tip, classic -->
+    <path d="M236 314 C 236 306, 264 306, 264 314 C 264 324, 254 332, 250 332 C 246 332, 236 324, 236 314 Z" fill="#16161f"/>
 
-  <!-- blush marks -->
-  <path d="M168 340 l 20 -8 M174 356 l 20 -8" stroke="#FF79FC" stroke-width="7" stroke-linecap="round"/>
-  <path d="M312 332 l 20 8 M306 348 l 20 8" stroke="#FF79FC" stroke-width="7" stroke-linecap="round"/>
+    <!-- smirk with fang -->
+    <path d="M214 368 Q 250 398, 292 364 Q 302 356, 306 346" fill="none" stroke="#16161f" stroke-width="9" stroke-linecap="round"/>
+    <path d="M266 374 L 277 396 L 289 370 Z" fill="#F7F5F2" stroke="#16161f" stroke-width="5" stroke-linejoin="round"/>
+
+    <!-- blush marks -->
+    <path d="M148 336 l 20 -8 M154 352 l 20 -8" stroke="#FF79FC" stroke-width="8" stroke-linecap="round"/>
+    <path d="M332 328 l 20 8 M326 344 l 20 8" stroke="#FF79FC" stroke-width="8" stroke-linecap="round"/>
+  </g>
 
 </svg>
 </svg>
