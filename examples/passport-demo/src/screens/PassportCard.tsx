@@ -94,7 +94,7 @@ export default function PassportCard(props: PassportCardProps) {
   const issued = issuedDate(issuedAt)
 
   const guardChip = guard.guarded ? (
-    <span className="mnpcard-chip mnpcard-chip-ok">✦ GUARDED — PASSKEY + BACKUP</span>
+    <span className="mnpcard-chip mnpcard-chip-ok">✦ GUARDED</span>
   ) : guard.onGuard ? (
     <button type="button" className="mnpcard-chip mnpcard-chip-warn" onClick={guard.onGuard}>
       NOT VALID UNTIL GUARDED — TAP TO GUARD

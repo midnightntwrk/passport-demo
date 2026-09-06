@@ -103,6 +103,22 @@ test.describe('@live the account model on stagenet', () => {
 
   test.beforeAll(async ({ browser }) => {
     const context = await browser.newContext({ viewport: specViewport({ width: 420, height: 900 }) });
+    /* A DETERMINISTIC stand-in for MetaMask: `personal_sign` over secp256k1
+       is deterministic (RFC 6979), and the derivation cares about nothing
+       else, so a fixed signature IS a faithful wallet for the enrolment
+       beat. Real MetaMask cannot run in this harness; what this walk proves
+       is everything after the signature — the derivation, the confirm, and
+       the REAL `add_device` on the account. Fresh account every run, so the
+       fixed key re-enrolling is never "device already active". */
+    await context.addInitScript(() => {
+      (window as unknown as { ethereum: unknown }).ethereum = {
+        request: async ({ method }: { method: string }) => {
+          if (method === 'eth_requestAccounts') return ['0xc0ffee0000000000000000000000000000005a5a'];
+          if (method === 'personal_sign') return `0x${'5a'.repeat(65)}`;
+          throw new Error(`unexpected wallet call: ${method}`);
+        },
+      };
+    });
     page = await context.newPage();
     await installVirtualAuthenticator(context, page);
     page.on('console', (message) => {
@@ -401,6 +417,39 @@ test.describe('@live the account model on stagenet', () => {
    * says a `withdraw_shielded` action now exists on this contract, which is
    * what makes the drop a withdrawal rather than a re-read.
    */
+  test('a MetaMask-derived recovery key is enrolled on the account, for real', async () => {
+    /* The guard ladder's third rung, on chain: connect-and-sign (the stub
+       above), the confirm beat naming what goes public, then `add_device`
+       proved and submitted against this walk's real account. 231 WATCH:
+       add_device is a small transaction, the same shape the
+       OutsideTimeToDismiss floor has been rejecting for deposit_night — if
+       this beat fails with error 231, that is the standing ledger issue
+       (#222), not this flow. */
+    await page.getByRole('button', { name: 'Access', exact: true }).click();
+    await page.getByRole('button', { name: /Keys/ }).click();
+    await expect(page.getByRole('heading', { name: 'Keys', level: 1 })).toBeVisible();
+
+    await page.getByRole('button', { name: 'Connect MetaMask' }).click();
+    /* The confirm beat: the derived key is named and NOTHING is on chain yet. */
+    const confirm = page.getByRole('button', { name: 'Add to your account' });
+    await expect(confirm).toBeVisible({ timeout: 60_000 });
+    await confirm.click();
+
+    // Proving and submitting a gated circuit — minutes on the live tier.
+    await expect(page.getByText(/holds this Passport.s recovery key/)).toBeVisible({
+      timeout: 20 * 60_000,
+    });
+    await page.getByRole('button', { name: /^Done$/ }).click();
+
+    /* The ladder tops out and the card flips: the walk skipped the guard
+       step earlier, so this is the OTHER way to become guarded, proven. */
+    await page.getByRole('button', { name: 'Passport', exact: true }).click();
+    await expect(page.locator('.mnguard')).toContainText('3 of 3');
+    await expect(page.locator('.mnpcard')).toContainText('GUARDED');
+    await expect(page.locator('.mnpcard')).not.toContainText('NOT VALID');
+    console.log('[live] recovery key enrolled — add_device confirmed');
+  });
+
   test('a shielded withdrawal pays mUSD out of the account, and the chain records withdraw_shielded', async () => {
     /* THE ADDRESS THE REST OF THIS TEST IS ABOUT.
        Home only ever shows the account contract elided — nine characters and

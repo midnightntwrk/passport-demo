@@ -56,14 +56,18 @@ export interface HomeScreenProps {
    */
   issuedAt?: string | null
   /**
-   * The mandatory-recovery gate, worn on the passport card. `guarded` today
-   * means a second way in exists — an encrypted backup was exported or this
-   * Passport was restored from one; the recovery keys of P3 will widen it.
-   * `onGuard` opens the surface where guarding happens (the Backup screen).
+   * The mandatory-recovery gate, worn on the passport card and climbed on
+   * the guard meter. `backup` = an encrypted backup exists (exported or
+   * restored from); `recoveryKey` = a MetaMask-derived device is enrolled on
+   * the account (P3). Either one makes the card GUARDED — each is a second
+   * way in. `onGuard` opens the Backup screen; `onRecoveryKey` opens the
+   * Keys screen, where the recovery key is enrolled.
    */
   guard: {
-    guarded: boolean
+    backup: boolean
+    recoveryKey: boolean
     onGuard?: (() => void) | undefined
+    onRecoveryKey?: (() => void) | undefined
   }
   /**
    * The ecosystem identity card: the name held on this network with its status
@@ -487,7 +491,7 @@ export default function HomeScreen(props: HomeScreenProps) {
           accountAddress={accountAddress}
           issuedAt={issuedAt ?? null}
           network={network}
-          guard={guard}
+          guard={{ guarded: guard.backup || guard.recoveryKey, onGuard: guard.onGuard }}
         />
 
         {error ? (
@@ -544,7 +548,12 @@ export default function HomeScreen(props: HomeScreenProps) {
             whether, this says how far and what is next, and it is the nag
             that stays after the onboarding guard step has been walked past.
             See GuardMeter.tsx. */}
-        <GuardMeter guarded={guard.guarded} onGuard={guard.onGuard} />
+        <GuardMeter
+          backup={guard.backup}
+          recoveryKey={guard.recoveryKey}
+          onGuard={guard.onGuard}
+          onRecoveryKey={guard.onRecoveryKey}
+        />
 
         </div>
 

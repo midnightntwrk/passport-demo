@@ -937,3 +937,19 @@
 }
 .mnid-danger-cta:hover:not(:disabled) { background: #ff94fd; }
 .mnid-danger-cta:disabled { opacity: .6; cursor: not-allowed; }
+
+/* --- Keys screen extras ---------------------------------------------------- */
+
+/* The recovery panel's two prose-only states. Unavailability is a fact about
+   the browser, muted; a failure is the seam's own sentence, in the cheek. */
+.mnid-keys-unavailable {
+  margin-top: 8px;
+  color: var(--mn-text-muted);
+  font-size: 12.5px;
+}
+.mnid-keys-error {
+  margin-top: 10px;
+  color: var(--mn-cheek);
+  font-size: 13px;
+  line-height: 1.5;
+}

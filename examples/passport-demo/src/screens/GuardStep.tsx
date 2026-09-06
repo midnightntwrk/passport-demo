@@ -55,10 +55,11 @@ export default function GuardStep(props: GuardStepProps) {
           and it takes about a minute.
         </p>
 
-        {/* The same ladder Home keeps. No inline action on the second rung —
-            the primary below IS that action, and one screen does not offer
-            the same act twice. */}
-        <GuardMeter guarded={false} />
+        {/* The same ladder Home keeps. No inline actions — the primary below
+            IS the second rung's action, and one screen does not offer the
+            same act twice; the third rung's surface is a page away, after
+            this step has been answered. */}
+        <GuardMeter backup={false} recoveryKey={false} />
 
         <div className="mnid-actions" data-toast-clear>
           <button type="button" className="mnid-primary" onClick={onGuard}>

@@ -54,6 +54,14 @@ import { PassportTxConsent } from './txConsent.js';
 import OnboardingScreen from './screens/Onboarding.js';
 import WelcomeScreen from './screens/Welcome.js';
 import GuardStep from './screens/GuardStep.js';
+import KeysScreen from './screens/Keys.js';
+import {
+  getEthereumProvider,
+  loadRecoveryKeyRecord,
+  requestRecoverySignature,
+  saveRecoveryKeyRecord,
+  type RecoveryKeyRecord,
+} from './identity/recoveryKey.js';
 import HomeScreen from './screens/Home.js';
 import AliasClaimScreen from './screens/AliasClaim.js';
 import BackupScreen from './screens/Backup.js';
@@ -600,8 +608,11 @@ const PASSPORT_CONTRACT_SCOPE = { appId: APP_ID, accountId: 'passport-contract-v
  * See `GuardStep` for why this one, unlike the name step, may be walked
  * past. It is never re-raised by the resolution effect: the card's chip,
  * the guard meter, and the sign-in nag carry the reminder from there.
+ *
+ * 'keys' (P3) is the keys sub-page behind Access's keys row and the meter's
+ * third rung — on demand, like 'backup', never scheduled.
  */
-type IdentityStep = 'welcome' | 'alias' | 'guard' | 'backup' | null;
+type IdentityStep = 'welcome' | 'alias' | 'guard' | 'keys' | 'backup' | null;
 
 /**
  * How long a WebAuthn ceremony may sit unanswered before Passport stops
@@ -1117,6 +1128,13 @@ export default function PassportDemo() {
   const [passportGuarded, setPassportGuarded] = useState(false);
   useEffect(() => {
     setPassportGuarded(profile ? storedGuarded(profile.passkey.credentialId) : false);
+  }, [profile]);
+  /* The recovery key's per-credential record — the other second-way-in. Held
+     beside the backup flag because everything that asks "is this Passport
+     guarded" needs both. Written by the enrolment machine further down. */
+  const [recoveryKeyRecord, setRecoveryKeyRecord] = useState<RecoveryKeyRecord | null>(null);
+  useEffect(() => {
+    setRecoveryKeyRecord(profile ? loadRecoveryKeyRecord(profile.passkey.credentialId) : null);
   }, [profile]);
   // One-button onboarding (2026/08/05): there is no separate "choose" step
   // any more, so the screen only distinguishes idle from working.
@@ -4267,7 +4285,10 @@ export default function PassportDemo() {
    */
   const guardNagged = useRef<string | null>(null);
   useEffect(() => {
-    if (!localSessionActive || !profile || passportGuarded || identityStep !== null) return;
+    /* Unguarded means NO second way in of either kind — the backup file or
+       the enrolled recovery key. Either one quiets the nag. */
+    const guarded = passportGuarded || recoveryKeyRecord !== null;
+    if (!localSessionActive || !profile || guarded || identityStep !== null) return;
     if (guardNagged.current === profile.passkey.credentialId) return;
     guardNagged.current = profile.passkey.credentialId;
     pushToast({
@@ -4275,7 +4296,7 @@ export default function PassportDemo() {
       title: 'Not valid until guarded',
       body: 'Your Passport has no spare key yet. Keep a backup before it needs one.',
     });
-  }, [localSessionActive, profile, passportGuarded, identityStep]);
+  }, [localSessionActive, profile, passportGuarded, recoveryKeyRecord, identityStep]);
   /* The two way-out panels hold the screen open in their own right. They have
      to: a failure that suppresses the error banner in favour of its panel
      would otherwise have nothing left keeping onboarding on screen. */
@@ -4446,6 +4467,111 @@ export default function PassportDemo() {
     }
     return account;
   }, [accountContractOf]);
+
+  /* ---------------------------------------------------------------------- */
+  /* The recovery key — MetaMask sign-to-derive (P3)                        */
+  /*                                                                        */
+  /* The guard ladder's third rung, for real: a device secret derived from   */
+  /* one fixed message signed by a wallet the user already holds            */
+  /* (`identity/recoveryKey.ts`), enrolled on the account contract with      */
+  /* `add_device` and authorised — like every gated call — by the passkey.   */
+  /* Three beats, each its own state below: connect-and-sign, a CONFIRM      */
+  /* that says exactly what goes on chain, then the call. The record kept   */
+  /* here is display state; the LEDGER holds the device.                     */
+  /* ---------------------------------------------------------------------- */
+
+  const [recoveryEnrol, setRecoveryEnrol] = useState<
+    | { stage: 'idle' }
+    | { stage: 'deriving' }
+    | { stage: 'confirm' | 'submitting'; ethAddress: string; commitment: bigint; commitmentTail: string }
+  >({ stage: 'idle' });
+  const [recoveryEnrolError, setRecoveryEnrolError] = useState<string | null>(null);
+  const [recoveryEnrolPhase, setRecoveryEnrolPhase] = useState<string | null>(null);
+
+  /** Connect-and-sign, then derive — nothing touches the chain yet. */
+  const beginRecoveryEnrolment = useCallback(async () => {
+    setRecoveryEnrolError(null);
+    const provider = getEthereumProvider();
+    if (!provider) {
+      setRecoveryEnrolError('No wallet extension answered. Install one and reload.');
+      return;
+    }
+    setRecoveryEnrol({ stage: 'deriving' });
+    try {
+      const { ethAddress, signature } = await requestRecoverySignature(provider);
+      const [{ recoverySecretFromSignature }, { deriveDeviceCommitment, formatFieldHex }] =
+        await Promise.all([
+          import('./identity/recoveryKey.js'),
+          import('./identity/accountCustody.js'),
+        ]);
+      const secret = await recoverySecretFromSignature(signature);
+      let commitment: bigint;
+      try {
+        commitment = await deriveDeviceCommitment(secret);
+      } finally {
+        secret.fill(0);
+      }
+      setRecoveryEnrol({
+        stage: 'confirm',
+        ethAddress,
+        commitment,
+        commitmentTail: formatFieldHex(commitment).slice(-6),
+      });
+    } catch (cause) {
+      setRecoveryEnrol({ stage: 'idle' });
+      setRecoveryEnrolError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }, []);
+
+  /** The chain half — `add_device`, passkey-authorised, fee-sponsored. */
+  const confirmRecoveryEnrolment = useCallback(async () => {
+    if (recoveryEnrol.stage !== 'confirm') return;
+    const { ethAddress, commitment, commitmentTail } = recoveryEnrol;
+    setRecoveryEnrolError(null);
+    setRecoveryEnrol({ stage: 'submitting', ethAddress, commitment, commitmentTail });
+    try {
+      const account = requireAccount();
+      const { addDevice, formatFieldHex } = await import('./identity/accountCustody.js');
+      const result = await withAccountDeviceSecret((deviceSecret) =>
+        addDevice(
+          account.handle,
+          deviceSecret,
+          { contractAddress: account.address, newDeviceCommitment: commitment },
+          (progress) => setRecoveryEnrolPhase(progress.phase),
+        ),
+      );
+      const record: RecoveryKeyRecord = {
+        ethAddress,
+        commitmentHex: formatFieldHex(commitment),
+        txId: result.txId,
+        txIdResolved: result.txIdResolved,
+        network: selectedNetwork,
+        contractAddress: account.address,
+        addedAt: new Date().toISOString(),
+      };
+      if (profile) saveRecoveryKeyRecord(profile.passkey.credentialId, record);
+      setRecoveryKeyRecord(record);
+      setRecoveryEnrol({ stage: 'idle' });
+      addActivity({
+        label: 'Recovery key added',
+        detail: `A key derived from ${ethAddress.slice(0, 6)}…${ethAddress.slice(-4)} can now let you back in — enrolled on your account.`,
+        status: 'complete',
+        source: 'wallet',
+      });
+      pushToast({
+        tone: 'success',
+        title: 'Guard level 3 of 3',
+        body: 'A second key can now rescue this Passport.',
+      });
+    } catch (cause) {
+      /* Back to CONFIRM, not to idle: the derivation is done and retrying the
+         submission must not cost another wallet ceremony. */
+      setRecoveryEnrol({ stage: 'confirm', ethAddress, commitment, commitmentTail });
+      setRecoveryEnrolError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setRecoveryEnrolPhase(null);
+    }
+  }, [addActivity, profile, recoveryEnrol, requireAccount, selectedNetwork, withAccountDeviceSecret]);
 
   /* ---------------------------------------------------------------------- */
   /* Sending to a `.night` name                                             */
@@ -5763,6 +5889,59 @@ export default function PassportDemo() {
           onGuard={() => setIdentityStep('backup')}
           onLater={() => setIdentityStep(null)}
         />
+      ) : identityStep === 'keys' ? (
+        /* The keys sub-page (P3): the passkey, the backup, and the recovery
+           key with its three-beat enrolment. The screen is dumb; the state
+           machine above (`recoveryEnrol`) is the authority. */
+        <KeysScreen
+          passkeySummary={
+            sessionActive
+              ? 'The passkey on this device — it opened this session.'
+              : profile
+                ? 'A passkey this browser knows. Sign in to use it.'
+                : null
+          }
+          backupKept={passportGuarded}
+          onOpenBackup={() => setIdentityStep('backup')}
+          recovery={{
+            record: recoveryKeyRecord
+              ? {
+                  ethAddress: recoveryKeyRecord.ethAddress,
+                  txIdResolved: recoveryKeyRecord.txIdResolved,
+                }
+              : null,
+            stage: recoveryEnrol.stage,
+            pending:
+              recoveryEnrol.stage === 'confirm' || recoveryEnrol.stage === 'submitting'
+                ? {
+                    ethAddress: recoveryEnrol.ethAddress,
+                    commitmentTail: recoveryEnrol.commitmentTail,
+                  }
+                : null,
+            phase: recoveryEnrolPhase,
+            error: recoveryEnrolError,
+            /* Offered only when every part of the act is real: an injected
+               wallet to sign, a session to authorise, and an account to
+               enrol on. Otherwise the reason is said in prose instead. */
+            onBegin:
+              getEthereumProvider() && sessionActive && accountContractAddress
+                ? () => void beginRecoveryEnrolment()
+                : undefined,
+            unavailableReason: !getEthereumProvider()
+              ? 'No wallet extension was found in this browser. Install MetaMask — or any wallet that injects one — and reload to add a recovery key.'
+              : !sessionActive
+                ? 'Sign in with your passkey first — enrolling a key on your account is authorised by the passkey.'
+                : !accountContractAddress
+                  ? 'Your account is still being set up on this network — the key is enrolled on it once it exists.'
+                  : null,
+            onConfirm: () => void confirmRecoveryEnrolment(),
+            onCancel: () => {
+              setRecoveryEnrol({ stage: 'idle' });
+              setRecoveryEnrolError(null);
+            },
+          }}
+          onDone={() => setIdentityStep(null)}
+        />
       ) : identityStep === 'backup' ? (
         /* Off the onboarding chain since 2026/08/06 — reached on demand from
            Home. Since 2026/08/19 it also exports and restores the private
@@ -5788,8 +5967,10 @@ export default function PassportDemo() {
                  exists (backup exported or restored — see GUARDED_STORAGE_PREFIX);
                  the chip opens the Backup screen until it does. */
               guard={{
-                guarded: passportGuarded,
+                backup: passportGuarded,
+                recoveryKey: recoveryKeyRecord !== null,
                 onGuard: profile ? () => setIdentityStep('backup') : undefined,
+                onRecoveryKey: profile ? () => setIdentityStep('keys') : undefined,
               }}
               identity={homeIdentity}
               passportContract={homePassportContract}
@@ -5831,7 +6012,7 @@ export default function PassportDemo() {
                     ? 'A passkey this browser knows'
                     : null
               }
-              onOpenKeys={profile ? () => setIdentityStep('backup') : undefined}
+              onOpenKeys={profile ? () => setIdentityStep('keys') : undefined}
               onSignOut={() => void signOutPassport()}
             />
           ) : (

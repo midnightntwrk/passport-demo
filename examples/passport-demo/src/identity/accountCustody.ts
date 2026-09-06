@@ -1315,6 +1315,46 @@ export interface AddGrantRequest {
  * value cap, and the current device epoch — a `recover()` invalidates every
  * outstanding grant along with every device.
  *
+/** What {@link addDevice} needs to know. */
+export interface AddDeviceRequest {
+  contractAddress: string;
+  /**
+   * The NEW device's commitment — `deriveDeviceCommitment` over a secret the
+   * new device (or its derivation — see `./recoveryKey.ts`) can reproduce.
+   * The commitment, never the secret: enrolment is public, keys are not.
+   */
+  newDeviceCommitment: bigint;
+}
+
+/**
+ * Enrols a second device on the account — `add_device`, authorised by the
+ * CURRENT device's secret (any active device is a 1-of-n admin). This is the
+ * chain half of the guard ladder's third rung: after it lands, the enrolled
+ * secret's holder can authorise every gated circuit this module reaches,
+ * including enrolling a replacement passkey after this one is gone.
+ */
+export async function addDevice(
+  handle: LocalMidnightWallet,
+  deviceSecret: Uint8Array,
+  request: AddDeviceRequest,
+  onPhase?: (progress: AccountCustodyProgress) => void,
+): Promise<AccountCustodyTxResult> {
+  onPhase?.({ phase: 'checking' });
+  await requireFees();
+
+  return callAccountCircuit(
+    handle,
+    {
+      contractAddress: request.contractAddress,
+      circuit: 'add_device',
+      args: [request.newDeviceCommitment],
+      secrets: { deviceSecret },
+    },
+    onPhase,
+  );
+}
+
+/*
  * Re-granting an ALREADY ACTIVE commitment in the same epoch is refused by the
  * circuit ("grant already active"), which surfaces here as `call-rejected` with
  * that message. That is deliberate: raising a cap is a revoke-then-grant, not a

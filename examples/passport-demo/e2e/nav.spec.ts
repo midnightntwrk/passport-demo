@@ -194,11 +194,9 @@ test('the three sections really switch, and none is a dead end', async () => {
 
 test('an unguarded Passport is nagged, honestly, and the ladder leads somewhere real', async () => {
   /* THE GUARD METER. This walk's Passport has a name and an account but no
-     backup, so it is unguarded — and the page must say so in three registers
-     at once: the card's chip, the meter's level, and where the one real act
-     leads. The third rung is the level that does not exist yet (P3), and it
-     is drilled as a NON-control: a button for an escape the build does not
-     offer would teach the reader this app's words are approximate. */
+     backup and no recovery key, so it is unguarded — and the page must say
+     so in three registers at once: the card's chip, the meter's level, and
+     where the two real acts lead. */
   await tabs().nth(0).click();
   const meter = page.locator('.mnguard');
   await expect(meter).toBeVisible();
@@ -206,15 +204,67 @@ test('an unguarded Passport is nagged, honestly, and the ladder leads somewhere 
   await expect(meter).toContainText('Not valid until guarded');
   await expect(page.locator('.mnpcard')).toContainText('NOT VALID UNTIL GUARDED');
 
-  // The rung that is next is not tappable — it says so instead.
-  await expect(meter.getByRole('button', { name: /second key/i })).toHaveCount(0);
-  await expect(meter).toContainText('Not here yet');
-
-  // The one act on the ladder opens the real backup surface, and comes back.
+  // The one act on the second rung opens the real backup surface, and comes back.
   await meter.getByRole('button', { name: 'Keep a backup' }).click();
   await expect(page.getByRole('heading', { name: 'Where your Passport lives' })).toBeVisible();
   await page.getByRole('button', { name: 'Done' }).click();
   await expect(page.locator('.mnpcard')).toBeVisible();
+
+  /* The third rung is REAL since P3 — its act opens the Keys page. This
+     headless browser injects no wallet, and the recovery panel must say
+     exactly that in prose rather than offer a connect button for an act the
+     browser cannot perform. */
+  await meter.getByRole('button', { name: 'Add one' }).click();
+  await expect(page.getByRole('heading', { name: 'Keys', level: 1 })).toBeVisible();
+  await expect(page.getByText('The recovery key')).toBeVisible();
+  await expect(page.getByText(/No wallet extension was found in this browser/)).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Connect MetaMask' })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Done' }).click();
+  await expect(page.locator('.mnpcard')).toBeVisible();
+});
+
+test('a stubbed wallet drives sign-to-derive to the confirm beat, and cancel touches nothing', async () => {
+  /* `personal_sign` is deterministic (RFC 6979), so a fixed signature IS a
+     faithful wallet for everything after the signature — which is exactly
+     the part this app owns: the derivation, and the CONFIRM beat that names
+     what would go on chain before anything does. The submit itself is the
+     live tier's to prove (stagenet.live.spec.ts); here the beat is reached,
+     read, and CANCELLED, and cancelling must leave no record anywhere. */
+  await page.addInitScript(() => {
+    (window as unknown as { ethereum: unknown }).ethereum = {
+      request: async ({ method }: { method: string }) => {
+        if (method === 'eth_requestAccounts') return ['0xc0ffee0000000000000000000000000000005a5a'];
+        if (method === 'personal_sign') return `0x${'42'.repeat(65)}`;
+        throw new Error(`unexpected wallet call: ${method}`);
+      },
+    };
+  });
+  await page.reload();
+  await expect(page.locator('.mnpcard')).toBeVisible({ timeout: 90_000 });
+
+  await tabs().nth(1).click();
+  await page.getByRole('button', { name: /Keys/ }).click();
+  /* Offered now — the stub is a wallet, the session restores, the account is
+     seeded. Waited on with a retrying assertion because the session restore
+     is what arms it. */
+  const connect = page.getByRole('button', { name: 'Connect MetaMask' });
+  await expect(connect).toBeVisible({ timeout: 90_000 });
+  await connect.click();
+
+  /* The confirm beat: the signer is named, the commitment is named as the
+     ONLY thing that goes public, and nothing has been submitted. */
+  await expect(page.getByText(/0xc0ff…5a5a/)).toBeVisible({ timeout: 60_000 });
+  await expect(page.getByText(/puts ONLY its public commitment/)).toBeVisible();
+  const confirm = page.getByRole('button', { name: 'Add to your account' });
+  await expect(confirm).toBeVisible();
+
+  await page.getByRole('button', { name: 'Cancel' }).click();
+  await expect(connect).toBeVisible();
+  const record = await page.evaluate(() =>
+    Object.keys(localStorage).filter((key) => key.startsWith('mn-passport:recovery-key:')),
+  );
+  expect(record).toEqual([]);
+  await page.getByRole('button', { name: 'Done' }).click();
 });
 
 test('the way out is on every tab', async () => {
@@ -267,8 +317,12 @@ test('this device can forget its Passport, and onboarding starts over', async ()
      network survive — device preferences, not identity. The passkey survives too (the platform
      keychain is not the app's to clear), which is why the landing screen is
      what is asserted rather than anything about credentials. */
+  /* The route is the product's own: Access → Keys (the sub-page since P3) →
+     the backup surface, where the danger zone lives. */
   await tabs().nth(1).click();
   await page.getByRole('button', { name: /Keys/ }).click();
+  await expect(page.getByRole('heading', { name: 'Keys', level: 1 })).toBeVisible();
+  await page.getByRole('button', { name: 'Back up or restore' }).click();
   await expect(page.getByRole('heading', { name: 'Where your Passport lives' })).toBeVisible();
 
   // Two presses: arm, then act. One press must not be enough.
