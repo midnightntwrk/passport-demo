@@ -45,6 +45,7 @@ import { renderSVG } from 'uqr';
 
 import { installNetworkBoundary, PASSPORT_ACCOUNT_ADDRESS, RESOLVABLE_NAME } from './mocks.js';
 import { installVirtualAuthenticator } from './passkey.js';
+import { specViewport } from './viewport.js';
 
 test.describe.configure({ mode: 'serial' });
 
@@ -156,7 +157,7 @@ async function openScanner(): Promise<void> {
 }
 
 test.beforeAll(async ({ browser }) => {
-  const context = await browser.newContext({ viewport: { width: 420, height: 900 } });
+  const context = await browser.newContext({ viewport: specViewport({ width: 420, height: 900 }) });
   page = await context.newPage();
   await installNetworkBoundary(page);
   await installVirtualAuthenticator(context, page);

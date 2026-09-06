@@ -100,4 +100,18 @@
 }
 .mnaccess-keysrow-chevron { color: var(--mn-text-muted); flex: 0 0 auto; }
 
+/* Desktop (≥1100px): the rail carries the brand, so the bar keeps only its
+   right-aligned actions, and the reading content caps at a text-friendly
+   680px against the 920px area the screen padding centres (tokens.css) —
+   left-aligned, so the content edge lines up with Home's rather than
+   drifting as tabs change. */
+@media (min-width: 1100px) {
+  .mnaccess-bar { justify-content: flex-end; }
+  .mnaccess-head,
+  .mnaccess-empty,
+  .mnaccess-keysrow {
+    max-width: 680px;
+  }
+}
+
 body:has(.mnaccess-screen) { background: var(--mn-surface-page); }

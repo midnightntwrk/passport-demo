@@ -62,6 +62,7 @@ import {
   type NetworkBoundary,
 } from './mocks.js';
 import { installVirtualAuthenticator } from './passkey.js';
+import { specViewport } from './viewport.js';
 
 test.describe.configure({ mode: 'serial' });
 
@@ -76,7 +77,7 @@ const RECIPIENT =
   'mn_addr_stagenet127xnp9uuxwhh7a8an77mxv02ypt6u09xkk63c9zvdkjsrj4mj68qg7c5ad';
 
 test.beforeAll(async ({ browser }) => {
-  const context = await browser.newContext({ viewport: { width: 420, height: 900 } });
+  const context = await browser.newContext({ viewport: specViewport({ width: 420, height: 900 }) });
   page = await context.newPage();
   network = await installNetworkBoundary(page);
   await installVirtualAuthenticator(context, page);
@@ -985,7 +986,7 @@ test('a passkey this browser does not know about never blocks the way in', async
      be consulted, must not be replaced, and must not stand in anybody's way.
 
      Its own context: the shared page above already holds a real Passport. */
-  const context = await browser.newContext({ viewport: { width: 420, height: 900 } });
+  const context = await browser.newContext({ viewport: specViewport({ width: 420, height: 900 }) });
   const fresh = await context.newPage();
   await installNetworkBoundary(fresh);
 
@@ -1152,7 +1153,7 @@ test('a Passport whose passkey this device cannot produce is offered a new one',
      Passport" targets the stored credential, the keystore has nothing to
      answer with, and the screen that comes back offers to make one. */
   test.setTimeout(180_000);
-  const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  const context = await browser.newContext({ viewport: specViewport({ width: 390, height: 844 }) });
   const stranded = await context.newPage();
   await installNetworkBoundary(stranded);
   const authenticator = await installVirtualAuthenticator(context, stranded);
@@ -1216,7 +1217,7 @@ test('a picker with nothing in it offers a new passkey too, not just an apology'
      create path's advice sent people, so the advice led from one dead end to
      another. */
   test.setTimeout(180_000);
-  const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  const context = await browser.newContext({ viewport: specViewport({ width: 390, height: 844 }) });
   const stranded = await context.newPage();
   await installNetworkBoundary(stranded);
   const authenticator = await installVirtualAuthenticator(context, stranded);
@@ -1265,7 +1266,7 @@ test('a passkey that is still there is signed in to, never created over', async 
      Chrome 140, does not turn it back on, so an authenticator crippled that
      way could not perform the enrolment this test is about. */
   test.setTimeout(240_000);
-  const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  const context = await browser.newContext({ viewport: specViewport({ width: 390, height: 844 }) });
   const held = await context.newPage();
   await installNetworkBoundary(held);
 
@@ -1405,7 +1406,7 @@ test('a claim whose passkey will not answer offers a retry, a way out, and a way
   browser,
 }) => {
   test.setTimeout(300_000);
-  const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  const context = await browser.newContext({ viewport: specViewport({ width: 390, height: 844 }) });
   const stalled = await context.newPage();
   await installNetworkBoundary(stalled);
   const authenticator = await installVirtualAuthenticator(context, stalled);

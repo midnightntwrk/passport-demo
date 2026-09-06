@@ -119,6 +119,10 @@
   --mn-radius-pill: 999px;
   --mn-hairline: 1px;
   --mn-nav-height: 76px;
+  /* The desktop rail's width (nav.css). Screens clear it — see the ≥1100px
+     shell below — so the two must agree, which is why it is a token rather
+     than the same number repeated in two files. */
+  --mn-rail-w: 236px;
 
   /* Fixed "ink" scale ------------------------------------------------
      Values that stay dark in BOTH themes, matching the dark theme's
@@ -341,6 +345,29 @@ body:has(.mnob-screen) {
   .passport-experience .mnassets-screen,
   .passport-experience .mnid-screen {
     padding-inline: max(28px, calc((100% - 640px) / 2));
+  }
+}
+
+/* Desktop (≥1100px). The nav becomes a full-height left rail (nav.css), so
+   the TAB screens clear it and centre a 920px content area in the space that
+   remains; the bottom clearance the floating pill needed goes with the pill.
+   The rail carries the brand, so the per-screen wordmark comes off the bar.
+   `.mnid-screen` is NOT here on purpose: Backup renders in place of the tab
+   tree, with no rail beside it, and keeps the centred column above. */
+@media (min-width: 1100px) {
+  .passport-experience .mnhome-screen,
+  .passport-experience .mnaccess-screen,
+  .passport-experience .mnstamps-screen,
+  .passport-experience .mnassets-screen {
+    padding-inline:
+      calc(var(--mn-rail-w) + max(48px, (100% - var(--mn-rail-w) - 920px) / 2))
+      max(48px, calc((100% - var(--mn-rail-w) - 920px) / 2));
+    padding-bottom: 56px;
+  }
+  .passport-experience .mnhome-wordmark,
+  .passport-experience .mnaccess-wordmark,
+  .passport-experience .mnstamps-wordmark {
+    display: none;
   }
 }
 

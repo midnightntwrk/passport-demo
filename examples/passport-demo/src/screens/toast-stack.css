@@ -25,6 +25,18 @@
   perspective: 800px;
 }
 
+/* On the desktop shell the nav is a left rail (nav.css), so the viewport's
+   centre is not the content's: shift the stack by half the rail — and only
+   when a rail is actually on screen, which is what the :has() asks. The
+   screens without one (onboarding, backup) keep the plain centre. The
+   nav-height term in `bottom` above is harmless here: the rail leaves the
+   foot clear, so the stack simply floats a little higher. */
+@media (min-width: 1100px) {
+  body:has(.mnnav) .mntoast-viewport {
+    left: calc(50% + var(--mn-rail-w) / 2);
+  }
+}
+
 .mntoast {
   position: absolute;
   bottom: 0;

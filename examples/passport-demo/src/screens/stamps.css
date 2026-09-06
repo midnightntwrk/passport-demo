@@ -43,4 +43,16 @@
 }
 .mnstamps-lede { margin: 0; color: var(--mn-text-secondary); font-size: 14px; }
 
+/* Desktop (≥1100px): mirrors access.css — actions right, reading column
+   capped at 680px and left-aligned so the content edge matches the other
+   tabs. The trail keeps its mnhome-activity classes (see the header comment),
+   so the cap lands on the wrapper this screen owns. */
+@media (min-width: 1100px) {
+  .mnstamps-bar { justify-content: flex-end; }
+  .mnstamps-head,
+  .mnstamps-screen .mnhome-activity {
+    max-width: 680px;
+  }
+}
+
 body:has(.mnstamps-screen) { background: var(--mn-surface-page); }

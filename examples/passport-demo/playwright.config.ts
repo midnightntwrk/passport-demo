@@ -24,6 +24,8 @@
 
 import { defineConfig, devices } from '@playwright/test';
 
+import { specViewport } from './e2e/viewport.js';
+
 /** True when this run is pointed at the deployed site and a real chain. */
 const live = process.env.RUN_LIVE === '1';
 
@@ -74,13 +76,10 @@ export default defineConfig({
         ...devices['Desktop Chrome'],
         /* A phone-shaped viewport by default. PW_VIEWPORT=1440x900 runs the
            same suite desktop-sized — the desktop shell must keep every
-           control reachable, and this override is how that is proven. */
-        viewport: (() => {
-          const m = process.env.PW_VIEWPORT?.match(/^(\d+)x(\d+)$/);
-          return m
-            ? { width: Number(m[1]), height: Number(m[2]) }
-            : { width: 420, height: 900 };
-        })(),
+           control reachable, and this override is how that is proven. The
+           specs open their own contexts, which is why the parsing lives in
+           e2e/viewport.ts and not here — see that file's header. */
+        viewport: specViewport({ width: 420, height: 900 }),
       },
     },
   ],

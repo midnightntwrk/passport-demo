@@ -568,6 +568,13 @@ export default function HomeScreen(props: HomeScreenProps) {
       ) : null}
 
       <div className="mnhome-body">
+        {/* TWO COLUMNS THAT ARE NOT THERE ON A PHONE. Both wrappers are
+            `display: contents` below 1100px, so the phone layout is exactly
+            the single flex column it has always been; on the desktop grid the
+            main column carries the greeting and the money, and the side
+            column carries the identity cards and the housekeeping. See the
+            desktop block in home.css. */}
+        <div className="mnhome-col-main">
         <div className="mnhome-identity">
           <p className="mnhome-kicker">Passport</p>
           {/* The greeting carries the user's own name once they hold one: the
@@ -700,6 +707,9 @@ export default function HomeScreen(props: HomeScreenProps) {
           </article>
         ) : null}
 
+        </div>
+
+        <div className="mnhome-col-side">
         {/* Identity: the name held on this network, its real registration
             transactions or the reason it is only queued, and what has been
             redeemed across the ecosystem. */}
@@ -893,6 +903,7 @@ export default function HomeScreen(props: HomeScreenProps) {
         {/* Renders nothing where the browser has no Notification API, which is
             why it needs no condition here. */}
         <NotificationToggle />
+        </div>
 
       </div>
     </section>

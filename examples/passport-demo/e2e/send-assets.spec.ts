@@ -41,6 +41,7 @@ import { expect, test, type Page } from '@playwright/test';
 
 import { installNetworkBoundary, PASSPORT_ACCOUNT_ADDRESS, RESOLVABLE_NAME } from './mocks.js';
 import { installVirtualAuthenticator } from './passkey.js';
+import { specViewport } from './viewport.js';
 
 test.describe.configure({ mode: 'serial' });
 
@@ -66,7 +67,7 @@ const SHIELDED =
   'mn_shield-addr_stagenet1zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygjyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygs74ltnl';
 
 test.beforeAll(async ({ browser }) => {
-  const context = await browser.newContext({ viewport: { width: 420, height: 900 } });
+  const context = await browser.newContext({ viewport: specViewport({ width: 420, height: 900 }) });
   page = await context.newPage();
   await installNetworkBoundary(page);
   await installVirtualAuthenticator(context, page);

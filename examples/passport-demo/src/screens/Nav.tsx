@@ -2,16 +2,18 @@ import { BookUser, KeyRound, Stamp } from 'lucide-react'
 import './nav.css'
 
 /**
- * Bottom navigation for the mobile Passport experience.
+ * Section navigation for the Passport experience.
  *
- * Both screens reserve bottom padding for the bar's zone. The bar sits at
- * z-index 100, beneath the PWA install and update actions at 105, so those
- * controls remain reachable.
- *
- * The bar is a floating card with a gap beneath it and gutters beside it, so
- * a sibling backdrop strip (z-index 99) spans the full viewport width behind
- * it, painted in the page surface. Scrolled content disappears cleanly at the
- * strip's top hairline instead of slicing through the gaps around the card.
+ * ONE component, TWO shapes, decided by nav.css alone. On a phone it is the
+ * floating bottom pill: both screens reserve bottom padding for its zone, it
+ * sits at z-index 100 beneath the PWA install and update actions at 105, and
+ * a sibling backdrop strip (z-index 99) spans the viewport behind it so
+ * scrolled content disappears cleanly at the strip's top hairline instead of
+ * slicing through the gaps around the card. From 1100px up it is a
+ * full-height left rail — the strip disappears, the tabs turn into rows, and
+ * the brand block below (hidden on the phone, where every screen's own bar
+ * carries the wordmark) heads the rail. The markup never changes, so a test
+ * that finds the Passport button by name finds it at every width.
  *
  * PASSPORT / ACCESS / STAMPS since the identity-first redesign: Passport is
  * the document (who you are), Access is who may act with it and how far, and
@@ -41,6 +43,10 @@ export default function PassportNav(props: PassportNavProps) {
     <>
       <div className="mnnav-backdrop" aria-hidden="true" />
       <nav className="mnnav" aria-label="Passport sections">
+        <div className="mnnav-brand">
+          <img src="/skunk/mark.svg" alt="" aria-hidden="true" />
+          <span>Passport</span>
+        </div>
         {TABS.map((tab) => {
           const Icon = tab.icon
           const current = tab.key === active

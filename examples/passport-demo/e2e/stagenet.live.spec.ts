@@ -40,6 +40,7 @@
 import { expect, test, type Page } from '@playwright/test';
 
 import { installVirtualAuthenticator, uniqueAlias } from './passkey.js';
+import { specViewport } from './viewport.js';
 
 /** Only runs deliberately. Every run spends stagenet NIGHT and claims a name. */
 const live = process.env.RUN_LIVE === '1';
@@ -101,7 +102,7 @@ test.describe('@live the account model on stagenet', () => {
   const alias = uniqueAlias('walk');
 
   test.beforeAll(async ({ browser }) => {
-    const context = await browser.newContext({ viewport: { width: 420, height: 900 } });
+    const context = await browser.newContext({ viewport: specViewport({ width: 420, height: 900 }) });
     page = await context.newPage();
     await installVirtualAuthenticator(context, page);
     page.on('console', (message) => {

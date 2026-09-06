@@ -122,6 +122,15 @@
   padding-bottom: calc(var(--mn-nav-height) + 24px + env(safe-area-inset-bottom));
 }
 
+/* The desktop grid's two columns (Home.tsx). On the phone they do not exist:
+   `display: contents` hands their children straight back to the body's flex
+   column, so the single-column layout is untouched by the wrappers. The
+   ≥1100px block at the foot of this file turns them into real columns. */
+.mnhome-col-main,
+.mnhome-col-side {
+  display: contents;
+}
+
 .mnhome-micro {
   margin: 0;
   color: var(--mn-text-muted);
@@ -1261,4 +1270,45 @@ button.mnhome-support { font-family: inherit; cursor: pointer; }
 .mnhome-assets-more:focus-visible {
   outline: 2px solid var(--mn-accent);
   outline-offset: 2px;
+}
+
+/* --- Desktop (≥1100px) ---------------------------------------------------- */
+
+/* The rail owns the left edge and the screen padding centres a 920px content
+   area (tokens.css), so the bar and the body stop capping themselves and fill
+   it. The body becomes a two-column grid: the greeting and the money on the
+   left, where the eye lands first; the identity cards and the housekeeping on
+   the right, in view without scrolling instead of two screens down. The
+   column wrappers are `display: contents` on the phone — see .mnhome-col-main
+   above — so nothing below 1100px moves. */
+@media (min-width: 1100px) {
+  .mnhome-bar,
+  .mnhome-body {
+    width: 100%;
+  }
+
+  .mnhome-body {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 340px);
+    gap: 20px 36px;
+    align-items: start;
+    /* The rail replaced the bottom pill; the screen's own 56px (tokens.css)
+       is the only clearance the foot needs. */
+    padding-bottom: 0;
+  }
+
+  .mnhome-col-main,
+  .mnhome-col-side {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    min-width: 0;
+  }
+
+  /* Three balance cards to a row: the main column is ~550px here, and two
+     cards that wide read as slabs. The container-query value sizing keeps
+     the figures fitting whatever the card width lands on. */
+  .mnhome-assets {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
 }
