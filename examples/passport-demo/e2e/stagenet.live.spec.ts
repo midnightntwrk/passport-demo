@@ -690,8 +690,13 @@ test.describe('@live the account model on stagenet', () => {
 
       /* B: the ledger watch finds its own commitment and lands. Nothing on A
          told B anything — the poll reads the account state every ten seconds,
-         so the landing IS the on-chain read-back. */
-      await expect(deviceB.locator('.mnpcard')).toBeVisible({ timeout: 10 * 60_000 });
+         so the landing IS the on-chain read-back. 15 min, not 10: run 1 of
+         this beat (2026/09/07) had A's add_device CONFIRM and B still watching
+         at the 10-min mark — the tx had landed, the indexer had not yet served
+         it to a fresh reader on an account that also took a deploy and a
+         recovery-key add in the same run. The wait absorbs that propagation;
+         it does not paper over a missing device, which would never appear. */
+      await expect(deviceB.locator('.mnpcard')).toBeVisible({ timeout: 15 * 60_000 });
       await expect(deviceB.locator('.mnpcard')).toContainText('GUARDED');
       await expect(deviceB.getByText(`${alias}.night`).first()).toBeVisible();
 
@@ -767,8 +772,9 @@ test.describe('@live the account model on stagenet', () => {
         timeout: 20 * 60_000,
       });
 
-      // The ledger watch lands the join; nothing but the chain said so.
-      await expect(deviceC.locator('.mnpcard')).toBeVisible({ timeout: 10 * 60_000 });
+      // The ledger watch lands the join; nothing but the chain said so. 15 min
+      // for the indexer propagation the handoff beat measured above.
+      await expect(deviceC.locator('.mnpcard')).toBeVisible({ timeout: 15 * 60_000 });
       await expect(deviceC.locator('.mnpcard')).toContainText('GUARDED');
       const accountC = await storedAccountContract(deviceC);
       expect(accountC).toBe(await storedAccountContract(page));
