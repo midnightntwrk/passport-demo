@@ -2,6 +2,8 @@ import { lazy, Suspense, useState } from 'react'
 import { ArrowRight, FileKey2, Fingerprint, KeySquare, MonitorSmartphone, ScanLine } from 'lucide-react'
 
 import { parseQrPayload, type QrPayload } from '../lib/qrPayload.js'
+import type { CustodyPhase } from '../lib/custodySteps.js'
+import CustodyProgress from './CustodyProgress.js'
 import ThemeToggle from './ThemeToggle.js'
 import './identity.css'
 
@@ -40,8 +42,8 @@ export interface KeysRecoveryState {
   stage: 'idle' | 'deriving' | 'confirm' | 'submitting'
   /** Set at the confirm beat: what enrolment will put on chain. */
   pending: { ethAddress: string; commitmentTail: string } | null
-  /** The live phase of the account call, in the seam's own words. */
-  phase: string | null
+  /** The live phase of the account call — drives the progress stepper. */
+  phase: CustodyPhase | null
   error: string | null
   /** Starts connect-and-sign. Absent when no injected wallet is in this browser. */
   onBegin?: (() => void) | undefined
@@ -62,7 +64,7 @@ export interface KeysAdmitState {
   stage: 'idle' | 'checking' | 'confirm' | 'submitting'
   /** Set at the confirm beat: what admitting will put on chain, and for whom. */
   pending: { domain: string; commitmentTail: string } | null
-  phase: string | null
+  phase: CustodyPhase | null
   error: string | null
   /**
    * Takes a decoded join code — from the camera, an image, or pasted text.
@@ -192,11 +194,10 @@ export default function KeysScreen(props: KeysScreenProps) {
           ) : recovery.stage === 'deriving' ? (
             <p>Waiting for the wallet — connect it, then sign the recovery message…</p>
           ) : recovery.stage === 'submitting' ? (
-            <p>
-              Adding the key to your account…
-              {recovery.phase ? ` (${recovery.phase})` : ''} This proves and submits a real
-              transaction, and can take a minute.
-            </p>
+            <>
+              <p>Adding the key to your account. This proves and submits a real transaction.</p>
+              <CustodyProgress phase={recovery.phase} />
+            </>
           ) : (
             <>
               <p>
@@ -257,11 +258,10 @@ export default function KeysScreen(props: KeysScreenProps) {
           ) : admit.stage === 'checking' ? (
             <p>Checking that code against the registry — whose Passport it was drawn for…</p>
           ) : admit.stage === 'submitting' ? (
-            <p>
-              Admitting the device…
-              {admit.phase ? ` (${admit.phase})` : ''} This proves and submits a real
-              transaction, and can take a minute.
-            </p>
+            <>
+              <p>Admitting the device. This proves and submits a real transaction.</p>
+              <CustodyProgress phase={admit.phase} />
+            </>
           ) : (
             <>
               {!admit.record ? (

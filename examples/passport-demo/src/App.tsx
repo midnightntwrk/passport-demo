@@ -73,6 +73,7 @@ import {
 } from './identity/secondDevice.js';
 import { classifyRecipientInput } from './lib/recipientName.js';
 import { encodeAddDevicePayload, type QrPayload } from './lib/qrPayload.js';
+import type { CustodyPhase } from './lib/custodySteps.js';
 import {
   loadConnections,
   recordConnection,
@@ -1224,7 +1225,7 @@ export default function PassportDemo() {
     | { stage: 'confirm' | 'submitting'; domain: string; commitment: bigint; commitmentTail: string }
   >({ stage: 'idle' });
   const [admitError, setAdmitError] = useState<string | null>(null);
-  const [admitPhase, setAdmitPhase] = useState<string | null>(null);
+  const [admitPhase, setAdmitPhase] = useState<CustodyPhase | null>(null);
   /* The rescue machine — the recovery rehearsal's landing half: on the join
      screen's show stage, the wallet-derived recovery key admits THIS device
      itself. The derived secret lives in the ref between the beats, never in
@@ -1235,7 +1236,7 @@ export default function PassportDemo() {
     | { stage: 'confirm' | 'submitting'; ethAddress: string }
   >({ stage: 'idle' });
   const [joinRescueError, setJoinRescueError] = useState<string | null>(null);
-  const [joinRescuePhase, setJoinRescuePhase] = useState<string | null>(null);
+  const [joinRescuePhase, setJoinRescuePhase] = useState<CustodyPhase | null>(null);
   const joinRescueSecret = useRef<Uint8Array | null>(null);
   // One-button onboarding (2026/08/05): there is no separate "choose" step
   // any more, so the screen only distinguishes idle from working.
@@ -4641,7 +4642,7 @@ export default function PassportDemo() {
     | { stage: 'confirm' | 'submitting'; ethAddress: string; commitment: bigint; commitmentTail: string }
   >({ stage: 'idle' });
   const [recoveryEnrolError, setRecoveryEnrolError] = useState<string | null>(null);
-  const [recoveryEnrolPhase, setRecoveryEnrolPhase] = useState<string | null>(null);
+  const [recoveryEnrolPhase, setRecoveryEnrolPhase] = useState<CustodyPhase | null>(null);
 
   /** Connect-and-sign, then derive — nothing touches the chain yet. */
   const beginRecoveryEnrolment = useCallback(async () => {
@@ -4935,6 +4936,14 @@ export default function PassportDemo() {
         domain: join.domain,
         network: selectedNetwork,
         status: 'registered',
+        /* Recovered, not registered-here: this device confirmed the name
+           resolves to the account but never sent the registration, so it
+           carries no tx ids and says so — the alias store's `recovered` rule
+           exempts it in exchange for the confirmed read-back below. Without
+           this the landing threw on `saveAliasRecord` and never completed
+           (two live rehearsal runs, 2026/09/07; the handoff's watch had been
+           swallowing the same throw as a read error). */
+        recovered: true,
         ...(join.resolverAddress ? { resolverAddress: join.resolverAddress } : {}),
         registryConfirmed: true,
         resolverTarget: 'contract',

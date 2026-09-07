@@ -1,6 +1,8 @@
 import { ArrowRight, Check, Copy, KeyRound, KeySquare, Search } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
 
+import type { CustodyPhase } from '../lib/custodySteps.js'
+import CustodyProgress from './CustodyProgress.js'
 import ThemeToggle from './ThemeToggle.js'
 import './identity.css'
 
@@ -63,7 +65,7 @@ export interface JoinRescueState {
   stage: 'idle' | 'signing' | 'confirm' | 'submitting'
   /** Set at the confirm beat: the wallet whose key answered. */
   pending: { ethAddress: string } | null
-  phase: string | null
+  phase: CustodyPhase | null
   error: string | null
   /** Starts connect-and-sign. Absent without an injected wallet. */
   onBegin?: (() => void) | undefined
@@ -306,11 +308,13 @@ export default function JoinDevice(props: JoinDeviceProps) {
               ) : rescue.stage === 'signing' ? (
                 <p>Waiting for the wallet — connect it, then sign the recovery message…</p>
               ) : rescue.stage === 'submitting' ? (
-                <p>
-                  Admitting this device…
-                  {rescue.phase ? ` (${rescue.phase})` : ''} This proves and submits a real
-                  transaction, and can take a minute. You are taken in the moment it confirms.
-                </p>
+                <>
+                  <p>
+                    Admitting this device with your recovery key. You are taken in the moment it
+                    confirms.
+                  </p>
+                  <CustodyProgress phase={rescue.phase} />
+                </>
               ) : (
                 <>
                   <p>

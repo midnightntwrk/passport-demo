@@ -24,6 +24,21 @@ export interface AliasRecord {
   /** Whether the registry itself was seen carrying the name. */
   registryConfirmed?: boolean;
   /**
+   * True when this record was NOT written by a registration this device
+   * performed, but adopted after another device registered the name — the
+   * device-join and recovery landings (`App.tsx` `adoptJoin`).
+   *
+   * The exact analogue of the contract store's `recovered`: a joining device
+   * confirms the name resolves to the account and then holds it as its own
+   * display record, but it never deployed the resolver and never sent the
+   * registration, so it has NO transaction ids for either — and inventing
+   * plausible ones would be the lie the tx-id rule exists to prevent. In
+   * exchange the bar is higher: {@link refuseAliasRecord} demands
+   * {@link registryConfirmed} on a recovered record, so "registered" can never
+   * be written on the strength of nothing.
+   */
+  recovered?: boolean;
+  /**
    * What the resolver leaf this record's claim deployed actually points at.
    *
    * OPTIONAL, and absent on every record written before 2026/08/19 — those
@@ -159,7 +174,16 @@ function refuseAliasRecord(record: AliasRecord): string | null {
   ) {
     return 'An alias record\'s status must be registered, queued, or failed.';
   }
-  if (record.status === 'registered' && (!record.resolverDeployTxId || !record.registerTxId)) {
+  if (record.status === 'registered' && record.recovered) {
+    /* The recovered case, exempt from the tx-id rule for the same reason the
+       contract store's is: this device never registered the name, so it holds
+       no transaction ids. In exchange it must have confirmed the name against
+       the registry — "registered" is never written on the strength of a claim
+       by another device alone. */
+    if (record.registryConfirmed !== true) {
+      return 'A recovered alias record must carry a confirmed registry read-back.';
+    }
+  } else if (record.status === 'registered' && (!record.resolverDeployTxId || !record.registerTxId)) {
     return 'A registered alias record must carry both the resolver deployment and registration transaction ids.';
   }
   if (record.status !== 'registered' && !record.queuedReason) {
