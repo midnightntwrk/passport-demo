@@ -60,7 +60,7 @@ export interface JoinDeviceState {
  * the one secret, for exactly as long as the ceremony needs it.
  */
 export interface JoinRescueState {
-  stage: 'idle' | 'signing' | 'confirm' | 'submitting' | 'submitted'
+  stage: 'idle' | 'signing' | 'confirm' | 'submitting'
   /** Set at the confirm beat: the wallet whose key answered. */
   pending: { ethAddress: string } | null
   phase: string | null
@@ -309,10 +309,8 @@ export default function JoinDevice(props: JoinDeviceProps) {
                 <p>
                   Admitting this device…
                   {rescue.phase ? ` (${rescue.phase})` : ''} This proves and submits a real
-                  transaction, and can take a minute.
+                  transaction, and can take a minute. You are taken in the moment it confirms.
                 </p>
-              ) : rescue.stage === 'submitted' ? (
-                <p>Submitted and confirmed — the ledger watch above lands this device next.</p>
               ) : (
                 <>
                   <p>

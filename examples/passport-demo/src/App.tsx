@@ -1232,7 +1232,7 @@ export default function PassportDemo() {
   const [joinRescue, setJoinRescue] = useState<
     | { stage: 'idle' }
     | { stage: 'signing' }
-    | { stage: 'confirm' | 'submitting' | 'submitted'; ethAddress: string }
+    | { stage: 'confirm' | 'submitting'; ethAddress: string }
   >({ stage: 'idle' });
   const [joinRescueError, setJoinRescueError] = useState<string | null>(null);
   const [joinRescuePhase, setJoinRescuePhase] = useState<string | null>(null);
@@ -4894,11 +4894,17 @@ export default function PassportDemo() {
   }, [joinFlow, selectedNetwork, withAccountDeviceSecret]);
 
   /**
-   * The landing, written ONLY off a ledger read that found this device's own
-   * commitment active. Every record it writes states what that read proved:
-   * a `recovered` contract record (this device never saw a deployment, so it
-   * has no transaction to carry), the alias the join resolved through, the
-   * pairing itself, and the name step marked done so no wizard re-asks.
+   * The landing, and the two ways this device can have earned it.
+   *
+   * `via: 'handoff'` — the watch saw this device's commitment go active after
+   * ANOTHER device admitted it; the ledger read IS the proof, and the words
+   * say so. `via: 'rescue'` — this device admitted ITSELF with the recovery
+   * key and holds its own confirmed `add_device` result, so it lands on that
+   * proof rather than re-reading the chain to learn what it just wrote. The
+   * records written are identical (a `recovered` contract record with no
+   * deployment this device saw, the alias, the pairing, the name step marked
+   * done); only the sentence the user reads differs, because "another device
+   * admitted you" is false in the rescue.
    */
   const adoptJoin = useCallback(
     async (join: {
@@ -4906,6 +4912,7 @@ export default function PassportDemo() {
       accountAddress: string;
       resolverAddress?: string;
       commitmentHex: string;
+      via?: 'handoff' | 'rescue';
     }) => {
       const activeProfile = profileRef.current;
       if (!activeProfile) return;
@@ -4947,17 +4954,21 @@ export default function PassportDemo() {
       setJoinWatchLine(null);
       setJoinFlow({ stage: 'name', busy: false });
       setIdentityStep(null);
+      const viaRescue = join.via === 'rescue';
       addActivity({
         label: `Joined ${join.domain}`,
-        detail:
-          'Another device admitted this one: its key is on the account now, read back from the ledger.',
+        detail: viaRescue
+          ? 'Your recovery key admitted this device — its own key is on the account now, and no other device took part.'
+          : 'Another device admitted this one: its key is on the account now, read back from the ledger.',
         status: 'complete',
         source: 'chain',
       });
       pushToast({
         tone: 'success',
         title: `This device now opens ${join.domain}`,
-        body: 'Admitted by your other device, confirmed on the ledger.',
+        body: viaRescue
+          ? 'Recovered with your recovery key, confirmed on the ledger.'
+          : 'Admitted by your other device, confirmed on the ledger.',
       });
       /* The new passkey should carry its account the way an original does —
          best effort, its own ceremony, never blocking the landing. */
@@ -5218,6 +5229,8 @@ export default function PassportDemo() {
       setJoinRescueError('The Passport signing session closed. Sign in again, then retry.');
       return;
     }
+    /* Captured before adoptJoin clears joinFlow: the landing reads these. */
+    const { domain, resolverAddress } = joinFlow;
     setJoinRescueError(null);
     setJoinRescue({ stage: 'submitting', ethAddress });
     try {
@@ -5228,15 +5241,25 @@ export default function PassportDemo() {
         { contractAddress: accountAddress, newDeviceCommitment: BigInt(`0x${commitmentHex}`) },
         (progress) => setJoinRescuePhase(progress.phase),
       );
-      /* Done with the secret the moment the call lands. The WATCH is what
-         finishes the join — this machine only reports the submit honestly. */
+      /* Done with the secret the moment the call lands. THIS device did the
+         add_device and holds its confirmed result, so it LANDS on that proof
+         — it does not defer to the ledger watch (built for the handoff, where
+         the joining device cannot know when the OTHER one acts). Deferring
+         re-read the chain to learn what this call just wrote, and hung for
+         ever when a fresh device's cold-sync load made those reads flaky
+         (two live runs, 2026/09/07: add_device confirmed, watch never landed
+         under 502s). adoptJoin resets joinFlow, so the show-stage watch stops
+         on its own. */
       disposeJoinRescueSecret();
-      setJoinRescue({ stage: 'submitted', ethAddress });
-      addActivity({
-        label: 'Recovered with your recovery key',
-        detail: `The key derived from ${ethAddress.slice(0, 6)}…${ethAddress.slice(-4)} admitted this device to your account — no other device involved.`,
-        status: 'complete',
-        source: 'chain',
+      /* Straight to the landing — no "submitted, now waiting" dwell, because
+         there is nothing to wait for: this device's own confirmed add_device
+         IS the proof. adoptJoin resets joinFlow, unmounting this screen. */
+      await adoptJoin({
+        domain,
+        accountAddress,
+        ...(resolverAddress ? { resolverAddress } : {}),
+        commitmentHex,
+        via: 'rescue',
       });
     } catch (cause) {
       /* Back to CONFIRM with the secret still held: retrying the submission
@@ -5246,7 +5269,7 @@ export default function PassportDemo() {
     } finally {
       setJoinRescuePhase(null);
     }
-  }, [addActivity, disposeJoinRescueSecret, joinFlow, joinRescue]);
+  }, [adoptJoin, disposeJoinRescueSecret, joinFlow, joinRescue]);
 
   /* The secret's backstop: whenever the show stage is left — the join landed,
      the exit was taken, the session closed — whatever the ref still holds is

@@ -767,14 +767,14 @@ test.describe('@live the account model on stagenet', () => {
       await waitForSponsor();
       await deviceC.getByRole('button', { name: 'Admit this device with it' }).click();
 
-      // Proving and submitting, authorised by the recovery secret — minutes.
-      await expect(deviceC.getByText(/Submitted and confirmed/)).toBeVisible({
-        timeout: 20 * 60_000,
-      });
-
-      // The ledger watch lands the join; nothing but the chain said so. 15 min
-      // for the indexer propagation the handoff beat measured above.
-      await expect(deviceC.locator('.mnpcard')).toBeVisible({ timeout: 15 * 60_000 });
+      /* Proving and submitting the recovery-authorised add_device — minutes —
+         and then the device LANDS on its own confirmed transaction. It does
+         not re-read the chain to learn what it just wrote: two live runs
+         (2026/09/07) had this add_device CONFIRM while a fresh device's cold
+         sync starved its ledger reads with 502s and it hung for ever. The
+         landing is the direct consequence of the submit now, so `.mnpcard`
+         appearing is the proof the rescue completed. */
+      await expect(deviceC.locator('.mnpcard')).toBeVisible({ timeout: 20 * 60_000 });
       await expect(deviceC.locator('.mnpcard')).toContainText('GUARDED');
       const accountC = await storedAccountContract(deviceC);
       expect(accountC).toBe(await storedAccountContract(page));
