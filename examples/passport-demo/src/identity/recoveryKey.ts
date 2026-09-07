@@ -68,18 +68,54 @@ function hexToBytes(hex: string): Uint8Array {
 }
 
 /**
+ * The two EIP-1193 answers a real wallet gives that are not failures, said in
+ * Passport's own calm words — or `null` for everything genuinely wrong.
+ *
+ * 4001 is the user pressing Cancel in the wallet's popup: an ANSWER, and the
+ * sentence must read like one rather than like something broke. -32002 is
+ * MetaMask refusing a second request while its popup is already open — the
+ * remedy is the popup, and the sentence points at it. Mapped here rather
+ * than in the machines because a wallet's rejection is not always an `Error`
+ * instance, and an object that reaches `String(cause)` reads as
+ * `[object Object]` on screen.
+ */
+function walletRefusalSentence(cause: unknown): string | null {
+  const code =
+    typeof cause === 'object' && cause !== null ? (cause as { code?: unknown }).code : undefined;
+  if (code === 4001) return 'You declined in the wallet — nothing was signed.';
+  if (code === -32002) {
+    return 'The wallet is already showing a request. Find its window and answer there, then try again.';
+  }
+  return null;
+}
+
+/** `provider.request`, with the two refusals above translated on the way out. */
+async function requestOrRefuse(
+  provider: EthereumProvider,
+  args: { method: string; params?: unknown[] },
+): Promise<unknown> {
+  try {
+    return await provider.request(args);
+  } catch (cause) {
+    const sentence = walletRefusalSentence(cause);
+    if (sentence) throw new Error(sentence);
+    throw cause;
+  }
+}
+
+/**
  * Asks the injected wallet for the deterministic signature the derivation is
  * built on. Two prompts at most (connect, then sign), both the wallet's own.
  */
 export async function requestRecoverySignature(
   provider: EthereumProvider,
 ): Promise<{ ethAddress: string; signature: string }> {
-  const accounts = (await provider.request({ method: 'eth_requestAccounts' })) as
+  const accounts = (await requestOrRefuse(provider, { method: 'eth_requestAccounts' })) as
     | string[]
     | undefined;
   const ethAddress = accounts?.[0];
   if (!ethAddress) throw new Error('The wallet connected but offered no account.');
-  const signature = (await provider.request({
+  const signature = (await requestOrRefuse(provider, {
     method: 'personal_sign',
     params: [utf8ToHex(RECOVERY_MESSAGE_V1), ethAddress],
   })) as string;

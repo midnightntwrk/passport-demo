@@ -698,6 +698,52 @@ export async function sponsorReadiness(
   }
 }
 
+/**
+ * How long {@link sponsorReadinessSettled} waits out a `busy` sponsor, and
+ * how often it asks again.
+ *
+ * `busy` is this module's documented transient: DUST is reserved per
+ * in-flight transaction, so a single-wallet pool reads `available: 0` for
+ * the seconds-to-a-minute its last job takes to settle. Seen live on
+ * 2026/09/07: a recovery-key enrolment confirmed moments after onboarding
+ * met the sponsor still settling THAT onboarding's registration and was
+ * refused — where a retry a minute later would have sailed through, and
+ * nothing retried. Two minutes covers the documented clearing time twice
+ * over, for a settling that includes a funding leg.
+ */
+export const SPONSOR_BUSY_PATIENCE_MS = 2 * 60_000;
+export const SPONSOR_BUSY_PROBE_MS = 5_000;
+
+/**
+ * Readiness with the busy patience applied — the fee gate's own read.
+ *
+ * `busy` is the one cause whose own documentation says "a surface should
+ * wait rather than refuse", and this is the waiting, in the one place every
+ * fee gate shares rather than re-grown in each caller. Probes past the
+ * 30-second cache with `force`, because a poll that reads the cache would
+ * report "still busy" for half the time the sponsor was already free — the
+ * cache's own doc names exactly this caller. Every other answer — `ready`,
+ * `disabled`, `unreachable` — returns at once: none of those clears by
+ * being stared at.
+ */
+export async function sponsorReadinessSettled(
+  options: SponsorClientOptions & { patienceMs?: number; probeMs?: number } = {},
+): Promise<SponsorReadiness> {
+  const now = options.now ?? Date.now;
+  const sleep = options.sleep ?? defaultSleep;
+  const patience = options.patienceMs ?? SPONSOR_BUSY_PATIENCE_MS;
+  const probeEvery = options.probeMs ?? SPONSOR_BUSY_PROBE_MS;
+  let readiness = await sponsorReadiness(options);
+  if (readiness.state !== 'unavailable' || readiness.cause !== 'busy') return readiness;
+  const deadline = now() + patience;
+  while (now() < deadline) {
+    await sleep(probeEvery);
+    readiness = await sponsorReadiness({ ...options, force: true });
+    if (readiness.state !== 'unavailable' || readiness.cause !== 'busy') return readiness;
+  }
+  return readiness;
+}
+
 /** Convenience wrapper: `true` only when the sponsor can pay right now. */
 export async function sponsorCanPay(options: SponsorClientOptions = {}): Promise<boolean> {
   return (await sponsorReadiness(options)).state === 'ready';

@@ -28,6 +28,7 @@ import {
   sponsorRefusal,
   sponsorHexToBytes,
   sponsorReadiness,
+  sponsorReadinessSettled,
   sponsorRetryDelayMs,
   sponsorWalletIsAvailable,
   validateSponsorBalanceResult,
@@ -924,5 +925,104 @@ describe('sponsorRefusal', () => {
     expect(refusal.cause).toBe('busy');
     expect(refusal.message).toContain('cannot cover this one right now');
     expect(refusal.detail).toBe('balancing threw');
+  });
+});
+
+describe('sponsorReadinessSettled', () => {
+  /* The fee gate's own read: `busy` is waited out, everything else answers at
+     once. Drilled with an injected clock whose sleep IS its advance, so the
+     patience arithmetic is exact and the test costs no real time. */
+  const BUSY = () =>
+    new Response(
+      JSON.stringify({
+        total: 1,
+        available: 0,
+        wallets: [{ index: 0, ready: true, dust: { balance: '0', utxoCount: 0, isSynced: true } }],
+      }),
+      { status: 200 },
+    );
+  const READY = () =>
+    new Response(
+      JSON.stringify({
+        total: 1,
+        available: 1,
+        wallets: [{ index: 0, ready: true, dust: { balance: '9', utxoCount: 1, isSynced: true } }],
+      }),
+      { status: 200 },
+    );
+
+  function fakeClock() {
+    let at = 0;
+    return {
+      now: () => at,
+      sleep: async (ms: number) => {
+        at += ms;
+      },
+    };
+  }
+
+  it('waits out a busy sponsor and returns ready the moment it frees', async () => {
+    resetSponsorReadinessCache();
+    const answers = [BUSY(), BUSY(), READY()];
+    const fetchSpy = vi.fn(async () => answers.shift() ?? READY());
+    const clock = fakeClock();
+    const readiness = await sponsorReadinessSettled({
+      config: { url: 'https://sponsor.example' },
+      fetch: fetchSpy as never,
+      ...clock,
+    });
+    expect(readiness.state).toBe('ready');
+    // The initial probe plus two forced re-probes — never the 30 s cache.
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+    expect(clock.now()).toBe(10_000);
+    resetSponsorReadinessCache();
+  });
+
+  it('gives up after the patience and hands back the busy verdict', async () => {
+    resetSponsorReadinessCache();
+    const fetchSpy = vi.fn(async () => BUSY());
+    const readiness = await sponsorReadinessSettled({
+      config: { url: 'https://sponsor.example' },
+      fetch: fetchSpy as never,
+      ...fakeClock(),
+      patienceMs: 12_000,
+      probeMs: 5_000,
+    });
+    expect(readiness).toMatchObject({ state: 'unavailable', cause: 'busy' });
+    resetSponsorReadinessCache();
+  });
+
+  it('an unreachable sponsor is refused at once — waiting learns nothing', async () => {
+    resetSponsorReadinessCache();
+    const fetchSpy = vi.fn(async () => {
+      throw new Error('connection refused');
+    });
+    const clock = fakeClock();
+    const readiness = await sponsorReadinessSettled({
+      config: { url: 'https://sponsor.example' },
+      fetch: fetchSpy as never,
+      ...clock,
+    });
+    expect(readiness).toMatchObject({ state: 'unavailable', cause: 'unreachable' });
+    /* Two fetches are the probe's OWN internal retry, not the patience: the
+       only sleep taken is that retry's half-second, never a busy probe. */
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(clock.now()).toBe(SPONSOR_PROBE_RETRY_DELAY_MS);
+    resetSponsorReadinessCache();
+  });
+
+  it('a ready sponsor costs one probe and no waiting at all', async () => {
+    resetSponsorReadinessCache();
+    const fetchSpy = vi.fn(async () => READY());
+    const clock = fakeClock();
+    const readiness = await sponsorReadinessSettled({
+      config: { url: 'https://sponsor.example' },
+      fetch: fetchSpy as never,
+      ...clock,
+    });
+    expect(readiness.state).toBe('ready');
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(clock.now()).toBe(0);
+    resetSponsorReadinessCache();
   });
 });

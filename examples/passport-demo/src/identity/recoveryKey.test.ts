@@ -61,6 +61,33 @@ describe('requestRecoverySignature', () => {
     };
     await expect(requestRecoverySignature(provider)).rejects.toThrow(/no account/i);
   });
+
+  it('a decline in the wallet reads as an answer, never as [object Object]', async () => {
+    /* EIP-1193 code 4001, thrown the way real wallets throw it — a plain
+       object with a code, not always an Error instance. The machines print
+       `String(cause)` for unknown shapes, so an unmapped 4001 reached the
+       screen as noise. */
+    const provider: EthereumProvider = {
+      request: async (args) => {
+        if (args.method === 'eth_requestAccounts') return ['0xAbCd00000000000000000000000000000000Ef12'];
+        throw { code: 4001, message: 'MetaMask Message Signature: User denied message signature.' };
+      },
+    };
+    await expect(requestRecoverySignature(provider)).rejects.toThrow(
+      /You declined in the wallet — nothing was signed\./,
+    );
+  });
+
+  it('a wallet already showing a request says where to look', async () => {
+    const provider: EthereumProvider = {
+      request: async () => {
+        throw { code: -32002, message: 'Request of type wallet_requestPermissions already pending' };
+      },
+    };
+    await expect(requestRecoverySignature(provider)).rejects.toThrow(
+      /already showing a request/i,
+    );
+  });
 });
 
 describe('recoverySecretFromSignature', () => {

@@ -433,6 +433,11 @@ test.describe('@live the account model on stagenet', () => {
     /* The confirm beat: the derived key is named and NOTHING is on chain yet. */
     const confirm = page.getByRole('button', { name: 'Add to your account' });
     await expect(confirm).toBeVisible({ timeout: 60_000 });
+    /* The sponsor is usually still settling the onboarding it just paid for —
+       the exact state that refused the first live run of this beat
+       (2026/09/07). The fee gate now waits busy out on its own; waiting here
+       too keeps the 20-minute proving budget for proving. */
+    await waitForSponsor();
     await confirm.click();
 
     // Proving and submitting a gated circuit — minutes on the live tier.
@@ -673,6 +678,7 @@ test.describe('@live the account model on stagenet', () => {
       await page.getByLabel('Paste a join code').fill(code);
       await page.getByRole('button', { name: 'Read it' }).click();
       await expect(page.getByText(/asks to join/)).toBeVisible({ timeout: 5 * 60_000 });
+      await waitForSponsor();
       await page.getByRole('button', { name: 'Admit this device' }).click();
 
       // Proving and submitting a gated circuit — minutes on the live tier.
@@ -753,6 +759,7 @@ test.describe('@live the account model on stagenet', () => {
          from the refusing side. */
       await deviceC.getByRole('button', { name: 'Use your recovery key' }).click();
       await expect(deviceC.getByText(/recovery key IS on/)).toBeVisible({ timeout: 5 * 60_000 });
+      await waitForSponsor();
       await deviceC.getByRole('button', { name: 'Admit this device with it' }).click();
 
       // Proving and submitting, authorised by the recovery secret — minutes.
@@ -783,12 +790,19 @@ test.describe('@live the account model on stagenet', () => {
  * the page, because the page's own probe is cached for thirty seconds and this
  * needs the current answer.
  */
+/* The sponsor this run really uses: a local-preview run against a local
+   balancer must poll THAT balancer, not the deployed one — polling the wrong
+   service reported "ready" about a wallet no transaction here would touch. */
+const SPONSOR_STATUS_URL = process.env.LIVE_SPONSOR_URL
+  ? `${process.env.LIVE_SPONSOR_URL.replace(/\/$/, '')}/wallet-status`
+  : 'https://67-205-177-162.sslip.io/balancer/wallet-status';
+
 async function waitForSponsor(timeoutMs = 6 * 60_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let last = 'never answered';
   while (Date.now() < deadline) {
     try {
-      const response = await fetch('https://67-205-177-162.sslip.io/balancer/wallet-status');
+      const response = await fetch(SPONSOR_STATUS_URL);
       const body = (await response.json()) as { available?: unknown; total?: unknown };
       last = `available ${String(body.available)}/${String(body.total)}`;
       if (typeof body.available === 'number' && body.available > 0) return;

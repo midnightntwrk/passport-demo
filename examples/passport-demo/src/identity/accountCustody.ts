@@ -76,7 +76,7 @@ import type { LocalMidnightWallet } from '../lib/localWallet.js';
 /* Type-only, and through the SAME specifier {@link loadAccountContract} uses —
    a type has no instance, so this adds no module to either graph. */
 import type { Ledger as AccountLedger } from '../../contracts/stagenet/account/index.js';
-import { sponsorFeeRefusal, sponsorReadiness } from '../lib/sponsor.js';
+import { sponsorFeeRefusal, sponsorReadiness, sponsorReadinessSettled } from '../lib/sponsor.js';
 import {
   createContractProviders,
   compiledContractFor,
@@ -986,10 +986,19 @@ function requirePositiveAmount(amount: bigint, what: string): void {
  * The fee gate every write shares, run before the user waits on a prover.
  * Throws `fee-unavailable` with the sponsor's own reason rather than letting
  * the SDK's funds error surface halfway through a proof.
+ *
+ * SETTLED, not probed (2026/09/07): a `busy` sponsor is the documented
+ * transient — a single-wallet pool reserves its DUST per in-flight job — and
+ * the first live recovery-key enrolment was refused for meeting the sponsor
+ * still settling the very onboarding it had just paid for. The gate now
+ * waits `busy` out (see `sponsorReadinessSettled`) and refuses only what is
+ * still not ready then; the caller's 'checking' phase is on screen the whole
+ * time, which is exactly what it claims to mean.
  */
 async function requireFees(): Promise<void> {
-  const fees = await checkAccountCustodyFees();
-  if (!fees.ok) throw new AccountCustodyError('fee-unavailable', fees.reason);
+  const readiness = await sponsorReadinessSettled();
+  if (readiness.state === 'ready') return;
+  throw new AccountCustodyError('fee-unavailable', sponsorFeeRefusal(readiness));
 }
 
 /* -------------------------------------------------------------------------- */
