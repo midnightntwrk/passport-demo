@@ -16,17 +16,60 @@ npm run test:e2e         # tier 1
 npm run test:e2e:live    # tier 2 — claims a real name on stagenet
 ```
 
-Both need a browser binary once: `npx playwright install chromium`.
+Both need browser binaries once: `npx playwright install chromium firefox webkit`.
 
 ## The passkey
 
 Neither tier can run without one: the passkey **is** the Passport. Its WebAuthn
 PRF output is where the wallet seed and the private-state key come from, so
-there is no "skip the ceremony" path to test around. Both specs install a CDP
-virtual authenticator (`WebAuthn.addVirtualAuthenticator`) with `ctap2_1`,
-`hasPrf`, a resident key, user verification, and automatic presence — see
-`passkey.ts`, which explains why each of those is required rather than default.
-That fixes the browser to Chromium; Firefox and WebKit have no equivalent.
+there is no "skip the ceremony" path to test around. On Chromium both specs install a CDP virtual
+authenticator (`WebAuthn.addVirtualAuthenticator`) with `ctap2_1`, `hasPrf`, a
+resident key, user verification, and automatic presence — see `passkey.ts`,
+which explains why each of those is required rather than default.
+
+Firefox and WebKit have no equivalent, which until 2026/09/05 fixed the whole
+suite to Chromium. `webauthnStub.ts` is what they get instead: a stand-in over
+`navigator.credentials.create`/`.get` that answers a ceremony faithfully in the
+two things the app actually reads — the credential id, and the extension
+results bag carrying the PRF output (HMAC-SHA-256 under a per-credential key)
+and the three-way largeBlob answer. It does not sign anything, because nothing
+in Passport verifies a signature; it models residency, exclusion conflicts, and
+refusals, because the app branches on all three. `passkey.ts` picks between the
+two off the browser type, so a spec asks for a passkey and does not care.
+
+The specs that drive the AUTHENTICATOR rather than the app — planting a
+resident credential, reading a largeBlob back off it, building an authenticator
+per Android passkey shape — stay Chromium's, and skip themselves elsewhere with
+a stated reason.
+
+## The projects
+
+| Project | Engine | Device |
+|---|---|---|
+| `chromium` | Chromium | 420×900, the reference run |
+| `chromium-pixel` | Chromium | `devices['Pixel 7']` — Android UA, touch, DPR 3 |
+| `webkit` | WebKit | 420×900, Safari's engine on a Mac |
+| `webkit-iphone` | WebKit | `devices['iPhone 14']` |
+| `firefox` | Firefox | 420×900 |
+
+Every spec opens its own browser context, and a context made by
+`browser.newContext()` inherits nothing from the project's `use`. So the
+emulation is put back by `walkContext.ts`, which each spec calls at the point
+it makes its context; without it the device projects would have been the right
+engine at the wrong size.
+
+**WebKit does not currently run on macOS 26.** Playwright's bundled WebKit —
+`webkit-2336` (Playwright 1.62.1), and also `webkit-2359` and `webkit-2360`
+from 1.63.0 and the 1.64 alpha — segfaults on launch in
+`-[WKWebView _viewDidChangeEffectiveCornerRadii]`, a KVO callback against
+AppKit's new corner-radii API, headless and headed alike. It is upstream.
+
+`playwright.config.ts` therefore drops the two WebKit projects on that OS and
+says so on the console, so a local run is four engines rather than a crash;
+on CI, and on any Mac before macOS 26, both run. `PW_WEBKIT=1` forces them
+back in for anyone checking whether a newer WebKit has fixed it. The projects
+are configured and correct, and they have **not** been executed on this host —
+nothing in this README claims a WebKit result.
 
 ## Tier 1 — `onboarding.spec.ts`
 
@@ -45,7 +88,18 @@ Holds the shipped bundle to the account model:
 - the Send sheet is a withdrawal from the account, and never mentions DUST.
 
 `mocks.ts` is the whole network boundary and says where each answer came from.
-Two details worth knowing:
+Three details worth knowing:
+
+- **The hosts are in one place, and the run proves it reached none of them.**
+  `previewEnv` in `playwright.config.ts` compiles tier 1 against the same
+  sponsor, funder, and prover origins the deployment builds against, and
+  `mocks.ts` derives every route from that same host list — `BALANCER_HOST` for
+  the funder and `SPONSOR_FAILOVER_HOST` for the 1AM gateway, which
+  `VITE_SPONSOR_URL` lists second and `sponsor.ts` probes just as readily. If
+  the two ever name different hosts, the interceptions miss and the specs are
+  graded by a real service. `NetworkBoundary.sponsorTraffic()` is the counter
+  that catches it: requests seen and requests intercepted must be equal, and
+  above zero.
 
 - **Availability is decoded for real.** `fixtures/stagenet-night-registry.json`
   is the stagenet `.night` TLD's own contract state, recorded from the indexer
@@ -120,7 +174,7 @@ over a flake:
   the sponsor is taken in between.
 
 If either fails twice the message carries the service's own sentence. Check
-`GET https://funder.midnightpassport.com/balancer/wallet-status` before
+`GET https://67-205-177-162.sslip.io/balancer/wallet-status` before
 concluding the app is broken.
 
 A clean run is about seven minutes; a run that has to wait out a reservation is

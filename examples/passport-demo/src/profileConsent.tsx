@@ -1,9 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, ExternalLink, ShieldCheck, X } from 'lucide-react';
+import { ConsentNotice } from './consentNotice.js';
+import { PASSPORT_SETUP_WAITING_MESSAGE } from './lib/passportIdentity.js';
+import { passportCallbackLaunch } from './identity/callbackLaunch.js';
 import {
   createPassportProfileReady,
   createPassportProfileResponse,
-  parsePassportProfileRequest,
+  pairOfUnreadableMessage,
+  readPassportProfileRequest,
   type PassportProfileField,
   type PassportProfileRequest,
   type PassportProfileResponse,
@@ -17,12 +21,29 @@ interface ProfileConsentProps {
    * "unavailable" then would refuse every standalone popup connect.
    */
   sessionActive: boolean;
+  /**
+   * Whether this Passport is enough of a Passport to answer an app — see
+   * `./lib/passportIdentity.ts`. A session being open is NOT the same question:
+   * a passkey exists long before there is an identity behind it, and this sheet
+   * used to arm on the difference, putting a modal backdrop over the Welcome
+   * screen and the name step. Nothing modal renders until this is true.
+   */
+  passportSetUp: boolean;
+  /** The `.night` name, or null. Never the device's label. */
   displayName: string | null;
   passportContract: {
     address: string;
     network: string;
   } | null;
-  midnightAddresses: {
+  /**
+   * @deprecated Ignored, and removed from the wire on 2026/09/01 with the
+   * account-custody ruling: the transaction engine's addresses are a signing
+   * detail no app has a legitimate use for, and offering them invited an app
+   * to pay an address the account cannot see. The prop is still accepted so
+   * the host can drop it in its own change rather than in this one; nothing
+   * reads it.
+   */
+  midnightAddresses?: {
     unshielded: string;
     shielded?: string;
     dust?: string;
@@ -35,30 +56,18 @@ interface PendingRequest {
   source: Window;
 }
 
-/* The `midnightAddresses` field still carries all three of the transaction
-   engine's addresses on the wire — the label simply does not name them.
-   Passport surfaces the .night name as the identity and keeps the three
-   addresses out of the primary UI, so a consent sheet must not be the one
-   place a user meets the fee token.
-
-   The in-Passport browser's own sheet (`screens/AppBrowser.tsx`) shows a detail
-   line under each label; its line for this field says outright that these are
-   engine addresses and that funds belong at the ACCOUNT address instead. This
-   sheet has no detail line, so its label carries the whole message and must
-   stay as neutral as it is — "technical", never "receiving".
-
-   FOLLOW-UP (2026/08/25): `midnightAddresses` should leave the profile protocol
-   altogether. A Passport user's identity is their account-custody contract —
-   `passportContract` — and that is what an app should key on; the raffle was
-   moved to it on this date. The three engine addresses are a signing detail no
-   dApp has a legitimate use for, and offering them here invites an app to pay
-   an address the account cannot see. Removing the field is a WIRE change, so it
-   waits for a version bump of `demo-backend/src/profileProtocol.ts` and its two
-   vendored copies, which must stay byte-identical. */
+/* DONE (2026/09/01): the follow-up recorded here on 2026/08/25 — that
+   the engine-address field should leave the profile protocol altogether — has
+   happened. A Passport user's identity is their account-custody contract, and
+   `passportContract` is what an app keys on; the three engine addresses were a
+   signing detail no dApp had a legitimate use for, and offering them here
+   invited an app to pay an address the account cannot see. There is one copy
+   of the vocabulary now, in `@midnight-passport/connect`, so removing the
+   field was a single edit rather than a wire change replicated across three
+   files that were asked to stay byte-identical. */
 const FIELD_LABELS: Record<PassportProfileField, string> = {
   displayName: 'Passport display name',
   passportContract: 'Your Passport account — its address and network',
-  midnightAddresses: 'Midnight technical addresses',
 };
 
 /**
@@ -77,17 +86,88 @@ function launchParameters(): { requestId: string; nonce: string } | null {
   const parameters = new URLSearchParams(window.location.search);
   const requestId = parameters.get('passportRequestId');
   const nonce = parameters.get('passportNonce');
-  if (!requestId || !nonce || !window.opener) return null;
+  /* THE OPENER IS NO LONGER PART OF THIS TEST (2026/09/05). It used to be, and
+     the effect was that a launch WITH an opener and a launch that had LOST one
+     were the same thing to this file — nothing. See
+     {@link consentReplyChannel} for what the difference is now worth. */
+  if (!requestId || !nonce) return null;
   return { requestId, nonce };
 }
 
+/**
+ * Which channel, if any, can carry this window's answer back to the app that
+ * asked — and the reason a Passport installed to an iPhone home screen needs
+ * to be asked the question at all.
+ *
+ * `window.open` from a standalone iOS web app opens a SAFARI tab, and that tab
+ * gets `window.opener === null`. Both consent surfaces read that as "there is
+ * no launch here", so the ready handshake was never posted, the request never
+ * arrived, and Passport rendered as an ordinary sign-in page over a request
+ * nobody could see. The app on the other side polls `opened.closed`, which
+ * reads `false` on a handle it cannot reach, so nothing there noticed either:
+ * the only exit was the client's three-minute timeout, spent in silence.
+ *
+ * The three answers:
+ *
+ *   - `opener` — an ordinary pop-up. Post the handshake and serve the request,
+ *     exactly as before.
+ *   - `redirect` — no opener, but this load ALSO carries the signed redirect
+ *     launch (`org.midnight.passport.callback/v1`), which is a channel that
+ *     survives a navigation and does not depend on a window handle. That
+ *     surface owns the reply, so this one shows nothing rather than a second
+ *     sheet asking the same question.
+ *   - `none` — a launch with no way home. Say so at once, in one sentence,
+ *     rather than showing a sign-in page for three minutes.
+ *
+ * `null` where this load carries no launch at all, which is every ordinary
+ * visit to Passport.
+ *
+ * `txConsent.tsx` decides by the same rule, for the same reason.
+ */
+export type PassportConsentChannel = 'opener' | 'redirect' | 'none';
+
+export function consentReplyChannel(input: {
+  launched: boolean;
+  hasOpener: boolean;
+  redirectArmed: boolean;
+}): PassportConsentChannel | null {
+  if (!input.launched) return null;
+  if (input.hasOpener) return 'opener';
+  return input.redirectArmed ? 'redirect' : 'none';
+}
+
+/**
+ * What a window with no way home says, and why it is one sentence.
+ *
+ * It names neither the opener, the channel, nor the transport. What a reader
+ * can act on is where to go back to and what to do differently, and both are
+ * in the sentence.
+ */
+export const CONSENT_NO_CHANNEL_MESSAGE =
+  'Passport has no way to send an answer back to the app that opened this. Return to the app and try again, or open its link in Safari.';
+
 export function PassportProfileConsent({
   sessionActive,
+  passportSetUp,
   displayName,
   passportContract,
-  midnightAddresses,
 }: ProfileConsentProps) {
   const launch = useMemo(launchParameters, []);
+  /* Pinned on first render alongside the launch: an opener that disappears
+     later must not change which channel this window decided to answer on. */
+  const channel = useMemo(
+    () =>
+      consentReplyChannel({
+        launched: launch !== null,
+        hasOpener: Boolean(window.opener),
+        /* The signed redirect launch, captured at import time by
+           `identity/callbackLaunch.ts` and answered by
+           `screens/callbackConsent.tsx`. An app that sends both survives an
+           installed iOS Passport with no change on this side. */
+        redirectArmed: passportCallbackLaunch.parse.kind === 'ok',
+      }),
+    [launch],
+  );
   const [pending, setPending] = useState<PendingRequest | null>(null);
   const [outcome, setOutcome] = useState<'approved' | 'denied' | 'unavailable' | null>(null);
 
@@ -105,7 +185,7 @@ export function PassportProfileConsent({
    */
   function replyOnce(
     target: PendingRequest,
-    body: Omit<PassportProfileResponse, 'protocol' | 'type' | 'requestId' | 'nonce'>,
+    body: Omit<PassportProfileResponse, 'protocol' | 'type' | 'version' | 'requestId' | 'nonce'>,
   ): boolean {
     if (answered.current) return false;
     answered.current = true;
@@ -117,7 +197,7 @@ export function PassportProfileConsent({
   }
 
   useEffect(() => {
-    if (!launch || !window.opener) return;
+    if (!launch || channel !== 'opener') return;
     const opener = window.opener;
     /* The wildcard is deliberate, and it is the only origin this line can
        name. A window opened by an app learns that app's origin only when a
@@ -131,14 +211,30 @@ export function PassportProfileConsent({
 
     const onMessage = (event: MessageEvent) => {
       if (event.source !== opener) return;
-      const request = parsePassportProfileRequest(event.data);
-      if (
-        !request ||
-        request.requestId !== launch.requestId ||
-        request.nonce !== launch.nonce
-      ) {
+      const parsed = readPassportProfileRequest(event.data);
+      if (parsed.kind !== 'ok') {
+        /* NOT silence. A message that IS a profile request and that this build
+           cannot read used to be dropped, and the opener experienced that as
+           a three-minute hang it could not tell from Passport being absent.
+           It is answered now — but only when it is addressed to THIS window's
+           launch pair, so a stray message from another exchange cannot spend
+           the one reply this window is allowed. */
+        if (parsed.kind === 'not-passport') return;
+        const pair = pairOfUnreadableMessage(event.data);
+        if (!pair || pair.requestId !== launch.requestId || pair.nonce !== launch.nonce) return;
+        const error = parsed.kind === 'version-mismatch' ? 'version_mismatch' : 'invalid_request';
+        if (
+          replyOnce(
+            { request: { ...pair } as PassportProfileRequest, origin: event.origin, source: opener },
+            { approved: false, error },
+          )
+        ) {
+          setOutcome('unavailable');
+        }
         return;
       }
+      const request = parsed.value;
+      if (request.requestId !== launch.requestId || request.nonce !== launch.nonce) return;
       /* One exchange per launch. The launch pair already fixes WHICH request
          this window serves, but the opener can re-send it — and a later
          message could arrive while the user is reading the sheet, swapping
@@ -149,39 +245,91 @@ export function PassportProfileConsent({
     };
     window.addEventListener('message', onMessage);
     return () => window.removeEventListener('message', onMessage);
-  }, [launch]);
+  }, [launch, channel]);
 
+  /**
+   * Whether this window can answer the request in front of it.
+   *
+   * TWO CONDITIONS, and the first of them was missing until 2026/09/08. A
+   * Passport that is SET UP — see `./lib/passportIdentity.ts` — and whose
+   * requested fields have hydrated can answer. `displayName` alone used to
+   * stand for both, and because it fell back to the enrolled passkey's label it
+   * was truthy the instant a passkey existed: this sheet armed over the Welcome
+   * screen of a Passport with no identity at all, and its backdrop covered the
+   * one action that would have given it one.
+   */
   const profileReady =
-    !pending ||
-    pending.request.fields.every((field) => {
-      if (field === 'displayName') return Boolean(displayName);
-      if (field === 'midnightAddresses') return Boolean(midnightAddresses);
-      return true;
-    });
+    passportSetUp &&
+    (!pending ||
+      pending.request.fields.every((field) => {
+        if (field === 'displayName') return Boolean(displayName);
+        return true;
+      }));
 
   /* A request this Passport cannot serve must still be answered — silence
      leaves the opener disabled forever. But "cannot serve" is only knowable
-     once a session is open: before then the user is mid-sign-in, so wait
-     indefinitely. With a session open, if the profile has not hydrated within
-     the grace period, tell the opener so; the timer is cancelled the moment
-     the fields arrive. */
+     once a session is open AND the Passport is one: before either, the user is
+     mid-sign-in or mid-setup, so wait — the notice below says an app is
+     waiting, and the wait ends when they finish. With a set-up Passport, if the
+     profile has not hydrated within the grace period, tell the opener so; the
+     timer is cancelled the moment the fields arrive. */
   useEffect(() => {
-    if (!pending || !sessionActive || profileReady || outcome) return;
+    if (!pending || !sessionActive || !passportSetUp || profileReady || outcome) return;
     const timer = window.setTimeout(() => {
       if (!replyOnce(pending, { approved: false, error: 'profile_unavailable' })) return;
       setOutcome('unavailable');
     }, PROFILE_WAIT_MS);
     return () => window.clearTimeout(timer);
-  }, [pending, sessionActive, profileReady, outcome]);
+  }, [pending, sessionActive, passportSetUp, profileReady, outcome]);
 
-  if (!launch || !pending) return null;
+  /* THE FAST FAIL. A launch arrived, and nothing in this window can answer it.
+     Three minutes of a sign-in page is not an answer, and it is what a reader
+     used to get. */
+  if (channel === 'none') {
+    return (
+      <div className="profile-consent-backdrop">
+        <section
+          className="profile-consent"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="profile-consent-title"
+        >
+          <header>
+            <span className="profile-consent-mark">
+              <ShieldCheck size={20} />
+            </span>
+            <div>
+              <p>Passport connection</p>
+              <h2 id="profile-consent-title">This window cannot answer.</h2>
+            </div>
+          </header>
+          <div className="profile-consent-outcome unavailable">
+            <X size={22} />
+            <p>{CONSENT_NO_CHANNEL_MESSAGE}</p>
+          </div>
+        </section>
+      </div>
+    );
+  }
+  if (!launch || channel !== 'opener' || !pending) return null;
+  /* SIGNED IN, BUT NOT SET UP YET (2026/09/08). The user is on the Welcome
+     screen or the name step, and a modal backdrop over it is what stopped them
+     finishing. Say so beside the task, block nothing, and let the sheet arm by
+     itself the moment the Passport becomes one. */
+  if (!passportSetUp && !outcome) {
+    return (
+      <ConsentNotice icon={<ShieldCheck size={16} aria-hidden />}>
+        {PASSPORT_SETUP_WAITING_MESSAGE}
+      </ConsentNotice>
+    );
+  }
   /* Not ready and not yet answered: the grace timer above is running. */
   if (!profileReady && !outcome) return null;
 
   const send = (
     response: Omit<
       PassportProfileResponse,
-      'protocol' | 'type' | 'requestId' | 'nonce'
+      'protocol' | 'type' | 'version' | 'requestId' | 'nonce'
     >,
   ) => replyOnce(pending, response);
 
@@ -192,12 +340,9 @@ export function PassportProfileConsent({
       if (field === 'passportContract' && passportContract) {
         profile.passportContract = passportContract;
       }
-      if (field === 'midnightAddresses' && midnightAddresses) {
-        profile.midnightAddresses = midnightAddresses;
-      }
     }
     /* An approval that carries nothing is not an approval. The grace timer
-       above only guards `displayName` and `midnightAddresses`, so a request
+       above only guards `displayName`, so a request
        for `passportContract` alone reaches this button on a Passport that has
        not deployed one — and `{ approved: true, profile: {} }` parses, leaving
        the app to read a yes and find no fields behind it. Answer with what is
@@ -272,6 +417,14 @@ export function PassportProfileConsent({
                   <span>{FIELD_LABELS[field]}</span>
                   {field === 'passportContract' && !passportContract && (
                     <small>Not deployed yet</small>
+                  )}
+                  {/* Said here for the same reason the row above says it, and
+                      the redirect sheet has said it all along: a Passport with
+                      no `.night` name has no display name, and the user should
+                      read that on the sheet rather than discover it in what the
+                      app did or did not receive. */}
+                  {field === 'displayName' && !displayName && (
+                    <small>Not set — will not be shared</small>
                   )}
                 </li>
               ))}

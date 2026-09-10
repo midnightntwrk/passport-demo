@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="USD">
+  <!-- The USD-coin mark: a solid blue disc, a white ring broken at the top and
+       the bottom, and a white dollar sign. Drawn rather than traced from a
+       raster so it stays crisp at 20 px and carries no embedded bitmap. -->
+  <circle cx="32" cy="32" r="31" fill="#2775CA"/>
+  <g fill="none" stroke="#FFFFFF" stroke-width="3.6" stroke-linecap="round">
+    <!-- Right arc, then left arc: each sweeps 150°, leaving a 30° gap at the
+         top and another at the bottom. -->
+    <path d="M37.694 10.75A22 22 0 0 1 37.694 53.25"/>
+    <path d="M26.306 10.75A22 22 0 0 0 26.306 53.25"/>
+  </g>
+  <path fill="none" stroke="#FFFFFF" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" d="M38 26C38 22.5 35 21 32 21c-3.5 0-6.5 1.5-6.5 4.5s3 4.5 6.5 6c3.5 1 6.5 2.5 6.5 6S35.5 43 32 43s-6.5-1.5-6.5-5"/>
+  <rect x="30" y="16.5" width="4" height="31" rx="1" fill="#FFFFFF"/>
+</svg>

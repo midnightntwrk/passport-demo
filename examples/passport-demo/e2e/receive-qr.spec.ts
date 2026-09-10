@@ -44,6 +44,7 @@ import jsQR from 'jsqr';
 import { renderSVG } from 'uqr';
 
 import { installNetworkBoundary, PASSPORT_ACCOUNT_ADDRESS, RESOLVABLE_NAME } from './mocks.js';
+import { walkContextOptions } from './walkContext.js';
 import { installVirtualAuthenticator } from './passkey.js';
 
 test.describe.configure({ mode: 'serial' });
@@ -156,7 +157,7 @@ async function openScanner(): Promise<void> {
 }
 
 test.beforeAll(async ({ browser }) => {
-  const context = await browser.newContext({ viewport: { width: 420, height: 900 } });
+  const context = await browser.newContext(walkContextOptions({ viewport: { width: 420, height: 900 } }));
   page = await context.newPage();
   await installNetworkBoundary(page);
   await installVirtualAuthenticator(context, page);
@@ -274,9 +275,15 @@ test('an image with no code in it says so, and keeps the sheet open', async () =
   });
 
   await expect(page.locator('.mnhome-qrscan')).toBeVisible();
-  await expect(page.locator('.mnhome-qrscan .mnhome-send-error')).toContainText(
-    /No QR code was found/i,
-  );
+  /* ASSERTED ON THE SHEET, not on ".mnhome-send-error" inside it, and the
+     difference is the whole reason this line was red. The sheet carries TWO
+     refusals here and both are correct: this walk grants no camera, so the
+     camera's own sentence is up, and the blank image adds the read failure
+     beneath it. A locator naming the class matched both and failed Playwright's
+     strict-mode check before it ever compared any text — an ambiguity in the
+     assertion rather than anything the screen did wrong. Found by the full-suite
+     run on 2026/09/04; it reproduces identically on b3a9a1e. */
+  await expect(page.locator('.mnhome-qrscan')).toContainText(/No QR code was found/i);
   await page.locator('.mnhome-qrscan').getByRole('button', { name: /^Close$/ }).click();
   await expect(page.locator('.mnhome-qrscan')).toHaveCount(0);
 });

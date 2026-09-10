@@ -16,6 +16,26 @@ interface NavigatorWithStandalone extends Navigator {
   standalone?: boolean;
 }
 
+/**
+ * What the install sheet promises, and why there are two of them.
+ *
+ * WHERE THE BROWSER OFFERS THE INSTALL ITSELF — Chrome, Edge — the installed
+ * app shares the browser's storage, so a Passport signed in before the install
+ * is signed in after it and {@link INSTALL_LEDE} is simply true.
+ *
+ * ON iOS IT IS NOT. An installed web app gets a storage container of its own:
+ * the passkey follows, through iCloud Keychain, but the profile and the
+ * encrypted state stay behind in Safari, so the first thing the new app does is
+ * ask for the passkey. Promising otherwise and then showing a sign-in screen
+ * is the app telling somebody it is broken, in its own words, one tap after
+ * they trusted it. {@link INSTALL_LEDE_IOS} says what happens instead.
+ */
+export const INSTALL_LEDE =
+  'It opens full-screen, keeps you signed in, and is one tap away next time.';
+
+export const INSTALL_LEDE_IOS =
+  'It opens full-screen and is one tap away next time. You will sign in once more with your passkey.';
+
 function isStandaloneDisplay(): boolean {
   return (
     window.matchMedia('(display-mode: standalone)').matches ||
@@ -120,13 +140,40 @@ function isSafariBrowser(): boolean {
   return /Safari/.test(ua) && !/CriOS|FxiOS|EdgiOS|OPiOS|Chrome|Chromium|Android/.test(ua);
 }
 
-export async function requestPassportStoragePersistence(): Promise<boolean | null> {
+/**
+ * How long the persistent-storage request may hold onboarding before it is
+ * treated as unanswered.
+ *
+ * Firefox answers `navigator.storage.persist()` with a permission doorhanger,
+ * and the promise stays pending until somebody presses it — for ever, if the
+ * reader ignores it or the browser is headless. Onboarding awaited that
+ * promise, so every Firefox walk stopped at "Encrypting your Passport state on
+ * this device" (found by the cross-browser suite, 2026/09/05). Persistence is
+ * a nicety: nothing about the passkey, the account, or the state just written
+ * depends on it, so it may not hold the critical path open.
+ */
+export const STORAGE_PERSISTENCE_TIMEOUT_MS = 3_000;
+
+export async function requestPassportStoragePersistence(
+  timeoutMs = STORAGE_PERSISTENCE_TIMEOUT_MS,
+): Promise<boolean | null> {
   if (!navigator.storage?.persist) return null;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const unanswered = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), timeoutMs);
+  });
   try {
-    if (await navigator.storage.persisted?.()) return true;
-    return navigator.storage.persist();
+    const answer = (async () => {
+      if (await navigator.storage.persisted?.()) return true;
+      return navigator.storage.persist();
+    })();
+    /* The request itself is left running: a doorhanger answered later still
+       takes effect, and nothing is waiting on it any more. */
+    return await Promise.race([answer, unanswered]);
   } catch {
     return null;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -317,13 +364,6 @@ export function PassportPwaShell({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  const install = async () => {
-    if (!installPrompt) return;
-    await installPrompt.prompt();
-    const choice = await installPrompt.userChoice;
-    if (choice.outcome === 'accepted') setInstallPrompt(null);
-  };
-
   /* --- The mobile invitation ---------------------------------------------- */
 
   /**
@@ -476,14 +516,11 @@ export function PassportPwaShell({ children }: { children: ReactNode }) {
             {reloadingForUpdate ? 'Updating' : 'Update Passport'}
           </button>
         )}
-        {/* Desktop keeps the quiet corner button. On mobile the sheet is the
-            invitation, and two competing install affordances is one too many. */}
-        {installPrompt && !standalone && !mobile && (
-          <button type="button" className="pwa-action" onClick={() => void install()}>
-            <Download size={15} />
-            Install Passport
-          </button>
-        )}
+        {/* THE CORNER BUTTON WENT ON 2026/09/03. Installing is offered from
+            Home's top bar now (`screens/InstallPassport.tsx`), where a person
+            looks for it and on every browser that can do it rather than only a
+            desktop-width Chromium one. A second button saying the same thing
+            in the corner of the same screen is one too many. */}
       </div>
 
       {installSheetOpen && (
@@ -507,10 +544,18 @@ export function PassportPwaShell({ children }: { children: ReactNode }) {
               </span>
               <div>
                 <h2 id="pwainstall-title">Add Passport to your home screen</h2>
-                <p>
-                  It opens full-screen, keeps you signed in, and is one tap away
-                  next time.
-                </p>
+                {/* WHAT IS TRUE ON EACH PLATFORM, AND NOT A WORD MORE
+                    (2026/09/05). This used to promise "keeps you signed in" to
+                    everybody. On iOS it is false: an installed web app gets a
+                    storage container of its own, so the passkey follows through
+                    iCloud Keychain but every local record — the profile, the
+                    encrypted state — stays behind in Safari, and the first
+                    thing the new app does is ask for the passkey. Somebody who
+                    read that sentence and then met a sign-in screen has been
+                    told the app is broken by the app itself. Where the browser
+                    offers the install itself, the app shares the browser's
+                    storage and the original sentence was true, so it stands. */}
+                <p>{iosInstructional && !installPrompt ? INSTALL_LEDE_IOS : INSTALL_LEDE}</p>
               </div>
             </header>
 
