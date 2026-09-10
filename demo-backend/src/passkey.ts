@@ -30,6 +30,12 @@ export interface PassportPasskeyReference {
 
 export interface EnrollPassportPasskeyOptions {
   label: string;
+  /**
+   * @deprecated Names the enrolment for a caller's own bookkeeping and nothing
+   * else. It used to be hashed into the WebAuthn user handle, which is how a
+   * second `create` came to REPLACE the passkey a Passport was already held
+   * behind; the handle is now random per enrolment. See {@link newUserHandle}.
+   */
   userId: string;
   rpName?: string;
   rpId?: string;
@@ -38,18 +44,20 @@ export interface EnrollPassportPasskeyOptions {
    * enrolled here, or synced to this device from another. All of them go into
    * `excludeCredentials`.
    *
-   * WHY THIS MATTERS. {@link userHandle} is deterministic and enrolment asks
-   * for `residentKey: 'required'`, so a second `create` for the same
-   * `(rpId, user.id)` does not fail: it REPLACES the credential. The
-   * replacement has a new PRF secret, and the old wallet seed — every coin it
-   * holds — becomes underivable, permanently. Excluding the ids we know makes
-   * the authenticator refuse instead, which surfaces as
-   * {@link PassportEnrolmentConflictError}.
+   * WHY IT IS STILL SENT, now that the handle is random. Replacement is no
+   * longer possible — {@link newUserHandle} gives every create a pair no
+   * credential occupies — so this no longer stands between a user and a lost
+   * wallet seed. What it still does is stop a browser that ALREADY holds a
+   * working Passport from quietly collecting a second credential for the same
+   * person: the authenticator refuses, and the refusal arrives as
+   * {@link PassportEnrolmentConflictError}, which callers route into sign-in.
    *
-   * Exclusion cannot cover the dangerous case on its own: site data cleared
-   * while the passkey survives in the keychain leaves no ids to exclude. For
-   * that, call {@link WebAuthnPrfKeyProvider.discoverOrEnroll}, which asks
-   * the authenticator itself before it creates anything.
+   * It never covered the dangerous case on its own, and that is the whole
+   * reason the handle changed: site data cleared while the passkey survives in
+   * the keychain leaves no ids to exclude. {@link
+   * WebAuthnPrfKeyProvider.discoverOrEnroll} asks the authenticator itself
+   * before it creates anything, and is still the right call wherever a picker
+   * is an acceptable cost.
    */
   knownCredentialIds?: readonly string[];
   /**
@@ -104,6 +112,25 @@ export class PassportPasskeyDiscoveryError extends Error {
 }
 
 /**
+ * What a passkey JUST CREATED here says when it cannot answer with a PRF, and
+ * why it is a sentence about the device rather than about the credential.
+ *
+ * The discoverable path's `prf-missing` means somebody ELSE'S passkey answered
+ * and cannot open a Passport, and the answer to that is to make one that can.
+ * This is the other case, and it is the Android one: the platform made the
+ * passkey Passport asked for, with the extension Passport asked for, and the
+ * passkey came back without it. Making a second one on the same platform
+ * produces the same passkey again, so "create a new passkey" is a loop, and
+ * the only doors that lead anywhere are a passkey held somewhere else — a
+ * phone, through the platform's own cross-device sheet — or another device.
+ *
+ * It names neither WebAuthn nor PRF. A reader cannot act on either word, and
+ * the sentence has to be true on a phone whose owner has never heard them.
+ */
+export const ENROLMENT_PRF_MISSING_MESSAGE =
+  'This passkey cannot be used for Passport on this device — try a different passkey or device.';
+
+/**
  * What {@link WebAuthnPrfKeyProvider.discoverOrEnroll} did: signed in to a
  * resident credential that already existed, or enrolled a new one. Exactly
  * one of the two handles is non-null, and the caller owns disposing it.
@@ -121,12 +148,66 @@ export type PassportPasskeyOnboarding =
       enrolled: null;
       reason: PassportPasskeyDiscoveryFailure;
       message: string;
+    }
+  /* THE USER SAID NO, AND THAT IS AN ANSWER (2026/09/05). A dismissed picker
+     used to fall straight through to `create`: dismiss the Face ID sheet and
+     iOS raised a make-a-passkey sheet nobody had asked for, one gesture after
+     the gesture that meant "not now". Nothing was created and nothing is
+     wrong; the ceremony simply ended. */
+  | {
+      outcome: 'cancelled';
+      discovered: null;
+      enrolled: null;
+      reason: 'cancelled';
+      message: string;
     };
 
 export interface DiscoverPassportPasskeyOptions {
   /** Relying-party id. Defaults to the current hostname, matching enrolment. */
   rpId?: string;
+  /**
+   * Whether this discovery may go after the account blob AT ALL. Defaults to
+   * `false`, and the default is the whole point.
+   *
+   * WHAT IT USED TO DO. The discoverable assertion hard-coded
+   * `largeBlob: { read: true }` with no way to turn it off, and the targeted
+   * path's opt-out ({@link AssertPassportPasskeyOptions.largeBlob}) is driven
+   * by a LOCAL PROFILE — a record a fresh container does not have. So the one
+   * ceremony a brand-new install runs was the one ceremony that could not be
+   * asked to leave the extension alone. On Android that combination is already
+   * known to produce a picker with nothing in it that never settles; an
+   * installed iOS PWA has its own storage container, so it meets the same
+   * ceremony with the same empty record, against iCloud Keychain passkeys
+   * whose largeBlob support is not something this code may assume either way.
+   *
+   * WHAT IT DOES NOW. The discoverable assertion sends NO largeBlob slice, so
+   * nothing about the extension can narrow the picker or hold the sheet open.
+   * Support is still learnt for free where the client volunteers a results
+   * slice unasked. A caller that actually wants the blob may set this to
+   * `true`, which spends ONE targeted follow-up read against the credential
+   * that just answered, bounded by {@link largeBlobTimeoutMs} and aborted when
+   * it expires.
+   *
+   * PASSPORT'S SIGN-IN DOES NOT SET IT, and that is deliberate: a sign-in is
+   * one assertion, and the blob is a convenience whose absence costs a person
+   * nothing they cannot get back. Recover-by-name reaches the same account from
+   * any device, and it is offered unconditionally.
+   */
+  largeBlob?: boolean;
+  /**
+   * How long the optional follow-up read may take before it is abandoned and
+   * the credential is treated as holding no blob. Ignored unless
+   * {@link largeBlob} is `true`.
+   */
+  largeBlobTimeoutMs?: number;
 }
+
+/**
+ * The ceiling on the optional follow-up read. Long enough for a user to answer
+ * a prompt they were expecting, short enough that a sheet which never settles
+ * is a delay rather than the end of the session.
+ */
+export const DISCOVERY_LARGE_BLOB_TIMEOUT_MS = 20_000;
 
 /**
  * What {@link WebAuthnPrfKeyProvider.enrollWithPrf} returns: the enrolled
@@ -178,6 +259,41 @@ export interface DiscoveredPassportPasskey {
    * on the same assertion that produced the PRF output.
    */
   accountBlob: PassportAccountBlob | null;
+  /**
+   * What became of a blob this assertion was asked to WRITE, or `null` when it
+   * was asked to write nothing — which is every assertion but the ride-along
+   * described on {@link AssertPassportPasskeyOptions.writeAccountBlob}.
+   *
+   * `'refused'` is retryable and `'unsupported'` is not: see
+   * {@link PassportAccountBlobWriteOutcome}.
+   */
+  accountBlobWritten: PassportAccountBlobWriteOutcome | null;
+  /**
+   * What THIS assertion revealed about whether the credential can hold a blob:
+   * `true` when the platform answered for largeBlob, `false` when it did not
+   * answer at all, and `null` when this assertion never asked.
+   *
+   * WHY AN ASSERTION IS ASKED THIS AND NOT JUST ENROLMENT (2026/09/04).
+   * Enrolment reports `largeBlob.supported` and that is the cheapest answer
+   * there is — but only the browser that enrolled the credential ever sees it.
+   * A passkey synced from another device, or one picked out of the platform's
+   * own account picker, arrives here with the question unanswered, and the
+   * app then had no way to learn the answer except by attempting a WRITE. On
+   * Android that attempt is the failure being fixed: Chrome filters the
+   * account picker down to credentials that can satisfy the extension, a
+   * Google Password Manager passkey cannot, and the sheet comes up with
+   * nothing selectable in it and never settles. What the user reports is that
+   * "the passkey prompt did not finish".
+   *
+   * A READ answers the same question for free and cannot filter anything out.
+   * By specification the client omits the whole `largeBlob` output when the
+   * authenticator does not implement the extension, and returns `largeBlob:
+   * {}` when it does and simply has nothing stored — which is the same rule
+   * {@link accountBlobWriteOutcome} has always read a write by. So every
+   * ordinary sign-in now learns the answer before anything is ever owed to a
+   * write, and the write that would have hung is never raised.
+   */
+  largeBlobSupported: boolean | null;
   /** Same bytes {@link WebAuthnPrfKeyProvider.deriveWalletSeed} would produce for `scope`. */
   deriveWalletSeed(scope: PassportStateScope): Promise<Uint8Array>;
   /** Same key {@link WebAuthnPrfKeyProvider.getKey} would derive for `scope` (uncached). */
@@ -238,6 +354,18 @@ export interface PassportAccountBlob {
  * runs to a couple of hundred bytes.
  */
 export const MAX_ACCOUNT_BLOB_BYTES = 2048;
+
+/**
+ * What one blob write did, in the three answers a caller acts on differently.
+ *
+ *   `'written'`      the authenticator stored it. Nothing more is owed.
+ *   `'refused'`      the extension is there and the write did not happen —
+ *                    RETRYABLE, because the next assertion may well succeed.
+ *   `'unsupported'`  the platform did not answer for largeBlob at all, which
+ *                    is a permanent property of this credential. Asking again
+ *                    can only cost somebody else's time.
+ */
+export type PassportAccountBlobWriteOutcome = 'written' | 'refused' | 'unsupported';
 
 /** What one write attempt did, and — when it did nothing — why. */
 export interface PassportAccountBlobWriteResult {
@@ -303,11 +431,40 @@ function randomChallenge(): Uint8Array {
   return challenge;
 }
 
-async function userHandle(userId: string): Promise<ArrayBuffer> {
-  return globalThis.crypto.subtle.digest(
-    'SHA-256',
-    asArrayBuffer(utf8(`midnight-passport:user:v1:${userId}`)),
-  );
+/**
+ * A FRESH user handle for every enrolment — the one thing that makes a create
+ * incapable of destroying a Passport.
+ *
+ * Until 2026/09/03 this was `SHA-256("midnight-passport:user:v1:" + userId)`
+ * over a constant `userId`, so every enrolment on this origin asked for the
+ * same `(rpId, user.id)` pair. WebAuthn is explicit about what that means with
+ * `residentKey: 'required'`: the authenticator does not refuse, it REPLACES the
+ * credential it already holds for that pair. The replacement carries a new PRF
+ * secret, so the wallet seed and the private-state key of the Passport that was
+ * there become underivable — permanently, and with nothing on screen to say so.
+ *
+ * `excludeCredentials` cannot cover that on its own, because the case where it
+ * matters is exactly the case where this browser has no ids to exclude: site
+ * data cleared (iOS evicts it after seven days of not visiting) with the passkey
+ * still in the keychain. Reproduced on 2026/09/03 against a virtual
+ * authenticator — one credential in, one credential out, a different id, the
+ * account blob gone, and the old `.night` name unreachable for ever.
+ *
+ * A random handle makes that impossible rather than unlikely: no create can
+ * name the pair an existing credential occupies, so the authenticator has
+ * nothing to replace and stores a second credential beside the first. The old
+ * passkey stays in the picker, which is what "Use a different passkey" needs to
+ * find it, and its blob still names the account.
+ *
+ * NOTHING READS THE HANDLE BACK. It is not a key, not an identifier this app
+ * stores, and not something a later ceremony has to reproduce: assertions are
+ * targeted by credential id and discovery is by relying party. So there is no
+ * value in it being derivable, and — as this incident proves — a real cost.
+ */
+function newUserHandle(): ArrayBuffer {
+  const handle = new Uint8Array(32);
+  globalThis.crypto.getRandomValues(handle);
+  return asArrayBuffer(handle);
 }
 
 /**
@@ -365,9 +522,31 @@ function assertAnsweredAsRequested(expectedCredentialId: string, rawId: ArrayBuf
   return answered;
 }
 
+/**
+ * The platform's account of a ceremony, in words a caller may show.
+ *
+ * IT REWRITES ONE THING AND GUESSES AT NOTHING. A relying-party id the origin
+ * cannot claim is the one WebAuthn failure whose own message is useless to a
+ * reader ("The operation is insecure"), and the browser reports it as a
+ * `SecurityError` — so that name, and only that name, earns the replacement.
+ *
+ * It used to decide by SUBSTRING, on `/invalid domain|relying party|rp id|
+ * security/i` over the message text, and on 2026/09/04 the Android-shape suite
+ * caught what that costs: Passport's own sentence about a passkey with no PRF
+ * ended "…or PRF-capable security key", the word "security" matched, and the
+ * screen told a reviewer on `localhost` that their origin was not a valid
+ * HTTPS one. A sniff over free text will always eventually match a message
+ * somebody wrote for another purpose; the error's NAME is the fact.
+ */
 function errorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
-  if (/invalid domain|relying party|rp id|security/i.test(message)) {
+  /* Read the way `isUserCancellation` reads a `NotAllowedError`: off the
+     object, not through `instanceof`, because what arrives here is a
+     `DOMException` and its relationship to `Error` is not something to depend
+     on across engines. */
+  const name =
+    typeof error === 'object' && error !== null ? (error as { name?: unknown }).name : undefined;
+  if (name === 'SecurityError') {
     return 'Passport passkeys require a valid HTTPS origin or localhost relying-party domain.';
   }
   return message;
@@ -446,6 +625,8 @@ function oneShotFromPrf(
   credentialId: string,
   prfResult: ArrayBuffer,
   accountBlob: PassportAccountBlob | null = null,
+  accountBlobWritten: PassportAccountBlobWriteOutcome | null = null,
+  largeBlobSupported: boolean | null = null,
 ): DiscoveredPassportPasskey {
   let output: Uint8Array | null = new Uint8Array(prfResult);
   const take = (): Uint8Array => {
@@ -455,6 +636,8 @@ function oneShotFromPrf(
   return {
     credentialId,
     accountBlob,
+    accountBlobWritten,
+    largeBlobSupported,
     deriveWalletSeed: async (scope) => deriveWalletSeedBytes(take(), scope),
     deriveStateKey: async (scope) => deriveKey(take(), scope),
     dispose: () => {
@@ -483,11 +666,183 @@ type PrfExtensionResults = AuthenticationExtensionsClientOutputs & {
  * one assertion, which is why {@link WebAuthnPrfKeyProvider.writeAccountBlob}
  * is a ceremony of its own.
  */
-function readExtensions(): AuthenticationExtensionsClientInputs {
+function readExtensions(largeBlob = true): AuthenticationExtensionsClientInputs {
   return {
     prf: { eval: { first: asArrayBuffer(PRF_SALT) } },
-    largeBlob: { read: true },
+    /* OMITTED ENTIRELY, not sent as `read: false`, when the caller already
+       knows this credential has no largeBlob. An extension the client has to
+       reconcile against the authenticator's capabilities is one more thing
+       that can narrow a picker; an extension that was never sent cannot. */
+    ...(largeBlob ? { largeBlob: { read: true } } : {}),
   } as AuthenticationExtensionsClientInputs;
+}
+
+/**
+ * What an assertion that asked for a READ revealed about largeBlob support.
+ *
+ * The same rule {@link accountBlobWriteOutcome} reads a write by, and it is the
+ * specification's: a client that finds no largeBlob support omits the output
+ * altogether, and one that finds support but no stored blob returns an empty
+ * slice. So an absent slice is a definite no about this credential, and an
+ * empty one is a definite yes — the difference between "cannot" and "has not".
+ *
+ * `null` where the assertion never asked, which is the one case in which
+ * nothing at all was learnt and nothing may be written down.
+ */
+function accountBlobReadSupport(
+  extension: PrfExtensionResults,
+  asked: boolean,
+): boolean | null {
+  if (!asked) return null;
+  return extension.largeBlob !== undefined;
+}
+
+/**
+ * ONE targeted, bounded, abortable read of the account blob off a credential
+ * that has just answered a discoverable assertion — and a best effort that
+ * NEVER throws and never blocks a sign-in.
+ *
+ * It exists because the discoverable assertion no longer asks for the
+ * extension at all (see {@link DiscoverPassportPasskeyOptions.largeBlob}), so a
+ * caller that genuinely wants the blob has to ask for it separately. Every
+ * failure — a refusal, a platform with no largeBlob, a sheet that never
+ * settles — comes back as "no blob", because by the time this runs the user is
+ * already signed in and the blob is a convenience.
+ *
+ * THE TIMEOUT ABORTS RATHER THAN ABANDONS. `AbortController` on
+ * `credentials.get` is what takes the platform sheet down; resolving early
+ * without it would leave a prompt on screen for a ceremony nobody is waiting
+ * on any more. A client that ignores the signal costs nothing here — this
+ * promise has already settled.
+ */
+async function readAccountBlobOnce(
+  navigator: Navigator,
+  credentialId: string,
+  rpId: string | undefined,
+  timeoutMs: number,
+): Promise<{
+  accountBlob: PassportAccountBlob | null;
+  largeBlobSupported: boolean | null;
+}> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<'timeout'>((resolve) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      resolve('timeout');
+    }, timeoutMs);
+  });
+  try {
+    const assertion = await Promise.race([
+      navigator.credentials.get({
+        publicKey: {
+          challenge: asArrayBuffer(randomChallenge()),
+          allowCredentials: [
+            { type: 'public-key' as const, id: asArrayBuffer(fromBase64(credentialId)) },
+          ],
+          userVerification: 'required',
+          extensions: { largeBlob: { read: true } } as AuthenticationExtensionsClientInputs,
+          ...(rpId ? { rpId } : {}),
+        },
+        signal: controller.signal,
+      }) as Promise<PublicKeyCredential | null>,
+      expired,
+    ]);
+    /* A sheet that never settled, a dismissal, or a credential that answered
+       as somebody else. None of them is evidence about largeBlob, so none of
+       them is written down as one. */
+    if (assertion === 'timeout' || !assertion) {
+      return { accountBlob: null, largeBlobSupported: null };
+    }
+    if (toBase64(new Uint8Array(assertion.rawId)) !== credentialId) {
+      return { accountBlob: null, largeBlobSupported: null };
+    }
+    const extension = assertion.getClientExtensionResults() as PrfExtensionResults;
+    return {
+      accountBlob: decodeAccountBlob(extension.largeBlob?.blob),
+      // This one DID ask, so an absent slice is the platform saying it has no
+      // largeBlob — a definite answer, and worth recording.
+      largeBlobSupported: accountBlobReadSupport(extension, true),
+    };
+  } catch {
+    return { accountBlob: null, largeBlobSupported: null };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * The same bag with the blob in place of the read — the RIDE-ALONG WRITE.
+ *
+ * The specification forbids `read` and `write` in one assertion, so this is a
+ * real either/or; it does not forbid `prf` alongside either, which is what
+ * makes a write free. Whoever asks for this is giving up the read, so it is
+ * only ever correct where the caller already holds what a read would have
+ * recovered — see {@link AssertPassportPasskeyOptions.writeAccountBlob}.
+ *
+ * `null` for a blob that will not encode. A payload over the ceiling is a
+ * programming error, not a reason to fail somebody's sign-in, so the caller
+ * falls back to the read it would otherwise have sent.
+ */
+function writeExtensions(
+  blob: PassportAccountBlob,
+): AuthenticationExtensionsClientInputs | null {
+  let payload: Uint8Array;
+  try {
+    payload = encodeAccountBlob(blob);
+  } catch {
+    return null;
+  }
+  return {
+    prf: { eval: { first: asArrayBuffer(PRF_SALT) } },
+    largeBlob: { write: asArrayBuffer(payload) },
+  } as AuthenticationExtensionsClientInputs;
+}
+
+/** Reads the three answers out of an assertion that carried a write. */
+function accountBlobWriteOutcome(
+  extension: PrfExtensionResults,
+): PassportAccountBlobWriteOutcome {
+  // The whole slice absent is the platform saying it has no largeBlob at all.
+  if (extension.largeBlob === undefined) return 'unsupported';
+  return extension.largeBlob.written === true ? 'written' : 'refused';
+}
+
+/** Options for {@link WebAuthnPrfKeyProvider.assertOnce}. */
+export interface AssertPassportPasskeyOptions {
+  /**
+   * A blob to WRITE onto the credential during this assertion, in place of
+   * reading the one already there. Absent — the norm — reads.
+   *
+   * WHY THIS EXISTS. A largeBlob write is only possible during an assertion,
+   * and pairing one with a read is forbidden, so on its own it costs a
+   * user-verified ceremony of its own: a passkey prompt out of nowhere for a
+   * piece of metadata the user never asked to save. Passport raised exactly
+   * that on the way to Home, and it is not a prompt this app is willing to
+   * charge anyone (2026/08/31). Carried HERE the write is free: the assertion
+   * was going to happen anyway, and the extension bag costs nothing.
+   *
+   * WHEN IT IS SAFE. Only when the caller already holds the record a read
+   * would have recovered — an account this browser has seen deployed. It then
+   * gives up nothing: {@link accountBlob} comes back `null` on this one
+   * assertion, and the recovery path it feeds does nothing for a browser that
+   * already knows its own contract.
+   */
+  writeAccountBlob?: PassportAccountBlob | null;
+  /**
+   * Whether this assertion may touch the largeBlob extension AT ALL. Defaults
+   * to `true`; pass `false` where the caller has already learnt that this
+   * credential cannot hold a blob.
+   *
+   * It suppresses the read AND the write, and the write is the one that
+   * matters: on Android, Chrome narrows the passkey sheet to credentials that
+   * can satisfy the extensions asked for, a Google Password Manager passkey
+   * cannot satisfy largeBlob, and the sheet then has nothing in it and never
+   * settles. That is the "the passkey prompt did not finish" report of
+   * 2026/09/04. Suppressing the read as well costs nothing on such a
+   * credential — there is by definition no blob on it to read.
+   */
+  largeBlob?: boolean;
 }
 
 /**
@@ -539,7 +894,9 @@ export class WebAuthnPrfKeyProvider implements PassportStateKeyProvider, Passpor
         publicKey: {
           rp,
           user: {
-            id: await userHandle(options.userId),
+            /* Random, never derived from `options.userId`: see
+               {@link newUserHandle} for the passkey this used to overwrite. */
+            id: newUserHandle(),
             name: options.label,
             displayName: options.label,
           },
@@ -582,8 +939,9 @@ export class WebAuthnPrfKeyProvider implements PassportStateKeyProvider, Passpor
       // A returned result proves the extension is live even on a platform that
       // omits the `enabled` flag when it evaluates eagerly.
       if (!extension.prf?.enabled && !evaluated) {
-        throw new Error(
-          'This authenticator does not support the WebAuthn PRF extension. Use a recent platform passkey or PRF-capable security key.',
+        throw new PassportPasskeyDiscoveryError(
+          'prf-missing',
+          ENROLMENT_PRF_MISSING_MESSAGE,
         );
       }
       const credentialId = toBase64(new Uint8Array(credential.rawId));
@@ -596,6 +954,18 @@ export class WebAuthnPrfKeyProvider implements PassportStateKeyProvider, Passpor
             : null,
       };
     } catch (error) {
+      /* A CREDENTIAL WITH NO PRF TRAVELS AS ITSELF, and this rethrow is the
+         whole reason it can. Flattened through `errorMessage` below it became
+         a string, and a string is a thing a surface has to pattern-match; what
+         actually happened on 2026/09/04 was worse than that. The sentence this
+         used to throw contained the word "security", `errorMessage`'s
+         substring sniff matched it, and an Android reviewer on a PRF-less
+         passkey was told "Passport passkeys require a valid HTTPS origin or
+         localhost relying-party domain" — a diagnosis that was false, about a
+         thing that was fine, with nothing to do about it. Typed, the caller
+         reads the reason and puts the right words and the right way out on the
+         screen. */
+      if (error instanceof PassportPasskeyDiscoveryError) throw error;
       // The exclusion list doing its job is a distinct, catchable outcome —
       // never a generic message the caller has to pattern-match, and never a
       // failure toast. It means the user's Passport is still there.
@@ -607,12 +977,14 @@ export class WebAuthnPrfKeyProvider implements PassportStateKeyProvider, Passpor
   /**
    * DISCOVER BEFORE CREATE — the affordance `excludeCredentials` cannot give.
    *
-   * Exclusion only protects against overwriting credentials whose ids this
-   * device still remembers. The dangerous case is exactly the one where it
-   * remembers none: site data cleared, passkey still in the keychain. An app
-   * that keys "create or sign in" off local storage then calls `create`, the
-   * deterministic user handle matches, and the surviving credential is
-   * REPLACED — the wallet seed gone for good.
+   * Exclusion only knows credentials whose ids this device still remembers.
+   * The case that matters is exactly the one where it remembers none: site
+   * data cleared, passkey still in the keychain. An app that keys "create or
+   * sign in" off local storage then calls `create` — which, until the handle
+   * became random on 2026/09/03, REPLACED the surviving credential and took
+   * the wallet seed with it. It no longer can; what it still does is leave the
+   * user with a second, empty Passport and their own one merely unfound. This
+   * finds it instead.
    *
    * So ask the authenticator first. One discoverable assertion: if a resident
    * credential answers, that is the Passport, and this returns its one-shot
@@ -626,8 +998,14 @@ export class WebAuthnPrfKeyProvider implements PassportStateKeyProvider, Passpor
    * that produced no usable credential is an answer, not an exception.
    *
    * The user dismissing the picker, and a picker with nothing in it, both
-   * surface as `NotAllowedError` (reason `cancelled`) and proceed to
-   * enrolment, as they always did. Any other failure has told us nothing
+   * surface as `NotAllowedError` (reason `cancelled`), and since 2026/09/05
+   * that ENDS the ceremony with `outcome: 'cancelled'` rather than proceeding
+   * to enrolment. Falling through was how a dismissed Face ID sheet became an
+   * unasked-for create sheet one gesture later. The two cases are
+   * indistinguishable to WebAuthn, so the safe reading is the one that makes
+   * nothing: an empty picker's way forward is the landing screen's own
+   * "Continue with Passport", which enrols where this browser knows of no
+   * credential. Any other failure has told us nothing
    * about what the device holds, so it is RETRIED once — a transient error
    * should not lead to a create — and then proceeds to enrolment as well.
    * Every create carries `knownCredentialIds` in `excludeCredentials`, which
@@ -636,8 +1014,9 @@ export class WebAuthnPrfKeyProvider implements PassportStateKeyProvider, Passpor
    * {@link PassportEnrolmentConflictError} instead.
    *
    * A credential that answered WITHOUT a PRF result is the one outcome worth
-   * stopping for: it cannot open a Passport, and creating under the same
-   * deterministic handle may replace it. That comes back as
+   * stopping for: it cannot open a Passport, and enrolling silently past it
+   * leaves the person with two passkeys for this site and no account of why.
+   * That comes back as
    * `outcome: 'unusable-credential'` so the caller can put the choice to the
    * user, rather than failing or overwriting on its own.
    *
@@ -689,6 +1068,22 @@ export class WebAuthnPrfKeyProvider implements PassportStateKeyProvider, Passpor
             message: error.message,
           };
         }
+        /* A DISMISSED PICKER IS A STOP, NOT A LICENCE TO ENROL (2026/09/05).
+           This used to fall through to `create`, so dismissing the Face ID
+           sheet raised a make-a-passkey sheet immediately after — a second
+           ceremony charged for the gesture that meant "not now", and on a
+           browser whose site data was cleared it is how somebody ends up with
+           a second, empty Passport beside the one they were trying to reopen.
+           The user has answered. */
+        if (error.reason === 'cancelled') {
+          return {
+            outcome: 'cancelled',
+            discovered: null,
+            enrolled: null,
+            reason: 'cancelled',
+            message: error.message,
+          };
+        }
         discovered = null;
       } else {
         discovered = null;
@@ -728,11 +1123,26 @@ export class WebAuthnPrfKeyProvider implements PassportStateKeyProvider, Passpor
    * {@link deriveWalletSeed} pair — same PRF salt, same HKDF constants.
    *
    * Callers MUST call `dispose()`; the PRF output must never outlive the flow.
+   *
+   * `options.writeAccountBlob` turns this one assertion's largeBlob slice from
+   * a read into a write, at no extra cost and no extra prompt. See
+   * {@link AssertPassportPasskeyOptions}.
    */
   static async assertOnce(
     reference: PassportPasskeyReference,
+    options: AssertPassportPasskeyOptions = {},
   ): Promise<DiscoveredPassportPasskey> {
     const navigator = getNavigator();
+    /* A credential the caller has already learnt cannot hold a blob is asserted
+       with no largeBlob slice at all — neither half. See
+       {@link AssertPassportPasskeyOptions.largeBlob} for the Android sheet that
+       never settles. */
+    const largeBlob = options.largeBlob !== false;
+    /* Null both when nothing was offered, when the caller has ruled largeBlob
+       out, and when what was offered will not encode; in every one of them this
+       assertion reads, exactly as it always did. */
+    const write =
+      largeBlob && options.writeAccountBlob ? writeExtensions(options.writeAccountBlob) : null;
     try {
       const assertion = (await navigator.credentials.get({
         publicKey: {
@@ -741,7 +1151,7 @@ export class WebAuthnPrfKeyProvider implements PassportStateKeyProvider, Passpor
             { type: 'public-key', id: asArrayBuffer(fromBase64(reference.credentialId)) },
           ],
           userVerification: 'required',
-          extensions: readExtensions(),
+          extensions: write ?? readExtensions(largeBlob),
           ...(reference.rpId ? { rpId: reference.rpId } : {}),
         },
       })) as PublicKeyCredential | null;
@@ -753,7 +1163,14 @@ export class WebAuthnPrfKeyProvider implements PassportStateKeyProvider, Passpor
         // Targeted: the answer must come from the credential that was named.
         assertAnsweredAsRequested(reference.credentialId, assertion.rawId),
         result,
-        decodeAccountBlob(extension.largeBlob?.blob),
+        // An assertion that wrote read nothing — the two are exclusive.
+        write ? null : decodeAccountBlob(extension.largeBlob?.blob),
+        write ? accountBlobWriteOutcome(extension) : null,
+        /* Learnt from whichever half this assertion actually sent. A write
+           already answers it through its own outcome, so only the read has to
+           be interrogated separately; an assertion that sent neither learnt
+           nothing and says so with `null`. */
+        write ? null : accountBlobReadSupport(extension, largeBlob),
       );
     } catch (error) {
       throw new Error(errorMessage(error));
@@ -785,7 +1202,16 @@ export class WebAuthnPrfKeyProvider implements PassportStateKeyProvider, Passpor
           // makes the authenticator offer every resident credential for this
           // rpId instead of demanding one we name in advance.
           userVerification: 'required',
-          extensions: readExtensions(),
+          /* NO largeBlob SLICE, IN EITHER DIRECTION (2026/09/05). This is the
+             ceremony a container with no local profile runs, so it is the one
+             ceremony that cannot be told about a credential's largeBlob
+             support in advance — and until today it was also the one that
+             asked for it unconditionally. An extension the client has to
+             reconcile against the authenticator's capabilities is one more
+             thing that can narrow a picker; an extension that was never sent
+             cannot. See {@link DiscoverPassportPasskeyOptions.largeBlob} for
+             what is given up and what replaces it. */
+          extensions: readExtensions(false),
           ...(rpId ? { rpId } : {}),
         },
       })) as PublicKeyCredential | null;
@@ -803,11 +1229,29 @@ export class WebAuthnPrfKeyProvider implements PassportStateKeyProvider, Passpor
           'A Passport passkey answered, but the authenticator did not return a PRF result.',
         );
       }
-      return oneShotFromPrf(
-        toBase64(new Uint8Array(assertion.rawId)),
-        result,
-        decodeAccountBlob(extension.largeBlob?.blob),
-      );
+      const credentialId = toBase64(new Uint8Array(assertion.rawId));
+      /* LEARNT FOR FREE WHERE IT IS THERE TO LEARN. The assertion above asked
+         for nothing, so by specification there should be no slice — but a
+         client that volunteers one has answered the question, and an answer
+         that costs no ceremony is never thrown away. Absent, nothing at all
+         has been learnt, which is `null` rather than `false`. */
+      let largeBlobSupported: boolean | null =
+        extension.largeBlob === undefined ? null : true;
+      let accountBlob = decodeAccountBlob(extension.largeBlob?.blob);
+      if (options.largeBlob === true && largeBlobSupported === null) {
+        /* THE OPT-IN FOLLOW-UP, and every way it can go wrong ends the same
+           way: no blob, sign-in unaffected. It is a ceremony of its own, which
+           is why no sign-in path sets the option. */
+        const read = await readAccountBlobOnce(
+          navigator,
+          credentialId,
+          rpId,
+          options.largeBlobTimeoutMs ?? DISCOVERY_LARGE_BLOB_TIMEOUT_MS,
+        );
+        accountBlob = read.accountBlob;
+        largeBlobSupported = read.largeBlobSupported;
+      }
+      return oneShotFromPrf(credentialId, result, accountBlob, null, largeBlobSupported);
     } catch (error) {
       if (error instanceof PassportPasskeyDiscoveryError) throw error;
       throw new PassportPasskeyDiscoveryError(
@@ -821,14 +1265,20 @@ export class WebAuthnPrfKeyProvider implements PassportStateKeyProvider, Passpor
    * Writes the account blob onto a credential — ONE targeted assertion, and a
    * best effort that NEVER throws.
    *
-   * WHY A SEPARATE CEREMONY. The specification forbids `largeBlob.read` and
-   * `largeBlob.write` in the same assertion, and a write is only possible
-   * during `credentials.get` — never during `credentials.create`. So the blob
-   * cannot be written as part of the enrolment or the sign-in that reads it;
-   * it costs its own user-verified assertion. Callers should run it inside the
-   * user gesture that already earned a prompt (immediately after a successful
-   * claim), so the user experiences one continuous action rather than a prompt
-   * out of nowhere.
+   * IT COSTS A PROMPT, WHICH IS WHY PASSPORT NO LONGER CALLS IT (2026/08/31).
+   * A write is only possible during `credentials.get` and may not be paired
+   * with a read, so on its own it is a full user-verified assertion. This was
+   * fired at the end of a name claim, on the advice that it would ride the
+   * gesture that earned the claim's own prompt. It does not: a claim is
+   * minutes of chain work, and what the user actually met was a passkey prompt
+   * on a finished Home screen, for a piece of metadata they never asked to
+   * save. Passport now carries the blob on the next assertion it was going to
+   * make anyway — see {@link AssertPassportPasskeyOptions.writeAccountBlob} —
+   * so the write is free and unprompted.
+   *
+   * What remains here is the standalone write, for a caller that is NOT about
+   * to assert for another reason and has decided a prompt of its own is worth
+   * it. Do not call it on a path the user did not ask for.
    *
    * WHY IT NEVER THROWS. Everything this write buys is a nicety on a future
    * device. Nothing that has already happened — the deployed contract, the

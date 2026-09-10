@@ -19,7 +19,19 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { classifyFundAccountAnswer } from './activation.js';
+import {
+  ACTIVATION_DEPOSITED_LABEL,
+  ACTIVATION_EXHAUSTED_LABEL,
+  ACTIVATION_REFUSED_LABEL,
+  ACTIVATION_STABLECOIN_LABEL,
+  OPENING_BALANCE_ON_THE_WAY_DETAIL,
+  OPENING_BALANCE_ON_THE_WAY_LABEL,
+  OPENING_MUSD,
+  OPENING_NIGHT,
+  activationRetryRowId,
+  classifyFundAccountAnswer,
+  openingBalanceOnTheWay,
+} from './activation.js';
 
 /** A real stagenet account-custody contract address, for the detail strings. */
 const ACCOUNT = '7c2f4a19e6d0b83c5194fe2a77bb0c61d8a3e94f20cb5d7e8f16a0b3c4d5e6f7';
@@ -182,21 +194,21 @@ describe('a 200 with both legs in', () => {
       {
         label: 'Opening balance deposited',
         detail:
-          'The sponsor deposited 2000 atomic NIGHT into your account contract 7c2f4a19e...4d5e6f7.',
+          'The sponsor deposited 2000 atomic NIGHT into your account 7c2f4a19e...4d5e6f7.',
         status: 'complete',
         txHash: 'ab'.repeat(32),
       },
       {
         label: 'Stablecoin deposited',
         detail:
-          '100 mUSD went into your account contract 7c2f4a19e...4d5e6f7 alongside the NIGHT.',
+          '100 mUSD went into your account 7c2f4a19e...4d5e6f7 alongside the NIGHT.',
         status: 'complete',
         txHash: 'cd'.repeat(32),
       },
     ]);
   });
 
-  it('never names a wallet or a DUST balance in what it says', () => {
+  it('never names the machinery in what it says', () => {
     const plan = classifyFundAccountAnswer(
       {
         kind: 'response',
@@ -208,9 +220,8 @@ describe('a 200 with both legs in', () => {
     );
     const said = plan.activities.map((activity) => `${activity.label} ${activity.detail}`).join(' ');
     // The account is the only thing value ever reaches, and the copy says so.
-    expect(said).toMatch(/account contract/);
-    expect(said.toLowerCase()).not.toContain('dust');
-    expect(said.toLowerCase()).not.toContain('wallet');
+    expect(said).toMatch(/your account\b/);
+    expect(said).not.toMatch(/contract|wallet|DUST|registry|indexer|resolver/i);
     expect(said).not.toContain('mn_addr');
   });
 
@@ -368,5 +379,221 @@ describe('bodies that are not objects', () => {
       expect(plan.activities).toHaveLength(1);
       expect(plan.activities[0]?.detail).toContain('an opening atomic NIGHT');
     }
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The row that carries the retry (2026/09/02).                               */
+/*                                                                            */
+/* A grant that never arrives leaves a trail row saying so and, until this     */
+/* rule existed, nothing to press. The marker is only written on evidence the  */
+/* grant landed, so asking again was always going to work — see               */
+/* `activationRetryRowId`. Rows arrive newest first, as `addActivity` writes   */
+/* them.                                                                      */
+/* -------------------------------------------------------------------------- */
+
+/** A trail row, in the two fields the rule reads. */
+const row = (id: string, label: string) => ({ id, label });
+
+describe('the trail row that carries a retry', () => {
+  it('is the failure row when nothing has happened since', () => {
+    expect(
+      activationRetryRowId([
+        row('c', ACTIVATION_EXHAUSTED_LABEL),
+        row('b', 'Your name is registered'),
+        row('a', 'Passport created'),
+      ]),
+    ).toBe('c');
+  });
+
+  it('is the one-attempt refusal too', () => {
+    expect(activationRetryRowId([row('c', ACTIVATION_REFUSED_LABEL)])).toBe('c');
+  });
+
+  it('is nothing at all when the grant has since landed', () => {
+    /* A control here would ask the sponsor for a SECOND opening balance. */
+    expect(
+      activationRetryRowId([
+        row('d', ACTIVATION_DEPOSITED_LABEL),
+        row('c', ACTIVATION_EXHAUSTED_LABEL),
+      ]),
+    ).toBeNull();
+  });
+
+  it('is nothing when only the stablecoin half is on the trail above it', () => {
+    /* The stablecoin row is written by the same landed answer as the NIGHT
+       one, so it is the same evidence and it counts. */
+    expect(
+      activationRetryRowId([
+        row('d', ACTIVATION_STABLECOIN_LABEL),
+        row('c', ACTIVATION_EXHAUSTED_LABEL),
+      ]),
+    ).toBeNull();
+  });
+
+  it('steps over rows that are about anything else', () => {
+    /* A send made after a failed grant must not hide the failed grant. */
+    expect(
+      activationRetryRowId([
+        row('e', 'Sent to bob.night'),
+        row('d', 'Your name is registered'),
+        row('c', ACTIVATION_EXHAUSTED_LABEL),
+      ]),
+    ).toBe('c');
+  });
+
+  it('offers the newest failure only, never both', () => {
+    /* Two spent schedules leave two rows and one of them is history; a control
+       on the older would describe an attempt that is over. */
+    expect(
+      activationRetryRowId([
+        row('c', ACTIVATION_EXHAUSTED_LABEL),
+        row('b', ACTIVATION_REFUSED_LABEL),
+      ]),
+    ).toBe('c');
+  });
+
+  it('is nothing on an empty trail, and on one with no activation in it', () => {
+    expect(activationRetryRowId([])).toBeNull();
+    expect(activationRetryRowId([row('a', 'Passport created')])).toBeNull();
+  });
+});
+
+describe('openingBalanceOnTheWay', () => {
+  const entry = (label: string) => ({ label });
+  /** An account holding neither half of the grant yet. */
+  const waiting = { holdsOpeningNight: false, holdsOpeningStablecoin: false };
+
+  it('is on its way from the moment there is an account holding nothing', () => {
+    /* Asked for on 2026/09/02: the opening balance should read as pending from
+       the moment activation begins, not from whenever the sponsor answers. */
+    expect(openingBalanceOnTheWay({ hasAccount: true, ...waiting, entries: [] })).toBe(true);
+  });
+
+  it('is nothing without an account for it to land in', () => {
+    expect(openingBalanceOnTheWay({ hasAccount: false, ...waiting, entries: [] })).toBe(false);
+  });
+
+  it('goes only once BOTH halves of the grant are held', () => {
+    /* THE 2026/09/04 STABILITY AUDIT. The grant is two deposits and they do not
+       land together: the audit watched the opening NIGHT arrive, the row go on
+       the spot, and the screen then show `mUSD 0` beside "Your account is
+       ready" for 18.1 seconds. Either half on its own leaves the other still
+       coming, and the row names both figures. */
+    expect(
+      openingBalanceOnTheWay({
+        hasAccount: true,
+        holdsOpeningNight: true,
+        holdsOpeningStablecoin: false,
+        entries: [],
+      }),
+    ).toBe(true);
+    expect(
+      openingBalanceOnTheWay({
+        hasAccount: true,
+        holdsOpeningNight: false,
+        holdsOpeningStablecoin: true,
+        entries: [],
+      }),
+    ).toBe(true);
+    /* Both held: the balances above ARE the answer now. */
+    expect(
+      openingBalanceOnTheWay({
+        hasAccount: true,
+        holdsOpeningNight: true,
+        holdsOpeningStablecoin: true,
+        entries: [],
+      }),
+    ).toBe(false);
+  });
+
+  it('goes when the sponsor refused, and when its ten minutes ran out', () => {
+    for (const label of [ACTIVATION_REFUSED_LABEL, ACTIVATION_EXHAUSTED_LABEL]) {
+      expect(
+        openingBalanceOnTheWay({
+          hasAccount: true,
+          ...waiting,
+          entries: [entry('Passport created'), entry(label)],
+        }),
+      ).toBe(false);
+    }
+  });
+
+  it('goes on a refusal even when one half of the grant did land', () => {
+    /* The half that arrived does not make the other one still coming: the
+       sponsor has said it is not sending it, and the trail carries the retry. */
+    expect(
+      openingBalanceOnTheWay({
+        hasAccount: true,
+        holdsOpeningNight: true,
+        holdsOpeningStablecoin: false,
+        entries: [entry(ACTIVATION_EXHAUSTED_LABEL)],
+      }),
+    ).toBe(false);
+  });
+
+  it('survives a trail of rows about anything else', () => {
+    expect(
+      openingBalanceOnTheWay({
+        hasAccount: true,
+        ...waiting,
+        entries: [entry('Passport created'), entry('Your name is registered')],
+      }),
+    ).toBe(true);
+  });
+});
+
+describe('the opening balance copy', () => {
+  it('names the sponsor’s two fixed figures', () => {
+    /* 2026/09/03: the reviewer wanted the expected figures visible while the
+       deposits are pending. They are the sponsor's fixed grant, so this device
+       can name them before the sponsor has answered. */
+    expect(OPENING_MUSD).toBe(100);
+    expect(OPENING_NIGHT).toBe('0.002');
+    expect(OPENING_BALANCE_ON_THE_WAY_LABEL).toBe('Opening balance on the way');
+    expect(OPENING_BALANCE_ON_THE_WAY_DETAIL).toBe(
+      '100 mUSD and 0.002 NIGHT are being added to your account.',
+    );
+  });
+
+  it('builds the sentence from the constants, so one figure cannot drift', () => {
+    expect(OPENING_BALANCE_ON_THE_WAY_DETAIL).toContain(`${OPENING_MUSD} mUSD`);
+    expect(OPENING_BALANCE_ON_THE_WAY_DETAIL).toContain(`${OPENING_NIGHT} NIGHT`);
+  });
+
+  it('reads as pending, never as a balance that has landed', () => {
+    /* Present continuous, both halves: the figures are what is COMING. Nothing
+       here may read as a settled deposit, which is the reviewer's standing
+       objection and the one this row could most easily break. */
+    expect(OPENING_BALANCE_ON_THE_WAY_LABEL).toContain('on the way');
+    expect(OPENING_BALANCE_ON_THE_WAY_DETAIL).toContain('are being added');
+    for (const copy of [OPENING_BALANCE_ON_THE_WAY_LABEL, OPENING_BALANCE_ON_THE_WAY_DETAIL]) {
+      expect(copy).not.toMatch(/deposited|arrived|you (?:now )?have/i);
+    }
+  });
+
+  it('says nothing about the machinery underneath it', () => {
+    /* The row is read by somebody who has never been told this account is a
+       contract, has never seen a wallet, and never will. */
+    for (const copy of [OPENING_BALANCE_ON_THE_WAY_LABEL, OPENING_BALANCE_ON_THE_WAY_DETAIL]) {
+      expect(copy).not.toMatch(/wallet|dust|contract|registry|indexer|resolver/i);
+    }
+  });
+
+  it('is not one of the labels an activation writes to the trail', () => {
+    /* `activationRetryRowId` and `openingBalanceOnTheWay` both match by
+       identity, and a pending row mistaken for a landing or a failure would
+       either hide the wait or offer a retry for a grant nobody refused. */
+    expect(
+      activationRetryRowId([{ id: 'p', label: OPENING_BALANCE_ON_THE_WAY_LABEL }]),
+    ).toBeNull();
+    expect(
+      openingBalanceOnTheWay({
+        hasAccount: true,
+        holdsOpeningNight: false,
+        holdsOpeningStablecoin: false,
+        entries: [{ label: OPENING_BALANCE_ON_THE_WAY_LABEL }],
+      }),
+    ).toBe(true);
   });
 });

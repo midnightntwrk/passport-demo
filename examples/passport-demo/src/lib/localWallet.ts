@@ -103,8 +103,17 @@ import {
 import * as Rx from 'rxjs';
 
 import type { PassportStateScope, PassportWalletSeedProvider } from '../backend.js';
+import { parseEndpointList } from './endpoints.js';
+import {
+  firstIndexerThatAnswers,
+  indexerEndpointList,
+  indexerWsFrom,
+  type IndexerEndpoint,
+} from './indexerFailover.js';
 import { sponsorReadiness, sponsorRefusal } from './sponsor.js';
 import type { SponsorUnavailableCause } from './sponsor.js';
+import { httpWalletProvingService } from './walletProver.js';
+import { createWalletSnapshotCheckpointer } from './walletSnapshotCheckpoint.js';
 import { wasmWalletProvingService } from './wasmProver.js';
 import {
   clearWalletSnapshots,
@@ -129,10 +138,25 @@ export { clearWalletSnapshots };
 export interface LocalWalletNetworkConfig {
   /** Midnight network identifier, e.g. `preview`, `mainnet`, `undeployed`. */
   networkId: string;
-  /** Indexer GraphQL endpoint over HTTP. */
+  /**
+   * The indexer this wallet's facade was actually built against — the head of
+   * {@link indexers} when nothing was probed, and otherwise the first entry
+   * that answered. Read it, not the list, to know where a wallet is reading.
+   */
   indexerHttpUrl: string;
   /** Indexer GraphQL endpoint over WebSocket (the HTTP URL plus `/ws`). */
   indexerWsUrl: string;
+  /**
+   * Every indexer this build is configured with, in the operator's order.
+   *
+   * `VITE_INDEXER_URL` takes a comma-separated list since 2026/09/06, and a
+   * single URL is a list of one that behaves exactly as it always did. The
+   * wallet opens on the first of these that answers a bounded probe; a stall
+   * afterwards is a REBUILD on the next one rather than a live switch, because
+   * the SDK binds its indexer client at `WalletFacade.init` and every consumer
+   * of an open wallet holds that facade. See `./indexerFailover.ts`.
+   */
+  indexers: IndexerEndpoint[];
   /** Node relay WebSocket URL used for transaction submission. */
   relayUrl: string;
   /**
@@ -143,8 +167,40 @@ export interface LocalWalletNetworkConfig {
    * proved in-tab either way (see {@link LocalWalletProvingMode}); it is the
    * contract clients in `../identity/` that need this, and they say so plainly
    * when it is absent rather than pretending a URL exists.
+   *
+   * This is the FIRST of {@link LocalWalletNetworkConfig.provingServerUrls} and
+   * exists because the wallet SDK's own facade takes one URL and no more.
    */
   provingServerUrl: string;
+  /**
+   * Every proof server this build may use, in the operator's own order.
+   *
+   * `VITE_MIDNIGHT_PROVING_URL` takes a comma-separated list since 2026/08/31,
+   * for the reason set out in `./endpoints.ts`: proving used to ride the same
+   * single droplet as fee sponsorship, name registration, and activation
+   * grants, and the 1AM stagenet gateway serves `POST /prove` and `POST /check`
+   * on the identical wire contract — anonymously, verified 2026/08/31 — so a
+   * second, independent prover costs one comma.
+   *
+   * THE WHOLE LIST IS HONOURED, ON BOTH PATHS, SINCE 2026/09/02. Contract
+   * circuits go through `createContractProviders` in
+   * `../identity/contractRuntime.ts`; the facade's own circuits go through
+   * `httpWalletProvingService` in `./walletProver.ts`. Both fall through per
+   * REQUEST, through the same `failoverProvingProvider`.
+   *
+   * They did not, before, and the sentence that used to be here — that the
+   * facade's prover "has nothing to do" — is what let the bug hide. It has
+   * something to do the moment a SHIELDED value moves: `deposit_shielded`
+   * needs a wallet-side Zswap spend proof, and `WalletFacade.init`'s own
+   * `provingServerUrl` client composes its endpoint as `new URL('/prove',
+   * base)`, an absolute path that discards the base's own path. So
+   * `…/prover` was posted to as `…/prove`, the deployed Caddy's catch-all
+   * answered without a CORS header, the browser blocked the preflight, and
+   * every shielded send died at its second leg with the note already out of
+   * the sender's account. {@link LocalWalletNetworkConfig.provingServerUrl}
+   * is consequently no longer given to the facade at all in `http` mode.
+   */
+  provingServerUrls: string[];
 }
 
 /**
@@ -167,13 +223,14 @@ const DEFAULT_PROVING_SERVER_URL = '';
 const DEFAULT_NETWORK_ID = 'stagenet';
 
 /**
- * The indexer's WebSocket endpoint is its HTTP endpoint with `/ws` appended —
- * the bare GraphQL path refuses the upgrade. Verified against Preview on
- * 2026/08/04; see the header comment in `./indexerTx.ts`.
+ * How long the indexer probe is given before an endpoint is passed over.
+ *
+ * Short, because it is spent on the way into the app: a Passport that opens is
+ * behind it. The full `fetchChainHeight` ceiling is ten seconds, which is the
+ * right patience for the depth guard and the wrong patience for a health check
+ * with a standby waiting behind it.
  */
-function indexerWsFrom(indexerHttpUrl: string): string {
-  return `${indexerHttpUrl.replace(/\/+$/, '').replace(/^http/, 'ws')}/ws`;
-}
+const INDEXER_PROBE_TIMEOUT_MS = 4_000;
 
 /** The submission relay speaks WebSocket, so an `http(s)` node URL is upgraded. */
 function relayFrom(nodeUrl: string): string {
@@ -245,28 +302,52 @@ function warnOnLoopbackEndpoints(config: LocalWalletNetworkConfig): void {
  * the same build can be pointed at a localnet, and nothing is pinned to one.
  *
  *   VITE_MIDNIGHT_NETWORK_ID    default `stagenet`
- *   VITE_INDEXER_URL            default the stagenet indexer (shared with indexerTx)
- *   VITE_INDEXER_WS_URL         default derived from VITE_INDEXER_URL
+ *   VITE_INDEXER_URL            default the stagenet indexer (shared with
+ *                               indexerTx). Takes one URL or SEVERAL,
+ *                               comma-separated and tried in the order written.
+ *   VITE_INDEXER_WS_URL         default derived from VITE_INDEXER_URL, position
+ *                               by position across the list
  *   VITE_MIDNIGHT_NODE_URL      default the stagenet RPC node
  *   VITE_MIDNIGHT_RELAY_URL     default derived from VITE_MIDNIGHT_NODE_URL
  *   VITE_MIDNIGHT_PROVING_URL   default NONE — stagenet publishes no proof
  *                               server. See {@link DEFAULT_PROVING_SERVER_URL}.
+ *                               Takes one URL or SEVERAL, comma-separated and
+ *                               tried in the order written.
  */
 export function localWalletNetworkConfig(
   overrides: Partial<LocalWalletNetworkConfig> = {},
 ): LocalWalletNetworkConfig {
   const env = environment();
-  const indexerHttpUrl =
-    overrides.indexerHttpUrl ?? env.VITE_INDEXER_URL ?? DEFAULT_INDEXER_HTTP_URL;
+  /* THE LIST IS THE SOURCE, and `indexerHttpUrl` is its head — the same shape
+     `provingServerUrls`/`provingServerUrl` has, and for the same reason: a
+     config where the two disagreed would query one host and subscribe to
+     another. An `indexers` override is what a rebuild after a stall passes,
+     already rotated so the endpoint to try next is first. */
+  const indexers =
+    overrides.indexers ??
+    indexerEndpointList(
+      overrides.indexerHttpUrl ?? env.VITE_INDEXER_URL ?? DEFAULT_INDEXER_HTTP_URL,
+      overrides.indexerWsUrl ?? env.VITE_INDEXER_WS_URL,
+    );
+  const indexerHttpUrl = indexers[0]?.httpUrl ?? DEFAULT_INDEXER_HTTP_URL;
   const nodeUrl = env.VITE_MIDNIGHT_NODE_URL ?? DEFAULT_NODE_URL;
+  /* One list, and `provingServerUrl` is its head rather than a second source
+     of truth — a config where the two disagreed would prove a contract circuit
+     on one host and a balancing circuit on another, silently. An override may
+     still name either, and a single-URL override parses to a list of one. */
+  const provingServerUrls =
+    overrides.provingServerUrls ??
+    parseEndpointList(
+      overrides.provingServerUrl ?? env.VITE_MIDNIGHT_PROVING_URL ?? DEFAULT_PROVING_SERVER_URL,
+    );
   const config: LocalWalletNetworkConfig = {
     networkId: overrides.networkId ?? env.VITE_MIDNIGHT_NETWORK_ID ?? DEFAULT_NETWORK_ID,
+    indexers,
     indexerHttpUrl,
-    indexerWsUrl:
-      overrides.indexerWsUrl ?? env.VITE_INDEXER_WS_URL ?? indexerWsFrom(indexerHttpUrl),
+    indexerWsUrl: indexers[0]?.wsUrl ?? indexerWsFrom(indexerHttpUrl),
     relayUrl: overrides.relayUrl ?? env.VITE_MIDNIGHT_RELAY_URL ?? relayFrom(nodeUrl),
-    provingServerUrl:
-      overrides.provingServerUrl ?? env.VITE_MIDNIGHT_PROVING_URL ?? DEFAULT_PROVING_SERVER_URL,
+    provingServerUrls,
+    provingServerUrl: provingServerUrls[0] ?? DEFAULT_PROVING_SERVER_URL,
   };
   warnOnLoopbackEndpoints(config);
   return config;
@@ -828,6 +909,36 @@ export interface LocalWalletSyncProgress {
  * `highestRelevantIndex` stay 0) — so the target is the largest index any of
  * them reports. A component with no target yet contributes nothing.
  */
+/**
+ * The three numbers a screen is told about sync, read off one facade state.
+ *
+ * Lifted out of the subscription on 2026/09/02 so the SAME answer can be used
+ * to decide whether an update is worth publishing at all — see
+ * `subscribeSyncProgress`. Two states that produce this are indistinguishable
+ * to everything downstream, so republishing the second is a re-render nobody
+ * asked for.
+ */
+function syncProgressOf(state: FacadeState): LocalWalletSyncProgress {
+  const ratios = [
+    componentRatio(state.shielded.progress),
+    componentRatio(state.unshielded.progress),
+    componentRatio(state.dust.progress),
+  ].filter((ratio): ratio is number => ratio !== null);
+  const percent =
+    ratios.length === 0
+      ? null
+      : Math.max(0, Math.min(100, Math.floor(Math.min(...ratios) * 100)));
+  return {
+    // A synced facade is 100% regardless of index arithmetic.
+    percent: state.isSynced ? 100 : percent,
+    synced: state.isSynced,
+    connected:
+      state.shielded.progress.isConnected &&
+      state.unshielded.progress.isConnected &&
+      state.dust.progress.isConnected,
+  };
+}
+
 function componentRatio(progress: {
   appliedIndex?: bigint;
   highestIndex?: bigint;
@@ -913,7 +1024,35 @@ export async function createLocalMidnightWallet(
   }
   installZswapApplyGuard();
 
-  const network = localWalletNetworkConfig(options.network);
+  const configured = localWalletNetworkConfig(options.network);
+  /**
+   * WHICH INDEXER THIS WALLET OPENS ON.
+   *
+   * Asked before the facade is built, because the facade cannot be asked
+   * again: `WalletFacade.init` takes one `indexerClientConnection` and holds
+   * it for the life of the wallet. One cheap block-height query per endpoint,
+   * bounded at {@link INDEXER_PROBE_TIMEOUT_MS}, and the first that answers is
+   * the one the wallet is built against.
+   *
+   * A LIST OF ONE COSTS ONE PROBE AND CHANGES NOTHING — it opens on that
+   * endpoint whatever the probe said, because a probe that is wrong about a
+   * healthy indexer must not be the reason a Passport will not open. The probe
+   * is a preference between endpoints, never a gate.
+   */
+  const chosen =
+    configured.indexers.length > 1
+      ? await firstIndexerThatAnswers(
+          configured.indexers,
+          async (httpUrl) => (await fetchChainHeight(httpUrl, INDEXER_PROBE_TIMEOUT_MS)) !== null,
+        )
+      : null;
+  const network: LocalWalletNetworkConfig = chosen
+    ? {
+        ...configured,
+        indexerHttpUrl: chosen.endpoint.httpUrl,
+        indexerWsUrl: chosen.endpoint.wsUrl,
+      }
+    : configured;
   // The address codecs and the unshielded keystore read the process-wide
   // network id, so it must be set before any key or address is produced.
   setNetworkId(network.networkId);
@@ -943,22 +1082,19 @@ export async function createLocalMidnightWallet(
       indexerHttpUrl: network.indexerHttpUrl,
       indexerWsUrl: network.indexerWsUrl,
     },
-    /* Only when one is configured. An empty string is not a URL, and the
-       facade treats an absent `provingServerUrl` as "no server" rather than
-       failing — which is the stagenet default. */
-    ...(network.provingServerUrl
-      ? { provingServerUrl: new URL(network.provingServerUrl) }
-      : {}),
     relayURL: new URL(network.relayUrl),
     costParameters: { feeBlocksMargin: options.feeBlocksMargin ?? 100 },
     txHistoryStorage: new NoOpTransactionHistoryStorage(),
   };
 
   const provingMode = options.provingMode ?? defaultProvingMode(network);
-  /* An explicit service wins. Otherwise each mode injects its own and `http`
-     leaves the facade's default (built from `provingServerUrl`) in place.
-     There is deliberately no cross-over: an in-process prover that cannot find
-     its key material fails, it does not silently phone a server, because "the
+  /* An explicit service wins. Otherwise EVERY mode injects its own, `http`
+     included since 2026/09/02 — the facade is never left to build a client
+     from a `provingServerUrl`, because the one it builds drops the URL's path
+     and posts wallet proofs to an address that is not the proof server. See
+     `./walletProver.ts` for what that cost. There is deliberately no
+     cross-over between the modes: an in-process prover that cannot find its
+     key material fails, it does not silently phone a server, because "the
      proof was computed locally" must never be claimed falsely.
 
      `sdk-wasm` is imported lazily so that the beta prover-client — and the
@@ -975,7 +1111,9 @@ export async function createLocalMidnightWallet(
             );
             return makeWasmProvingService({});
           }
-        : undefined);
+        : network.provingServerUrls.length > 0
+          ? httpWalletProvingService(network.provingServerUrls)
+          : undefined);
   if (provingMode !== 'http' && !options.provingService && !network.provingServerUrl) {
     console.debug(
       `[localWallet] no proof server is configured for ${network.networkId}; this wallet's own circuits are proved in-process (${provingMode}).`,
@@ -1109,57 +1247,42 @@ export async function createLocalMidnightWallet(
 
   const saveSnapshot = async (): Promise<void> => {
     if (stopped) return;
-    try {
-      // Bounded so that `close()` — which awaits this — can never be held open
-      // by a wedged facade or a blocked IndexedDB transaction.
-      const [shielded, unshielded, dust] = await Promise.race([
-        Promise.all([
-          facade.shielded.serializeState(),
-          facade.unshielded.serializeState(),
-          facade.dust.serializeState(),
-        ]),
-        new Promise<never>((_resolve, reject) =>
-          setTimeout(
-            () => reject(new Error('serializing the wallet state timed out')),
-            SNAPSHOT_TIMEOUT_MS,
-          ),
+    // Bounded so that `close()` — which awaits this — can never be held open
+    // by a wedged facade or a blocked IndexedDB transaction.
+    const [shielded, unshielded, dust] = await Promise.race([
+      Promise.all([
+        facade.shielded.serializeState(),
+        facade.unshielded.serializeState(),
+        facade.dust.serializeState(),
+      ]),
+      new Promise<never>((_resolve, reject) =>
+        setTimeout(
+          () => reject(new Error('serializing the wallet state timed out')),
+          SNAPSHOT_TIMEOUT_MS,
         ),
-      ]);
-      await saveWalletSnapshot({
-        version: WALLET_SNAPSHOT_VERSION,
-        networkId: network.networkId,
-        unshieldedAddress,
-        savedAt: new Date().toISOString(),
-        shielded,
-        unshielded,
-        dust,
-      });
-      if (devMode()) console.debug('[localWallet] sync snapshot saved');
-    } catch (cause) {
-      // Losing the cache costs a longer sync next time and nothing else.
-      console.debug('[localWallet] unable to save the sync snapshot', cause);
-    }
+      ),
+    ]);
+    await saveWalletSnapshot({
+      version: WALLET_SNAPSHOT_VERSION,
+      networkId: network.networkId,
+      unshieldedAddress,
+      savedAt: new Date().toISOString(),
+      shielded,
+      unshielded,
+      dust,
+    });
+    if (devMode()) console.debug('[localWallet] sync snapshot saved');
   };
 
-  let snapshotTimer: ReturnType<typeof setInterval> | null = null;
-  let sawSynced = false;
+  const snapshotCheckpointer = createWalletSnapshotCheckpointer({
+    save: saveSnapshot,
+    // Losing the cache costs a longer sync next time and nothing else.
+    onError: (cause) => console.debug('[localWallet] unable to save the sync snapshot', cause),
+  });
   const snapshotSubscription = facade.state().subscribe({
     next: (state) => {
       if (closed) return;
-      if (!state.isSynced) {
-        sawSynced = false;
-        return;
-      }
-      if (sawSynced) return;
-      sawSynced = true;
-      void saveSnapshot();
-      if (snapshotTimer === null) {
-        // Keep refreshing while synced so a long-lived tab does not leave a
-        // stale offset behind if it is killed rather than closed.
-        snapshotTimer = setInterval(() => {
-          if (!closed && sawSynced) void saveSnapshot();
-        }, 60_000);
-      }
+      snapshotCheckpointer.noteState(state.isSynced);
     },
     error: (cause) => {
       // Sync errors are surfaced through subscribeSyncProgress's `connected`
@@ -1300,7 +1423,27 @@ export async function createLocalMidnightWallet(
     subscribeSyncProgress(listener: (progress: LocalWalletSyncProgress) => void): () => void {
       const subscription = facade
         .state()
-        .pipe(Rx.throttleTime(500, undefined, { leading: true, trailing: true }))
+        .pipe(
+          Rx.throttleTime(500, undefined, { leading: true, trailing: true }),
+          /* And only when the ANSWER changed. The facade republishes its state
+             on every applied index, so a wallet that has been synced for ten
+             minutes was still pushing "100%, synced" twice a second and
+             re-rendering the whole app behind it — through a send, through a
+             proof, through everything. The throttle bounded the rate; it could
+             not stop identical values. */
+          Rx.distinctUntilChanged((previous, next) => {
+            const before = syncProgressOf(previous);
+            const after = syncProgressOf(next);
+            return (
+              before.percent === after.percent &&
+              before.synced === after.synced &&
+              /* Connectivity too, on the same rule: it is the third thing a
+                 screen reads, and a drop that changed no percentage would
+                 otherwise never be published. */
+              before.connected === after.connected
+            );
+          }),
+        )
         .subscribe((state) => {
           if (devMode()) {
             const show = (p: unknown) => JSON.stringify(p, (_k, v) => (typeof v === 'bigint' ? String(v) : v));
@@ -1308,38 +1451,17 @@ export async function createLocalMidnightWallet(
               `[localWallet sync] shielded=${show(state.shielded.progress)} unshielded=${show(state.unshielded.progress)} dust=${show(state.dust.progress)} synced=${state.isSynced}`,
             );
           }
-          const ratios = [
-            componentRatio(state.shielded.progress),
-            componentRatio(state.unshielded.progress),
-            componentRatio(state.dust.progress),
-          ].filter((ratio): ratio is number => ratio !== null);
-          const percent =
-            ratios.length === 0
-              ? null
-              : Math.max(0, Math.min(100, Math.floor(Math.min(...ratios) * 100)));
-          listener({
-            // A synced facade is 100% regardless of index arithmetic.
-            percent: state.isSynced ? 100 : percent,
-            synced: state.isSynced,
-            connected:
-              state.shielded.progress.isConnected &&
-              state.unshielded.progress.isConnected &&
-              state.dust.progress.isConnected,
-          });
+          listener(syncProgressOf(state));
         });
       return () => subscription.unsubscribe();
     },
     async close(): Promise<void> {
       if (closed) return;
       closed = true;
-      if (snapshotTimer !== null) {
-        clearInterval(snapshotTimer);
-        snapshotTimer = null;
-      }
       snapshotSubscription.unsubscribe();
       // Last write wins: whatever this session reached is what the next one
       // resumes from, synced or not.
-      await saveSnapshot();
+      await snapshotCheckpointer.stop();
       stopped = true;
       try {
         await facade.stop();

@@ -17,7 +17,14 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { walletAvailability } from '../src/availability.js';
-import { createWalletReservation, type WalletReservation } from '../src/reservation.js';
+import {
+  SpendPriority,
+  createWalletReservation,
+  isSpendJobStalled,
+  progress,
+  releaseWithJob,
+  type WalletReservation,
+} from '../src/reservation.js';
 
 const wait = (ms: number): Promise<void> => new Promise((settle) => setTimeout(settle, ms));
 
@@ -135,7 +142,7 @@ describe('the wallet reservation', () => {
 
     assert.deepEqual(results, ['first', 'second']);
     assert.deepEqual(order, ['first', 'second'], 'spends must still run one at a time');
-    assert.deepEqual(reservation.counts(), { reserved: 0, jobs: 0 });
+    assert.deepEqual(reservation.counts(), { reserved: 0, jobs: 0, running: [] });
   });
 
   it('never lets two claims overlap on a single-threaded run', async () => {
@@ -152,6 +159,61 @@ describe('the wallet reservation', () => {
     clearInterval(watch);
 
     assert.ok(peak <= 1, `two queued grants should never claim the wallet at once (peak ${peak})`);
+  });
+
+  it('lets a registration overtake grants that are only waiting', async () => {
+    const reservation = createWalletReservation();
+    const order: string[] = [];
+    const job = (name: string, priority: number): Promise<string> =>
+      reservation.exclusive(
+        async () => {
+          await wait(20);
+          order.push(name);
+          return name;
+        },
+        { priority },
+      );
+
+    /* The first grant is RUNNING by the time the others arrive, so it finishes
+       first however it is prioritised: the queue reorders what is waiting, and
+       never interrupts what has started. */
+    const first = job('grant-running', SpendPriority.Normal);
+    const second = job('grant-waiting', SpendPriority.Normal);
+    const registration = job('registration', SpendPriority.Registration);
+
+    assert.deepEqual(await Promise.all([first, second, registration]), [
+      'grant-running',
+      'grant-waiting',
+      'registration',
+    ]);
+    assert.deepEqual(
+      order,
+      ['grant-running', 'registration', 'grant-waiting'],
+      'the registration must jump the grant that had not started',
+    );
+  });
+
+  it('keeps equal priorities in the order they arrived', async () => {
+    const reservation = createWalletReservation();
+    const order: string[] = [];
+    const job = (name: string, priority: number): Promise<string> =>
+      reservation.exclusive(
+        async () => {
+          await wait(10);
+          order.push(name);
+          return name;
+        },
+        { priority },
+      );
+
+    await Promise.all([
+      job('running', SpendPriority.Registration),
+      job('first', SpendPriority.Registration),
+      job('second', SpendPriority.Registration),
+      job('third', SpendPriority.Registration),
+    ]);
+
+    assert.deepEqual(order, ['running', 'first', 'second', 'third']);
   });
 
   it('releases the claim when a phase throws', async () => {
@@ -175,7 +237,7 @@ describe('the wallet reservation', () => {
 
     await assert.rejects(failed, /deposit failed/);
     assert.equal(await next, 'ran anyway');
-    assert.deepEqual(reservation.counts(), { reserved: 0, jobs: 0 });
+    assert.deepEqual(reservation.counts(), { reserved: 0, jobs: 0, running: [] });
   });
 
   it('is re-entrant, because a contract call claims the wallet twice inside one job', async () => {
@@ -186,7 +248,7 @@ describe('the wallet reservation', () => {
       return submitted;
     });
     assert.equal(result, 'balanced+submitted');
-    assert.deepEqual(reservation.counts(), { reserved: 0, jobs: 0 });
+    assert.deepEqual(reservation.counts(), { reserved: 0, jobs: 0, running: [] });
   });
 });
 
@@ -208,9 +270,13 @@ describe('the availability policy', () => {
       available: 0,
       unavailableCause: 'WALLET_SYNCING',
     });
+    /* A claim is settling BY DEFINITION — it is seconds, and it ends by
+       itself — so this one carries the wait without being told about it. */
     assert.deepEqual(walletAvailability({ ...healthy, reserved: true }), {
       available: 0,
       unavailableCause: 'PENDING_TRANSACTION',
+      settling: true,
+      retryAfterMs: 3_000,
     });
     assert.deepEqual(walletAvailability({ ...healthy, dustSpecks: 0n }), {
       available: 0,
@@ -226,10 +292,580 @@ describe('the availability policy', () => {
     });
   });
 
+  /* The two fields `/wallet-status` gained on 2026/09/02, after a client that
+     read a bare `available: 0` mid-send gave up on this service and took its
+     second leg to a different sponsor — which proved it against a state the
+     first leg had already moved, and it never landed. They say the wait is
+     short and bounded; they never say the wallet can pay. */
+  it('says a shortfall is a wait, without ever calling an empty wallet available', () => {
+    const settling = walletAvailability({ ...healthy, dustSpecks: 0n, settling: true });
+    assert.deepEqual(settling, {
+      available: 0,
+      unavailableCause: 'INSUFFICIENT_DUST',
+      settling: true,
+      retryAfterMs: 3_000,
+    });
+
+    assert.deepEqual(walletAvailability({ ...healthy, synced: false, settling: true }), {
+      available: 0,
+      unavailableCause: 'WALLET_SYNCING',
+      settling: true,
+      retryAfterMs: 3_000,
+    });
+  });
+
+  it('does not dress a prover failure up as something worth waiting for', () => {
+    assert.deepEqual(walletAvailability({ ...healthy, proving: 'failed', settling: true }), {
+      available: 0,
+      unavailableCause: 'PROVER_UNAVAILABLE',
+    });
+  });
+
+  it('carries nothing extra when there is nothing in flight to explain the shortfall', () => {
+    assert.deepEqual(walletAvailability({ ...healthy, dustSpecks: 0n, settling: false }), {
+      available: 0,
+      unavailableCause: 'INSUFFICIENT_DUST',
+    });
+  });
+
   it('reports syncing ahead of every other cause, because nothing else is knowable', () => {
     assert.deepEqual(
       walletAvailability({ synced: false, dustSpecks: 0n, reserved: true, proving: 'failed' }),
       { available: 0, unavailableCause: 'WALLET_SYNCING' },
     );
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* Lanes                                                                      */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * What a lane really is, and why it is a function of the chain rather than a
+ * setting.
+ *
+ * Every sponsored spend consumes a whole DUST coin, and the SDK's coin
+ * selection takes the smallest coin with a value above zero until the fee is
+ * covered. Two jobs started against one free coin therefore do not queue
+ * politely — the second fails to balance, or sweeps a coin the first was about
+ * to spend. So the queue asks how many coins are free before every start, and
+ * the configured ceiling is only ever the smaller half of that answer.
+ *
+ * On 2026/09/02 the consequence of having no lanes at all was measured: five
+ * sequential sponsored transactions per activation, a second Passport's
+ * registration queued 280 s behind the first's, and 519 s from a landed account
+ * to visible mUSD.
+ */
+describe('spend lanes', () => {
+  /** A job that reports when it starts and finishes on the caller's schedule. */
+  function job(log: string[], name: string) {
+    let release!: () => void;
+    const finished = new Promise<void>((settle) => {
+      release = settle;
+    });
+    return {
+      release,
+      run: async () => {
+        log.push(`start ${name}`);
+        await finished;
+        log.push(`end ${name}`);
+        return name;
+      },
+    };
+  }
+
+  it('runs three jobs at once when three DUST coins are free', async () => {
+    const log: string[] = [];
+    const reservation = createWalletReservation({ lanes: () => 3 });
+    const jobs = ['a', 'b', 'c'].map((name) => job(log, name));
+    const running = jobs.map((entry) => reservation.exclusive(entry.run));
+
+    await wait(5);
+    assert.deepEqual(log, ['start a', 'start b', 'start c']);
+    assert.equal(reservation.counts().jobs, 3);
+
+    for (const entry of jobs) entry.release();
+    assert.deepEqual(await Promise.all(running), ['a', 'b', 'c']);
+  });
+
+  it('runs one job when only one coin is free, however many lanes are configured', async () => {
+    const log: string[] = [];
+    const reservation = createWalletReservation({ lanes: () => Math.min(3, 1) });
+    const jobs = ['a', 'b'].map((name) => job(log, name));
+    const running = jobs.map((entry) => reservation.exclusive(entry.run));
+
+    await wait(5);
+    assert.deepEqual(log, ['start a'], 'the second waits for a coin, not for a lane');
+
+    jobs[0]!.release();
+    await wait(5);
+    assert.deepEqual(log, ['start a', 'end a', 'start b']);
+    jobs[1]!.release();
+    await Promise.all(running);
+  });
+
+  it('opens a lane the moment a coin comes free, without an event to say so', async () => {
+    /* The coin count is read AFRESH at each drain, which is what lets change
+       landing on the chain admit a waiting job with nothing having to notify
+       the queue. */
+    const log: string[] = [];
+    let free = 1;
+    const reservation = createWalletReservation({ lanes: () => free });
+    const jobs = ['a', 'b', 'c'].map((name) => job(log, name));
+    const running = jobs.map((entry) => reservation.exclusive(entry.run));
+
+    await wait(5);
+    assert.deepEqual(log, ['start a']);
+
+    free = 3;
+    jobs[0]!.release();
+    await wait(5);
+    assert.deepEqual(log, ['start a', 'end a', 'start b', 'start c']);
+    jobs[1]!.release();
+    jobs[2]!.release();
+    await Promise.all(running);
+  });
+
+  it('never stalls the queue when the caller reports no free coins at all', async () => {
+    /* Zero lanes would not throttle this queue, it would STOP it: `drain` runs
+       on arrival and on completion, so with nothing running there is nothing
+       left to call it again. One lane whose job then fails its own fee estimate
+       is recoverable; a queue holding work nobody will ever start is not. */
+    const log: string[] = [];
+    const reservation = createWalletReservation({ lanes: () => 0 });
+    assert.equal(reservation.lanes(), 1);
+    const only = job(log, 'a');
+    const running = reservation.exclusive(only.run);
+    await wait(5);
+    assert.deepEqual(log, ['start a']);
+    only.release();
+    await running;
+  });
+
+  it('keeps registration ahead of the jobs waiting behind a full set of lanes', async () => {
+    /* Priorities order what is WAITING and nothing else, so they must survive
+       the change from one lane to several unchanged. */
+    const log: string[] = [];
+    const reservation = createWalletReservation({ lanes: () => 1 });
+    const first = job(log, 'running');
+    const running = reservation.exclusive(first.run);
+    await wait(5);
+
+    const grant = job(log, 'grant');
+    const registration = job(log, 'registration');
+    const queued = [
+      reservation.exclusive(grant.run),
+      reservation.exclusive(registration.run, { priority: SpendPriority.Registration }),
+    ];
+
+    first.release();
+    await wait(5);
+    assert.deepEqual(log, ['start running', 'end running', 'start registration']);
+    registration.release();
+    await wait(5);
+    grant.release();
+    await Promise.all([running, ...queued]);
+    assert.deepEqual(log.filter((line) => line.startsWith('start')), [
+      'start running',
+      'start registration',
+      'start grant',
+    ]);
+  });
+
+  it('keeps the next lane for a registration that stepped outside to wait', async () => {
+    /* The live shape, 2026/09/02: the registration finds no fee-capable coin,
+       leaves the queue to wait for one, and the activation grant behind it
+       takes the coin that comes free. With a hold it does not. */
+    const reservation = createWalletReservation();
+    const order: string[] = [];
+    const job = (name: string, priority: number): Promise<string> =>
+      reservation.exclusive(
+        async () => {
+          await wait(10);
+          order.push(name);
+          return name;
+        },
+        { priority },
+      );
+
+    const release = reservation.hold(SpendPriority.Registration);
+    const grant = job('grant', SpendPriority.Normal);
+    await wait(30);
+    assert.deepEqual(order, [], 'a held queue must not start the grant');
+
+    /* The coin arrived: the registration rebuilds, and only then is the hold
+       dropped — which is the ordering `withDustWait` relies on. */
+    const registration = job('registration', SpendPriority.Registration);
+    release();
+    assert.deepEqual(await Promise.all([grant, registration]), ['grant', 'registration']);
+    assert.deepEqual(order, ['registration', 'grant']);
+  });
+
+  it('does not hold back a job of equal or higher priority', async () => {
+    const reservation = createWalletReservation();
+    const order: string[] = [];
+    const job = (name: string, priority: number): Promise<string> =>
+      reservation.exclusive(
+        async () => {
+          order.push(name);
+          return name;
+        },
+        { priority },
+      );
+
+    const release = reservation.hold(SpendPriority.Normal);
+    await Promise.all([
+      job('peer', SpendPriority.Normal),
+      job('registration', SpendPriority.Registration),
+    ]);
+    assert.deepEqual(order, ['peer', 'registration']);
+    release();
+  });
+
+  it('never interrupts a job that has started', async () => {
+    const reservation = createWalletReservation();
+    const order: string[] = [];
+    const running = reservation.exclusive(async () => {
+      await wait(20);
+      order.push('running');
+    });
+    const release = reservation.hold(SpendPriority.Registration);
+    await running;
+    release();
+    assert.deepEqual(order, ['running']);
+  });
+
+  it('drains on release, and releases only once', async () => {
+    const reservation = createWalletReservation();
+    const order: string[] = [];
+    const release = reservation.hold(SpendPriority.Registration);
+    const second = reservation.hold(SpendPriority.Registration);
+    const grant = reservation.exclusive(async () => {
+      order.push('grant');
+    });
+    release();
+    release();
+    await wait(5);
+    assert.deepEqual(order, [], 'the second hold still stands');
+    second();
+    await grant;
+    assert.deepEqual(order, ['grant']);
+  });
+
+  it('defaults to one lane, which is the behaviour every earlier test asserts', () => {
+    assert.equal(createWalletReservation().lanes(), 1);
+  });
+});
+
+/**
+ * The watchdog that gives a silent job's lane back.
+ *
+ * THE FAILURE THIS PINS DOWN. On 2026/09/02, twice, a spend job stopped making
+ * progress while holding a lane and nothing in this process noticed: 23:03:31
+ * for thirty-seven minutes and 23:46:30 for twenty-three, both ended by an
+ * operator restarting the service by hand. The queue behind them waited the
+ * whole time.
+ *
+ * The hard part is not noticing that a job is quiet — it is telling a quiet job
+ * from a working one. A contract proof is legitimately minutes long and reports
+ * nothing at all while it runs, so a watchdog on time alone would abort healthy
+ * registrations, which is a worse fault than the one it fixes. The distinction
+ * this rests on is the PROVER: a job that reports no step AND has nothing of
+ * ours at the prover is not slow, it is stuck.
+ */
+describe('the stall watchdog', () => {
+  /** A job that never finishes, and reports whatever steps the test tells it to. */
+  const silentJob = () => new Promise<never>(() => undefined);
+
+  it('aborts a job that has gone quiet with the prover idle, and frees its lane', async () => {
+    const lines: string[] = [];
+    let clock = 1_000;
+    const reservation = createWalletReservation({
+      stallMs: 100,
+      proverIdle: () => true,
+      watchdogIntervalMs: 5,
+      now: () => clock,
+      log: (line) => lines.push(line),
+    });
+
+    const stalled = reservation
+      .exclusive(async () => {
+        progress('balanced');
+        return silentJob();
+      }, { label: 'the registration of alice.night' })
+      .catch((cause: unknown) => cause);
+
+    await wait(10);
+    assert.equal(reservation.counts().jobs, 1);
+    assert.equal(reservation.counts().running[0]?.step, 'balanced');
+
+    /* Past the stall window, on the test's own clock. */
+    clock += 200;
+    const failure = await stalled;
+
+    assert.ok(isSpendJobStalled(failure), 'the caller learns why, in a type it can match');
+    assert.match((failure as Error).message, /last step balanced/);
+    assert.equal(reservation.counts().jobs, 0, 'and the lane is back');
+    assert.ok(
+      lines.some((line) => /aborting the registration of alice\.night/.test(line)),
+      'and the journal says so, which is what was missing on 2026/09/02',
+    );
+    reservation.stop();
+  });
+
+  it('lets the next job start after a stalled one is aborted', async () => {
+    /* The point of the whole exercise. A wedged job used to hold its lane until
+       an operator intervened; every registration behind it waited. */
+    let clock = 1_000;
+    const reservation = createWalletReservation({
+      lanes: () => 1,
+      stallMs: 100,
+      proverIdle: () => true,
+      watchdogIntervalMs: 5,
+      now: () => clock,
+      log: () => undefined,
+    });
+
+    const stalled = reservation.exclusive(silentJob, { label: 'wedged' }).catch(() => 'aborted');
+    let started = false;
+    const behind = reservation.exclusive(async () => {
+      started = true;
+      return 'ran';
+    }, { label: 'waiting behind it' });
+
+    await wait(10);
+    assert.equal(started, false, 'the single lane is taken');
+
+    clock += 200;
+    assert.equal(await stalled, 'aborted');
+    assert.equal(await behind, 'ran');
+    reservation.stop();
+  });
+
+  it('never aborts a job while something of ours is at the prover', async () => {
+    /* A proof is minutes of silence and perfectly healthy. Aborting one would
+       fail a registration a person is watching. */
+    let clock = 1_000;
+    const reservation = createWalletReservation({
+      stallMs: 100,
+      proverIdle: () => false,
+      watchdogIntervalMs: 5,
+      now: () => clock,
+      log: () => undefined,
+    });
+
+    const proving = reservation.exclusive(silentJob, { label: 'proving' });
+    const outcome = await Promise.race([
+      proving.catch((cause: unknown) => cause),
+      (async () => {
+        await wait(10);
+        clock += 10_000;
+        await wait(20);
+        return 'still running';
+      })(),
+    ]);
+
+    assert.equal(outcome, 'still running');
+    assert.equal(reservation.counts().jobs, 1);
+    reservation.stop();
+  });
+
+  it('never aborts a job that keeps saying what it is doing', async () => {
+    let clock = 1_000;
+    const reservation = createWalletReservation({
+      stallMs: 100,
+      proverIdle: () => true,
+      watchdogIntervalMs: 5,
+      now: () => clock,
+      log: () => undefined,
+    });
+
+    const running = reservation.exclusive(async () => {
+      for (let step = 0; step < 6; step += 1) {
+        clock += 50;
+        progress(`step-${step}`);
+        await wait(5);
+      }
+      return 'finished';
+    }, { label: 'a long but honest job' });
+
+    assert.equal(await running, 'finished');
+    reservation.stop();
+  });
+
+  it('is off unless a stall window is configured', async () => {
+    /* Every test written before the watchdog keeps its behaviour. */
+    let clock = 1_000;
+    const reservation = createWalletReservation({ now: () => clock, log: () => undefined });
+    const job = reservation.exclusive(silentJob, { label: 'unwatched' });
+    clock += 10_000_000;
+    await wait(20);
+    assert.equal(reservation.counts().jobs, 1);
+    void job.catch(() => undefined);
+    reservation.stop();
+  });
+
+  it('publishes what each running job is doing, for /status', async () => {
+    /* This is what makes a silent job visible from OUTSIDE the process: the
+       droplet watchdog reads a step and an age and can act without a person. */
+    let clock = 5_000;
+    const reservation = createWalletReservation({ now: () => clock, log: () => undefined });
+    const job = reservation.exclusive(async () => {
+      progress('submitted');
+      return silentJob();
+    }, { label: 'the activation grant for 0xabc' });
+
+    await wait(10);
+    clock += 400_000;
+    const [summary] = reservation.counts().running;
+    assert.equal(summary?.label, 'the activation grant for 0xabc');
+    assert.equal(summary?.step, 'submitted');
+    assert.equal(summary?.ageMs, 400_000);
+    assert.equal(summary?.sinceProgressMs, 400_000);
+    void job.catch(() => undefined);
+    reservation.stop();
+  });
+});
+
+/**
+ * The ceiling the prover cannot stand off.
+ *
+ * `stallMs` never fires while a proof is outstanding, which is right and is
+ * also a way to be silenced: on 2026/09/03 one wallet call that never returned,
+ * inside a job the proof counter still called busy, kept the five-second sweep
+ * returning at its first line for eight minutes.
+ */
+describe('the lane ceiling', () => {
+  const silentForever = () => new Promise<never>(() => undefined);
+
+  it('aborts a job past maxMs even with the prover busy', async () => {
+    const lines: string[] = [];
+    let clock = 1_000;
+    const reservation = createWalletReservation({
+      stallMs: 150,
+      maxMs: 720,
+      proverIdle: () => false,
+      watchdogIntervalMs: 5,
+      now: () => clock,
+      log: (line) => lines.push(line),
+    });
+
+    const held = reservation
+      .exclusive(silentForever, { label: 'the spare mUSD mint' })
+      .catch((cause: unknown) => cause);
+
+    await wait(10);
+    clock += 719;
+    await wait(10);
+    assert.equal(reservation.counts().jobs, 1, 'one tick short of the ceiling is a running job');
+
+    clock += 1;
+    const failure = await held;
+    assert.ok(isSpendJobStalled(failure), 'the caller learns why');
+    assert.equal((failure as { reason: string }).reason, 'ceiling');
+    assert.equal(reservation.counts().jobs, 0, 'and the lane is back');
+    assert.ok(
+      lines.some((line) => /past every bound underneath it/.test(line)),
+      lines.join('\n'),
+    );
+    reservation.stop();
+  });
+
+  it('leaves a proving job alone right up to the ceiling', async () => {
+    let clock = 1_000;
+    const reservation = createWalletReservation({
+      stallMs: 150,
+      maxMs: 720,
+      proverIdle: () => false,
+      watchdogIntervalMs: 5,
+      now: () => clock,
+      log: () => undefined,
+    });
+
+    const held = reservation
+      .exclusive(silentForever, { label: 'a registration' })
+      .catch((cause: unknown) => cause);
+    void held;
+
+    await wait(10);
+    clock += 600;
+    await wait(10);
+    assert.equal(reservation.counts().jobs, 1, 'ten minutes of proving is a healthy job');
+    reservation.stop();
+  });
+});
+
+/**
+ * What a job releases when it ends, and the measurement behind it.
+ *
+ * Every contract job builds its own indexer provider — an Apollo client over a
+ * graphql-ws WebSocket — and midnight-js's provider has a `dispose()` that
+ * releases both. Nothing here called it. Measured on the droplet on
+ * 2026/09/03: one resolver-leaf deploy took the sponsor from 6 sockets and
+ * 276 MB resident to 14 sockets and 373 MB. Eight sockets and ninety-seven
+ * megabytes per job, and the retained subscriptions carry every block on chain,
+ * so the per-block work on this thread grew with every job the service had ever
+ * run.
+ */
+describe('releasing what a job opened', () => {
+  it('releases on the ordinary path', async () => {
+    const closed: string[] = [];
+    const reservation = createWalletReservation({ log: () => undefined });
+    await reservation.exclusive(async () => {
+      releaseWithJob(() => {
+        closed.push('indexer client');
+      });
+    }, { label: 'a resolver leaf for the shelf' });
+    assert.deepEqual(closed, ['indexer client']);
+    reservation.stop();
+  });
+
+  it('releases when the job FAILS', async () => {
+    const closed: string[] = [];
+    const reservation = createWalletReservation({ log: () => undefined });
+    await assert.rejects(
+      reservation.exclusive(async () => {
+        releaseWithJob(() => {
+          closed.push('indexer client');
+        });
+        throw new Error('the node refused it');
+      }, { label: 'a registration' }),
+    );
+    assert.deepEqual(closed, ['indexer client'], 'a failed job leaks nothing');
+    reservation.stop();
+  });
+
+  it('releases when the watchdog ABANDONS the job', async () => {
+    /* The case a try/finally at the call site cannot reach: an abandoned job
+       never returns, so its own cleanup never runs — and an abandoned job is
+       precisely the one whose sockets nobody else will close. */
+    const closed: string[] = [];
+    let clock = 1_000;
+    const reservation = createWalletReservation({
+      stallMs: 100,
+      proverIdle: () => true,
+      watchdogIntervalMs: 5,
+      now: () => clock,
+      log: () => undefined,
+    });
+
+    const abandoned = reservation
+      .exclusive(async () => {
+        releaseWithJob(() => {
+          closed.push('indexer client');
+        });
+        return new Promise<never>(() => undefined);
+      }, { label: 'the spare mUSD mint' })
+      .catch((cause: unknown) => cause);
+
+    await wait(10);
+    clock += 200;
+    assert.ok(isSpendJobStalled(await abandoned));
+    assert.deepEqual(closed, ['indexer client']);
+    reservation.stop();
+  });
+
+  it('says so when there is no job to release with', () => {
+    assert.equal(releaseWithJob(() => undefined), false);
   });
 });

@@ -119,6 +119,98 @@ interface FundAccountBody {
   message?: unknown;
 }
 
+/**
+ * The four labels an activation writes to the activity trail, as constants,
+ * because {@link activationRetryRowId} has to tell them apart by identity and a
+ * literal repeated in two files is a rule that drifts. `Opening balance
+ * deposited` and `Opening balance not deposited` differ by one word, which is
+ * exactly the kind of pair a substring match gets wrong.
+ */
+export const ACTIVATION_DEPOSITED_LABEL = 'Opening balance deposited';
+export const ACTIVATION_STABLECOIN_LABEL = 'Stablecoin deposited';
+/** The sponsor said no, in one attempt. Written by the classifier below. */
+export const ACTIVATION_REFUSED_LABEL = 'Opening balance not deposited';
+/** The whole retry schedule ran out. Written by `fundAccountOnce` in `App.tsx`. */
+export const ACTIVATION_EXHAUSTED_LABEL = 'Opening balance not added';
+
+/**
+ * THE GRANT'S TWO FIGURES, ONCE.
+ *
+ * The sponsor's opening grant is fixed — the same two amounts for every
+ * Passport — so this device can name them before the sponsor has answered
+ * without inventing anything. They live here, beside the labels, because the
+ * copy below is built from them and a figure written out a second time in a
+ * screen is a figure that drifts from the one the sponsor actually deposits.
+ *
+ * `OPENING_NIGHT` is a STRING. `0.002` as a number is not `0.002`, and a
+ * trailing-digit surprise under a balance is exactly the kind of thing this
+ * row exists to avoid.
+ */
+export const OPENING_MUSD = 100;
+export const OPENING_NIGHT = '0.002';
+
+/**
+ * What the pending opening-balance row says, now that it names the figures.
+ *
+ * Asked for on 2026/09/03: the reviewer wanted the expected amounts VISIBLE
+ * while the deposits are pending, rather than a row that admits only that
+ * something unnamed is coming. Naming them is safe in a way that naming an
+ * arbitrary number would not have been — the grant is the sponsor's fixed one,
+ * and it is the figure every Passport gets.
+ *
+ * The row is only ever the PENDING one. It carries no transaction, it is never
+ * added to a balance, and it is gone the moment the account holds something or
+ * the trail says the grant is not coming — see {@link openingBalanceOnTheWay},
+ * which is the whole of that rule and is unchanged by this copy.
+ *
+ * Deliberately in NEITHER label set above: this is not a row an activation
+ * writes to the trail, so {@link activationRetryRowId} must not see it as a
+ * landing or as a failure. Both sets match by identity, and this label is
+ * distinct from all four.
+ */
+export const OPENING_BALANCE_ON_THE_WAY_LABEL = 'Opening balance on the way';
+export const OPENING_BALANCE_ON_THE_WAY_DETAIL = `${OPENING_MUSD} mUSD and ${OPENING_NIGHT} NIGHT are being added to your account.`;
+
+const ACTIVATION_FAILURE_LABELS = new Set<string>([
+  ACTIVATION_REFUSED_LABEL,
+  ACTIVATION_EXHAUSTED_LABEL,
+]);
+const ACTIVATION_LANDED_LABELS = new Set<string>([
+  ACTIVATION_DEPOSITED_LABEL,
+  ACTIVATION_STABLECOIN_LABEL,
+]);
+
+/**
+ * Which trail row — if any — should carry a "Retry" the reader can press.
+ *
+ * THE SECOND HALF OF THE 2026/09/02 DEAD END. A Passport can finish onboarding
+ * with its name and its stablecoin on the trail and no opening NIGHT, because
+ * the two are independent asks and the grant has its own ten-minute schedule to
+ * run out of. When it does, the trail says so — and said only that. The grant
+ * is only ever marked done on evidence that it landed, so asking again was
+ * always going to work; there was simply nothing to press.
+ *
+ * `entries` are newest first, as `addActivity` writes them. The rule is the
+ * newest activation row wins: a failure with nothing after it earns the
+ * control, and a failure with a landed deposit ABOVE it earns nothing, because
+ * a retry beside a grant that has since arrived would ask the sponsor for a
+ * second one. Rows that are not about activation are stepped over, so a send
+ * made after a failed grant does not hide it.
+ *
+ * At most one id comes back. A schedule that has been spent twice leaves two
+ * failure rows and one of them is history; a control on both would be the same
+ * action offered twice, with the older one describing an attempt that is over.
+ */
+export function activationRetryRowId(
+  entries: readonly { id: string; label: string }[],
+): string | null {
+  for (const entry of entries) {
+    if (ACTIVATION_LANDED_LABELS.has(entry.label)) return null;
+    if (ACTIVATION_FAILURE_LABELS.has(entry.label)) return entry.id;
+  }
+  return null;
+}
+
 /** The refusal codes that mean the grant is already in place. */
 const ALREADY_GRANTED_CODES = new Set(['already-activated', 'already-funded']);
 
@@ -131,7 +223,7 @@ function asNonEmptyString(value: unknown): string | null {
 }
 
 /**
- * Classifies one `/fund-account` answer for one account contract.
+ * Classifies one `/fund-account` answer for one Passport account.
  *
  * Pure: it reads the answer and returns the plan. It writes no marker, adds no
  * activity, and touches no balance — see {@link ActivationPlan}.
@@ -196,7 +288,7 @@ export function classifyFundAccountAnswer(
       stablecoin: null,
       activities: [
         {
-          label: 'Opening balance not deposited',
+          label: ACTIVATION_REFUSED_LABEL,
           detail: sponsorSentence,
           status: 'blocked',
         },
@@ -240,10 +332,10 @@ export function classifyFundAccountAnswer(
   const txHash = typeof body.txHash === 'string' ? body.txHash : undefined;
   const activities: ActivationActivity[] = [
     {
-      label: 'Opening balance deposited',
+      label: ACTIVATION_DEPOSITED_LABEL,
       detail: `The sponsor deposited ${
         typeof body.amountAtomic === 'string' ? body.amountAtomic : 'an opening'
-      } atomic NIGHT into your account contract ${compactAddress(contractAddress)}.${
+      } atomic NIGHT into your account ${compactAddress(contractAddress)}.${
         assetError ? ` The stablecoin half did not land: ${assetError}` : ''
       }`,
       status: 'complete',
@@ -252,10 +344,10 @@ export function classifyFundAccountAnswer(
   ];
   if (assetTx) {
     activities.push({
-      label: 'Stablecoin deposited',
+      label: ACTIVATION_STABLECOIN_LABEL,
       detail: `${
         typeof body.assetAmount === 'string' ? body.assetAmount : 'The sponsor’s stablecoin'
-      } went into your account contract ${compactAddress(contractAddress)} alongside the NIGHT.`,
+      } went into your account ${compactAddress(contractAddress)} alongside the NIGHT.`,
       status: 'complete',
       txHash: assetTx,
     });
@@ -269,4 +361,59 @@ export function classifyFundAccountAnswer(
     stablecoin,
     activities,
   };
+}
+
+/**
+ * Whether the opening balance should be shown as ON ITS WAY.
+ *
+ * Asked for directly on 2026/09/02: "show the expected opening balance as
+ * pending from the moment activation begins" — and never as a settled figure
+ * until the chain shows it. Activation begins the moment this Passport has an
+ * account for a grant to be deposited INTO, which is what `hasAccount` means;
+ * from then until either the money shows up or the sponsor gives up, the
+ * honest reading of an empty account is "it is coming", not "you have nothing".
+ *
+ * THE GRANT IS TWO DEPOSITS, AND THE ROW WAITS FOR BOTH (2026/09/04).
+ *
+ * This asked `holdsNothing` until that date — the row went the moment the
+ * account held ANYTHING — and the two deposits do not land together. The
+ * 2026/09/04 stability audit watched a new Passport take its opening NIGHT,
+ * lose the row on the spot, and then sit for 18.1 seconds showing `mUSD 0`
+ * beside "Your account is ready", which is the screen saying a stablecoin that
+ * was on its way had not been sent. One asset arriving is not the grant
+ * arriving, so the row now stays until BOTH legs of it are in the account.
+ *
+ * Four conditions, and each one is a way of misleading somebody if dropped:
+ *
+ *   `hasAccount`   — no account, nothing has been asked for, and a line
+ *                    promising an opening balance would be a promise nobody
+ *                    made.
+ *   `holdsOpeningNight`      — both together are the grant. Either one on its
+ *   `holdsOpeningStablecoin`   own leaves the other still coming, and the row
+ *                              names both figures, so retiring it on the first
+ *                              turns the second into a zero nothing explains.
+ *                              Once both are held the balances above ARE the
+ *                              answer, and a line still saying they are on
+ *                              their way would contradict them.
+ *   no failure row — the sponsor refusing, or its ten minutes running out,
+ *                    ends the wait. The trail already says so in the sponsor's
+ *                    own words and carries the control to ask again; a line
+ *                    still saying "on the way" beside it would be the screen
+ *                    telling two stories at once.
+ *
+ * Pure over the trail the screens already hold, so Home and Assets cannot
+ * disagree about whether a Passport is still waiting for its first money. What
+ * counts as each leg being HELD is `openingBalanceLegsHeld` in
+ * `lib/balanceWatch.ts`, which reads it off the same snapshot both screens
+ * paint their balances from.
+ */
+export function openingBalanceOnTheWay(input: {
+  hasAccount: boolean;
+  holdsOpeningNight: boolean;
+  holdsOpeningStablecoin: boolean;
+  entries: readonly { label: string }[];
+}): boolean {
+  if (!input.hasAccount) return false;
+  if (input.holdsOpeningNight && input.holdsOpeningStablecoin) return false;
+  return !input.entries.some((entry) => ACTIVATION_FAILURE_LABELS.has(entry.label));
 }

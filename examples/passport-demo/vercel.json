@@ -1,5 +1,11 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+
+  "framework": "vite",
+  "installCommand": "cd ../.. && npm ci",
+  "buildCommand": "npm run vercel-build",
+  "outputDirectory": "dist",
+
   "rewrites": [
     { "source": "/verify", "destination": "/verify/index.html" },
     { "source": "/verify/", "destination": "/verify/index.html" },
@@ -7,12 +13,26 @@
   ],
   "headers": [
     {
+      "source": "/(.*)",
+      "headers": [
+        { "key": "content-security-policy", "value": "frame-ancestors 'none'" },
+        { "key": "x-content-type-options", "value": "nosniff" },
+        { "key": "referrer-policy", "value": "strict-origin-when-cross-origin" }
+      ]
+    },
+    {
       "source": "/zk-params/(.*)",
-      "headers": [{ "key": "content-type", "value": "application/octet-stream" }]
+      "headers": [
+        { "key": "content-type", "value": "application/octet-stream" },
+        { "key": "cache-control", "value": "public, max-age=31536000, immutable" }
+      ]
     },
     {
       "source": "/zk/(.*)",
-      "headers": [{ "key": "content-type", "value": "application/octet-stream" }]
+      "headers": [
+        { "key": "content-type", "value": "application/octet-stream" },
+        { "key": "cache-control", "value": "public, max-age=31536000, immutable" }
+      ]
     },
     {
       "source": "/zk/(.*).json",

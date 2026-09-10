@@ -34,6 +34,7 @@
 import { expect, test, type Page } from '@playwright/test';
 
 import { installNetworkBoundary, PASSPORT_ACCOUNT_ADDRESS } from './mocks.js';
+import { walkContextOptions } from './walkContext.js';
 import { installVirtualAuthenticator } from './passkey.js';
 
 test.describe.configure({ mode: 'serial' });
@@ -44,7 +45,7 @@ let page: Page;
 const NAME = 'assetswalk';
 
 test.beforeAll(async ({ browser }) => {
-  const context = await browser.newContext({ viewport: { width: 420, height: 900 } });
+  const context = await browser.newContext(walkContextOptions({ viewport: { width: 420, height: 900 } }));
   page = await context.newPage();
   await installNetworkBoundary(page);
   await installVirtualAuthenticator(context, page);
@@ -155,11 +156,13 @@ test('Assets shows both shelves, and the empty one says so', async () => {
      the collision `describeColours` qualifies. Asserted here because it is the
      configuration this tier is really in. */
   const tokenShelf = page.locator('.mnassets-shelf').first();
-  /* Waited for with a RETRYING assertion rather than snapshotted: the account's
-     ledger is read after the screen is on, so a snapshot taken the instant the
-     tab opens can catch a shelf that is still one card of "Syncing". */
-  await expect(tokenShelf.locator('.mnassets-card')).toHaveCount(3);
-  const shelfText = (await tokenShelf.locator('.mnassets-card').allInnerTexts()).join(' ');
+  /* THREE LINE ITEMS, not three cards, since 2026/09/01 — "we show them like
+     line items, so it's a table". Waited for with a RETRYING assertion rather
+     than snapshotted: the account's ledger is read after the screen is on, so
+     a snapshot taken the instant the tab opens can catch a table that is still
+     one row of "Syncing". */
+  await expect(tokenShelf.locator('.mnassets-row')).toHaveCount(3);
+  const shelfText = (await tokenShelf.locator('.mnassets-row').allInnerTexts()).join(' ');
   expect(shelfText).toMatch(/NIGHT/i);
   expect(shelfText).toContain('0.002');
   expect(shelfText).toContain('100');
@@ -214,8 +217,10 @@ test('an item is not left among the balances on Home', async () => {
   await tabs().nth(0).click();
   const strip = page.locator('.mnhome-assets');
   await expect(strip).toBeVisible();
-  await expect(strip.locator('.mnhome-card')).toHaveCount(3);
+  await expect(strip.locator('.mnhome-token-row')).toHaveCount(3);
 
-  const shelf = await page.evaluate(() => document.querySelectorAll('.mnassets-card').length);
+  const shelf = await page.evaluate(
+    () => document.querySelectorAll('.mnassets-row, .mnassets-card').length,
+  );
   expect(shelf).toBe(0);
 });

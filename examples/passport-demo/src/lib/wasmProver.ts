@@ -151,16 +151,198 @@ async function lookupSystemKey(keyLocation: string): Promise<KeyMaterial | undef
 // One shared worker; each in-flight request carries its own KmProvider so
 // the worker's key-material callbacks route back to the right resolver.
 
+/**
+ * How long a request may go without a WORD from the worker before the worker
+ * is presumed dead — and why there are two of these rather than one.
+ *
+ * It is an IDLE bound, not a total one. A first shielded send legitimately
+ * takes minutes, but almost none of that is silent: roughly 54 MB of proving
+ * keys comes down first, and every one of them arrives as a `km` request on
+ * this channel, so the download restarts the clock over and over.
+ *
+ * THE SILENT STRETCH IS THE PROOF ITSELF, and it is silent by construction.
+ * Once the wasm has every key it needs it runs synchronous PLONK arithmetic
+ * inside the worker with nothing to report until it is finished — no
+ * progress messages, no yields, no way for this side to tell "still working"
+ * from "gone". So the bound has to be long enough to cover the whole of that
+ * stretch on the slowest device Passport runs on, and a shielded leg on an
+ * iPhone can plausibly take several minutes. A bound that is merely generous
+ * for a laptop restarts a proof that was going to succeed, doubles the wait,
+ * and then fails it — strictly worse than the hang it replaced.
+ *
+ * `check` has no such stretch: it is a validation pass, and 90 seconds of
+ * silence from one is already a dead worker.
+ *
+ * The elapsed time of every request is logged by the worker
+ * (`proofWorker.ts`), so these two numbers can be replaced by measurements
+ * from real devices rather than left as estimates.
+ *
+ * WHAT THEY ARE FOR. iOS reclaims memory by killing the WebContent process or
+ * jettisoning a worker outright, and neither produces an `error` event: the
+ * worker simply stops answering. `callWorker` had no timeout, no signal, and
+ * no cancellation, so a proof interrupted by the user switching apps left a
+ * spinner that never resolved — for ever, on the send screen, after the money
+ * may already have moved.
+ */
+export const PROOF_WORKER_IDLE_MS = 90_000;
+
+/** The same bound for `prove`, which is silent for as long as the maths takes. */
+export const PROOF_WORKER_PROVE_IDLE_MS = 360_000;
+
+/** The bound this request is held to. See both constants above. */
+function idleBoundFor(op: 'prove' | 'check'): number {
+  return op === 'prove' ? PROOF_WORKER_PROVE_IDLE_MS : PROOF_WORKER_IDLE_MS;
+}
+
+/**
+ * What the user is told when the proof did not come back, in words that name
+ * something they can do.
+ *
+ * It says nothing about workers, processes, or wasm. What a reader can act on
+ * is that the screen has to stay open, which is the actual cause on a phone.
+ */
+export const PROOF_UNFINISHED_MESSAGE =
+  'The proof did not finish on this device. Keep this screen open and try again — leaving Passport while it works can stop it part-way.';
+
+interface WorkerRequest {
+  op: 'prove' | 'check';
+  preimage: Uint8Array;
+  obi?: bigint;
+}
+
+interface PendingRequest {
+  resolve: (v: any) => void;
+  reject: (e: Error) => void;
+  km: KmProvider;
+  /** Kept so the request can be replayed onto a fresh worker exactly once. */
+  request: WorkerRequest;
+  replayed: boolean;
+  timer: ReturnType<typeof setTimeout> | null;
+}
+
 let worker: Worker | null = null;
 let nextReqId = 1;
-const pending = new Map<
-  number,
-  { resolve: (v: any) => void; reject: (e: Error) => void; km: KmProvider }
->();
+const pending = new Map<number, PendingRequest>();
+
+/**
+ * How a proof worker is spawned. A seam rather than a bare `new Worker` so the
+ * restart logic above can be driven in a test without a real worker, and so
+ * `spawnProofWorker` stays the single place the Vite-rewritable form is
+ * written. See the module header for why that form is load-bearing.
+ */
+let spawnProofWorker: () => Worker = () =>
+  new Worker(new URL('./proofWorker.ts', import.meta.url), { type: 'module' });
+
+/**
+ * Replaces the spawn seam and tears down whatever is running. Pass `null` to
+ * restore the real one. Tests only.
+ */
+export function setProofWorkerSpawn(spawn: (() => Worker) | null): void {
+  disposeWorker();
+  for (const [id, request] of pending) {
+    if (request.timer) clearTimeout(request.timer);
+    pending.delete(id);
+  }
+  spawnProofWorker =
+    spawn ??
+    (() => new Worker(new URL('./proofWorker.ts', import.meta.url), { type: 'module' }));
+}
+
+function disposeWorker(): void {
+  const current = worker;
+  worker = null;
+  try {
+    current?.terminate();
+  } catch {
+    /* A worker that will not terminate is one we have already stopped
+       listening to; there is nothing further to do about it and nothing worth
+       failing a send over. */
+  }
+}
+
+/** Restarts the idle clock for one request. Any word from the worker is progress. */
+function markProgress(id: number): void {
+  const request = pending.get(id);
+  if (!request) return;
+  if (request.timer) clearTimeout(request.timer);
+  request.timer = setTimeout(() => stalled(id), idleBoundFor(request.request.op));
+}
+
+/**
+ * The worker has said nothing for {@link PROOF_WORKER_IDLE_MS}. Presume it is
+ * gone: take it down, replay every request that has not yet had its second
+ * chance onto a fresh one, and fail the rest in plain words.
+ *
+ * Every in-flight request is replayed, not just the one whose clock expired,
+ * because they were all on the worker that just died — leaving them parked on
+ * a terminated channel is the hang this exists to end.
+ */
+function stalled(id: number): void {
+  console.debug(
+    `[wasm-prover] proof worker went quiet on req ${id} (bound ${
+      pending.get(id) ? idleBoundFor(pending.get(id)!.request.op) : '—'
+    } ms); restarting`,
+  );
+  disposeWorker();
+  const stranded = [...pending.entries()];
+  for (const [requestId, request] of stranded) {
+    if (request.timer) clearTimeout(request.timer);
+    request.timer = null;
+    if (request.replayed) {
+      pending.delete(requestId);
+      request.reject(new Error(PROOF_UNFINISHED_MESSAGE));
+    }
+  }
+  const replayable = [...pending.entries()];
+  if (replayable.length === 0) return;
+  const restarted = ensureWorker();
+  for (const [requestId, request] of replayable) {
+    request.replayed = true;
+    post(restarted, requestId, request.request);
+    markProgress(requestId);
+  }
+}
+
+/**
+ * Copies key material out of the main-thread cache and hands the COPIES to the
+ * worker by transfer.
+ *
+ * The cache's own buffers are never transferred: transferring detaches, and a
+ * detached prover key is a cache entry that fails every proof after the first.
+ * So the copy is what moves. What that buys over a bare structured clone is
+ * one allocation instead of two — the clone would copy into the worker on top
+ * of whatever the reply already held — and, with the worker's own cache, a
+ * repeat lookup within a session that costs neither.
+ */
+function transferable(result: unknown): { payload: unknown; transfer: ArrayBuffer[] } {
+  if (result instanceof Uint8Array) {
+    const copy = new Uint8Array(result);
+    return { payload: copy, transfer: [copy.buffer as ArrayBuffer] };
+  }
+  if (result && typeof result === 'object') {
+    const source = result as Record<string, unknown>;
+    const payload: Record<string, unknown> = { ...source };
+    const transfer: ArrayBuffer[] = [];
+    for (const [key, value] of Object.entries(source)) {
+      if (!(value instanceof Uint8Array)) continue;
+      const copy = new Uint8Array(value);
+      payload[key] = copy;
+      transfer.push(copy.buffer as ArrayBuffer);
+    }
+    return { payload, transfer };
+  }
+  return { payload: result, transfer: [] };
+}
+
+function post(target: Worker, id: number, request: WorkerRequest): void {
+  const { op, preimage, obi } = request;
+  console.debug(`[wasm-prover] → worker: ${op} (req ${id}, ${preimage.length} bytes)`);
+  target.postMessage({ id, op, preimage, obi });
+}
 
 function ensureWorker(): Worker {
   if (worker) return worker;
-  worker = new Worker(new URL('./proofWorker.ts', import.meta.url), { type: 'module' });
+  worker = spawnProofWorker();
   worker.onmessage = async (e: MessageEvent) => {
     const msg = e.data;
     if (msg.ready) {
@@ -170,29 +352,43 @@ function ensureWorker(): Worker {
     if (msg.km !== undefined) {
       const keyRequest = pending.get(msg.id);
       if (!keyRequest || !worker) return;
+      // A key request IS progress: the worker is alive and working through
+      // this proof, however long the download behind it takes.
+      markProgress(msg.id);
+      const target = worker;
       try {
         const result =
           msg.km === 'lookupKey'
             ? await keyRequest.km.lookupKey(msg.arg)
             : await keyRequest.km.getParams(msg.arg);
-        worker.postMessage({ kmReply: msg.kmId, result });
+        // The worker may have been restarted while this resolved; a reply to a
+        // channel nobody is listening on is dropped rather than thrown.
+        if (worker !== target) return;
+        markProgress(msg.id);
+        const { payload, transfer } = transferable(result);
+        target.postMessage({ kmReply: msg.kmId, result: payload }, transfer);
       } catch (err: any) {
-        worker.postMessage({ kmReply: msg.kmId, error: String(err?.message ?? err) });
+        if (worker !== target) return;
+        target.postMessage({ kmReply: msg.kmId, error: String(err?.message ?? err) });
       }
       return;
     }
     const req = pending.get(msg.id);
     if (!req) return;
+    if (req.timer) clearTimeout(req.timer);
     pending.delete(msg.id);
     if (msg.err !== undefined) req.reject(new Error(msg.err));
     else req.resolve(msg.ok);
   };
   worker.onerror = (e: ErrorEvent) => {
-    const error = new Error(`proof worker crashed: ${e.message}`);
-    for (const req of pending.values()) req.reject(error);
-    pending.clear();
-    worker?.terminate();
-    worker = null;
+    console.debug(`[wasm-prover] proof worker crashed: ${e.message}`);
+    /* A crash IS an answer, unlike the silence `stalled` handles, but it is
+       answered the same way: one fresh worker and one replay each. A
+       WebContent process taken down under memory pressure is not a fact about
+       this transaction. */
+    disposeWorker();
+    for (const request of pending.values()) request.timer = null;
+    stalled(-1);
   };
   return worker;
 }
@@ -205,12 +401,13 @@ function callWorker(
 ): Promise<any> {
   return new Promise((resolve, reject) => {
     const id = nextReqId++;
-    pending.set(id, { resolve, reject, km });
     // Copy before posting: the ledger may hand us a view over its wasm
     // memory, and structured clone would clone the entire backing buffer.
-    const bytes = new Uint8Array(preimage);
-    console.debug(`[wasm-prover] → worker: ${op} (req ${id}, ${bytes.length} bytes)`);
-    ensureWorker().postMessage({ id, op, preimage: bytes, obi });
+    // The copy is kept, because a replay onto a fresh worker needs it again.
+    const request: WorkerRequest = { op, preimage: new Uint8Array(preimage), obi };
+    pending.set(id, { resolve, reject, km, request, replayed: false, timer: null });
+    post(ensureWorker(), id, request);
+    markProgress(id);
   });
 }
 

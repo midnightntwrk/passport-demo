@@ -18,6 +18,9 @@ import {
   MID_SESSION_PASSKEY_MESSAGE,
   midSessionPasskeyMessage,
   PASSKEY_CEREMONY_TIMEOUT_MESSAGE,
+  PASSKEY_CONFIRM_ACTION,
+  PASSKEY_CONFIRM_MESSAGE,
+  passkeyConfirmationNeeded,
   passkeySignInRecovery,
   type PasskeyCeremonyReason,
 } from './passkeyRecovery.js';
@@ -130,6 +133,33 @@ describe('passkeySignInRecovery', () => {
     expect(passkeySignInRecovery({ stage: 'credential', timedOut: false })).toBe('keyless');
     expect(passkeySignInRecovery({ stage: 'credential', reason: null })).toBe('keyless');
   });
+
+  it('never answers a PRF-less ENROLMENT with another enrolment', () => {
+    /* The Android shape, found by `e2e/android-shapes.spec.ts` on 2026/09/04.
+       The platform made the passkey it was asked for and left out the
+       extension the wallet seed derives from, so the passkey it makes next
+       time is the same passkey — and "create a new passkey" is a button that
+       returns the reader to this panel for ever. It is the same `prf-missing`
+       the discoverable path reports, and it must NOT reach the same answer. */
+    expect(passkeySignInRecovery({ stage: 'enrolment', reason: 'prf-missing' })).toBe(
+      'unusable-device',
+    );
+    expect(passkeySignInRecovery({ stage: 'credential', reason: 'prf-missing' })).toBe(
+      'unusable-credential',
+    );
+  });
+
+  it('leaves every other enrolment failure to the button that was just pressed', () => {
+    /* A dismissed sheet or a keystore that was busy has said nothing about
+       what this platform can do, so there is nothing to explain and nothing to
+       offer that is not already on the screen. */
+    expect(passkeySignInRecovery({ stage: 'enrolment', reason: 'cancelled' })).toBe('none');
+    expect(passkeySignInRecovery({ stage: 'enrolment', reason: 'failed' })).toBe('none');
+    expect(passkeySignInRecovery({ stage: 'enrolment' })).toBe('none');
+    /* And the watchdog does not change it either way: an enrolment nobody
+       answered is not evidence about the platform's extensions. */
+    expect(passkeySignInRecovery({ stage: 'enrolment', timedOut: true })).toBe('none');
+  });
 });
 
 describe('KEYLESS_PASSKEY_MESSAGE', () => {
@@ -192,7 +222,16 @@ describe('PASSKEY_CEREMONY_TIMEOUT_MESSAGE', () => {
     expect(PASSKEY_CEREMONY_TIMEOUT_MESSAGE).toMatch(/QR code/);
     expect(PASSKEY_CEREMONY_TIMEOUT_MESSAGE).toMatch(/leave the prompt open/);
     expect(PASSKEY_CEREMONY_TIMEOUT_MESSAGE).toMatch(/extension/);
-    expect(PASSKEY_CEREMONY_TIMEOUT_MESSAGE).toMatch(/private window/);
+  });
+
+  it('sends nobody to a private window, where a Passport cannot be saved', () => {
+    /* Found by the Safari review, 2026/09/05. The sentence used to end "a
+       private window rules that out", which is sound on Chrome and harmful on
+       Safari: a Safari private window has no usable IndexedDB, so a reader who
+       followed the advice reached the one context where onboarding cannot
+       finish — at the moment they were already stuck. */
+    expect(PASSKEY_CEREMONY_TIMEOUT_MESSAGE).not.toMatch(/private/i);
+    expect(PASSKEY_CEREMONY_TIMEOUT_MESSAGE).not.toMatch(/incognito/i);
   });
 });
 
@@ -206,6 +245,51 @@ describe('midSessionPasskeyMessage', () => {
   it('says the passkey could not be used when the platform is what refused', () => {
     expect(midSessionPasskeyMessage({ timedOut: false })).toBe(MID_SESSION_PASSKEY_MESSAGE);
     expect(midSessionPasskeyMessage({})).toBe(MID_SESSION_PASSKEY_MESSAGE);
+  });
+});
+
+/**
+ * THE ORPHAN LOOP, AND THE TWO STAGES THAT DECIDE WHETHER IT REOPENS.
+ *
+ * The create journey asks the authenticator first wherever this browser knows
+ * of a credential, so a dismissed picker is reached from the CREATE button as
+ * well as from "Use a different passkey". Reporting that as an enrolment
+ * failure answers `none` — a banner over the same button, which on Hector's
+ * Android case (passkey deleted from Google Password Manager, records still
+ * local, Chrome's sheet empty) is a loop with no exit: press, empty sheet,
+ * dismiss, banner, press. Reporting it as the credential failure it actually
+ * is answers `keyless`, which is the panel with a way out on it.
+ *
+ * The two assertions below are the same fact from both sides, and the pair is
+ * the guard: whichever stage a caller passes has to be the one that matches
+ * what failed.
+ */
+describe('a dismissed picker on the create journey', () => {
+  it('reaches the keyless panel, because a picker is a credential ceremony', () => {
+    expect(passkeySignInRecovery({ stage: 'credential', reason: 'cancelled' })).toBe('keyless');
+    /* Explicitly NOT `none`. `none` means "the banner and the button already
+       on the screen are the whole answer", and the button is the thing that
+       just failed. */
+    expect(passkeySignInRecovery({ stage: 'credential', reason: 'cancelled' })).not.toBe('none');
+  });
+
+  it('would answer with a bare banner if it were reported as an enrolment', () => {
+    /* Kept as the contrast rather than left implicit: this IS the wrong
+       answer, and the only thing standing between it and the screen is which
+       stage the caller names. A creation that was dismissed is genuinely
+       `none` — the button that was pressed is the right one to press again,
+       because nothing has been learnt about the platform. A picker that was
+       dismissed is not, because something has: no passkey could be loaded. */
+    expect(passkeySignInRecovery({ stage: 'enrolment', reason: 'cancelled' })).toBe('none');
+  });
+
+  it('offers to make a passkey, and says what that does to the ones already here', () => {
+    /* The panel's copy, which is what the reader actually meets. It has to
+       carry the offer — otherwise the loop is unbroken — and it has to say
+       that creating leaves an existing Passport alone, because a reader who
+       still holds one has every right to fear otherwise. */
+    expect(KEYLESS_PASSKEY_MESSAGE).toMatch(/create a new one/);
+    expect(KEYLESS_PASSKEY_MESSAGE).toMatch(/stays untouched/);
   });
 });
 
@@ -230,5 +314,47 @@ describe('the mid-session way-out mark', () => {
     expect(isMidSessionWayOut(undefined)).toBe(false);
     expect(isMidSessionWayOut('cancelled')).toBe(false);
     expect(isMidSessionWayOut(new Error('ordinary'))).toBe(false);
+  });
+});
+
+/**
+ * The rule that stops onboarding raising a second ceremony on its own.
+ *
+ * Safari evaluates no PRF during `credentials.create`, so a Passport made
+ * there is a passkey plus one assertion — and that assertion used to be fired
+ * off the back of the creation, with the creating gesture already spent. This
+ * is the fact the screen consults before it prompts anybody.
+ */
+describe('passkeyConfirmationNeeded', () => {
+  it('is false where the platform already evaluated the PRF at creation', () => {
+    /* Chrome and the platforms that behave like it: one ceremony, one prompt,
+       and nothing further asked of the reader. */
+    expect(passkeyConfirmationNeeded({ prf: { dispose: () => {} } })).toBe(false);
+  });
+
+  it('is true where enrolment came back without one — the Safari case', () => {
+    expect(passkeyConfirmationNeeded({ prf: null })).toBe(true);
+    expect(passkeyConfirmationNeeded({ prf: undefined })).toBe(true);
+  });
+
+  it('asks for nothing where there is no enrolment to finish', () => {
+    /* A sign-in that reopened an existing Passport enrolled nothing, so there
+       is no gap to close and no question to put on the screen. */
+    expect(passkeyConfirmationNeeded(null)).toBe(false);
+    expect(passkeyConfirmationNeeded(undefined)).toBe(false);
+  });
+
+  it('says what is true in words a reader can act on', () => {
+    /* The sentence a person meets on their first Passport. It may not name the
+       extension, the ceremony, or the browser: none of the three is a thing
+       they can do anything about, and the button is. */
+    expect(PASSKEY_CONFIRM_MESSAGE).toBe(
+      'Your passkey is ready. This device needs to see it once more to finish setting up your Passport.',
+    );
+    expect(PASSKEY_CONFIRM_ACTION).toBe('Confirm with your passkey');
+    for (const word of ['PRF', 'WebAuthn', 'extension', 'assertion', 'ceremony', 'Safari']) {
+      expect(PASSKEY_CONFIRM_MESSAGE).not.toContain(word);
+      expect(PASSKEY_CONFIRM_ACTION).not.toContain(word);
+    }
   });
 });
