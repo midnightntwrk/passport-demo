@@ -75,7 +75,7 @@ import * as Rx from 'rxjs';
 import type { LocalMidnightWallet } from '../lib/localWallet.js';
 /* Type-only, and through the SAME specifier {@link loadAccountContract} uses —
    a type has no instance, so this adds no module to either graph. */
-import type { Ledger as AccountLedger } from '../../contracts/stagenet/account/index.js';
+import type { Ledger as AccountLedger } from '../../contracts/stagenet/account/contract/index.js';
 import { sponsorFeeRefusal, sponsorReadiness } from '../lib/sponsor.js';
 import {
   createContractProviders,
@@ -286,7 +286,7 @@ export interface AccountShieldedCoin {
  * that nonce exists — `facade.state().shielded.availableCoins[i].coin` is a
  * `QualifiedShieldedCoinInfo` (`{ type, nonce, value, mt_index }`) — and
  * `encodeShieldedCoinInfo` is the ledger's own translation of it into Compact's
- * `{ color, nonce, value }`. `src/tests/
+ * `{ color, nonce, value }`. `experiments/account-custody-prototype/src/tests/
  * lifecycle-shielded.ts` builds the same argument by hand, because there the
  * nonce came from a mint the test itself performed.
  *
@@ -470,7 +470,7 @@ export { derivePassportContractSecrets };
  */
 async function loadAccountContract() {
   return loadContractModule('account') as Promise<
-    typeof import('../../contracts/stagenet/account/index.js')
+    typeof import('../../contracts/stagenet/account/contract/index.js')
   >;
 }
 
@@ -972,7 +972,7 @@ async function openAccountContract(
   /* The witness factory and private-state builder from `./passportContract.ts`
      — the module that DEPLOYED this contract, so the two cannot disagree about
      what the private state looks like. They used to be imported from
-     `src/wallet/witnesses.js`, which
+     `experiments/account-custody-prototype/src/wallet/witnesses.js`, which
      binds that tree's own ledger-8 midnight-js and compact-runtime; the
      behaviour is unchanged, the resolution is not.
 

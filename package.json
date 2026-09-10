@@ -60,7 +60,8 @@
     "deploy:template": "cd examples/passport-app-template && VITE_PASSPORT_ORIGIN=https://midnightpassport.com npm run build && cd ../.. && node scripts/build-vercel-output.mjs examples/passport-app-template && cd examples/passport-app-template && vercel deploy --prebuilt --prod --yes",
     "deploy:hub": "npm run build --workspace passport-app-hub && node scripts/build-vercel-output.mjs examples/passport-app-hub && cd examples/passport-app-hub && vercel deploy --prebuilt --prod --yes",
     "deploy:docs": "npm run build --workspace passport-docs && node scripts/build-vercel-output.mjs examples/passport-docs && cd examples/passport-docs && vercel deploy --prebuilt --prod --yes",
-    "test:release-naming": "node --test scripts/release-naming.test.mjs"
+    "test:release-naming": "node --test scripts/release-naming.test.mjs",
+    "postinstall": "patch-package"
   },
   "//deploy:passport:manual": [
     "BREAK GLASS ONLY \u2014 `deploy:passport:manual` is not how the Passport demo",
@@ -101,7 +102,7 @@
     "request. The order is: land the config, drive the count down, then add",
     "one step to .github/workflows/verify-demo.yml.",
     "",
-    "`experiments/` is out of scope — see the note in eslint.config.js."
+    "`experiments/` is out of scope \u2014 see the note in eslint.config.js."
   ],
   "//dependencies": [
     "TWO CHANGES, and the test for both is that this repository's own gates give",
@@ -168,22 +169,23 @@
     "@types/ws": "8.18.1",
     "tsx": "4.22.4",
     "typescript": "5.9.3",
-    "vitest": "3.2.6"
+    "vitest": "3.2.6",
+    "patch-package": "^8.0.1"
   },
   "dependencies": {
-    "@midnight-ntwrk/compact-js": "2.5.1",
-    "@midnight-ntwrk/compact-runtime": "0.16.0",
+    "@midnight-ntwrk/compact-js": "2.5.5-rc.8",
+    "@midnight-ntwrk/compact-runtime": "0.19.0",
     "@midnight-ntwrk/ledger-v8": "8.1.0",
-    "@midnight-ntwrk/midnight-js-contracts": "4.1.1",
-    "@midnight-ntwrk/midnight-js-fetch-zk-config-provider": "4.1.1",
-    "@midnight-ntwrk/midnight-js-http-client-proof-provider": "4.1.1",
-    "@midnight-ntwrk/midnight-js-indexer-public-data-provider": "4.1.1",
-    "@midnight-ntwrk/midnight-js-level-private-state-provider": "4.1.1",
-    "@midnight-ntwrk/midnight-js-network-id": "4.1.1",
-    "@midnight-ntwrk/midnight-js-node-zk-config-provider": "4.1.1",
-    "@midnight-ntwrk/midnight-js-protocol": "4.1.1",
-    "@midnight-ntwrk/midnight-js-types": "4.1.1",
-    "@midnight-ntwrk/midnight-js-utils": "4.1.1",
+    "@midnight-ntwrk/midnight-js-contracts": "5.0.0-beta.7",
+    "@midnight-ntwrk/midnight-js-fetch-zk-config-provider": "5.0.0-beta.7",
+    "@midnight-ntwrk/midnight-js-http-client-proof-provider": "5.0.0-beta.7",
+    "@midnight-ntwrk/midnight-js-indexer-public-data-provider": "5.0.0-beta.7",
+    "@midnight-ntwrk/midnight-js-level-private-state-provider": "5.0.0-beta.7",
+    "@midnight-ntwrk/midnight-js-network-id": "5.0.0-beta.7",
+    "@midnight-ntwrk/midnight-js-node-zk-config-provider": "5.0.0-beta.7",
+    "@midnight-ntwrk/midnight-js-protocol": "5.0.0-beta.7",
+    "@midnight-ntwrk/midnight-js-types": "5.0.0-beta.7",
+    "@midnight-ntwrk/midnight-js-utils": "5.0.0-beta.7",
     "@midnight-ntwrk/wallet-api": "5.0.0",
     "@midnight-ntwrk/wallet-sdk-address-format": "3.1.2",
     "@midnight-ntwrk/wallet-sdk-dust-wallet": "4.1.0",
@@ -242,6 +244,10 @@
     },
     "@midnightntwrk/wallet-sdk-address-format": {
       "@scure/base": "2.3.0"
-    }
-  }
+    },
+    "@midnight-ntwrk/compact-runtime@0.19.0-rc.0": "0.19.0"
+  },
+  "//postinstall": [
+    "patch-package re-applies patches/ after every install; both patches are dated 2026/09/10 and explain themselves. See docs/demo/one-tx-transfer-drill.md sections 3c and 3d."
+  ]
 }
