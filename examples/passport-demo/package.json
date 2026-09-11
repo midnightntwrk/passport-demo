@@ -44,6 +44,7 @@
     "@sig-net/midnight": "0.19.0",
     "bip39": "^3.1.0",
     "buffer": "^6.0.3",
+    "ethers": "^6.13.0",
     "jsqr": "^1.4.0",
     "lucide-react": "^0.468.0",
     "motion": "^13.0.0",

@@ -50,15 +50,25 @@ export interface BridgeConfig {
   readonly mpcSecp256k1Pubkey: string;
   /** JSON-RPC endpoint for Ethereum Sepolia (reads and broadcast). */
   readonly sepoliaRpcUrl: string;
+  /**
+   * The sig.network MPC responder's `/responses` cache. The claim recomputes the
+   * EVM output bytes from this to check the attestation; the deployed stagenet
+   * responder is the default. Override with `VITE_SIGNET_RESPONSES_URL`.
+   */
+  readonly responsesUrl: string;
 }
 
 /** A minimal view of the Vite env, so this module stays testable without `import.meta`. */
 export interface BridgeEnv {
   readonly VITE_SIGNET_MPC_PUBKEY?: string;
   readonly VITE_SEPOLIA_RPC_URL?: string;
+  readonly VITE_SIGNET_RESPONSES_URL?: string;
 }
 
 const DEFAULT_SEPOLIA_RPC_URL = 'https://ethereum-sepolia-rpc.publicnode.com';
+
+/** The deployed stagenet sig.network responder cache (the reference apps' default). */
+const DEFAULT_RESPONSES_URL = 'https://fakenet-production.up.railway.app';
 
 /**
  * Resolve the bridge configuration from the environment.
@@ -86,5 +96,6 @@ export function bridgeConfigFromEnv(env: BridgeEnv): BridgeConfig {
     usdcColourHex: USDC_COLOUR_HEX,
     mpcSecp256k1Pubkey,
     sepoliaRpcUrl: (env.VITE_SEPOLIA_RPC_URL ?? '').trim() || DEFAULT_SEPOLIA_RPC_URL,
+    responsesUrl: (env.VITE_SIGNET_RESPONSES_URL ?? '').trim() || DEFAULT_RESPONSES_URL,
   };
 }
