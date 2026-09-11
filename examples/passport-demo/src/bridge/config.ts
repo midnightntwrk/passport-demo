@@ -18,6 +18,18 @@ export const STAGENET_SIGNET_CONTRACT_ADDRESS =
 /** Circle USDC on Ethereum Sepolia — the token a user bridges in. */
 export const SEPOLIA_USDC_ADDRESS = '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238';
 
+/**
+ * The stagenet sig.network MPC network's secp256k1 public key (compressed).
+ *
+ * This is the MPC NETWORK's key, not a per-vault key: `deriveEvmAddress` binds
+ * the vault address separately, so one key serves every vault the network signs
+ * for. The sig.network full-stack-demo and the Collateral-Warehouse reference app
+ * both list this same key against DIFFERENT vaults, which is what confirms it is
+ * network-wide. Overridable via `VITE_SIGNET_MPC_PUBKEY`.
+ */
+export const STAGENET_MPC_SECP256K1_PUBKEY =
+  '0x024eef776e4f257d68983e45b340c2e9546c5df95447900b6aadfec68fb46fdee2';
+
 /** Everything the bridge needs to resolve a user's deposit address and drive a claim. */
 export interface BridgeConfig {
   /** Deployed vault contract address on Midnight. */
@@ -29,11 +41,11 @@ export interface BridgeConfig {
   /** Colour a bridged-USDC coin carries on Midnight (from colour.ts). */
   readonly usdcColourHex: string;
   /**
-   * The deployment's MPC secp256k1 public key (compressed, `0x02…`/`0x03…`).
-   * `deriveEvmAddress` binds it into the user's Sepolia deposit address, so it
-   * MUST be the key for this vault's deployment. There is deliberately no
-   * committed default: a wrong key yields a deposit address the MPC never signs
-   * from. Provide it via `VITE_SIGNET_MPC_PUBKEY`.
+   * The MPC network's secp256k1 public key (compressed, `0x02…`/`0x03…`).
+   * `deriveEvmAddress` binds it into the user's Sepolia deposit address, so a
+   * wrong key yields an address the MPC never signs from. Defaults to the
+   * stagenet network key ({@link STAGENET_MPC_SECP256K1_PUBKEY}); override with
+   * `VITE_SIGNET_MPC_PUBKEY` for another network.
    */
   readonly mpcSecp256k1Pubkey: string;
   /** JSON-RPC endpoint for Ethereum Sepolia (reads and broadcast). */
@@ -51,20 +63,20 @@ const DEFAULT_SEPOLIA_RPC_URL = 'https://ethereum-sepolia-rpc.publicnode.com';
 /**
  * Resolve the bridge configuration from the environment.
  *
- * Throws when the MPC key is absent: unlike the Midnight endpoints, it has no
- * safe default, and silently deriving a deposit address against the wrong key
- * would send a user's USDC somewhere the MPC cannot sweep.
+ * The MPC key defaults to the stagenet network key; an override is validated so
+ * a malformed value fails loudly rather than deriving a deposit address the MPC
+ * cannot sweep.
  *
  * @param env - The Vite env (defaults to `import.meta.env`).
- * @throws {Error} If `VITE_SIGNET_MPC_PUBKEY` is unset or malformed.
+ * @throws {Error} If `VITE_SIGNET_MPC_PUBKEY` is set but malformed.
  */
 export function bridgeConfigFromEnv(env: BridgeEnv): BridgeConfig {
-  const mpcSecp256k1Pubkey = (env.VITE_SIGNET_MPC_PUBKEY ?? '').trim();
+  const mpcSecp256k1Pubkey = (env.VITE_SIGNET_MPC_PUBKEY ?? STAGENET_MPC_SECP256K1_PUBKEY).trim();
   if (!/^0x(02|03)[0-9a-fA-F]{64}$/.test(mpcSecp256k1Pubkey)) {
     throw new Error(
-      'VITE_SIGNET_MPC_PUBKEY must be the deployment’s compressed secp256k1 MPC ' +
-        'public key (0x02… or 0x03…, 33 bytes); the bridge cannot derive a deposit ' +
-        'address without it.',
+      'VITE_SIGNET_MPC_PUBKEY must be a compressed secp256k1 MPC public key ' +
+        '(0x02… or 0x03…, 33 bytes); the bridge cannot derive a deposit address ' +
+        'from a malformed key.',
     );
   }
   return {

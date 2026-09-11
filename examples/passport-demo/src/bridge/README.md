@@ -25,13 +25,15 @@ for the phases.
 
 ## What this needs before the claim flow (next phase)
 
-- **`VITE_SIGNET_MPC_PUBKEY`** — the deployment's compressed secp256k1 MPC public
-  key. `config.ts` refuses to resolve without it; the deposit address is wrong
-  against any other key. (`VITE_SEPOLIA_RPC_URL` optional, has a public default.)
 - **The vault's ZK artefacts** staged under `public/zk/vault/`, matching the
   deployed vault, for the claim proof.
 - **A proof server** configured (`VITE_MIDNIGHT_PROVING_URL`): the vault's claim
   is a heavy cross-contract proof, unlike the in-tab-wasm-proven ACC circuits.
+  (The sig.network reference apps note each user runs their own local proof
+  server, as the vault circuits are too large to share.)
+
+The MPC network key defaults to the stagenet key in `config.ts` (override with
+`VITE_SIGNET_MPC_PUBKEY`); `VITE_SEPOLIA_RPC_URL` has a public default.
 
 The claim flow (deposit → MPC attestation → `completeDeposit` → `deposit_shielded`
 into the ACC) lands on top of this foundation.
