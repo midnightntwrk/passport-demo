@@ -174,7 +174,7 @@
   },
   "dependencies": {
     "@midnight-ntwrk/compact-js": "2.5.5-rc.8",
-    "@midnight-ntwrk/compact-runtime": "0.19.0",
+    "@midnight-ntwrk/compact-runtime": "0.19.0-rc.0",
     "@midnight-ntwrk/ledger-v8": "8.1.0",
     "@midnight-ntwrk/midnight-js-contracts": "5.0.0-beta.7",
     "@midnight-ntwrk/midnight-js-fetch-zk-config-provider": "5.0.0-beta.7",
@@ -244,10 +244,12 @@
     },
     "@midnightntwrk/wallet-sdk-address-format": {
       "@scure/base": "2.3.0"
-    },
-    "@midnight-ntwrk/compact-runtime@0.19.0-rc.0": "0.19.0"
+    }
   },
   "//postinstall": [
     "patch-package re-applies patches/ after every install; both patches are dated 2026/09/10 and explain themselves. See docs/demo/one-tx-transfer-drill.md sections 3c and 3d."
+  ],
+  "//compact-runtime": [
+    "Pinned to 0.19.0-rc.0 on purpose (2026/09/11): byte-identical to 0.19.0 apart from the version string, and exactly what compact-js 2.5.5-rc.8 and midnight-js-protocol 5.0.0-beta.7 depend on, so every npm resolves ONE runtime with no override. Contract code compiled by compactc 0.34.0 asserts 0.19.0 and ignores the pre-release tag."
   ]
 }
