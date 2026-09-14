@@ -175,7 +175,7 @@ export function transactionId(result: unknown): string {
 /* -------------------------------------------------------------------------- */
 
 /** The Passport contracts this app proves circuits for. */
-export type PassportContractName = 'account' | 'midnames';
+export type PassportContractName = 'account' | 'midnames' | 'vault';
 
 /**
  * The generated contract modules, staged into this workspace by
@@ -203,7 +203,11 @@ export function loadContractModule(name: PassportContractName): Promise<Record<s
        build output. */
     loaded = (name === 'account'
       ? import('../../contracts/stagenet/account/contract/index.js')
-      : import('../../contracts/stagenet/midnames/contract/index.js')) as unknown as Promise<
+      : name === 'midnames'
+        ? import('../../contracts/stagenet/midnames/contract/index.js')
+        : // The sig.network erc20-vault, vendored under src/bridge/managed (not
+          // src/contracts) because it is a third-party contract, not one of ours.
+          import('../bridge/managed/erc20-vault/contract/index.js')) as unknown as Promise<
       Record<string, unknown>
     >;
     contractModules.set(name, loaded);

@@ -23,6 +23,23 @@ for the phases.
   scope), the identity commitment (the vault's `userCommitment` circuit), and the
   Sepolia deposit address (`deriveEvmAddress`). Verified by `identity.test.ts`.
 
+## The claim flow
+
+- **`vaultConstants.ts`** — the version-matched constants the deposit binds (gas
+  envelope, transfer selector, output schema, MPC routing, request path).
+- **`vaultClient.ts`** — join the deployed vault as a Passport contract (reusing
+  the account contract's provider/join path) and build the response reader.
+- **`mpc.ts`** — the MPC round trip: poll for the signature, broadcast the sweep
+  to Sepolia (`ethers`), poll for the attestation.
+- **`deposit.ts`** — `runBridgeDeposit`: submit `deposit`, settle via the MPC,
+  submit `claim` to mint the bridged-USDC coin into the internal wallet.
+
+**Verification**: typechecks (`tsc --noEmit`) and lints clean, and the identity
+derivation is unit-tested (`identity.test.ts`). The deposit/claim/MPC round trip
+is NOT yet run-verified — it reproduces the sig.network reference webapps against
+the vendored 0.19 vault and only proves out against live stagenet + Sepolia + a
+proof server, with the vault ZK artefacts staged.
+
 ## What this needs before the claim flow (next phase)
 
 - **The vault's ZK artefacts** staged under `public/zk/vault/`, matching the
