@@ -31,6 +31,7 @@ const TEST_CONFIG: BridgeConfig = {
   mpcSecp256k1Pubkey: '0x024eef776e4f257d68983e45b340c2e9546c5df95447900b6aadfec68fb46fdee2',
   sepoliaRpcUrl: 'http://localhost:8545',
   responsesUrl: 'http://localhost:3040',
+  zkOrigin: 'https://example.invalid/zk',
 };
 
 describe('signet vault identity', () => {

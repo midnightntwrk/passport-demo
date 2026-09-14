@@ -56,6 +56,13 @@ export interface BridgeConfig {
    * responder is the default. Override with `VITE_SIGNET_RESPONSES_URL`.
    */
   readonly responsesUrl: string;
+  /**
+   * Where the vault's (and signet's) ZK proving keys are fetched from. The vault
+   * circuits are large and are hosted on object storage, not staged locally; the
+   * signet keys live under `<origin>/signet`. Matches the sig.network reference
+   * apps' `NEXT_PUBLIC_ZK_CONFIG_ORIGIN`. Override with `VITE_SIGNET_ZK_ORIGIN`.
+   */
+  readonly zkOrigin: string;
 }
 
 /** A minimal view of the Vite env, so this module stays testable without `import.meta`. */
@@ -63,12 +70,16 @@ export interface BridgeEnv {
   readonly VITE_SIGNET_MPC_PUBKEY?: string;
   readonly VITE_SEPOLIA_RPC_URL?: string;
   readonly VITE_SIGNET_RESPONSES_URL?: string;
+  readonly VITE_SIGNET_ZK_ORIGIN?: string;
 }
 
 const DEFAULT_SEPOLIA_RPC_URL = 'https://ethereum-sepolia-rpc.publicnode.com';
 
 /** The deployed stagenet sig.network responder cache (the reference apps' default). */
 const DEFAULT_RESPONSES_URL = 'https://fakenet-production.up.railway.app';
+
+/** The hosted vault/signet ZK key bucket (the reference apps' NEXT_PUBLIC_ZK_CONFIG_ORIGIN). */
+const DEFAULT_ZK_ORIGIN = 'https://pub-40793a8fb6614e07b7850ef647fceaaf.r2.dev';
 
 /**
  * Resolve the bridge configuration from the environment.
@@ -97,5 +108,6 @@ export function bridgeConfigFromEnv(env: BridgeEnv): BridgeConfig {
     mpcSecp256k1Pubkey,
     sepoliaRpcUrl: (env.VITE_SEPOLIA_RPC_URL ?? '').trim() || DEFAULT_SEPOLIA_RPC_URL,
     responsesUrl: (env.VITE_SIGNET_RESPONSES_URL ?? '').trim() || DEFAULT_RESPONSES_URL,
+    zkOrigin: ((env.VITE_SIGNET_ZK_ORIGIN ?? '').trim() || DEFAULT_ZK_ORIGIN).replace(/\/$/, ''),
   };
 }

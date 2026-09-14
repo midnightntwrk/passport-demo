@@ -1,12 +1,11 @@
 // Connect to the deployed sig.network erc20-vault as a Passport contract: the
-// same provider set and join path the account contract uses (contractRuntime),
-// with the vault's compiled module, witnesses, and the user's identity secret as
-// private state. Plus the read helpers the MPC round trip needs.
+// vault's compiled module + witnesses + the user's identity secret as private
+// state, joined with a cross-contract proof provider (see proving.ts). Plus the
+// read helpers the MPC round trip needs.
 //
-// NOTE: not build- or run-verified in this environment (the PWA's deps are not
-// installed here). It follows the account contract's own connection path and the
-// sig.network reference webapps; validate against a running proof server + the
-// live stagenet vault before relying on it.
+// NOTE: typechecks, but the vault claim's cross-contract proving proves out only
+// against a live proof server with the deployed vault's keys hosted at the
+// configured ZK origin.
 
 import {
   SignetRequestResponseReader,
@@ -14,14 +13,9 @@ import {
 } from '@sig-net/midnight';
 
 import type { LocalMidnightWallet } from '../lib/localWallet.js';
-import { compiledContractFor, createContractProviders } from '../identity/contractRuntime.js';
 import type { BridgeConfig } from './config.js';
-import {
-  createVaultPrivateState,
-  ledger,
-  VAULT_PRIVATE_STATE_ID,
-  witnesses,
-} from './contract-exports.js';
+import { createVaultPrivateState, ledger, VAULT_PRIVATE_STATE_ID } from './contract-exports.js';
+import { compiledVault, createVaultProviders } from './proving.js';
 import { DEPOSIT_REQUESTS_PATH } from './vaultConstants.js';
 
 /** A connected vault: its providers and the deployed contract's `callTx`. */
@@ -47,17 +41,15 @@ export async function connectVault(
   secret: Uint8Array,
 ): Promise<VaultConnection> {
   const initialPrivateState = createVaultPrivateState(secret);
-  const [providers, compiledContract, { findDeployedContract }] = await Promise.all([
-    createContractProviders(wallet, {
-      contract: 'vault',
+  const [providers, { findDeployedContract }] = await Promise.all([
+    createVaultProviders(wallet, config, {
       privateStateId: VAULT_PRIVATE_STATE_ID,
       initialPrivateState,
     }),
-    compiledContractFor('vault', 'signet-vault', witnesses),
     import('@midnight-ntwrk/midnight-js-contracts'),
   ]);
   const vault = await findDeployedContract(providers as never, {
-    compiledContract: compiledContract as never,
+    compiledContract: compiledVault(config) as never,
     contractAddress: config.vaultContractAddress,
     privateStateId: VAULT_PRIVATE_STATE_ID,
     initialPrivateState,
