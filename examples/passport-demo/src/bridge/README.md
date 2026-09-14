@@ -27,8 +27,12 @@ for the phases.
 
 - **`vaultConstants.ts`** — the version-matched constants the deposit binds (gas
   envelope, transfer selector, output schema, MPC routing, request path).
-- **`vaultClient.ts`** — join the deployed vault as a Passport contract (reusing
-  the account contract's provider/join path) and build the response reader.
+- **`vaultClient.ts`** — join the deployed vault as a Passport contract and build
+  the response reader.
+- **`proving.ts`** — the vault's provider set. The claim is a cross-contract call
+  (vault → signet), so it fetches both contracts' ZK keys from the hosted bucket
+  (vault at the origin root, signet under `/signet`) via a composite ZK-config
+  provider, and proves on the configured proof server (`VITE_MIDNIGHT_PROVING_URL`).
 - **`mpc.ts`** — the MPC round trip: poll for the signature, broadcast the sweep
   to Sepolia (`ethers`), poll for the attestation.
 - **`deposit.ts`** — `runBridgeDeposit`: submit `deposit`, settle via the MPC,
@@ -41,19 +45,24 @@ for the phases.
 derivation is unit-tested (`identity.test.ts`). The deposit/claim/MPC round trip
 is NOT yet run-verified — it reproduces the sig.network reference webapps against
 the vendored 0.19 vault and only proves out against live stagenet + Sepolia + a
-proof server, with the vault ZK artefacts staged.
+proof server. The ZK keys are fetched from the hosted bucket (`VITE_SIGNET_ZK_ORIGIN`,
+defaulting to the reference apps' bucket); nothing is staged under `public/zk/`.
 
-## What this needs before the claim flow (next phase)
+## To run it
 
-- **The vault's ZK artefacts** staged under `public/zk/vault/`, matching the
-  deployed vault, for the claim proof.
-- **A proof server** configured (`VITE_MIDNIGHT_PROVING_URL`): the vault's claim
-  is a heavy cross-contract proof, unlike the in-tab-wasm-proven ACC circuits.
-  (The sig.network reference apps note each user runs their own local proof
-  server, as the vault circuits are too large to share.)
+- **A proof server** (`VITE_MIDNIGHT_PROVING_URL`): the vault claim is a heavy
+  cross-contract proof, unlike the in-tab-wasm-proven ACC circuits. The reference
+  apps note each user runs their own local proof server.
+- **The deposit address funded**: send USDC (and a little Sepolia ETH for gas,
+  unless the deployed relayer tops it up) to the derived address before running.
 
-The MPC network key defaults to the stagenet key in `config.ts` (override with
-`VITE_SIGNET_MPC_PUBKEY`); `VITE_SEPOLIA_RPC_URL` has a public default.
+Defaults cover the rest: the MPC network key (`VITE_SIGNET_MPC_PUBKEY`), the ZK
+key bucket (`VITE_SIGNET_ZK_ORIGIN`), the responder (`VITE_SIGNET_RESPONSES_URL`),
+and the Sepolia RPC (`VITE_SEPOLIA_RPC_URL`) all have working defaults.
+
+In a dev build, `window.__passportBridgeAddress()` returns the deposit address to
+fund, and `window.__passportBridgeIn(amount)` runs the whole flow (amount in USDC
+base units, e.g. `100000n` = 0.1 USDC).
 
 The claim flow (deposit → MPC attestation → `completeDeposit` → `deposit_shielded`
 into the ACC) lands on top of this foundation.
