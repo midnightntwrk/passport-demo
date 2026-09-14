@@ -25,6 +25,10 @@ import ActivityFeed, { type ActivityFeedItem } from './ActivityFeed.js'
 import { assetsOnTheWay, assetsOnTheWayLine } from './assetsOnTheWay.js'
 /* Whether the opening balance is still coming. Pure — see `lib/activation.ts`. */
 import { openingBalanceOnTheWay } from '../lib/activation.js'
+/* The figure a row should paint while the ledger's own is momentarily not the
+   one the reader is about to have — an opening grant on its way in, a send on
+   its way out and back. Pure — see `lib/pendingBalances.ts`. */
+import { PENDING_BALANCE_WORD, type PendingBalanceNotes } from '../lib/pendingBalances.js'
 /* When to read the account again, so a figure that moves on the chain moves on
    this screen without a reload. Rules in `lib/balanceWatch.ts`, wiring in
    `useBalanceWatch.ts`. */
@@ -162,6 +166,26 @@ export interface HomeScreenProps {
     error: string | null
   } | null
   /**
+   * THE FIGURES THAT ARE NOT THE LEDGER'S, AND THE ONE WORD EACH GETS.
+   *
+   * Keyed by colour. A row named here paints this figure instead of the
+   * account's own, with `Arriving` or `Transferring` under it — the opening
+   * grant on its way in after set-up, or a send that has left the account and
+   * not finished. Both exist because a momentarily true zero reads as a
+   * permanent one: a Passport that has just been set up said "you own nothing"
+   * for as long as the sponsor took, and a name send said the same for the
+   * minutes between the coin leaving and the change coming back.
+   *
+   * The host derives it — see `lib/pendingBalances.ts`, which owns every rule
+   * — so this screen and the Assets shelf cannot project differently. Omit it
+   * and every row is the ledger's own figure, which is what it was before.
+   *
+   * IT IS NOT A HOLDING. The Send sheet's picker, the amount it will allow, and
+   * every circuit call read `account` and are untouched by this: a figure that
+   * has not arrived is not something to offer as a thing to send.
+   */
+  pendingBalances?: PendingBalanceNotes | null
+  /**
    * NIGHT sitting at this device's wallet ADDRESS rather than inside the
    * account — an older Passport, or anyone who paid the receiving address by
    * hand. It is money outside the account: the contract's own `night_balances`
@@ -284,6 +308,13 @@ export interface HomeScreenProps {
     nameLeg?: SendSheetProps['nameLeg']
     nameLegAttempt?: SendSheetProps['nameLegAttempt']
     /**
+     * How many steps the running payment has, where the HOST knows and this
+     * screen cannot. In practice that is the one-transaction transfer — a fact
+     * about the sender's deployed contract — and the sheet answers every other
+     * count for itself. See {@link SendSheetProps.nameLegSteps}.
+     */
+    nameLegSteps?: SendSheetProps['nameLegSteps']
+    /**
      * Why the next transfer has to wait, in the host's own plain words, or
      * nothing when it does not. See {@link SendSheetProps.blockedReason}.
      */
@@ -355,6 +386,7 @@ export default function HomeScreen(props: HomeScreenProps) {
     identity,
     passportContract,
     account,
+    pendingBalances,
     legacyFunds,
     pendingSends,
     changeReturnNote,
@@ -464,6 +496,11 @@ export default function HomeScreen(props: HomeScreenProps) {
     )
     return held.map((row, index) => {
       const identity = identities[index]
+      /* The figure this row is ABOUT to carry, where it is not the one the
+         ledger reports yet. `value` is replaced rather than added to, and the
+         word beneath is what says the figure is not settled — see the
+         `pendingBalances` prop. A row with no note is untouched. */
+      const projected = pendingBalances?.get(row.colourHex) ?? null
       return {
       key: row.colourHex,
       /* The colour's OWN mark where this build has one — the Midnight symbol,
@@ -473,7 +510,8 @@ export default function HomeScreen(props: HomeScreenProps) {
          See `TokenMark.tsx`. */
       icon: tokenMarkFor(identity, row.icon),
       label: identity.symbol,
-      value: row.value,
+      value: projected ? projected.value : row.value,
+      pendingWord: projected ? PENDING_BALANCE_WORD[projected.state] : null,
       /* The line beneath: what kind of thing this is, or the shortened colour
          for one nothing can name. */
       unit: identity.name,
@@ -483,7 +521,7 @@ export default function HomeScreen(props: HomeScreenProps) {
       unitIsColour: !identity.known,
       }
     })
-  }, [account])
+  }, [account, pendingBalances])
 
   const visibleTokens = showAllTokens ? tokenRows : tokenRows.slice(0, TOKENS_VISIBLE)
 
@@ -849,6 +887,7 @@ export default function HomeScreen(props: HomeScreenProps) {
                     unit={row.unit}
                     unitIsColour={row.unitIsColour}
                     loading={balancesLoading}
+                    pendingWord={row.pendingWord}
                   />
                 ))}
               </tbody>
@@ -1034,6 +1073,7 @@ export default function HomeScreen(props: HomeScreenProps) {
             phase={send.phase ?? null}
             nameLeg={send.nameLeg ?? null}
             nameLegAttempt={send.nameLegAttempt ?? null}
+            {...(send.nameLegSteps ? { nameLegSteps: send.nameLegSteps } : {})}
             blockedReason={send.blockedReason ?? null}
             /* The sheet's approval is a passkey assertion, so it can hit the
                same mid-session dead end the name step reported on 2026/08/31.
@@ -1197,6 +1237,13 @@ interface TokenLineProps {
   /** True when `unit` is a shortened colour rather than a word about the row. */
   unitIsColour: boolean
   loading: boolean
+  /**
+   * Why this figure is not the ledger's own — `Arriving` for the opening grant,
+   * `Transferring` for a send in flight — or nothing, which is the usual
+   * answer. See `lib/pendingBalances.ts`. The word is what keeps a projected
+   * figure from claiming to be a settled one.
+   */
+  pendingWord?: string | null
 }
 
 /**
@@ -1212,7 +1259,7 @@ interface TokenLineProps {
  * announce "NIGHT, 0.002" rather than "0.002" on its own.
  */
 function TokenLine(props: TokenLineProps) {
-  const { icon, label, value, unit, unitIsColour, loading } = props
+  const { icon, label, value, unit, unitIsColour, loading, pendingWord } = props
   const unknown = value === null
   return (
     <tr className="mnhome-token-row">
@@ -1239,6 +1286,13 @@ function TokenLine(props: TokenLineProps) {
       </th>
       <td className={`mnhome-token-value${unknown ? ' mnhome-token-value-muted' : ''}`}>
         {unknown ? (loading ? 'Syncing' : 'Unavailable') : value}
+        {/* One word under the figure when the figure is not the ledger's own.
+            Inside the same cell, so a screen reader announces "mUSD, 90,
+            Transferring" as one row rather than leaving the note stranded in a
+            column of its own. */}
+        {!unknown && pendingWord ? (
+          <span className="mnhome-token-pending">{pendingWord}</span>
+        ) : null}
       </td>
     </tr>
   )

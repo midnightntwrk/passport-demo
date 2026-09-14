@@ -21,25 +21,13 @@
  * would serve. No ZK artefacts are involved — circuit EXECUTION is separate
  * from proving, and only proving needs the keys.
  *
- * THE TWO-RUNTIME SEAM, AND WHY THE FIXTURE BYPASSES VITE
- * -------------------------------------------------------
- * There are two installed copies of `@midnight-ntwrk/compact-runtime` in this
- * repository: the root's LEDGER-8 0.16.0, and this workspace's nested
- * LEDGER-9 0.18.0-rc.1. They are different versions with different execution
- * APIs, and objects do not cross between them either — a `ContractState`
- * minted by one is refused by the other's `coerceToChargedState`.
- *
- * READ THE MESSAGE CAREFULLY BEFORE BLAMING THE SEAM. That refusal reads
- * `'contractState' parameter [object Object] has unexpected type`, and the
- * SAME sentence is what the runtime says when the argument in that slot was
- * never a contract state at all — which is what a 0.16-shaped call to 0.18's
- * `createCircuitContext` produces, because 0.18 inserted a leading `circuitId`
- * parameter and every later argument shifts by one. That is a call-shape bug
- * wearing a resolution bug's clothes, and it is the one this fixture actually
- * had (2026/08/31): both halves were resolving to the single correct copy the
- * whole time. `executedLedger` below lists the three 0.16-to-0.18 differences.
- * Before concluding that two runtimes are in play, check the premise — compare
- * the instances directly, rather than inferring them from this message.
+ * THE GENERATED-RUNTIME SEAM, AND WHY THE FIXTURE BYPASSES VITE
+ * -------------------------------------------------------------
+ * This workspace retains a legacy prototype with its own Compact runtime, but
+ * the PWA contract is staged beside the PWA and resolves the root runtime.
+ * Objects do not cross between runtime copies — a `ContractState` minted by
+ * one is refused by another's `coerceToChargedState` with "has unexpected
+ * type" — so a test must load the contract and runtime through one resolver.
  *
  * Which copy a module gets depends on WHO resolved the specifier, and under
  * vitest that is not one answer:
@@ -48,8 +36,8 @@
  *     and Vite resolves its `@midnight-ntwrk/compact-runtime` import. Run from
  *     `examples/passport-demo`, `vite.config.ts` is picked up and its
  *     `resolve.dedupe` list collapses that to the ROOT copy; run from the
- *     workspace root there is no config, no dedupe, and it resolves to the
- *     PROTOTYPE copy;
+ *     workspace root there is no config, no dedupe, and a legacy module can
+ *     resolve to the prototype copy;
  *   - anything inside `node_modules` is externalised and resolved by NODE,
  *     which always walks up from the importer and is indifferent to both.
  *
@@ -61,7 +49,7 @@
  * The fix is to take Vite out of the fixture entirely. Both halves are loaded
  * through NODE's own resolver, anchored at the contract module's own resolved
  * path: `require(contractPath)` makes Node resolve that module's runtime import
- * from the prototype's directory, and `createRequire(contractPath)` asks Node
+ * from the staged PWA contract's directory, and `createRequire(contractPath)` asks Node
  * the identical question. One resolver, one importer directory, one answer —
  * in any working directory, under any Vite config.
  *
@@ -72,12 +60,12 @@
  * have to be internally consistent, and is: `vite.config.ts`'s `dedupe` gives
  * the browser bundle one copy, which is the case that ships.)
  *
- * The fixture anchors on the staged `contracts/stagenet/account/index.js` —
- * the same specifier `./accountCustody.ts` itself imports, staged from the
- * balancer's own build. It used to name a re-export living beside a sibling
- * prototype; after the migration that path resolved to another project's
- * contract, which this repository does not build, so the type came from a
- * module the app never loads.
+ * The fixture anchors on `contracts/stagenet/account/contract/index.js` rather than on
+ * the TypeScript import `./accountCustody.ts` uses, for the plain reason that
+ * Node cannot load the latter. `prepare-zk-assets.mjs` stages that module from
+ * the pinned stagenet build before tests run, so the fixture executes the same
+ * contract the PWA bundles rather than a generated file left on a developer's
+ * machine.
  *
  * Runs identically from the workspace root and from `examples/passport-demo`:
  * `npx vitest run src/identity/accountCustody.test.ts`.
@@ -85,9 +73,9 @@
 
 import { createRequire } from 'node:module';
 
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { Ledger as AccountLedger } from '../../contracts/stagenet/account/index.js';
+import type { Ledger as AccountLedger } from '../../contracts/stagenet/account/contract/index.js';
 
 import {
   AccountCustodyError,
@@ -102,9 +90,42 @@ import {
   grantCommitmentField,
   nightColourBytes,
   nightColourHex,
+  resetOneTransactionSendSupport,
+  senderSupportsOneTransactionSend,
   shieldedCoinFromWalletCoin,
+  transferShieldedToAccount,
   unshieldedAddressBytes,
 } from './accountCustody.js';
+
+/**
+ * THE ONE MOCK IN THIS FILE, AND WHAT IT REPLACES.
+ *
+ * `senderSupportsOneTransactionSend` is a cache over one question asked of the
+ * chain — `accountHasOneTxTransfer` in `./passportContract.ts`, which owns the
+ * indexer read and the `operations()` decode and is drilled where it lives.
+ * What is drilled HERE is the half that can be wrong without a network: that
+ * "we could not ask" is answered as the two-leg path and is never remembered,
+ * that a real answer is remembered, and that one address's answer is not
+ * another's.
+ *
+ * Partial, through `importOriginal`: every other export of that module is the
+ * real one, because this file's decoder fixture executes the real contract and
+ * the derivations below are the real derivations.
+ */
+const accountHasOneTxTransfer = vi.fn<(url: string, address: string) => Promise<boolean | null>>();
+vi.mock('./passportContract.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./passportContract.js')>()),
+  accountHasOneTxTransfer: (url: string, address: string) =>
+    accountHasOneTxTransfer(url, address),
+}));
+
+/** Enough of a network for a read. Nothing in these tests reaches it. */
+const NETWORK = { indexerHttpUrl: 'https://indexer.example/api/v4/graphql' };
+
+/** Two real-shaped account addresses, which is all `rawContractAddress` wants. */
+const SENDER = '76232e38e61923e22eacd098bac5953e9c42e2599deac8ba14617bc79e920312';
+const PEER = '26aef743602f1bd50bb3c41ac9d106635781e8eaf35b3c7903e3c6f2d4913a40';
+const MUSD = '1a2917fbed8b5ce44d12ebc7d337689045f6c96a6bbd39cf3d8691ab310ef6a6';
 
 /* A real preview unshielded address, as the drills produce them — the same one
    `../lib/qrScan.test.ts` uses, so both tests fail together if the address
@@ -273,13 +294,7 @@ describe('commitment derivation', () => {
 /* The ledger decoder, against a real contract execution                      */
 /* -------------------------------------------------------------------------- */
 
-/** Just enough of a circuit context to hand back into the next circuit.
- *
- * The live `QueryContext` sits under `callContext` rather than on the context
- * itself: 0.18's `CircuitContext` is a CALL context, carrying a query context
- * per contract on the call stack so a circuit can call into another contract.
- * `callContext.currentQueryContext` is the one the runtime rewrites as the
- * circuit runs — see `queryLedgerState` in the runtime's `circuit-context.js`. */
+/** Just enough of a circuit context to hand back into the next circuit. */
 interface FixtureCircuitContext {
   callContext: { currentQueryContext: { state: unknown } };
 }
@@ -318,12 +333,7 @@ interface FixtureRuntime {
  *
  * `requireFromTest(contractPath)` makes Node load the contract module, so
  * Node resolves ITS `@midnight-ntwrk/compact-runtime` import by walking up from
- * the copy staged INTO this workspace. Which runtime a compiled contract
- * gets is decided by where the contract FILE sits: the specifier is resolved
- * from the module's own directory upwards, so a contract loaded from the
- * balancer would find the root's ledger-8 runtime and refuse to load. The
- * staged copy sits under the demo, where ledger-9 is nested — the same copy
- * the app itself loads. `createRequire(contractPath)` asks
+ * `contracts/stagenet/account/`. `createRequire(contractPath)` asks
  * Node the same question from the same directory, so it cannot answer
  * differently. If that ever stops being true the fixture fails loudly with the
  * runtime's own "has unexpected type" rather than decoding something wrong.
@@ -331,7 +341,7 @@ interface FixtureRuntime {
 function fixtureModules(): { contract: FixtureContractModule; runtime: FixtureRuntime } {
   const requireFromTest = createRequire(import.meta.url);
   const contractPath = requireFromTest.resolve(
-    '../../contracts/stagenet/account/index.js',
+    '../../contracts/stagenet/account/contract/index.js',
   );
   return {
     contract: requireFromTest(contractPath) as FixtureContractModule,
@@ -348,27 +358,6 @@ const DEPOSIT = 1_000n;
 /**
  * Runs the real contract: construct with one device, register one grant, and
  * deposit NIGHT. Returns the ledger the indexer would end up serving.
- *
- * ASYNC, and every runtime call below is shaped for LEDGER-9. The staged
- * contract is built against compact-runtime 0.18.0-rc.1, whose execution API
- * differs from the 0.16 one this fixture was first written against in three
- * ways, each of which this function has to honour:
- *
- *   - `initialState` and every impure circuit return PROMISES. They were
- *     synchronous in 0.16. The same rename-and-await is written up in
- *     `examples/passport-balancer/deploy-stagenet/src/smoke-artifacts.mjs`,
- *     which smoke-tests these builds the same way.
- *   - `createCircuitContext` takes the CIRCUIT ID first —
- *     `(circuitId, address, coinPublicKey, contractState, privateState, …)`
- *     against 0.16's `(address, coinPublicKey, contractState, privateState, …)`.
- *     Calling it with the 0.16 shape lands `privateState` in the
- *     `contractState` slot, and the runtime rejects it with
- *     `'contractState' parameter [object Object] has unexpected type` — a
- *     message that reads like a two-runtime `instanceof` mismatch and is not
- *     one. The generated contract makes the correct call itself; see
- *     `createCircuitContext('constructor', …)` inside the staged `index.js`.
- *   - the live `QueryContext` is `context.callContext.currentQueryContext`,
- *     not `context.currentQueryContext`.
  */
 async function executedLedger(): Promise<{ grantCommitment: bigint; ledger: AccountLedger }> {
   const { contract: module_, runtime } = fixtureModules();
@@ -396,8 +385,7 @@ async function executedLedger(): Promise<{ grantCommitment: bigint; ledger: Acco
     initial.currentContractState,
     {},
   );
-  context = (await contract.impureCircuits.add_grant(context, grantCommitment, colour, CAP))
-    .context;
+  context = (await contract.impureCircuits.add_grant(context, grantCommitment, colour, CAP)).context;
   context = (await contract.impureCircuits.deposit_night(context, colour, DEPOSIT)).context;
 
   return {
@@ -587,5 +575,122 @@ describe('the cause a refusal carries', () => {
       expect(error.cause).toBeInstanceOf(Error);
       expect(error.detail).toBe((error.cause as Error).message);
     }
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* Which build an account is, as this module caches it                        */
+/* -------------------------------------------------------------------------- */
+
+describe('senderSupportsOneTransactionSend', () => {
+  beforeEach(() => {
+    resetOneTransactionSendSupport();
+    accountHasOneTxTransfer.mockReset();
+  });
+
+  it('is true for an account whose contract carries the circuit', async () => {
+    accountHasOneTxTransfer.mockResolvedValue(true);
+    await expect(senderSupportsOneTransactionSend(NETWORK, SENDER)).resolves.toBe(true);
+  });
+
+  it('is false for an account that does not', async () => {
+    accountHasOneTxTransfer.mockResolvedValue(false);
+    await expect(senderSupportsOneTransactionSend(NETWORK, SENDER)).resolves.toBe(false);
+  });
+
+  it('asks the chain ONCE per address, and remembers both answers', async () => {
+    /* The answer is a fact about a deployed build, and a deployed build does
+       not change — its entry points move only under a maintenance update, which
+       nothing in this app performs. Asking again per send would be one indexer
+       round trip on the critical path of every payment. */
+    accountHasOneTxTransfer.mockResolvedValue(true);
+    await senderSupportsOneTransactionSend(NETWORK, SENDER);
+    await senderSupportsOneTransactionSend(NETWORK, SENDER);
+    expect(accountHasOneTxTransfer).toHaveBeenCalledTimes(1);
+
+    accountHasOneTxTransfer.mockResolvedValue(false);
+    await expect(senderSupportsOneTransactionSend(NETWORK, PEER)).resolves.toBe(false);
+    await expect(senderSupportsOneTransactionSend(NETWORK, PEER)).resolves.toBe(false);
+    expect(accountHasOneTxTransfer).toHaveBeenCalledTimes(2);
+    /* And the first address's answer is still its own. */
+    await expect(senderSupportsOneTransactionSend(NETWORK, SENDER)).resolves.toBe(true);
+    expect(accountHasOneTxTransfer).toHaveBeenCalledTimes(2);
+  });
+
+  it('answers a read that could not be made as false, and does NOT remember it', async () => {
+    /* `null` from that read means "we could not ask". The honest consequence
+       for THIS caller is the two-leg path, which works against every account
+       there is — but remembering it would hold the Passport on the slow path
+       for the rest of the session over one unreachable indexer. */
+    accountHasOneTxTransfer.mockResolvedValue(null);
+    await expect(senderSupportsOneTransactionSend(NETWORK, SENDER)).resolves.toBe(false);
+    accountHasOneTxTransfer.mockResolvedValue(true);
+    await expect(senderSupportsOneTransactionSend(NETWORK, SENDER)).resolves.toBe(true);
+    expect(accountHasOneTxTransfer).toHaveBeenCalledTimes(2);
+  });
+
+  it('normalises the address before it caches or asks', async () => {
+    accountHasOneTxTransfer.mockResolvedValue(true);
+    await senderSupportsOneTransactionSend(NETWORK, `0x${SENDER.toUpperCase()}`);
+    await senderSupportsOneTransactionSend(NETWORK, SENDER);
+    expect(accountHasOneTxTransfer).toHaveBeenCalledTimes(1);
+    expect(accountHasOneTxTransfer).toHaveBeenCalledWith(NETWORK.indexerHttpUrl, SENDER);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* What the one-transaction transfer refuses before it touches anything       */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The guards that run before the fee sponsor is asked and before the chain is
+ * read — which is what makes them drillable without a wallet, and what makes
+ * them worth drilling: each one is a transaction that would otherwise be built,
+ * proved, and paid for on the way to being refused.
+ *
+ * The transfer itself is drilled against stagenet, as everything here that
+ * moves money is. See `docs/demo/one-tx-transfer-drill.md` §3e.
+ */
+describe('transferShieldedToAccount, before anything is built', () => {
+  /* No wallet is reached by any of these: every one of them throws in front of
+     the fee gate, which is the first line that would need one. */
+  const NO_WALLET = null as never;
+
+  it('refuses an amount of zero or less', async () => {
+    for (const amount of [0n, -1n]) {
+      await expect(
+        transferShieldedToAccount(NO_WALLET, new Uint8Array(32), {
+          contractAddress: SENDER,
+          recipientContractAddress: PEER,
+          colourHex: MUSD,
+          amount,
+        }),
+      ).rejects.toMatchObject({ code: 'invalid-request' });
+    }
+  });
+
+  it('refuses an account paying itself', async () => {
+    /* The same contract would spend and merge the same coin inside one call
+       tree. Refused by name here rather than discovered as a proof that will
+       not build, minutes later, after a passkey ceremony. */
+    await expect(
+      transferShieldedToAccount(NO_WALLET, new Uint8Array(32), {
+        contractAddress: SENDER,
+        recipientContractAddress: `0x${SENDER.toUpperCase()}`,
+        colourHex: MUSD,
+        amount: 5n,
+      }),
+    ).rejects.toMatchObject({ code: 'invalid-request' });
+  });
+
+  it('refuses a colour that is not 32 bytes', async () => {
+    await expect(
+      transferShieldedToAccount(NO_WALLET, new Uint8Array(32), {
+        contractAddress: SENDER,
+        recipientContractAddress: PEER,
+        colourHex: 'ab',
+        amount: 5n,
+      }),
+    ).rejects.toMatchObject({ code: 'invalid-request' });
   });
 });

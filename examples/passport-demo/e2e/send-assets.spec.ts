@@ -404,3 +404,213 @@ test('an almost-account is refused as the name it is not, never sent', async () 
   await expect(page.getByRole('button', { name: /^Review$/ })).toBeDisabled();
   expect(await refusal().innerText()).not.toContain(PASSPORT_ACCOUNT_ADDRESS);
 });
+
+/**
+ * TWO MOMENTS THAT MUST NOT PAINT A ZERO.
+ *
+ * "When the account is set up show the NIGHT and mUSD set already so the user
+ * is aware about the balances owned" (issue #19), and — reported against
+ * production on 2026/09/08 — a name send that showed `mUSD 0` until the change
+ * came back minutes later. A shielded payment takes the WHOLE coin out of the
+ * account and puts the remainder back three transactions later, so the ledger
+ * really does report none of that colour in between: the strip was painting the
+ * truth, and it is a truth that reads as permanent, which is what made it wrong.
+ *
+ * LAST IN THIS FILE, and it reloads: the seam the second half needs is an
+ * unfinished send in storage, which is only read when the app starts, and the
+ * reload is also what puts the balance strip back in front of the sheet every
+ * test above leaves open.
+ *
+ * The rules themselves — what is projected, what is left alone, and that the
+ * projection can never overstate — are pure and drilled on every branch in
+ * `src/lib/pendingBalances.test.ts`. What only a browser can answer is that the
+ * strip really paints the projected figure rather than the ledger's, and really
+ * says which word.
+ */
+test('a balance on its way is a figure with a word on it, never a zero', async () => {
+  /* The shielded asset's own colour, taken from the picker rather than
+     hard-coded: the option's value IS the colour — see `sendAssets.ts` — so the
+     record below names a colour this build really shows a row for. */
+  const colourHex = await picker().locator('option').nth(1).getAttribute('value');
+  expect(colourHex).toBeTruthy();
+
+  await page.reload();
+  const strip = page.locator('.mnhome-assets');
+  await expect(strip).toBeVisible({ timeout: 90_000 });
+
+  /* ISSUE #19. This walk's Passport has an account and no opening grant in it
+     yet, which is exactly the state a Passport is in for the first minutes of
+     its life. Every row that is waiting for one names the figure it is waiting
+     for and says `Arriving` — and none of them says `0`. */
+  const arriving = page
+    .locator('.mnhome-token-row')
+    .filter({ has: page.locator('.mnhome-token-pending', { hasText: 'Arriving' }) });
+  await expect(arriving.first()).toBeVisible({ timeout: 60_000 });
+  for (const cell of await arriving.locator('.mnhome-token-value').all()) {
+    expect(await cell.innerText()).not.toMatch(/^0\s*Arriving/);
+  }
+
+  /* THE SEND. A run big enough that its change cannot be mistaken for anything
+     the account holds, so the figure that appears is unambiguously the
+     projected one and not the ledger's. */
+  const change = 1_000_000_000n;
+  const seeded = await page.evaluate(
+    ({ colour, withdrawAmount }) => {
+      const credentialId = localStorage.getItem('passport-last-passkey');
+      if (!credentialId) return null;
+      const now = new Date().toISOString();
+      localStorage.setItem(
+        `midnight.passport.sends.v1:${credentialId}`,
+        JSON.stringify([
+          {
+            id: 'walk-transfer',
+            kind: 'shielded',
+            recipient: { label: 'alice.night', accountAddress: 'ee'.repeat(32) },
+            amount: '1',
+            tokenType: colour,
+            colourHex: colour,
+            ownReceivingAddress: 'ff'.repeat(32),
+            /* STOPPED, deliberately. A run still moving would be carried on by
+               itself three seconds after the reload — see
+               `PENDING_SEND_AUTO_RESUME_DELAY_MS` — and this tier has no prover
+               for it to finish with. A stopped run holds the same figure for
+               the same reason: the coin is out of the account either way, and
+               the card below the strip is where "it stopped" is said. */
+            leg: 'failed',
+            withdrawTxHash: 'aa'.repeat(32),
+            withdrawAmount,
+            attempts: { withdraw: 1, deposit: 1, change: 0 },
+            lastError: { message: 'The walk stopped it here.', retryable: true },
+            createdAt: now,
+            updatedAt: now,
+          },
+        ]),
+      );
+      return credentialId;
+    },
+    { colour: colourHex as string, withdrawAmount: (change + 1n).toString() },
+  );
+  expect(seeded).not.toBeNull();
+
+  await page.reload();
+  await expect(strip).toBeVisible({ timeout: 90_000 });
+
+  /* The balance the sender will be left with once the transfer finishes, with
+     the one word that says it is not the settled one yet. */
+  const transferring = page
+    .locator('.mnhome-token-row')
+    .filter({ has: page.locator('.mnhome-token-pending', { hasText: 'Transferring' }) });
+  await expect(transferring).toHaveCount(1, { timeout: 60_000 });
+  await expect(transferring.locator('.mnhome-token-value')).toContainText(change.toString());
+
+  /* Left as it was found: the next file's Passport is not this one's
+     half-finished payment. */
+  await page.evaluate(() => {
+    const credentialId = localStorage.getItem('passport-last-passkey');
+    if (credentialId) localStorage.removeItem(`midnight.passport.sends.v1:${credentialId}`);
+  });
+});
+
+/**
+ * THE ONE-TRANSACTION SEND, AS THE REVIEW STEP DESCRIBES IT.
+ *
+ * A Passport whose account carries `transfer_shielded_to_account` pays another
+ * Passport in a single transaction — the recipient's own `deposit_shielded`
+ * runs inside the same call tree — so nothing about that send is two of
+ * anything, and the sheet must not say it is. Proved on chain in
+ * `docs/demo/one-tx-transfer-drill.md` §3d and §3e.
+ *
+ * THE SENDER HAS TO BE AN UPGRADED ONE, AND THIS FILE MAKES ONE (2026/09/10).
+ * The account every test above uses is a REAL recorded stagenet account and it
+ * is a pre-upgrade one: eleven entry points, no `transfer_shielded_to_account`.
+ * That is not a gap in the recording, it is what that account is — so the
+ * recording is taken as it stands and ONE entry point is added to it here, with
+ * the ledger's own codec, borrowing an existing operation's value. What the
+ * client reads to decide the path is the NAME
+ * (`ContractState.operations()` — see `accountHasOneTxTransfer`), and the name
+ * is the whole of what this changes: the contract's data, and therefore every
+ * balance on screen, is byte-for-byte the recording's.
+ *
+ * IT STOPS AT REVIEW, like everything else in this file. The mocked tier has no
+ * prover and no chain to take a transaction; what only a browser can answer is
+ * that the sheet reads the sender's own build and says the right thing about it
+ * before anybody presses Send.
+ *
+ * LAST IN THE FILE, because the override outlives the test: the support answer
+ * is cached per address for the session and the page has to be reloaded for the
+ * app to ask at all.
+ */
+test('a sender whose account can pay in one transaction is reviewed as one transfer', async () => {
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const url = await import('node:url');
+  const { ContractState } = await import('@midnightntwrk/ledger-v9');
+
+  const here = path.dirname(url.fileURLToPath(import.meta.url));
+  const recorded = JSON.parse(
+    fs.readFileSync(path.join(here, 'fixtures', 'stagenet-passport-account.json'), 'utf8'),
+  ) as { data: { contract: { state: string } } };
+
+  const state = ContractState.deserialize(
+    Uint8Array.from(Buffer.from(recorded.data.contract.state, 'hex')),
+  );
+  /* Eleven, and the one that is missing is the one this test is about. */
+  expect(state.operations()).not.toContain('transfer_shielded_to_account');
+  const borrowed = state.operation('withdraw_shielded');
+  expect(borrowed).toBeDefined();
+  state.setOperation('transfer_shielded_to_account', borrowed!);
+  const upgraded = JSON.stringify({
+    data: {
+      contract: {
+        ...recorded.data.contract,
+        state: Buffer.from(state.serialize()).toString('hex'),
+      },
+    },
+  });
+
+  /* Registered AFTER the boundary's own route, so it is consulted first, and
+     narrow: only the sender's account, only the contract-state query. Anything
+     else falls through to the recording every other test reads. */
+  await page.route('**/indexer.stagenet.shielded.tools/**', async (route) => {
+    const body = route.request().postData() ?? '';
+    const address = (/"address":"([0-9a-fA-F]+)"/.exec(body)?.[1] ?? '').toLowerCase();
+    if (body.includes('CONTRACT_STATE_QUERY') && address === PASSPORT_ACCOUNT_ADDRESS) {
+      return route.fulfill({ contentType: 'application/json', body: upgraded });
+    }
+    return route.fallback();
+  });
+
+  await page.reload();
+  await expect(page.getByRole('button', { name: /^Send$/ }).first()).toBeVisible({
+    timeout: 90_000,
+  });
+  await expect(page.locator('.mnhome-assets')).toContainText(/mUSD/i, { timeout: 60_000 });
+  await page.getByRole('button', { name: /^Send$/ }).first().click();
+  await expect(page.locator('.mnhome-send')).toBeVisible();
+
+  await picker().selectOption({ index: 1 });
+  await recipient().fill(`${RESOLVABLE_NAME}.night`);
+  await expect(page.locator('.mnhome-send-resolved')).toBeVisible({ timeout: 30_000 });
+  await page.getByPlaceholder('0', { exact: true }).fill('1');
+  await page.getByRole('button', { name: /^Review$/ }).click();
+
+  const review = await page.locator('.mnhome-send-rows').innerText();
+  expect(review).toContain('1 mUSD');
+  expect(review).toContain(`${RESOLVABLE_NAME}.night`);
+  /* ONE WORD, AND NOT A COUNT. "the copy for the in-between state should simply
+     say Transferring" (reviewer, 2026/09/08) — and the row that promises what
+     somebody is about to wait through says the same word for the same reason. */
+  expect(review).toContain('Transferring');
+  expect(review).toContain('in one network transaction');
+  /* THE DEFECT THIS GUARDS. Nothing on this path is two steps, and a row that
+     still said so would be describing the older build's send over the new
+     build's transfer. */
+  expect(review).not.toContain('Two steps');
+  expect(review).not.toContain('Three steps');
+  expect(review).not.toMatch(/\bStep \d/);
+  /* Still no colour, no account address, and no machinery on the step that
+     confirms — the rule every other test in this file holds to. */
+  expect(review).not.toMatch(/\b[0-9a-f]{16,}\b/);
+  expect(review).not.toContain(PASSPORT_ACCOUNT_ADDRESS);
+  expect(review).not.toMatch(/wallet|registry|indexer|resolver|contract|circuit|DUST/i);
+});

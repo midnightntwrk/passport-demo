@@ -20,10 +20,11 @@
  * ------------------------------------------
  * `examples/passport-balancer/contracts-stagenet/managed/account`, staged into
  * this workspace by `scripts/prepare-zk-assets.mjs`. That is the build the
- * stagenet deployment harness used — compactc 0.33.0-rc.2, language 0.25.0,
- * runtime 0.18.0-rc.1 — and the ONLY source change from the preview contracts
- * was the pragma. It replaces the reach into
- * the repository root's `npm run compile`, whose managed output is a 0.31.1 /
+ * stagenet deployment harness used — compactc 0.34.0, language 0.26.0,
+ * runtime 0.19.0 since 2026/09/10, and every verifier key it produces for a
+ * circuit that already existed is `cmp` identical to the 0.33.0-rc.2 keys the
+ * deployed contracts carry. It replaces the reach into
+ * `experiments/account-custody-prototype`, whose managed output is a 0.31.1 /
  * runtime-0.16 build that the ledger-9 runtime refuses on sight:
  * `checkRuntimeVersion` is the generated module's second line.
  *
@@ -429,6 +430,86 @@ export async function confirmPassportContractOnLedger(
   } catch {
     return false;
   }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Which build an account is                                                  */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The circuit that makes a Passport able to pay another Passport in ONE
+ * transaction, named once so nothing spells it twice.
+ *
+ * It is the whole difference between the account build deployed before
+ * 2026/09/10 and the one deployed since. A recipient needs nothing — their
+ * `deposit_shielded` key is byte-identical across both builds, which is why the
+ * peer is named through a contract declaration of it — so this is a fact about
+ * the SENDER's contract and about nothing else.
+ */
+export const ONE_TX_TRANSFER_OPERATION = 'transfer_shielded_to_account';
+
+/**
+ * The entry points a deployed contract really carries, read through the
+ * indexer, or null where it could not be asked.
+ *
+ * `ContractState.operations()` is the contract's own map of callable entry
+ * points, so this is the deployed build answering for itself rather than a
+ * version number somebody wrote down. Entries come back as strings, or as the
+ * raw bytes of one where the name is not valid UTF-8 in the runtime's view;
+ * both are decoded to text here so a caller compares names and not encodings.
+ *
+ * NULL IS NOT "NO". An indexer that could not be reached and a contract that
+ * does not exist are the same silence to this function, and the caller must not
+ * read either as "this account lacks the circuit" — see
+ * {@link accountHasOneTxTransfer}, which is the only caller that matters and
+ * which treats null as "do not act".
+ */
+export async function readAccountOperations(
+  indexerHttpUrl: string,
+  address: string,
+): Promise<string[] | null> {
+  try {
+    const { indexerPublicDataProvider } = await import(
+      '@midnight-ntwrk/midnight-js-indexer-public-data-provider'
+    );
+    const reader = indexerPublicDataProvider({
+      queryURL: indexerHttpUrl,
+      subscriptionURL: indexerWsFrom(indexerHttpUrl),
+    });
+    const state = (await reader.queryContractState(rawContractAddress(address))) as {
+      operations?: () => (string | Uint8Array)[];
+    } | null;
+    if (!state || typeof state.operations !== 'function') return null;
+    const decoder = new TextDecoder();
+    return state.operations().map((entry) =>
+      typeof entry === 'string' ? entry : decoder.decode(entry),
+    );
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether the account at `address` can send in one transaction — `true`, or
+ * `false`, or `null` when the chain could not be asked.
+ *
+ * THREE ANSWERS, AND THE THIRD IS THE POINT. The drill (`docs/demo/
+ * one-tx-transfer-drill.md` §4) settled that the one-transaction branch has to
+ * be chosen from the SENDER's on-chain state, because that is the only fact a
+ * client can read that says which build it is talking to. It settled nothing
+ * about what to do when the indexer is down, and the honest answer there is
+ * neither of the other two: an upgrade started on a failed read would drain a
+ * perfectly good account for nothing, and a one-transaction send attempted on a
+ * failed read would be refused by the node after the user had waited on a
+ * proof. So the caller is told we do not know, and both of those callers wait.
+ */
+export async function accountHasOneTxTransfer(
+  indexerHttpUrl: string,
+  address: string,
+): Promise<boolean | null> {
+  const operations = await readAccountOperations(indexerHttpUrl, address);
+  if (operations === null) return null;
+  return operations.includes(ONE_TX_TRANSFER_OPERATION);
 }
 
 /**
