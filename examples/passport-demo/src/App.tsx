@@ -1962,6 +1962,76 @@ export default function PassportDemo() {
     return { handle, address: record.address };
   }, []);
 
+  /*
+   * DEV-only bridge-in trigger. In a dev build, `window.__passportBridgeIn(amount)`
+   * runs the whole sig.network flow — deposit the USDC already sitting at the
+   * derived Sepolia address, claim it into the internal wallet, and deposit it
+   * into this account — against the signed-in Passport. `amount` is USDC base
+   * units (6 decimals: 100000 = 0.1 USDC). It is never wired in a prod build.
+   */
+  useEffect(() => {
+    if (!import.meta.env.DEV || typeof window !== 'object') return undefined;
+    const runBridgeInDev = async (
+      amount: bigint | number | string,
+    ): Promise<unknown> => {
+      const account = accountContractOf();
+      if (!account) throw new Error('bridge-in: sign in and deploy an account first');
+      const [{ runBridgeIn }, { deriveSignetVaultSecret }, { bridgeConfigFromEnv }] =
+        await Promise.all([
+          import('./bridge/depositToAcc.js'),
+          import('./bridge/identity.js'),
+          import('./bridge/config.js'),
+        ]);
+      const config = bridgeConfigFromEnv(import.meta.env as never);
+      const passkey = await withPasskeyWatchdog(() => WebAuthnPrfKeyProvider.discover());
+      const secret = await deriveSignetVaultSecret(
+        (scope) => passkey.deriveWalletSeed(scope),
+        APP_ID,
+      );
+      try {
+        return await runBridgeIn(
+          account.handle,
+          config,
+          secret,
+          account.address,
+          BigInt(amount),
+          (message) => {
+            console.log('[bridge]', message);
+          },
+        );
+      } finally {
+        secret.fill(0);
+      }
+    };
+    // Companion helper: derive the Sepolia deposit address to fund BEFORE a
+    // bridge-in (the flow assumes the USDC already sits there).
+    const bridgeAddressDev = async (): Promise<string> => {
+      const [{ signetDepositAddress, deriveSignetVaultSecret }, { bridgeConfigFromEnv }] =
+        await Promise.all([import('./bridge/identity.js'), import('./bridge/config.js')]);
+      const config = bridgeConfigFromEnv(import.meta.env as never);
+      const passkey = await withPasskeyWatchdog(() => WebAuthnPrfKeyProvider.discover());
+      const secret = await deriveSignetVaultSecret(
+        (scope) => passkey.deriveWalletSeed(scope),
+        APP_ID,
+      );
+      try {
+        return signetDepositAddress(secret, config);
+      } finally {
+        secret.fill(0);
+      }
+    };
+    const handle = window as unknown as {
+      __passportBridgeIn?: typeof runBridgeInDev;
+      __passportBridgeAddress?: typeof bridgeAddressDev;
+    };
+    handle.__passportBridgeIn = runBridgeInDev;
+    handle.__passportBridgeAddress = bridgeAddressDev;
+    return () => {
+      delete handle.__passportBridgeIn;
+      delete handle.__passportBridgeAddress;
+    };
+  }, [accountContractOf]);
+
   /**
    * Reads the account contract's own ledger — the figures Home shows.
    *

@@ -33,6 +33,9 @@ for the phases.
   to Sepolia (`ethers`), poll for the attestation.
 - **`deposit.ts`** — `runBridgeDeposit`: submit `deposit`, settle via the MPC,
   submit `claim` to mint the bridged-USDC coin into the internal wallet.
+- **`depositToAcc.ts`** — `depositBridgedUsdcToAcc` moves the claimed coin into
+  the user's ACC via its `deposit_shielded` circuit (fee sponsored), and
+  `runBridgeIn` composes the whole flow: deposit → claim → into the ACC.
 
 **Verification**: typechecks (`tsc --noEmit`) and lints clean, and the identity
 derivation is unit-tested (`identity.test.ts`). The deposit/claim/MPC round trip
