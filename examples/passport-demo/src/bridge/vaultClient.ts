@@ -91,5 +91,5 @@ export function makeResponseReader(
     eventSource: signetEventSourceFromPublicDataProvider(
       connection.providers.publicDataProvider as never,
     ),
-  } as never);
+  });
 }

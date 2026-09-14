@@ -34,10 +34,11 @@ for the phases.
 - **`deposit.ts`** — `runBridgeDeposit`: submit `deposit`, settle via the MPC,
   submit `claim` to mint the bridged-USDC coin into the internal wallet.
 
-**Not build- or run-verified**: the PWA's dependencies are not installed in the
-environment this was written in, so `tsc`/Vite/vitest have not run over the claim
-flow. It reproduces the sig.network reference webapps against the vendored 0.19
-vault; validate end to end against live stagenet + Sepolia + a proof server.
+**Verification**: typechecks (`tsc --noEmit`) and lints clean, and the identity
+derivation is unit-tested (`identity.test.ts`). The deposit/claim/MPC round trip
+is NOT yet run-verified — it reproduces the sig.network reference webapps against
+the vendored 0.19 vault and only proves out against live stagenet + Sepolia + a
+proof server, with the vault ZK artefacts staged.
 
 ## What this needs before the claim flow (next phase)
 

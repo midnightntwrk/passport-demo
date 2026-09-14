@@ -81,7 +81,7 @@ export async function pollSignatureResponse(
       return signBidirectionalEventToSignedEvmTransaction(
         request,
         verified,
-      ) as unknown as Transaction;
+      );
     }
     await sleep(1000);
   }
@@ -128,11 +128,11 @@ async function fetchAttestedRespondOutcome(
   const candidates: { serializedOutput: Uint8Array; isFailure: boolean; succeeded: boolean }[] = [];
   if (cached?.success && cached.output != null) {
     try {
-      const decoded = deserializeEvmOutput(RESULT_SCHEMA as never, cached.output) as {
+      const decoded = deserializeEvmOutput(RESULT_SCHEMA, cached.output) as {
         success?: boolean;
       };
       candidates.push({
-        serializedOutput: serializeRespondOutput(RESULT_SCHEMA as never, decoded as never),
+        serializedOutput: serializeRespondOutput(RESULT_SCHEMA, decoded),
         isFailure: false,
         succeeded: decoded.success === true,
       });

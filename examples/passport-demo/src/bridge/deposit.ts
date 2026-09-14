@@ -91,7 +91,7 @@ function predictRequestId(
       },
     },
   } as unknown as SignBidirectionalEvent;
-  return requestIdHex(calculateRequestId(expected)) as RequestIdHex;
+  return requestIdHex(calculateRequestId(expected));
 }
 
 /** The `claim` recipient meaning "mint to me" (the internal wallet's own coin public key). */

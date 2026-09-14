@@ -30,6 +30,7 @@ const TEST_CONFIG: BridgeConfig = {
   usdcColourHex: '3954535699b5cd4c04f5db5b495d7fcac0f7a7ff13a0643eabdc2e088825d628',
   mpcSecp256k1Pubkey: '0x024eef776e4f257d68983e45b340c2e9546c5df95447900b6aadfec68fb46fdee2',
   sepoliaRpcUrl: 'http://localhost:8545',
+  responsesUrl: 'http://localhost:3040',
 };
 
 describe('signet vault identity', () => {
