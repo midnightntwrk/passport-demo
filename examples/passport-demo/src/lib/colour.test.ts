@@ -18,6 +18,7 @@ import {
   MUSD_COLOUR_HEX,
   NIGHT_COLOUR_HEX,
   SUSD_COLOUR_HEX,
+  USDC_COLOUR_HEX,
   nftTitle,
   normalisedColourHex,
   shortColour,
@@ -86,6 +87,24 @@ describe('describeColour', () => {
       symbol: 'sUSD',
       name: 'Swap dollar',
       decimals: 0,
+      known: true,
+      mark: { light: '/usd.svg', dark: '/usd.svg' },
+    });
+  });
+
+  it('names bridged USDC, and keeps its real six decimals', () => {
+    // Pinned to the exact colour the sig.network vault mints for Circle USDC
+    // (Sepolia 0x1c7D4B…7238) at vault 3fdef849…733d, so a rename or a bad
+    // paste is caught here rather than shown under the wrong ticker.
+    expect(USDC_COLOUR_HEX).toBe(
+      '3954535699b5cd4c04f5db5b495d7fcac0f7a7ff13a0643eabdc2e088825d628',
+    );
+    // Six decimals, unlike the zero-decimal demo dollars: bridged USDC carries
+    // real USDC's scale because the vault mints it in the token's base units.
+    expect(describeColour(USDC_COLOUR_HEX)).toEqual({
+      symbol: 'USDC',
+      name: 'bridged dollar',
+      decimals: 6,
       known: true,
       mark: { light: '/usd.svg', dark: '/usd.svg' },
     });

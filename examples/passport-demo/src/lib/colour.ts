@@ -80,6 +80,28 @@ export const MUSD_COLOUR_HEX =
 export const SUSD_COLOUR_HEX =
   'a62e273dda9a4a288068dec91c3b6ce8ca10fd085703469ac371b7c415884d3b';
 
+/**
+ * Bridged USDC's colour on stagenet — the shielded token a sig.network vault
+ * mints into a Passport account when Circle USDC crosses over from Ethereum.
+ *
+ * Not a demo dollar like mUSD or sUSD. It stands in for real USDC held on
+ * Sepolia, so unlike those two it carries USDC's own SIX decimals: the vault
+ * mints the coin in the ERC20's base units, and USDC is a six-decimal token on
+ * Ethereum, so a whole dollar is a value of 1_000_000 here (see
+ * {@link TokenIdentity.decimals}).
+ *
+ * Derived, never guessed: `rawTokenType(vaultTokenDomainSeparator(erc20),
+ * vault)` with the Sepolia Circle USDC address
+ * `0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238` and the deployed vault
+ * `3fdef8491a0f769cda62e03b4cc7d5ee39cf85ba907b0750fd128f86906f733d`, run
+ * through the vault's own compiled `vaultTokenDomainSeparator` circuit — the
+ * derivation the sig.network apps use, not a TypeScript re-implementation.
+ * Pinned here so a build that has not reached the bridge still names it, and
+ * pinned again by `colour.test.ts` so the value cannot drift.
+ */
+export const USDC_COLOUR_HEX =
+  '3954535699b5cd4c04f5db5b495d7fcac0f7a7ff13a0643eabdc2e088825d628';
+
 /* -------------------------------------------------------------------------- */
 /* The mark a colour is shown under (2026/09/05)                              */
 /* -------------------------------------------------------------------------- */
@@ -137,12 +159,14 @@ export interface TokenIdentity {
   /**
    * How many decimal places the amount is quoted with.
    *
-   * Six for NIGHT, and ZERO for every shielded colour — including the ones
-   * named here. That is not an omission: a shielded colour is minted by a
-   * contract and carries no decimal scale anywhere on the ledger, so an amount
-   * is a whole count of that colour's own atomic units and any scale Passport
-   * applied would be one it had invented. This is the one place to change if a
-   * colour ever publishes a real one.
+   * Six for NIGHT and for bridged USDC, and ZERO for the demo shielded colours
+   * (mUSD, sUSD). That split is the point: a demo colour is minted by a
+   * contract at whole amounts and carries no decimal scale anywhere on the
+   * ledger, so an amount is a whole count of its own atomic units and any scale
+   * Passport applied would be one it had invented — but bridged USDC does carry
+   * a real scale, USDC's own six decimals, because the vault mints it in the
+   * Ethereum token's base units. This is the field a colour sets when it
+   * publishes a real scale rather than none.
    */
   decimals: number;
   /** False when nothing could name it, which is what the `Token · …` form means. */
@@ -163,9 +187,10 @@ export interface TokenIdentity {
 /**
  * Colours Passport can name without asking anybody.
  *
- * Zero decimals for every shielded colour here, for the reason
- * {@link TokenIdentity.decimals} gives: a shielded colour carries no decimal
- * scale anywhere on the ledger, so an amount is a whole count of its own units.
+ * Zero decimals for the demo shielded colours (mUSD, sUSD), for the reason
+ * {@link TokenIdentity.decimals} gives: a demo colour carries no decimal scale
+ * on the ledger, so an amount is a whole count of its own units. Bridged USDC
+ * is the exception — it carries USDC's own six decimals.
  */
 const KNOWN_COLOURS: Readonly<
   Record<string, { symbol: string; name: string; decimals: number; mark: TokenMarkArt }>
@@ -173,6 +198,7 @@ const KNOWN_COLOURS: Readonly<
   [NIGHT_COLOUR_HEX]: { symbol: 'NIGHT', name: 'native token', decimals: 6, mark: NIGHT_MARK },
   [MUSD_COLOUR_HEX]: { symbol: 'mUSD', name: 'stablecoin', decimals: 0, mark: USD_MARK },
   [SUSD_COLOUR_HEX]: { symbol: 'sUSD', name: 'Swap dollar', decimals: 0, mark: USD_MARK },
+  [USDC_COLOUR_HEX]: { symbol: 'USDC', name: 'bridged dollar', decimals: 6, mark: USD_MARK },
 };
 
 /**
