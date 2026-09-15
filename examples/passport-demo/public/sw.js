@@ -251,12 +251,28 @@ async function immutableAsset(request) {
  * cached answer is always chased with a network refresh.
  */
 async function staticAsset(request, event) {
-  const cached = await caches.match(request);
+  /* `caches.open(STATIC_CACHE)` and then `.match`, NOT the
+     `caches.match(request)` this used to be — the correction `immutableAsset`
+     got on 2026/09/14, for the same reason, applied to the sibling that was
+     left behind. The bare form searches EVERY cache on the origin in creation
+     order, so the PREVIOUS build's copy of a stable url — an icon, the
+     wordmark, the manifest — can answer for this build in the window between
+     `skipWaiting()` and `activate` finishing its deletions, which is precisely
+     the window a worker that has just claimed a page is serving fetches in.
+     Confined to this build's own cache, it cannot be reached at all.
+
+     The window is short and the cost of losing that race is not: `pwa.tsx`
+     reloads an idle page the instant this worker claims it, and the manifest
+     the reloaded page reads decides which icons an installed Passport shows. */
+  const cache = await caches.open(STATIC_CACHE).catch(() => null);
+  const cached = await cache?.match(request);
   const network = fetch(request)
     .then(async (response) => {
       if (response.ok && response.type === 'basic') {
-        const cache = await caches.open(STATIC_CACHE);
-        await cache.put(request, response.clone());
+        /* Best effort, for the reason spelled out in `immutableAsset`: a
+           rejected write must never turn a download that in fact succeeded
+           into a network error at the caller. */
+        await cache?.put(request, response.clone()).catch(() => undefined);
       }
       return response;
     })
