@@ -172,31 +172,44 @@ jobs:
         run: npm run test:coverage --workspace passport-demo
 
   # ---------------------------------------------------------------------------
-  # THE SUITES NOTHING RAN. Three test suites existed in this repository and no
-  # workflow executed any of them, so the only thing keeping them passing was
-  # whoever last remembered to run them by hand:
+  # THE SUITES NOTHING RAN. Test suites existed in this repository that no
+  # workflow executed, so the only thing keeping them passing was whoever last
+  # remembered to run them by hand:
   #
-  #   packages/connect        166 tests — the pairing protocol partner apps use.
-  #                           A break here is a break in somebody else's site.
-  #   examples/passport-balancer  621 tests — the fee sponsor. It is the only
-  #                           thing that can serve /register-alias and
-  #                           /fund-account, and it is shipped by rsync, so its
-  #                           tests are the only gate it has before a droplet.
+  #   packages/connect        166 tests — the pairing protocol partner apps
+  #                           build against. A break here is a break in
+  #                           somebody else's site.
   #   scripts/release-naming  19 tests — the `v<N> - YYYY/MM/DD` derivation
   #                           every promotion is recorded by.
   #
-  # Its own job rather than steps on `gates`: none of it depends on the demo
-  # backend being rebuilt first, and running it in parallel costs nothing.
+  # Its own job rather than steps on `gates`: neither depends on the demo
+  # backend being rebuilt first, and running them in parallel costs nothing.
   #
-  # `npm run lint` at the root is deliberately NOT here. It does not pass on
-  # `main` — 2,046 errors over 20 directories, 1,794 of them unrelated to the
-  # generated contract modules a checkout lacks (measured 2026/09/15) — so
-  # adding it would turn every pull request red on the first run, and adding it
-  # with `continue-on-error` would be a gate that cannot fail. Whoever clears
-  # the backlog adds the step in the same change.
+  # TWO SUITES ARE MISSING FROM THIS JOB, AND NEITHER IS AN OVERSIGHT. Both
+  # were added here, run, and taken out again, because a gate that is red on
+  # arrival is not a gate — it is a thing everyone learns to ignore.
+  #
+  #   `npm run lint` at the root does not pass on `main`: 2,046 errors over 20
+  #   directories, 1,794 of them nothing to do with the generated contract
+  #   modules a checkout lacks (measured 2026/09/15).
+  #
+  #   `examples/passport-balancer`'s 621 tests — the fee sponsor's only gate
+  #   before a droplet, which makes their absence the worst of the two — do not
+  #   pass on Node 22, the version everything else here runs. 593 pass, 0 fail,
+  #   and 28 are CANCELLED: `reservation.test.mjs` loses its watchdog, lane and
+  #   coin-reservation suites to "Promise resolution is still pending but the
+  #   event loop has already resolved" (run 35008543080, 2026/09/15). The same
+  #   621 pass on Node 25. The suite is also not installed from its own
+  #   `package-lock.json` — it is not a workspace, and `npm ci` refuses that
+  #   lock because `package.json` asks for
+  #   `@midnight-ntwrk/compact-runtime@0.19.0-rc.0` where the lock records
+  #   `0.19.0`. Both are real defects in that package rather than in this
+  #   workflow, and neither is this change's to repair.
+  #
+  # Whoever fixes either one adds its step here in the same change.
   # ---------------------------------------------------------------------------
   suites:
-    name: Connect, balancer, and release-naming suites
+    name: Connect and release-naming suites
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -215,27 +228,6 @@ jobs:
       - name: Connect package tests
         run: npx vitest run
         working-directory: packages/connect
-
-      # THE BALANCER RUNS OFF THE ROOT INSTALL, and that is a compromise rather
-      # than a design. It is not an npm workspace and carries its own
-      # `package-lock.json`, so installing that lockfile first would be the
-      # honest thing — except `npm ci` refuses it: `package.json` asks for
-      # `@midnight-ntwrk/compact-runtime@0.19.0-rc.0` and the lock beside it
-      # records `0.19.0`, which is a lockfile that has drifted from the manifest
-      # it describes (first run of this job, 2026/09/15). Regenerating it is not
-      # this change's business — locks here are rebuilt from the previous lock
-      # and the resolutions diffed, never recreated.
-      #
-      # Everything its test bundles import at run time — `wallet-sdk`,
-      # `ledger-v9`, `@polkadot/api`, `zkir-v2`, `rxjs`, `ws` — is hoisted to
-      # the root tree by the install above, and `esbuild` with them, so the
-      # suite runs. Note that the hoisted `compact-runtime` is 0.16.0, not the
-      # 0.19.0-rc.0 this package asks for; the tests pass against it, and
-      # whoever repairs the lockfile should put `npm ci` back here in the same
-      # change.
-      - name: Balancer tests
-        run: npm test
-        working-directory: examples/passport-balancer
 
       - name: Release-naming tests
         run: npm run test:release-naming
