@@ -10,14 +10,17 @@ Read [`WHAT-THIS-IS.md`](../../WHAT-THIS-IS.md) for what this demo is, and is
 not, and [`docs/demo/runbook.md`](../../docs/demo/runbook.md) for how to run
 it end to end with its companion services.
 
+From the repository root:
+
 ```sh
 npm install
-npm run demo
+npm run passport:demo
 ```
 
 Open `http://localhost:5175`. The port is pinned in the source, not in
 configuration: Passport frames apps by URL, and a handshake against a moving
-origin fails silently. Do not substitute `127.0.0.1`.
+origin fails silently. Do not substitute `127.0.0.1`. `npm run demo` is an
+alias for the same command.
 
 Copy `.env.example` to `.env.local` to point the build at a different indexer,
 proof server, or sponsor. Every entry is optional — the defaults run against
@@ -91,8 +94,9 @@ never cached, queued, or presented as available offline.
   cannot pay. A queued name is never shown as registered.
 - The `.night` name is the identity on the primary surface. The three wallet
   addresses are deliberately not on the everyday screens.
-- The account-custody contract source stays in
-  the foundations demo at the repository root; it is not a production API.
+- The account-custody contract source is
+  `examples/passport-balancer/contracts-stagenet/src/account_custody.compact`,
+  beside the build this app ships the artefacts of; it is not a production API.
 
 ## Connected apps
 

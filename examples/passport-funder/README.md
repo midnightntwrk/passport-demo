@@ -349,9 +349,9 @@ Point the Passport demo at it with `VITE_FUNDER_URL` (see
 | `FUNDER_ALIAS_MAX_PER_HOUR` | `20`                                         | Global ceiling on sponsored registrations per rolling hour. Modest by design: each one costs two proofs and two transactions, so the limit that matters is throughput, not spend. |
 | `FUNDER_ACCOUNT_GRANT_ATOMIC` | `2000`                                     | Atomic NIGHT deposited into each account-custody contract. An opening balance, not a one-transaction allowance. |
 | `FUNDER_ACCOUNT_MAX_PER_HOUR` | `30`                                       | Global ceiling on funded accounts per rolling hour, counted separately from drips and registrations. One proof and one transaction each, so throughput sits between the two. |
-| `FUNDER_ACCOUNT_ASSETS` | auto-discovered                                  | Path to the compiled account build (`contracts/managed/account` at the repository root, produced by `npm run compile` there). |
+| `FUNDER_ACCOUNT_ASSETS` | auto-discovered                                  | Path to a compiled ledger-8 account build. **Set it.** The auto-discovery still looks for `contracts/managed/account` at the repository root, but that tree was never tracked and nothing here produces it since the account-custody prototype was retired on 2026/09/15. |
 | `FUNDER_MIDNAMES_TLD_ADDRESS` | the deployed `.night` TLD for the network  | Override to sponsor against a locally deployed registry. Unset on `undeployed`, where `/register-alias` is disabled. |
-| `FUNDER_MIDNAMES_ASSETS`| auto-discovered                                  | Path to the pinned Midnames build (`contracts/managed/midnames` at the repository root). |
+| `FUNDER_MIDNAMES_ASSETS`| auto-discovered                                  | Path to the pinned Midnames build. **Set it** — as above, the auto-discovered `contracts/managed/midnames` is not produced by anything in this repository. |
 | `FUNDER_ALLOWED_ORIGINS`| `https://midnightpassport.com`                   | Comma list of browser origins for CORS.     |
 | `FUNDER_PORT`           | `8799`                                           | HTTP port.                                  |
 | `FUNDER_HOST`           | `0.0.0.0`                                        | Bind address.                               |
@@ -359,10 +359,11 @@ Point the Passport demo at it with `VITE_FUNDER_URL` (see
 | `FUNDER_NODE_URL`       | per network                                      | Node RPC endpoint override.                 |
 | `FUNDER_PROVER_URL`     | per network                                      | Proof server override.                      |
 
-`undeployed` defaults to the disposable localnet used across this repository
-(indexer `localhost:8088`, node `localhost:19944`, prover `127.0.0.1:6300`);
-fund the funder there with `node fund-localnet.mjs <address>` from the
-repository root.
+`undeployed` defaults to a disposable local Midnight network on the standard
+ports (indexer `localhost:8088`, node `localhost:19944`, prover
+`127.0.0.1:6300`); fund the funder's address there from the localnet genesis
+wallet. Nothing in this repository brings such a network up any more — the
+account-custody prototype that did was retired on 2026/09/15.
 
 ## Deployment
 

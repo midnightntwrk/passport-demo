@@ -1,7 +1,7 @@
 /**
  * The funder's Midnight wallet, run under plain Node.
  *
- * A straight port of the working `fund-localnet.mjs` path (repository root) —
+ * A straight port of the working localnet funding path —
  * `transferTransaction → signRecipe → finalizeRecipe → submitTransaction` —
  * plus two behaviours borrowed from the demo's `localWallet.ts`:
  *
@@ -53,7 +53,7 @@ export function formatNight(value: bigint): string {
 
 /**
  * ledger-v8 8.0.3 can panic inside `MerkleTree::collapse` while applying a
- * Zswap offer. Same guard `fund-localnet.mjs` and the demo both install.
+ * Zswap offer. Same guard the demo installs.
  */
 let zswapGuardInstalled = false;
 function installZswapApplyGuard(): void {
@@ -238,7 +238,7 @@ export async function openFunderWallet(config: FunderConfig): Promise<FunderWall
     provingServerUrl: new URL(config.provingServerUrl),
     relayURL: new URL(config.relayUrl),
     // A wallet with only a few blocks of DUST accrued can refuse its own
-    // transactions under a large fee margin. Five matches `fund-localnet.mjs`.
+    // transactions under a large fee margin. Five is the measured floor.
     costParameters: { feeBlocksMargin: 5 },
     txHistoryStorage: {
       upsert: async () => undefined,

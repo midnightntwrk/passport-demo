@@ -138,9 +138,10 @@ const HERE = dirname(fileURLToPath(import.meta.url));
  * module that uses it, never imported from the path this returns; see the note
  * on that import in `./midnames.ts` for why the difference matters.
  *
- * The repository stages exactly one copy of each build, under
- * `contracts/managed/` at the repository root, and every
- * consumer reaches it rather than keeping a copy that can drift.
+ * The historical location is `contracts/managed/<build>` at the repository
+ * root. That tree was never tracked, and since 2026/09/15 nothing here
+ * produces it either — supply the builds and name them with
+ * `FUNDER_ACCOUNT_ASSETS` and `FUNDER_MIDNAMES_ASSETS`.
  *
  * The candidates cover running from `dist/` (what `npm start` does) and from
  * `src/`, plus the current working directory for a harness started elsewhere.

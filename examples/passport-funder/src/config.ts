@@ -1,8 +1,7 @@
 /**
  * Funder configuration — everything comes from the environment, and every
  * default matches the endpoints the Passport demo itself uses (see
- * `examples/passport-demo/src/lib/localWallet.ts` for the public networks and
- * `fund-localnet.mjs` at the repository root for the localnet).
+ * `examples/passport-demo/src/lib/localWallet.ts` for the public networks).
  */
 
 import { readFileSync } from 'node:fs';
@@ -63,9 +62,10 @@ export interface FunderConfig extends FunderNetworkEndpoints {
 
 /**
  * Default endpoints per network. Public networks use the same hosts the demo
- * wallet defaults to; `undeployed` matches the disposable localnet brought up
- * from `infra/` at the repository root (node on 19944 — see the
- * header of `fund-localnet.mjs`).
+ * wallet defaults to; `undeployed` matches a disposable local Midnight network
+ * on the standard ports (indexer 8088, node 19944, prover 6300). Nothing in
+ * this repository brings one up any more — the account-custody prototype that
+ * did was retired on 2026/09/15.
  */
 const NETWORK_DEFAULTS: Record<string, { indexer: string; node: string; prover: string }> = {
   preview: {

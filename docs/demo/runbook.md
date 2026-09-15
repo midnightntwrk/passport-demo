@@ -19,15 +19,22 @@ runbook no longer contains, because earlier versions of it did:
 
 ## Start Passport
 
+From the repository root:
+
 ```sh
 npm install
-npm run demo
+npm run passport:demo
 ```
 
 Open `http://localhost:5175`. The port is pinned in the source with
 `strictPort`, and the dev build redirects any other origin to it: Passport
 frames apps by URL, and a handshake against a moving origin fails silently. Do
 not substitute `127.0.0.1`.
+
+`npm run demo` is an alias for `npm run passport:demo` and starts the same
+thing. It did not always: until 2026/09/15 the repository root carried an
+older account-custody prototype, and `npm run demo` started that instead, on
+5173. The prototype has been deleted and there is nothing else to start.
 
 Every setting is optional — the defaults run against stagenet, with fees
 sponsored through the stagenet balancer. Copy
