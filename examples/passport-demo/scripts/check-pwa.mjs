@@ -165,6 +165,63 @@ includes(
   'an over-quota cache write never turns a successful download into a network error',
 );
 includes(sourceWorker, "'/midnight-wordmark.svg'", 'onboarding art is a precached shell asset');
+
+/* THE SHELL PRECACHE, PER ASSET (2026/09/15)
+   ------------------------------------------
+   `install` used to be one `cache.addAll(SHELL_ASSETS)`. `addAll` is all or
+   nothing, so a single asset that 404s — a renamed icon, a request that lost
+   the network mid-install — rejected the whole batch, wrote NOTHING, failed
+   the install, and made the browser discard the worker. Nothing reaches a
+   screen when that happens: the page carries on being served by the worker
+   already in charge, which is the previous build. It is the silent staleness
+   this file's build-id checks exist for, reached by a different road.
+
+   Two things are asserted, and the second is the one no amount of reading the
+   worker could tell you. */
+includes(
+  sourceWorker,
+  'await Promise.allSettled(',
+  'one unreachable shell asset cannot discard the whole install',
+);
+includes(
+  sourceWorker,
+  'const REQUIRED_SHELL_ASSETS = [',
+  'the two shell assets an install may not go without are named',
+);
+
+/* … AND THAT EVERY ONE OF THEM IS ACTUALLY IN THE BUILD. Per-asset precaching
+   makes a missing shell asset survivable, which is exactly why it must not
+   also make one invisible: before this, a `SHELL_ASSETS` entry misspelled or
+   left behind by a rename showed up only as a worker that quietly never
+   installed. The list is read out of the BUILT worker rather than the source,
+   so what is checked is the list the deploy will actually precache. */
+const shellAssetList = /const SHELL_ASSETS = \[([^\]]*)\]/.exec(builtWorker);
+assert.ok(shellAssetList, 'Built service worker has no SHELL_ASSETS list to check.');
+const shellAssets = [
+  ...shellAssetList[1]
+    /* The list carries comments, and a comment carries apostrophes — "the
+       onboarding screen's only art" parsed as a quoted entry the first time
+       this ran. Line comments go first, and what is then taken is only a
+       quoted string that begins with `/`, which every path does and no English
+       sentence in here does. */
+    .replace(/\/\/[^\n]*/g, '')
+    .matchAll(/'(\/[^'\n]*)'/g),
+].map((match) => match[1]);
+assert.ok(shellAssets.length > 0, 'SHELL_ASSETS parsed as empty.');
+assert.ok(
+  shellAssets.includes('/index.html') && shellAssets.includes('/offline.html'),
+  'SHELL_ASSETS parsed without the two required shells — the parse is wrong, not the list.',
+);
+for (const asset of shellAssets) {
+  /* `/` is the SPA entry, which `dist` holds as `index.html` — the same file
+     the rewrite in `vercel.json` answers it with. */
+  const builtFile = path.join(distDir, asset === '/' ? 'index.html' : asset);
+  assert.ok(
+    await exists(builtFile),
+    `Shell asset ${asset} is precached by sw.js but is not in dist/. An install would warn about it on every client.`,
+  );
+}
+pass(`all ${shellAssets.length} precached shell assets exist in the build`);
 includes(sourceWorker, "url.origin !== self.location.origin", 'cross-origin requests bypass caches');
 includes(sourceWorker, "url.pathname.startsWith('/api/')", 'same-origin API requests bypass caches');
 includes(
