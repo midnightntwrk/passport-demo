@@ -1,93 +1,63 @@
-# MN Passport Foundations Demo
+# Midnight Passport demo
 
-Client-facing MN Passport demo for a fresh user onboarding into a contract-custodied
-Midnight account.
+Passport is the user-facing identity and wallet layer for the Midnight
+network. Onboarding is a passkey ceremony in the browser tab: the WebAuthn PRF
+output becomes a 32-byte Midnight seed, the wallet is built in the browser, and
+claiming a `.night` name deploys the account-custody contract that name
+resolves to. There is no third-party wallet vendor in the flow.
 
-This repository is intentionally self-contained. It includes the demo React app,
-Compact contracts, wallet client wrapper, localnet scripts, and tests needed to
-run the end-to-end flow.
+This repository holds that demo, the services it talks to, and the example
+applications that integrate with it. It is the repository the Midnight
+Foundation reviews and releases from; `https://midnightpassport.com` is
+deployed from a published release by `.github/workflows/deploy-demo.yml`.
 
-The lower-level research/prototype work remains in the original `passport`
-repository under `experiments/account-custody-prototype/`.
+Read [`WHAT-THIS-IS.md`](WHAT-THIS-IS.md) for what this demo is and is not.
 
-## What It Proves
-
-- Browser passkey onboarding for a Night ID.
-- Passkey-derived device secret used to deploy the MN Passport custody account.
-- Identity registry binding from `<handle>.night` to the custody contract.
-- Direct localnet `deposit_night` into the custody account.
-- Position creation after custody deposit.
-- Logout/login restore of account, positions, and wallet state.
-- Custody workspace views for holdings, account overview, connections, devices,
-  and recovery.
-
-## Layout
-
-| Path | Purpose |
-|---|---|
-| `app/` | Vite + React demo UI. |
-| `contracts/` | Compact contracts for account custody, faucet, and identity registry. |
-| `src/wallet/` | Platform-neutral wallet/account-custody client API. |
-| `src/node/` | Localnet wallet/provider/deployment helpers. |
-| `src/tests/` | Localnet lifecycle tests. |
-| `scripts/demo-local.mjs` | One-command localnet + deploy + Vite runner. |
-| `infra/` | Midnight localnet Docker compose files. |
-
-## Run The Demo
-
-Prerequisites:
-
-- Docker
-- Node.js >= 22
-- `compact` on PATH with toolchain 0.31.1 installed (Compact language 0.23)
-- Chrome for the headless E2E script
+## Run it
 
 ```sh
 npm install
-cd app && npm install && cd ..
-compact update 0.31.1 --no-set-default
-npm run demo
+npm run passport:demo
 ```
 
-Open:
+Open `http://localhost:5175`. The port is pinned in the source with
+`strictPort`, and the dev build redirects any other origin to it: Passport
+frames apps by URL, and a handshake against a moving origin fails silently. Do
+not substitute `127.0.0.1`. `npm run demo` is an alias for the same thing.
 
-```sh
-http://localhost:5173/
-```
+Every setting is optional — the defaults run against stagenet. Copy
+`examples/passport-demo/.env.example` to `.env.local` to change any of them.
+[`docs/demo/runbook.md`](docs/demo/runbook.md) is the full walk-through,
+including the companion services and which of them you actually need.
 
-The demo script:
+## Layout
 
-1. Creates `infra/.env` if missing.
-2. Compiles Compact contracts if needed.
-3. Starts Midnight localnet and proof server.
-4. Deploys the faucet and identity registry.
-5. Starts the Vite demo app.
+| Path | What it is | Port |
+|---|---|---|
+| `examples/passport-demo/` | Passport itself: the installable PWA, the wallet, the whole user-facing flow. | 5175 |
+| `demo-backend/` | The demo backend with connectors — encrypted private-state store, WebAuthn PRF key provider, and the profile and transaction wire protocols. | — |
+| `packages/connect/` | The client library an integrating application imports to ask Passport for a profile or a payment. | — |
+| `examples/passport-balancer/` | The fee sponsor and name-registration service, plus the stagenet contract build everything else is verified against. | — |
+| `examples/passport-funder/` | Self-hosted onboarding service: registers `.night` names and drips activation-sized NIGHT. | 8799 |
+| `examples/raffle-demo/` | Example dApp: profile handshake plus a payment Passport signs. In the Apps grid by default. | 5177 |
+| `examples/passport-app-template/` | The starter a third-party developer copies. | 5178 |
+| `examples/clubcoin-mock/` | The URL-callback (redirect) connector example, for phones. | 5181 |
+| `examples/passport-profile-client/` | The original separate-origin consent client, "Atlas". | 5176 |
+| `examples/passport-app-hub/` | Public listing site for apps that integrate the bridge. | 5179 |
+| `examples/passport-docs/` | The documentation site. | 5180 |
+| `docs/demo/` | The runbook, the deployment procedure, the partner API, and the drill write-ups. | — |
 
-## End-To-End Check
+Not every directory under `examples/` is a workspace of the root
+`package.json`; the ones that are not install and run standalone, each from its
+own lockfile. See the `//workspaces` note in `package.json`.
 
-With the demo server running:
+## Gates
 
-```sh
-npm run demo:e2e
-```
+`.github/workflows/verify-demo.yml` runs the typecheck, the unit suites, the
+PWA checks, and the mocked Playwright tier on every pull request that touches
+the demo. `.github/workflows/deploy-demo.yml` runs the same gates again before
+it ships a release. Neither can be skipped for a deploy.
 
-The E2E flow runs in automation mode, so it does not open a browser passkey
-prompt. It still exercises the meaningful localnet path:
-
-1. Deploys a custody account.
-2. Registers a Night ID.
-3. Runs the real `deposit_night` circuit.
-4. Opens a position.
-5. Confirms custody holdings and workspace screens render.
-
-For a client/manual pass, use the normal browser flow and create the passkey
-when prompted.
-
-## Notes
-
-- Runtime state such as `contracts/managed/`, `midnight-level-db/`,
-  `infra/.env`, and deployment JSON files is ignored.
-- Partner integration work belongs on a separate branch, not in this demo
-  folder.
-- This is a demo, not production custody. Recovery shares are still prototype
-  placeholders and the localnet genesis wallet funds demo deposits.
+The promotion rule — pull request, review, `main`, release, staging, then
+production — is in [`.claude/CLAUDE.md`](.claude/CLAUDE.md) and
+[`docs/demo/deployment.md`](docs/demo/deployment.md).

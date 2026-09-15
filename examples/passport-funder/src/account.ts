@@ -38,9 +38,9 @@
  *
  * PROVENANCE
  * ----------
- * The contract is `contracts/account.compact` at the repository root
- * and the circuit handling mirrors that prototype's own client
- * (`src/wallet/account.ts` — `depositNight`). The provider set, the artefact
+ * The contract is the LEDGER-8 account-custody build this service was written
+ * against, and the circuit handling mirrors the account-custody prototype's own
+ * client (`depositNight`). The provider set, the artefact
  * reader, and the transaction-identifier handling are the shared ones in
  * `./contractRuntime.ts`, the same ones `./midnames.ts` registers names with.
  */
@@ -63,15 +63,18 @@ import type { FunderWallet } from './wallet.js';
 const CONFIRM_ATTEMPTS = 45;
 
 /**
- * Where the compiled account build's ZK ARTEFACTS live. `npm run compile` at the repository root produces the one
- * copy the repository stages; `FUNDER_ACCOUNT_ASSETS` overrides the search. See
- * {@link managedBuildPath} for the candidates and the liveness probe.
+ * Where the compiled account build's ZK ARTEFACTS live. The operator supplies
+ * that build and names it with `FUNDER_ACCOUNT_ASSETS`; nothing in this
+ * repository produces it any more — the root `contracts/` tree that used to,
+ * and the `npm run compile` that drove it, were retired with the
+ * account-custody prototype on 2026/09/15. See {@link managedBuildPath} for the
+ * remaining auto-discovery candidates and the liveness probe.
  */
 function accountManagedPath(configured?: string): string {
   return managedBuildPath('account', {
     configured,
     remedy:
-      'Run `npm run compile` at the repository root, or set FUNDER_ACCOUNT_ASSETS.',
+      'Set FUNDER_ACCOUNT_ASSETS to a compiled ledger-8 account build.',
   });
 }
 

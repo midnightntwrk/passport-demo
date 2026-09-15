@@ -12,16 +12,10 @@
 # are written out here. It is a DENY list: anything not named is uploaded, so a
 # new workspace is included by default rather than silently missing.
 #
-# Reconciled against the tree on 2026/09/15. Five rules named directories this
-# repository does not have — `research`, `site`, `assets`, and both
-# `experiments/` subtrees, which came across in the carry from
-# `midnightntwrk/passport` and were never here. The paragraph that used to sit
-# under this one was worse than dead: it said `experiments/account-custody-
-# prototype` must NOT be excluded because `vite.config.ts` aliases
-# `isomorphic-ws` into it, and that alias has pointed at
-# `examples/passport-demo/src/lib/ws-shim.ts` since the shim moved. A reader
-# following it would have gone looking for a directory that is not here to
-# protect a dependency that no longer exists.
+# Nothing outside the workspaces above is a build input any more. The
+# account-custody prototype that used to sit at the root, and the
+# `isomorphic-ws` shim the demo once aliased into it, were retired on
+# 2026/09/15; the shim now lives in the app, at `src/lib/ws-shim.ts`.
 
 node_modules
 .git
@@ -42,18 +36,9 @@ test-results
 # Prose. Nothing under here is read by a build.
 /docs
 
-# The pre-PWA repository: the CLI harness, its contracts, its localnet scripts,
-# and the deployment scaffolding for the droplet services. None of it is
-# reachable from `examples/passport-demo` — the demo's own `../../contracts/…`
-# imports resolve inside the app, to the tree `prepare:zk` stages — and none of
-# it should decide what a browser gets.
-/app
 /src
-/test
 /contracts
-/infra
 /run-all.sh
-/fund-localnet.mjs
 
 # THE GENERATED ZK TREES, EXCLUDED ON PURPOSE — this is the load-bearing part.
 #

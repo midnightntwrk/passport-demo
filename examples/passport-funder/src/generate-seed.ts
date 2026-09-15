@@ -35,7 +35,7 @@ console.log(
     FAUCETS[networkId]
       ? ` from the captcha faucet: ${FAUCETS[networkId]}`
       : networkId === 'undeployed'
-        ? ` from the localnet genesis wallet: node fund-localnet.mjs ${address}`
+        ? ' from the localnet genesis wallet.'
         : ' (no public faucet is known for this network).'
   }`,
 );

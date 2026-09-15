@@ -47,9 +47,9 @@
  *
  * PROVENANCE
  * ----------
- * The contract handling is a server-side port of
- * `the repository root/src/integrations/midnames/preview.ts`
- * (Midnames rev 83f8422b, compact 0.31.1) — the original Node integration. The
+ * The contract handling is a server-side port of the original Node integration
+ * `src/integrations/midnames/preview.ts` in the `midnightntwrk/passport`
+ * working repository (Midnames rev 83f8422b, compact 0.31.1). The
  * pure helpers (label normalisation, the reserved list, the cost table, the
  * owner-key hash, the padded-key encoding) are COPIED from
  * `examples/passport-demo/src/identity/midnames.ts` rather than imported, so
@@ -195,16 +195,16 @@ export function ownerKeyBytes(value: string): Uint8Array {
 /* -------------------------------------------------------------------------- */
 
 /**
- * Where the pinned Midnames build's ZK ARTEFACTS live. `midnames:prepare` in
- * `the repository root` produces the one copy the repository
- * stages; `FUNDER_MIDNAMES_ASSETS` overrides the search. See
- * {@link managedBuildPath} for the candidates and the liveness probe.
+ * Where the pinned Midnames build's ZK ARTEFACTS live. The operator supplies
+ * that build and names it with `FUNDER_MIDNAMES_ASSETS`; nothing in this
+ * repository produces it. See {@link managedBuildPath} for the remaining
+ * auto-discovery candidates and the liveness probe.
  */
 function midnamesManagedPath(configured?: string): string {
   return managedBuildPath('midnames', {
     configured,
     remedy:
-      'Run `npm run midnames:prepare` in the repository root, or set FUNDER_MIDNAMES_ASSETS.',
+      'Set FUNDER_MIDNAMES_ASSETS to a pinned Midnames build.',
   });
 }
 
@@ -362,7 +362,7 @@ export async function createMidnamesSponsor(
    * A LITERAL relative specifier, not a path computed from `managedPath`.
    *
    * That is not a style preference, it is the difference between working and
-   * not. `the repository root` carries its own
+   * not. A build tree elsewhere on disk can carry its own
    * `node_modules`, so a runtime `import()` of an absolute path inside that
    * tree makes Node resolve `@midnight-ntwrk/compact-runtime` from THERE, while
    * the indexer provider next to it resolves the copy at the repository root.

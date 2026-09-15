@@ -1,16 +1,16 @@
 # CLAUDE.md
 
-You are an AGENT working for the Advanced Research and Creativity (ARC) department at Input Output Global (IOG). You are assisting the researchers and engineers — they are experts in their domain. Respond concisely.
+You are an AGENT working on the Midnight Passport demo. You are assisting the engineers and researchers who build it — they are experts in their domain. Respond concisely.
 
 ## Project
 
-**Midnight Passport — Planning Workspace**
+**Midnight Passport — the demo**
 
-This repository is the planning and knowledge-gathering workspace for Midnight Passport, the user-facing identity and wallet layer for the Midnight network (`alice.midnight` names, passkey onboarding, multi-device, privacy-preserving credentials). We produce architecture, protocol drafts, research, and decision records here. The working prototype lives in a separate repository and evolves against the standards defined in this one.
+This repository IS the Midnight Passport demo: the installable Passport client, the services it talks to, and the example applications that integrate with it. It is the repository the Midnight Foundation reviews and releases from, and `https://midnightpassport.com` is deployed from a published release here. It is not a planning workspace and it holds no plan documents — architecture, protocol drafts, and decision records live elsewhere.
 
-**Audience:** internal IOG ARC, the Midnight Foundation, partner wallet and dApp developers, and the wider standards community (MIPs, and where relevant CIPs).
+Passport is the user-facing identity and wallet layer for the Midnight network: passkey onboarding, a wallet built in the browser tab from the WebAuthn PRF output, a `.night` name, and a shielded balance that can send and receive. Everything on screen is read from the chain or absent; nothing is simulated.
 
-**Core value:** produce a coordinated plan — scope, parallelisation map, delegation, decision records — that identifies what can be built simultaneously across teams (or sequenced by a single team), drives toward a public demo in October 2026, and ultimately produces a set of MIPs and CIPs the wider ecosystem can adopt.
+**Audience:** the Midnight Foundation, partner application developers, and the stakeholders who open the production link.
 
 ## Delivery rule (2026/09/15, non-negotiable)
 
@@ -45,41 +45,34 @@ A build is promoted from staging to production only when all of these are true o
 
 Every promotion is backed by a `v<N> - YYYY/MM/DD` release on **midnightntwrk/passport-demo** at the carried commit (the repository the Foundation watches), with the ZK artefact bundle attached, and mirrored on midnightntwrk/passport. Lockfiles are never regenerated from scratch: rebuild from the previous lock and diff the resolutions.
 
-## Constraints
-
-- **Timeline:** there is no fixed MVP deadline. We are aiming at a public demo in October 2026, but the plan's job is to map the work — not to enforce a critical path. Identify what can run in parallel across different teams (or be sequenced by the same team) so progress is bounded by capacity, not by one ordered chain of dependencies.
-- **Weekly cadence:** demonstrable progress every week remains the preferred rhythm but is no longer a hard contract. If a week's intended deliverable slips, show the next thing that works rather than a broken thing.
-- **Ecosystem dependency:** protocols we draft must be adoptable by the Midnight Foundation and partner wallets. Unilateral design produces shelfware.
-- **Prototype lives elsewhere:** decisions and specs must be portable to a separate repository. Over-specifying implementation details risks rework; under-specifying risks the prototype team free-styling.
-- **Research vs. specification balance:** every standard we draft is backed by evidence — an experiment, an upstream extraction, or a cryptographer review. Speculative specs do not compel adoption.
-
 ## Repository layout
 
-- `site/` — static web artefacts deployed to GitHub Pages. `site/index.html` is the unified entry point; `site/demo.html` and `site/standards.html` are the stakeholder-facing artefacts. Earlier plan documents (`the-plan.html`, `delivery-plan.html`, plus their Plan-B variants) live in `site/archive/` for historical reference. Uses `../assets/logos/…` so it still renders locally.
-- `docs/` — plan and design documents in prose (markdown and PDF).
-- `research/` — background research informing the plan.
-- `experiments/` — cryptographic validation experiments (TypeScript and Rust).
-- `docs/reference/` — git subtree from `https://github.com/LFDT-Nightstream/MVE-Planning.git`.
-- `experiments/nearfall-evaluation/` — git subtree from `git@github.com:input-output-hk/arc-nearfall-evaluation.git`.
-- `.planning/` — internal planning notes, **gitignored**. Never committed.
+- `examples/passport-demo/` — Passport itself. The installable PWA, the wallet, the whole user-facing flow. Dev server on **5175**, pinned with `strictPort`. Started with `npm run passport:demo` from the root (`npm run demo` is an alias).
+- `examples/passport-balancer/` — the fee sponsor and name-registration service, and `contracts-stagenet/`, the stagenet contract build whose artefacts the demo ships. Runs on the droplet. Not a workspace of the root `package.json`.
+- `packages/connect/` — the client library an integrating application imports to ask Passport for a profile or a payment.
+- `demo-backend/` — the demo backend with connectors: encrypted private-state store, WebAuthn PRF key provider, and the profile and transaction wire protocols. File-linked, not published.
+- `examples/passport-funder/` — self-hosted onboarding service. Registers `.night` names and drips activation-sized NIGHT. Port 8799.
+- The partner and example applications — `examples/raffle-demo` (5177), `examples/passport-app-template` (5178), `examples/clubcoin-mock` (5181, the URL-callback connector), `examples/passport-profile-client` (5176), `examples/passport-app-hub` (5179), `examples/passport-docs` (5180).
+- `docs/demo/` — the runbook, the deployment procedure, the partner API, and the drill write-ups. `docs/demo/runbook.md` is the walk-through; `docs/demo/deployment.md` is the release and deploy procedure.
+- `scripts/` — the release and build tooling the workflows call: `tag-release.mjs`, `release-naming.mjs`, `build-vercel-output.mjs`, `fetch-zk-artefacts.mjs`.
+- `.github/workflows/` — `verify-demo.yml` (the pull-request gates) and `deploy-demo.yml` (release → staging → production).
 
-## Experiments
-
-Both experiments validate Schnorr-verification-in-a-Compact-circuit end-to-end on Midnight devnet. They produce identical signatures across the language boundary, so the signing boundary is client-agnostic.
-
-- `experiments/redjubjub-wallet/` — TypeScript client and signer.
-- `experiments/redjubjub-wallet-rs/` — Rust client and verifier.
-
-Build artefacts (`node_modules/`, `target/`) are gitignored.
+Not every directory under `examples/` is a workspace of the root `package.json`. The ones that are not install and run standalone from their own lockfiles; the `//workspaces` note in `package.json` says which and why.
 
 ## Key conventions
 
 - British English. Oxford comma. Date format `YYYY/MM/DD`.
 - Prefer "colour" not "color", "centre" not "center".
-- See `.claude/rules/` for the full conventions reference, including Rust style and the IOG brand guidelines.
+- **On-screen vocabulary.** The words below are how the machinery works, not what a person is doing, and none of them belongs in the interface a reviewer sees: *wallet address*, *DUST*, *contract*, *registry*, *indexer*, *resolver*, *sponsor*, *SDK*. Say what the person gets — a name, a balance, "sent", "ready". The same rule governs how we describe the demo in prose: it is a demo backend with connectors, integrations are *connectors* built case by case, and nothing here is an SDK. See `WHAT-THIS-IS.md`.
+- Every dependency version at the root is exact and is resolution control rather than code — read the `//dependencies` note in `package.json` before touching one.
+- Commits are signed (`.envrc` sets `commit.gpgSign` and points `core.hooksPath` at `.githooks`).
 
 ## What not to do
 
-- Do not commit anything under `.planning/` or `.serena/`.
-- Do not reintroduce stakeholder-political framing into any committed document. That content lives in `.planning/` for internal use only.
-- Do not treat `docs/reference/` or `experiments/nearfall-evaluation/` as ours to edit — they are maintained upstream. Use `git subtree pull` to update.
+- **Do not deploy anything, to either environment, outside the Delivery rule above.** Not a one-line fix, not for a call in an hour, not for a partner.
+- Do not push to `main`, and do not push anything to `midnightntwrk/passport` — it is retired for pushes, as the Delivery rule above sets out.
+- Do not regenerate a lockfile from scratch. Rebuild it from the previous lock and diff the resolutions.
+- Do not add a second copy of any Midnight package to the root resolution. `npm ls @midnight-ntwrk/compact-runtime` must report exactly one copy at the root with the demo deduped onto it.
+- Do not commit the ZK artefacts (`keys/`, `zkir/`, `public/zk/`). They are ~97 MB, they ship as a release asset, and the workflows fetch and verify them against the tracked manifests.
+- Do not treat a passing automated walk as a passing review: it is fresh-browser only. A returning browser and a real device are separate gates, and gate 3 exists because a cache defect passed everything else.
+- Do not put anything on screen that is not read from the chain. A queued name is never shown as registered; a balance is read or absent, never substituted.

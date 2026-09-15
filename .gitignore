@@ -1,23 +1,15 @@
-# --------------------------------------------------------------------------
-# Foundations demo (unchanged — every rule below was already here)
-# --------------------------------------------------------------------------
 node_modules/
 dist/
-contracts/managed/
-midnight-level-db/
-infra/.env
-deployment.json
-faucet-deployment.json
-identity-registry-deployment.json
 *.log
-app/public/zk-params/
-
-# --------------------------------------------------------------------------
-# Passport app (added)
-# --------------------------------------------------------------------------
 
 # Local demo sandboxes and generated chain state
-/midnight-level-db/
+midnight-level-db/
+
+# A compiled contract build an operator drops at the root for
+# `examples/passport-funder` to auto-discover (FUNDER_ACCOUNT_ASSETS and
+# FUNDER_MIDNAMES_ASSETS are the supported way to name one). Machine output,
+# and ~100 MB of prover keys; never committed.
+/contracts/managed/
 
 # Generated ZK assets and staged contract builds.
 #
@@ -65,7 +57,7 @@ coverage/
 playwright-report/
 test-results/
 
-# The foundations demo's `*.log` rule above is unchanged, but the Passport app
-# carries one deliberately committed log: the stagenet shielded-receipt drill
-# transcript, which is evidence rather than output. Re-admit just that file.
+# The `*.log` rule at the top would otherwise swallow one deliberately
+# committed log: the stagenet shielded-receipt drill transcript, which is
+# evidence rather than output. Re-admit just that file.
 !examples/passport-balancer/deploy-stagenet/shielded-receipt-drill.log
