@@ -6,10 +6,18 @@
 # already run here, so the proxy lives beside them and there is no second
 # machine to lose.
 #
-# Both names serve the same thing. The sslip.io name resolves to this droplet by
+# ONE NAME, and it is the sslip.io one. It resolves to this droplet by
 # construction and needs no DNS record, so the sponsor has a working HTTPS
-# address even while funder.midnightpassport.com still points at an address that
-# is no longer ours.
+# address with nothing to keep in step.
+#
+# funder.midnightpassport.com was served here too until 2026/09/15 and is served
+# here no longer. That record still points at the address of the 1 GB droplet
+# deleted on 2026/08/27 — an address handed on to somebody else — so the name
+# was one Caddy could never obtain a certificate for and one that, if the record
+# were ever corrected, would put this box behind a name the demo does not use.
+# A site address Caddy cannot satisfy is not free: it retries ACME for it on
+# every reload. It is gone rather than commented out so that nothing reinstates
+# it by uncommenting.
 #
 # THE /prove AND /check BLOCKS ARE LOAD-BEARING. Add nothing above them without
 # reading this:
@@ -78,7 +86,7 @@ http://:6301 {
 	}
 }
 
-funder.midnightpassport.com, 67-205-177-162.sslip.io {
+67-205-177-162.sslip.io {
 	encode zstd gzip
 
 	# The balancer: fees, names, and activation.

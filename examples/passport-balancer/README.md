@@ -1621,9 +1621,11 @@ reason, and activations still deposit their NIGHT.
 
 ### The TLS proxy, and the two root paths it must carry
 
-`deploy/Caddyfile` is the proxy configuration this service is served through,
-kept here rather than only on the droplet because one of its blocks is a bug fix
-that is invisible from the balancer's own logs.
+`deploy/Caddyfile.stagenet` is the proxy configuration this service is served
+through, kept here rather than only on the droplet because one of its blocks is a
+bug fix that is invisible from the balancer's own logs. It is the only one: a
+`deploy/Caddyfile` sat beside it until 2026/09/15 carrying a stale subset of the
+same config, which is a worse thing to find than no file at all.
 
 The wallet SDK's `HttpProverClient` builds its endpoint as
 `new URL('/prove', baseUrl)`, which **discards the path on the base**. A client
@@ -1642,7 +1644,7 @@ Install and reload it alongside a deploy:
 ```sh
 rsync -a deploy/ root@<droplet>:/opt/passport-balancer/deploy/
 ssh root@<droplet> '
-  install -m 644 /opt/passport-balancer/deploy/Caddyfile /etc/caddy/Caddyfile
+  install -m 644 /opt/passport-balancer/deploy/Caddyfile.stagenet /etc/caddy/Caddyfile
   caddy validate --config /etc/caddy/Caddyfile && systemctl reload caddy'
 ```
 

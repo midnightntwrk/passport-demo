@@ -277,7 +277,21 @@ function trimmed(value: string | undefined): string | undefined {
 
 export const DEFAULT_NETWORK = 'stagenet';
 export const DEFAULT_PORT = 8807;
-export const DEFAULT_ALLOWED_ORIGINS = ['https://midnightpassport.com'];
+/**
+ * The origins a browser may call this service from when the deployment names
+ * none of its own.
+ *
+ * STAGING IS ON THIS LIST because staging is where every build lands first —
+ * production runs only what passed there, so an origin the staging build cannot
+ * call is an origin no build can be proved against. The droplet already admits
+ * it through `BALANCER_ALLOWED_ORIGINS`; until 2026/09/15 the committed default
+ * did not, so a deployment that fell back to this list refused the very site the
+ * promotion rule requires a live walk against.
+ */
+export const DEFAULT_ALLOWED_ORIGINS = [
+  'https://midnightpassport.com',
+  'https://staging.midnightpassport.com',
+];
 export const DEFAULT_FEE_BLOCKS_MARGIN = 5;
 /** Thirty minutes, the same window the demo builds its own transfers with. */
 export const DEFAULT_BALANCE_TTL_MS = 30 * 60 * 1_000;

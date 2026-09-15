@@ -110,16 +110,20 @@ import {
   createCoinReservation,
   createDustFeeSelector,
   describeCoin,
+  feeLegRefusalSentence,
   feeShapeFromCost,
   isBlockLimit,
   isCrumb,
   isTimeToDismiss,
   maxDustInputsFor,
   nextFeeLegPadding,
+  nextFeeLegRebuild,
   paddingForVerdict,
   parseBlockLimits,
   timeToDismissSentence,
   MAX_FEE_LEG_PADDING,
+  MAX_FEE_LEG_REBUILDS,
+  type RebuildVerdict,
   TIME_TO_DISMISS_TARGET,
   nightPayloadFirst,
   smallestOfType,
@@ -2612,6 +2616,15 @@ export async function openBalancerWallet(
                that a path which never reached this line does not get. */
             if (!ticket || !ticket.isOpen()) ticket = coins.open(label);
             let padRounds = padFloor;
+            /* EVERY REBUILD THIS JOB HAS BEEN SENT BACK FOR, of either kind.
+               `padRounds` cannot be that count: a block-limit verdict puts it
+               back to zero, which is the correct remedy and also erases the
+               only record of how long this job has been going round. A
+               transaction that draws `time to dismiss` low and `exceeded block
+               limit` high therefore climbed, reset, and climbed again with
+               nothing to stop it — see {@link MAX_FEE_LEG_REBUILDS}. This
+               counter is never reset, so the oscillation ends. */
+            let rebuildRounds = 0;
             /* What the last balance ACTUALLY carried, which is not what it
                asked for whenever the crumbs ran out. Every piece of
                arithmetic that subtracts padding from the ledger's sentence
@@ -2748,48 +2761,59 @@ export async function openBalancerWallet(
                 break;
               } catch (cause) {
                 const message = cause instanceof Error ? cause.message : String(cause);
-                if (isTimeToDismiss(cause)) {
-                  if (padRounds >= 8) {
-                    throw new Error(
-                      `this transaction is too small for its compute at every padding tried (the ledger says: ${message.slice(0, 160)})`,
-                    );
-                  }
-                  /* Strictly upward, so the `>= 8` guard above always ends
-                     the climb. The verdict is read against the crumbs the
-                     transaction CARRIED, which can be fewer than the round
-                     asked for; without the `padRounds + 1` a scarce-crumb job
-                     would ask for the same number for ever. */
-                  padRounds = Math.min(8, Math.max(padRounds + 1, paddingForVerdict(message, appliedPadding)));
-                  continue;
-                }
-                /* THE OPPOSITE OF THE CLIMB. `exceeded block limit in
-                   transaction fee computation` is the ledger declining to PRICE
-                   this shape at all: its cost is over one of the chain's
-                   per-block dimensions. More bytes cannot help — bytes are the
-                   problem — so the padding goes back to nothing and the job
-                   waits for a covering DUST coin to come free, the way it waits
-                   for any contended coin, and builds again. The input cap in
-                   `./coinReservation.ts` is what stops this being reached at
-                   all; this is the remedy for the case it is. */
-                if (isBlockLimit(cause)) {
-                  if (padRounds > 0 || Date.now() - startedAt < waitForReservedCoinMs) {
-                    const droppedPadding = padRounds;
-                    padRounds = 0;
-                    padFloor = 0;
-                    progress('waiting for a covering DUST coin');
-                    console.warn(
-                      `[fee] ${label}: the chain would not price this shape (${message.slice(0, 200)}) — dropping the padding from ${droppedPadding} to 0 and waiting for a covering DUST coin before building again`,
-                    );
-                    if (droppedPadding === 0) {
-                      await coins.whenReleased(
-                        Math.min(10_000, Math.max(0, waitForReservedCoinMs - (Date.now() - startedAt))),
+                /* THE TWO VERDICTS, DECIDED IN ONE PLACE AND COUNTED TOGETHER.
+                   `time to dismiss` says the shape needs more bytes and
+                   `exceeded block limit` says it needs fewer, so answering
+                   each on its own terms — climb, then reset to nothing — let a
+                   transaction that draws both alternate between them for as
+                   long as the job's deadline allowed, holding a spend lane and
+                   this wallet's coins throughout. `nextFeeLegRebuild` in
+                   `./coinReservation.ts` holds the arithmetic and the bound
+                   across both kinds; the side effects stay here. */
+                const verdict: RebuildVerdict | null = isTimeToDismiss(cause)
+                  ? 'time-to-dismiss'
+                  : isBlockLimit(cause)
+                    ? 'block-limit'
+                    : null;
+                if (verdict !== null) {
+                  const step = nextFeeLegRebuild({
+                    verdict,
+                    message,
+                    padRounds,
+                    appliedPadding,
+                    rebuildRounds,
+                    waitedOut: Date.now() - startedAt >= waitForReservedCoinMs,
+                  });
+                  rebuildRounds += 1;
+                  if (step.kind === 'refuse') {
+                    if (rebuildRounds > MAX_FEE_LEG_REBUILDS) {
+                      console.warn(
+                        `[fee] ${label}: ${rebuildRounds - 1} rebuilds and the ledger is still refusing this shape (${message.slice(0, 200)}) — giving up rather than going round again`,
                       );
                     }
+                    throw new Error(feeLegRefusalSentence(step.reason, message));
+                  }
+                  if (step.kind === 'wait') {
+                    progress('waiting for a covering DUST coin');
+                    console.warn(
+                      `[fee] ${label}: the chain would not price this shape (${message.slice(0, 200)}) — nothing to unpad, so waiting for a covering DUST coin before building again`,
+                    );
+                    await coins.whenReleased(
+                      Math.min(10_000, Math.max(0, waitForReservedCoinMs - (Date.now() - startedAt))),
+                    );
                     continue;
                   }
-                  throw new Error(
-                    `the chain will not price this transaction at any input count this service will build (${message.slice(0, 160)})`,
-                  );
+                  if (verdict === 'block-limit') {
+                    /* The padding goes back to nothing, and so does the floor a
+                       previous refusal raised — the floor is a memory of a
+                       verdict that pointed the other way. */
+                    console.warn(
+                      `[fee] ${label}: the chain would not price this shape (${message.slice(0, 200)}) — dropping the padding from ${padRounds} to 0 and building again`,
+                    );
+                    padFloor = 0;
+                  }
+                  padRounds = step.padRounds;
+                  continue;
                 }
                 const excluded = coins.excluded();
                 if (
@@ -2864,27 +2888,39 @@ export async function openBalancerWallet(
                 true,
               );
             } catch (cause) {
-              /* A PROVEN transaction over a block limit is the same finding as
-                 above, reached one proof later: rebuild with no padding. */
-              if (isBlockLimit(cause) && padRounds > 0) {
-                console.warn(
-                  `[fee] ${label}: the PROVEN transaction is over a block limit — reverting and rebuilding with no padding`,
-                );
-                try {
-                  await reserve(() => facade.revert(proved as never));
-                } catch {
-                  // Best effort; the rebuild selects afresh.
-                }
-                recipe = null;
-                padRounds = 0;
-                padFloor = 0;
-                continue;
-              }
-              if (!isTimeToDismiss(cause) || padRounds >= 8) throw cause;
+              /* THE SAME TWO VERDICTS, reached one proof later, and counted on
+                 the SAME counter. A rebuild costs a proof whether the ledger
+                 refused the erased transaction or the proven one, so a job that
+                 oscillates here is the more expensive of the two — it must not
+                 have a budget of its own. */
+              if (!isTimeToDismiss(cause) && !isBlockLimit(cause)) throw cause;
               const message = cause instanceof Error ? cause.message : String(cause);
-              const next = Math.min(8, Math.max(padRounds + 1, paddingForVerdict(message, appliedPadding)));
+              const step = nextFeeLegRebuild({
+                verdict: isBlockLimit(cause) ? 'block-limit' : 'time-to-dismiss',
+                message,
+                padRounds,
+                appliedPadding,
+                rebuildRounds,
+                /* A proven transaction is already built: waiting for a covering
+                   coin would only rebuild the identical shape, so this path has
+                   no wait — an unpadded block-limit refusal here is final. */
+                waitedOut: true,
+              });
+              rebuildRounds += 1;
+              if (step.kind === 'refuse') {
+                if (rebuildRounds > MAX_FEE_LEG_REBUILDS) {
+                  console.warn(
+                    `[fee] ${label}: ${rebuildRounds - 1} rebuilds and the PROVEN transaction is still refused (${message.slice(0, 200)}) — giving up rather than proving another`,
+                  );
+                  throw new Error(feeLegRefusalSentence(step.reason, message));
+                }
+                throw cause;
+              }
+              /* `wait` is unreachable with `waitedOut: true`; a padding of zero
+                 is what a block-limit verdict resolves to. */
+              const next = step.kind === 'pad' ? step.padRounds : 0;
               console.warn(
-                `[fee] ${label}: the PROVEN transaction would be refused (${message.slice(0, 320)}) — reverting and rebuilding with ${next} crumb DUST inputs`,
+                `[fee] ${label}: the PROVEN transaction would be refused (${message.slice(0, 320)}) — reverting and rebuilding with ${next} crumb DUST input${next === 1 ? '' : 's'}`,
               );
               try {
                 await reserve(() => facade.revert(proved as never));
@@ -2892,6 +2928,7 @@ export async function openBalancerWallet(
                 // Best effort; the rebuild selects afresh.
               }
               recipe = null;
+              if (next === 0) padFloor = 0;
               padRounds = next;
               continue;
             }

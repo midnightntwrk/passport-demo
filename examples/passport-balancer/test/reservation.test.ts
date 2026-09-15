@@ -14,7 +14,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { describe, it } from 'node:test';
+import { after, before, describe, it } from 'node:test';
 
 import { walletAvailability } from '../src/availability.js';
 import {
@@ -27,6 +27,37 @@ import {
 } from '../src/reservation.js';
 
 const wait = (ms: number): Promise<void> => new Promise((settle) => setTimeout(settle, ms));
+
+/**
+ * HOLDS THE EVENT LOOP OPEN FOR THE LENGTH OF THIS FILE, which on Node 22 is
+ * the difference between a suite that passes and a suite that is cancelled
+ * halfway through.
+ *
+ * WHAT ACTUALLY HAPPENS. Several tests here await a job that never settles —
+ * `silentJob`, and the pending submissions the reclaim tests model — and rely on
+ * the reservation's own stall watchdog to end it. That watchdog is an
+ * `unref()`-ed interval (see `createWalletReservation` in `../src/reservation.ts`),
+ * deliberately: the service must not be held open by its own sweep at shutdown.
+ * So at the moment one of these tests is waiting, NOTHING ref'd is due — a
+ * never-settling promise refs nothing, and neither does an unref'd timer — and
+ * the loop drains with the runner's own await still outstanding. Node 22 reports
+ * that as `Promise resolution is still pending but the event loop has already
+ * resolved` and cancels every test after it: 28 of them, in these two files,
+ * with zero failures. Node 23 and later do not, which is why the suite is green
+ * on a developer's Node 25 and cancelled on CI's and the droplet's Node 22.
+ *
+ * One ref'd timer for the length of the file is the whole remedy. It changes
+ * nothing about what is tested, and it is a TEST fix rather than a service one
+ * on purpose: the `unref()` it works around is correct and must stay.
+ */
+let loopHeldOpen: ReturnType<typeof setInterval>;
+before(() => {
+  loopHeldOpen = setInterval(() => undefined, 1_000);
+});
+after(() => {
+  clearInterval(loopHeldOpen);
+});
+
 
 /** How `/wallet-status` would answer, for a wallet that is otherwise healthy. */
 const availableNow = (reservation: WalletReservation): 0 | 1 =>

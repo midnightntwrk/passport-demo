@@ -147,6 +147,7 @@ import {
   type RegistryReading,
 } from './aliasOwnership.js';
 import { walletAvailability } from './availability.js';
+import { createReadCache } from './readCache.js';
 import { createChainHeadProbe, type ChainHeadProbe } from './chainHead.js';
 import { ASSET_SYMBOL, applyEnvFile, loadConfig, type BalancerConfig } from './config.js';
 import { bytesToHex, queryIndexerHeight, rawContractAddress } from './contractRuntime.js';
@@ -662,13 +663,24 @@ async function main(): Promise<void> {
           };
         }
         if (heldNight < required) {
+          /* THE OPERATOR'S HALF, AND ONLY HERE. The sentence returned below
+             reaches a person mid-send, and until 2026/09/15 it handed that
+             person this service's own funding address and told them to go to a
+             faucet — an instruction nobody outside this team can act on and a
+             detail nobody outside this team should be reading off a screen. The
+             address, the shortfall, and the remedy go to the journal and to the
+             operator fields on `/status`; the reader gets a sentence that says
+             what happened and what to do about it, which is wait. */
+          console.warn(
+            `[fee] EMPTY — holding ${formatNight(heldNight)} NIGHT, less than the ${formatNight(required)} NIGHT this request needs: top ${wallet.address} up from the ${config.networkId} faucet`,
+          );
           return {
             ready: false,
             night: heldNight,
             refuse: refusal(
               503,
               'funder-empty',
-              `The balancer holds ${formatNight(heldNight)} NIGHT, less than the ${formatNight(required)} NIGHT this needs. Its address (${wallet.address}) needs topping up from the ${config.networkId} faucet.`,
+              'The service that covers fees is out of funds right now. Try again later.',
             ),
           };
         }
@@ -1069,6 +1081,16 @@ async function main(): Promise<void> {
       balanceAtomic: night.toString(),
       balanceNight: formatNight(night),
       dustSpecks: dust.toString(),
+      /* WHERE THE `funder-empty` REMEDY LIVES NOW. The refusal a caller reads
+         is a fixed sentence — it names no address and no faucet, because a
+         person mid-send can do nothing with either. The instruction an operator
+         needs is here instead, on the endpoint only operators and watchdogs
+         read, alongside the balance that decides whether it is wanted. */
+      topUp: {
+        address: wallet.address,
+        network: config.networkId,
+        note: `when balanceNight reaches zero, top this address up from the ${config.networkId} faucet`,
+      },
       /* `synced` is the readiness answer and NOT the SDK's strict one — see
          `publishedSync`. The strict figure is still published, under
          `syncedStrict`, next to the reason the two differ. */
@@ -1766,12 +1788,21 @@ async function main(): Promise<void> {
             ),
           );
         }
+        /* THE CAUSE GOES TO THE JOURNAL AND NOWHERE ELSE. This sentence is
+           rendered by the app, and until 2026/09/15 it carried a 64-hex
+           contract address and whatever the read threw — a stack-shaped string
+           from somebody else's client library — onto a screen a person was
+           waiting at. `detail` is no better a home for it: the app renders that
+           field too in several places. So the reader gets one plain sentence,
+           `detail` stays a sentence, and the thing an operator has to see is
+           logged here where the rest of this failure already is. */
+        console.warn(
+          `[account] the account contract ${contractAddress} could not be read: ${cause instanceof Error ? (cause.stack ?? cause.message) : String(cause)}`,
+        );
         return fail(
-          refusal(
-            503,
-            'indexer-unreachable',
-            `The contract at ${contractAddress} could not be checked: ${cause instanceof Error ? cause.message : String(cause)}`,
-          ),
+          refusal(503, 'indexer-unreachable', 'This Passport could not be checked right now. Try again shortly.', {
+            detail: 'The service that reads accounts did not answer.',
+          }),
         );
       }
 
@@ -2877,6 +2908,20 @@ async function main(): Promise<void> {
     );
   }
 
+  /**
+   * The one-second memory `/status` and `/wallet-status` are served through.
+   *
+   * ONE SECOND, AND NOT MORE. Both of these answers are read as gates: the
+   * client asks `/wallet-status` immediately before a send and the deploy
+   * watchdog greps `/status` for `"syncState":"ready"`. A second is short
+   * against the six-second blocks the figures come from — no watcher can tell a
+   * remembered reading from a fresh one — and long enough that the polling
+   * these routes actually get costs one wallet pass a second rather than one
+   * per caller. They are the only unguarded routes here, by design; this is
+   * what keeps that decision cheap.
+   */
+  const readCache = createReadCache({ ttlMs: 1_000 });
+
   const spendGuards: Record<string, { prefix: string; bucket: TokenBucket }> = {
     '/balance-only': { prefix: 'balance', bucket: balanceBucket },
     /* Guarded like the route it undoes, and on the same bucket: it costs a
@@ -3049,13 +3094,18 @@ async function main(): Promise<void> {
         releaseSlot = () => spendAdmission.leave();
       }
 
+      /* MEMOISED FOR A SECOND, BOTH OF THEM — see `./readCache.ts`. These are
+         the two routes nothing guards, and each of them does a full pass over
+         the wallet per request. A second's memory bounds that at one pass per
+         route per second however hard either is polled, and hands concurrent
+         pollers the same reading rather than starting a pass each. */
       if (request.method === 'GET' && path === '/wallet-status') {
-        respond(request, response, 200, await walletStatus());
+        respond(request, response, 200, await readCache.through('/wallet-status', walletStatus));
         return;
       }
 
       if (request.method === 'GET' && path === '/status') {
-        respond(request, response, 200, await status());
+        respond(request, response, 200, await readCache.through('/status', status));
         return;
       }
 
