@@ -20,21 +20,17 @@ it was told across the wire protocol.
 
 ```
 npm install                # from the repository root, once
-npm run dev -w doorman     # or: cd examples/doorman && npm run dev
+cd examples/doorman && npm run dev
 ```
 
-Doorman is a root workspace, so `npm install` at the root links it and `-w
-doorman` reaches it by name. It adds nothing to the root lockfile beyond that
-link: every dependency it names — React, Vite, TypeScript, and the React
-plugin — is already resolved at the root at a version its ranges accept, so it
-takes them from the root `node_modules` rather than installing its own copies.
-Its `package.json` lists them so the versions it was written against are on the
-record.
+Doorman is deliberately **not** a root workspace — the root `package.json`
+belongs to the package, not to its examples — so it takes React, Vite, and
+TypeScript from the root `node_modules` by ordinary upward resolution rather
+than installing its own copies. Its `package.json` lists them so the versions
+it was written against are on the record.
 
 It comes up on `http://localhost:5184`, deliberately a different origin from
-the Passport shell on `http://localhost:5175`. (It pinned 5180 until
-2026/09/15, which `passport-docs` pins too — with `strictPort` on both, the
-second of the two to start failed to bind.) Point it elsewhere with a
+the Passport shell on `http://localhost:5175`. Point it elsewhere with a
 `.env.local`:
 
 ```
@@ -53,8 +49,8 @@ repository. The name resolves through the **workspace link** at
 That package publishes `dist/`, and nothing in this tree builds it — the shared
 `dist/` is off limits here — so both TypeScript (`tsconfig.json` `paths`) and
 Vite (`vite.config.ts` `resolve.alias`) are pointed at the package's sources
-instead. Doorman does not declare `@midnight-passport/connect` as a dependency;
-it reads the workspace link that is already there.
+instead. Doorman does not add itself to the root `package.json`; it reads the
+link that is already there.
 
 ## Scripts
 
