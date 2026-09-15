@@ -16,7 +16,7 @@ none of the gates.
 | Vercel projects | `midnight-passport-staging` and `midnight-passport-app` (team Webisoft) |
 | Workflow | [`.github/workflows/deploy-demo.yml`](../../.github/workflows/deploy-demo.yml) |
 | Branch | `main`, and nothing else |
-| Releases | `v<N> - YYYY/MM/DD` on **this repository**, `midnightntwrk/passport-demo` |
+| Releases | `v<major>.<minor> - YYYY/MM/DD` on **this repository**, `midnightntwrk/passport-demo`. A fix moves the decimal, a feature the whole number |
 
 Two triggers, and they are not interchangeable:
 
@@ -42,7 +42,7 @@ than uploading an empty build over the live site.
 A run that names `release_tag` **checks out that tag**, so a promotion builds
 the immutable release rather than whatever the dispatch was started from. A
 production promotion must additionally be dispatched *from* that tag — **Run
-workflow → Use workflow from → Tags → `v<N>`** — so the commit the run reports
+workflow → Use workflow from → Tags → `v<major>.<minor>`** — so the commit the run reports
 is the commit it shipped.
 
 The project ids are resolved before anything is built, from the pair belonging
@@ -66,11 +66,13 @@ unset fails by name rather than falling back to the staging project.
      examples/passport-balancer/contracts-stagenet/managed/midnames/zkir
    ```
 
-3. Cut the release from `main` and attach that file:
+3. Cut the release from `main` and attach that file. The tag is
+   `v<major>.<minor>` — see [How it is numbered](#how-it-is-numbered-hector-20260915)
+   — and the next one is `v1.0`:
 
    ```sh
-   gh release create v17 --target main \
-     --title 'v17 - 2026/09/15' \
+   gh release create v1.0 --target main \
+     --title 'v1.0 - 2026/09/15' \
      --notes 'What changed.' \
      passport-zk-artefacts.tar.zst
    ```
@@ -137,7 +139,7 @@ are true **on staging**:
 Then, from the release tag:
 
 ```sh
-gh workflow run deploy-demo.yml --ref v17 -f target=production -f release_tag=v17
+gh workflow run deploy-demo.yml --ref v1.0 -f target=production -f release_tag=v1.0
 ```
 
 Every promotion is mirrored as a release on `midnightntwrk/passport` at the
@@ -392,11 +394,22 @@ change nothing about what it emits. Both were confirmed by preview deployment on
 
 Every production deploy must be backed by a GitHub release (Hector, 2026/09/03: "nothing fancy, just the release tag"). **Releases are cut on this repository, `midnightntwrk/passport-demo`** — the one the Foundation watches — and mirrored onto `midnightntwrk/passport` at the carried commit. `deploy:passport:manual` ends by running `scripts/tag-release.mjs`, which reads the service-worker build id from `examples/passport-demo/dist/sw.js`, refuses a dirty tree, verifies and packages the pinned ZK artefacts, and creates the release targeting the deployed commit; pass `--repo` for the mirror. A published release without that bundle is invalid: GitHub makes published releases immutable, so it must be superseded by a new release that includes the artefact.
 
-The release is tagged `v<N>`, where N is one past the highest `v<N>` that already exists — counted from both the tag refs (`git ls-remote --tags`) and the releases (`gh release list`), so a tag pushed without a release, or a release whose tag was deleted, still counts. A repository holding only the older `demo-YYYY.MM.DD-<build id>` tags therefore starts at `v1`. The title is `v<N> - YYYY/MM/DD` (UTC). The body opens with the build id, the commit, and the production URL, then carries the "## Fixed" section of `RELEASE-NOTES.md` (`PASSPORT_RELEASE_NOTES` appends a gate summary).
+### How it is numbered (Hector, 2026/09/15)
 
-**It is not a pre-release** (changed 2026/09/07). It used to be, and that was the bug: GitHub never shows a pre-release as "Latest", so a reviewer reading the repository front page saw a three-day-old release and concluded nothing had shipped since. The naming rule — `v<N> - <date>` — is Hector's, from the same review.
+The release is tagged `v<major>.<minor>`, and **the next release is `v1.0`** — the count starts again, deliberately. After that:
 
-It is idempotent for a **commit and build**: re-running the same release is reported rather than released twice. A later gate-only commit may carry identical PWA bytes after an immutable release failed before deployment, and it receives a replacement release instead of being trapped behind the old build id. It verifies that a same-commit release has the ZK bundle; if it does not, it stops rather than claiming the immutable release was repaired. `--dry-run` prints the `gh` command without creating anything. The derivation of the number and the title is unit-tested — `npm run test:release-naming`.
+- **a patch or a bug fix moves the decimal**: v1.0 → v1.1 → v1.2 (`--kind fix`, the default);
+- **a new feature moves the whole number, and the decimal resets**: v1.2 → v2.0 (`--kind feature`).
+
+The title is `v<major>.<minor> - YYYY/MM/DD` (UTC). The number is derived from both sources of truth — the tag refs (`git ls-remote --tags`) and the releases (`gh release list`) — so a tag pushed without a release, or a release whose tag was deleted, still counts.
+
+**The undotted `v1`–`v16` are history and are ignored.** They stay where they are and the builds they carry are still downloadable, but only `v<major>.<minor>` names take part in deriving the next number, which is what makes the next release `v1.0` rather than `v17.0`. They decide exactly one thing: with no dotted release yet, the release the notes delta is taken against is `v16`, so `v1.0`'s body is what has changed since `v16` rather than the whole cumulative file.
+
+The body opens with the build id, the commit, and the production URL, then carries the entries of `RELEASE-NOTES.md`'s "## Fixed" section that were not already there at the previous release (`PASSPORT_RELEASE_NOTES` appends a gate summary).
+
+**It is not a pre-release** (changed 2026/09/07). It used to be, and that was the bug: GitHub never shows a pre-release as "Latest", so a reviewer reading the repository front page saw a three-day-old release and concluded nothing had shipped since. The naming rule is Hector's, from the same review that it replaced.
+
+It is idempotent for a **commit and build**: re-running the same release is reported rather than released twice. A later gate-only commit may carry identical PWA bytes after an immutable release failed before deployment, and it receives a replacement release instead of being trapped behind the old build id. It verifies that a same-commit release has the ZK bundle; if it does not, it stops rather than claiming the immutable release was repaired. `--dry-run` prints the tag it would create and the `gh` command, without creating anything. The derivation of the number and the title is unit-tested — `npm run test:release-naming`.
 
 Options, for releasing something other than "what was just built here":
 
@@ -405,6 +418,7 @@ Options, for releasing something other than "what was just built here":
 | `--repo <owner/name>` | The repository to release in. Default `midnightntwrk/passport-demo`, this one (or `PASSPORT_RELEASE_REPO`). Pass `midnightntwrk/passport` for the mirror, so the same deploy is released the same way in both places. |
 | `--commit <sha>` | The commit the release points at. Default HEAD. The carried commit has a different sha in `passport-demo`, and an older deploy is no longer at HEAD. Naming it also makes the notes come from THAT commit's `RELEASE-NOTES.md`, so the release says what that build shipped rather than what has been fixed since. |
 | `--build-id <id>` | The service-worker build id, when `dist/` has moved on — mirroring into `passport-demo`, or filling in a release after the fact. Default: read from the stamped `dist/sw.js`. |
+| `--kind fix\|feature` | What this release carries, and so which part of the number moves. `fix` (the default) takes the decimal up one; `feature` takes the whole number up one and resets the decimal. Neither applies to `v1.0`, which is the first release of the scheme either way. |
 
 The mirror of a deploy into `passport-demo` is run from a **checkout of `passport-demo`**, after the carry — the carried commit only exists there, and the script resolves `--commit` against the repository it is run in (which is also where it reads that commit's `RELEASE-NOTES.md`). The carry brings the script itself along, so it is already present:
 

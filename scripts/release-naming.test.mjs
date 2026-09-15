@@ -3,11 +3,16 @@
  *
  * Run with `npm run test:release-naming` (or `node --test scripts/`).
  *
- * The cases that matter are the ones the repositories actually contain: a
- * repository with nothing but legacy `demo-…` tags must start at v1, and one
- * that already has `v<N>` must count past the highest of them however that
- * number reaches us — as a `refs/tags/` line from `git ls-remote --tags`, as a
- * bare tag from `gh release list`, or as a release title.
+ * The scheme (Hector, 2026/09/15): the next release is v1.0; a fix moves the
+ * decimal (v1.1, v1.2, …); a feature moves the whole number and resets the
+ * decimal (v2.0). The legacy undotted `v1`–`v16` stay as history and take no
+ * part in the count — which is the case that matters most here, because it is
+ * the only reason the next release is v1.0 and not v17.0.
+ *
+ * The one thing the legacy tags still decide is which release the notes delta
+ * is taken against: with no dotted release yet, the release before v1.0 is v16,
+ * so v1.0's body is what changed since v16 rather than the whole cumulative
+ * file.
  */
 
 import assert from 'node:assert/strict';
@@ -15,82 +20,117 @@ import test from 'node:test';
 
 import {
   RELEASE_BODY_LIMIT,
+  compareVersions,
   fixedEntries,
   fixedSection,
-  highestReleaseNumber,
+  highestLegacyReleaseNumber,
+  highestReleaseVersion,
+  legacyReleaseNumberOf,
   newEntries,
-  nextReleaseNumber,
-  previousReleaseNumber,
+  nextReleaseVersion,
+  previousReleaseTag,
   releaseBody,
   releaseDate,
-  releaseNumberOf,
   releaseTag,
   releaseTitle,
+  releaseVersionOf,
   summariseEntry,
 } from './release-naming.mjs';
 
-test('a legacy demo- tag carries no release number', () => {
-  assert.equal(releaseNumberOf('demo-2026.09.04-19729c64'), null);
-  assert.equal(releaseNumberOf('refs/tags/demo-2026.09.07-a207dee8'), null);
-  assert.equal(releaseNumberOf('Passport demo 2026/09/07'), null);
+test('a version is read from every shape the two sources print', () => {
+  assert.deepEqual(releaseVersionOf('v1.0'), { major: 1, minor: 0 });
+  assert.deepEqual(releaseVersionOf('refs/tags/v1.2'), { major: 1, minor: 2 });
+  assert.deepEqual(releaseVersionOf('refs/tags/v2.0^{}'), { major: 2, minor: 0 });
+  assert.deepEqual(releaseVersionOf('v1.0 - 2026/09/15'), { major: 1, minor: 0 });
+  assert.deepEqual(
+    releaseVersionOf('0123456789abcdef0123456789abcdef01234567\trefs/tags/v3.11'),
+    { major: 3, minor: 11 },
+  );
 });
 
-test('a release number is read from every shape the two sources print', () => {
-  assert.equal(releaseNumberOf('v4'), 4);
-  assert.equal(releaseNumberOf('refs/tags/v4'), 4);
-  assert.equal(releaseNumberOf('refs/tags/v4^{}'), 4);
-  assert.equal(releaseNumberOf('v4 - 2026/09/07'), 4);
-  assert.equal(releaseNumberOf('0123456789abcdef0123456789abcdef01234567\trefs/tags/v12'), 12);
+test('a name that is not a dotted release carries no version', () => {
+  // The legacy scheme, which is history and nothing more.
+  assert.equal(releaseVersionOf('v16'), null);
+  assert.equal(releaseVersionOf('refs/tags/v16'), null);
+  assert.equal(releaseVersionOf('v16 - 2026/09/15'), null);
+  // The scheme before that.
+  assert.equal(releaseVersionOf('demo-2026.09.04-19729c64'), null);
+  assert.equal(releaseVersionOf('refs/tags/demo-2026.09.07-a207dee8'), null);
+  // Not ours at all.
+  assert.equal(releaseVersionOf('v1.2.3'), null);
+  assert.equal(releaseVersionOf('vercel-output'), null);
+  assert.equal(releaseVersionOf('v0.1'), null);
+  assert.equal(releaseVersionOf(undefined), null);
 });
 
-test('a name that merely starts with a v is not a release', () => {
-  assert.equal(releaseNumberOf('v1.2.3'), null);
-  assert.equal(releaseNumberOf('vercel-output'), null);
-  assert.equal(releaseNumberOf('v0'), null);
-  assert.equal(releaseNumberOf(undefined), null);
-});
-
-test('a repository with only legacy tags starts at v1', () => {
+test('THE FIRST RELEASE OF THE NEW SCHEME IS v1.0, legacy tags and all', () => {
+  // The repository as it actually stands on 2026/09/15: v1 to v16 undotted,
+  // the demo- tags older still, and not one dotted release.
   const existing = [
-    'refs/tags/demo-2026.09.03-f3b1f118',
     'refs/tags/demo-2026.09.04-19729c64',
-    'refs/tags/demo-2026.09.07-a207dee8',
-    'Passport demo 2026/09/07',
+    ...Array.from({ length: 16 }, (_, index) => `refs/tags/v${index + 1}`),
+    'v16 - 2026/09/15',
   ];
-  assert.equal(highestReleaseNumber(existing), 0);
-  assert.equal(nextReleaseNumber(existing), 1);
+  assert.equal(highestReleaseVersion(existing), null);
+  assert.equal(releaseTag(nextReleaseVersion(existing)), 'v1.0');
+  assert.equal(releaseTag(nextReleaseVersion(existing, 'feature')), 'v1.0');
+  // And on a repository with nothing at all.
+  assert.equal(releaseTag(nextReleaseVersion([])), 'v1.0');
+  assert.equal(releaseTag(nextReleaseVersion(undefined)), 'v1.0');
 });
 
-test('a repository with no tags at all starts at v1', () => {
-  assert.equal(nextReleaseNumber([]), 1);
-  assert.equal(nextReleaseNumber(undefined), 1);
+test('a fix moves the decimal', () => {
+  assert.equal(releaseTag(nextReleaseVersion(['refs/tags/v1.0'], 'fix')), 'v1.1');
+  assert.equal(releaseTag(nextReleaseVersion(['refs/tags/v1.1', 'v1.0 - 2026/09/15'])), 'v1.2');
+  // A fix is what you get without saying which kind it is.
+  assert.equal(releaseTag(nextReleaseVersion(['v2.4'])), 'v2.5');
 });
 
-test('the next number is one past the highest, from either source', () => {
-  // The tag ref is ahead of what `gh release list` reports, and vice versa;
-  // both are consulted so neither can hand back a number already taken.
-  assert.equal(nextReleaseNumber(['refs/tags/v1', 'refs/tags/v2', 'v1 - 2026/09/07']), 3);
-  assert.equal(nextReleaseNumber(['refs/tags/v1', 'v9 - 2026/09/08', 'refs/tags/v2']), 10);
+test('a feature moves the whole number and resets the decimal', () => {
+  assert.equal(releaseTag(nextReleaseVersion(['refs/tags/v1.0'], 'feature')), 'v2.0');
+  assert.equal(releaseTag(nextReleaseVersion(['refs/tags/v1.7'], 'feature')), 'v2.0');
+  assert.equal(releaseTag(nextReleaseVersion(['v2.0', 'refs/tags/v1.7'], 'feature')), 'v3.0');
+});
+
+test('a release is a fix or a feature, and nothing else', () => {
+  assert.throws(() => nextReleaseVersion(['v1.0'], 'patch'), TypeError);
+  assert.throws(() => nextReleaseVersion(['v1.0'], ''), TypeError);
+});
+
+test('the legacy tags are ignored when the dotted ones exist too', () => {
+  const existing = ['refs/tags/v16', 'refs/tags/v1.0', 'refs/tags/v1.1', 'v1.1 - 2026/09/16'];
+  assert.deepEqual(highestReleaseVersion(existing), { major: 1, minor: 1 });
+  assert.equal(releaseTag(nextReleaseVersion(existing, 'fix')), 'v1.2');
+  assert.equal(releaseTag(nextReleaseVersion(existing, 'feature')), 'v2.0');
+  // v16 is a bigger integer than 1 and still loses, because it is not a release
+  // under this scheme.
+  assert.equal(legacyReleaseNumberOf('v16'), 16);
+  assert.equal(highestLegacyReleaseNumber(existing), 16);
 });
 
 test('the count is numeric, not alphabetical', () => {
-  assert.equal(nextReleaseNumber(['refs/tags/v9', 'refs/tags/v10']), 11);
+  assert.equal(releaseTag(nextReleaseVersion(['v1.9', 'v1.10'])), 'v1.11');
+  assert.equal(releaseTag(nextReleaseVersion(['v9.0', 'v10.0'], 'feature')), 'v11.0');
+  assert.ok(compareVersions({ major: 1, minor: 10 }, { major: 1, minor: 9 }) > 0);
+  assert.ok(compareVersions({ major: 1, minor: 10 }, { major: 2, minor: 0 }) < 0);
 });
 
-test('the tag is v<N> and the title is v<N> - YYYY/MM/DD', () => {
-  assert.equal(releaseTag(1), 'v1');
-  assert.equal(releaseTitle(1, '2026/09/07'), 'v1 - 2026/09/07');
-  assert.equal(releaseTitle(12, '2026/10/01'), 'v12 - 2026/10/01');
+test('the tag is v<major>.<minor> and the title is v<major>.<minor> - YYYY/MM/DD', () => {
+  assert.equal(releaseTag({ major: 1, minor: 0 }), 'v1.0');
+  assert.equal(releaseTitle({ major: 1, minor: 0 }, '2026/09/15'), 'v1.0 - 2026/09/15');
+  assert.equal(releaseTitle({ major: 12, minor: 3 }, '2026/10/01'), 'v12.3 - 2026/10/01');
 });
 
-test('a title refuses a date in any other shape', () => {
-  assert.throws(() => releaseTitle(1, '2026-09-07'), TypeError);
-  assert.throws(() => releaseTitle(1, '07/09/2026'), TypeError);
-  assert.throws(() => releaseTitle(0, '2026/09/07'), TypeError);
+test('a title refuses a date in any other shape, and a version in any other shape', () => {
+  assert.throws(() => releaseTitle({ major: 1, minor: 0 }, '2026-09-15'), TypeError);
+  assert.throws(() => releaseTitle({ major: 1, minor: 0 }, '15/09/2026'), TypeError);
+  assert.throws(() => releaseTitle({ major: 0, minor: 1 }, '2026/09/15'), TypeError);
+  assert.throws(() => releaseTag({ major: 1 }), TypeError);
+  assert.throws(() => releaseTag(1), TypeError);
 });
 
 test('the date is UTC, formatted the way this repository writes dates', () => {
-  assert.equal(releaseDate(new Date('2026-09-07T23:30:00Z')), '2026/09/07');
+  assert.equal(releaseDate(new Date('2026-09-15T23:30:00Z')), '2026/09/15');
   // Late evening in New York is already the next day in UTC, and the tag is UTC.
   assert.equal(releaseDate(new Date('2026-09-07T04:00:00Z')), '2026/09/07');
 });
@@ -229,11 +269,27 @@ test('a body over 4,000 characters is refused, and --allow-long overrides it', (
   assert.ok(forced.length > RELEASE_BODY_LIMIT);
 });
 
-test('the previous release is the highest v<N> below the one being created', () => {
-  // v9 was never published, so the release before v10 is v8.
-  const existing = ['refs/tags/v8', 'refs/tags/v10', 'v10 - 2026/09/08', 'refs/tags/demo-2026.09.04-19729c64'];
-  assert.equal(previousReleaseNumber(existing, 10), 8);
-  assert.equal(previousReleaseNumber(existing, 11), 10);
-  assert.equal(previousReleaseNumber(existing, 1), null);
-  assert.equal(previousReleaseNumber([], 4), null);
+test('the previous release is the highest dotted one below the one being created', () => {
+  // v1.2 was never published, so the release before v1.3 is v1.1.
+  const existing = ['refs/tags/v1.0', 'refs/tags/v1.1', 'refs/tags/v1.3', 'v1.3 - 2026/09/20'];
+  assert.equal(previousReleaseTag(existing, { major: 1, minor: 3 }), 'v1.1');
+  assert.equal(previousReleaseTag(existing, { major: 2, minor: 0 }), 'v1.3');
+  assert.equal(previousReleaseTag(existing, { major: 1, minor: 1 }), 'v1.0');
+});
+
+test('WITH NO DOTTED RELEASE YET, THE PREVIOUS RELEASE IS THE HIGHEST LEGACY TAG', () => {
+  // This is what makes v1.0's body the delta since v16 rather than the whole
+  // cumulative RELEASE-NOTES.md.
+  const existing = [
+    'refs/tags/demo-2026.09.04-19729c64',
+    'refs/tags/v15',
+    'refs/tags/v16',
+    'v16 - 2026/09/15',
+  ];
+  assert.equal(previousReleaseTag(existing, { major: 1, minor: 0 }), 'v16');
+  // Once a dotted release exists, the legacy tags stop standing in.
+  assert.equal(previousReleaseTag([...existing, 'refs/tags/v1.0'], { major: 1, minor: 1 }), 'v1.0');
+  // A repository with no releases of either scheme has nothing to delta against.
+  assert.equal(previousReleaseTag(['refs/tags/demo-2026.09.04-19729c64'], { major: 1, minor: 0 }), null);
+  assert.equal(previousReleaseTag([], { major: 1, minor: 0 }), null);
 });

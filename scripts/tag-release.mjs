@@ -12,13 +12,29 @@
  * It is the LAST step of `deploy:passport:manual`, after Vercel has accepted
  * the upload. A tag for a deploy that failed would be worse than no tag.
  *
- * WHAT THE RELEASE IS (2026/09/08)
+ * WHAT THE RELEASE IS (2026/09/15)
  * --------------------------------
- *   tag     v<N>              N is one past the highest v<N> that exists
- *   title   v<N> - YYYY/MM/DD
+ *   tag     v<major>.<minor>
+ *   title   v<major>.<minor> - YYYY/MM/DD
  *   body    the build id, the commit, and the production URL, then ONLY the
  *           RELEASE-NOTES.md entries that were not already there at the
  *           previous release
+ *
+ * The number says what the release carried, which a flat count never did:
+ *
+ *   - the next release is **v1.0** — the count starts again, deliberately;
+ *   - a patch or a bug fix moves the DECIMAL: v1.0 -> v1.1 -> v1.2
+ *     (`--kind fix`, and that is the default);
+ *   - a new feature moves the WHOLE NUMBER and resets the decimal: v1.2 -> v2.0
+ *     (`--kind feature`).
+ *
+ * The scheme is Hector's, from the 2026/09/15 review. The undotted `v1`-`v16`
+ * that preceded it stay exactly where they are — they are history, and the
+ * builds they carry are still downloadable — but they are ignored when the next
+ * number is derived, which is what makes the next release v1.0 and not v17.0.
+ * They decide one thing only: with no dotted release yet, the release the notes
+ * delta is taken against is v16, so v1.0's body is what changed since v16
+ * rather than the whole cumulative file.
  *
  * THE BODY IS A DELTA (2026/09/08)
  * --------------------------------
@@ -28,8 +44,9 @@
  * published forty-two fixes in 51,000 characters, the same text v1 to v8 had
  * carried, and the reviewer could not tell from it what that deploy changed.
  *
- * The previous release is the highest v<N> below the one being created; its
- * RELEASE-NOTES.md is read with `git show v<N>:RELEASE-NOTES.md`, and the body
+ * The previous release is the highest dotted release below the one being
+ * created, falling back to the highest legacy `v<N>` when there is none; its
+ * RELEASE-NOTES.md is read with `git show <tag>:RELEASE-NOTES.md`, and the body
  * carries the entries whose bold title is not in it, one line each. The full
  * prose stays in the file. A body over 4,000 characters is refused: that is a
  * deploy that should have been two (`--allow-long` insists).
@@ -41,6 +58,8 @@
  * The number is derived from what both sources of truth say — the tag refs
  * (`git ls-remote --tags`) and the releases (`gh release list`) — so a tag
  * pushed without a release, or a release whose tag was deleted, still counts.
+ * Only `v<major>.<minor>` names count; anything else is not a release under
+ * this scheme.
  * The derivation itself lives in `release-naming.mjs` and is unit-tested.
  *
  * The build id is the one the service worker carries — see the header of
@@ -72,13 +91,18 @@
  * -----
  *   node scripts/tag-release.mjs [options]
  *
- *   --dry-run            print the `gh release create` command and exit,
- *                        creating nothing. The preflight checks still run —
- *                        they are read-only. On a build that is ALREADY
- *                        released it says so and still prints the body that
- *                        release's delta comes to, rather than stopping at
- *                        "nothing to create": the point of a dry run is to see
- *                        the body.
+ *   --dry-run            print the tag it would create and the `gh release
+ *                        create` command, then exit, creating nothing. The
+ *                        preflight checks still run — they are read-only. On a
+ *                        build that is ALREADY released it says so and still
+ *                        prints the body that release's delta comes to, rather
+ *                        than stopping at "nothing to create": the point of a
+ *                        dry run is to see the tag and the body.
+ *   --kind fix|feature   what this release carries, and so which part of the
+ *                        number moves. `fix` (the default) takes the decimal up
+ *                        one; `feature` takes the whole number up one and
+ *                        resets the decimal. Neither applies to the first
+ *                        release of the scheme, which is v1.0 either way.
  *   --allow-long         publish a body over 4,000 characters anyway. Reach
  *                        for it only when the long body is genuinely one
  *                        release; the refusal is usually telling you that a
@@ -120,15 +144,16 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
+  RELEASE_KINDS,
   fixedSection,
   newEntries,
-  nextReleaseNumber,
-  previousReleaseNumber,
+  nextReleaseVersion,
+  previousReleaseTag,
   releaseBody,
   releaseDate,
-  releaseNumberOf,
   releaseTag,
   releaseTitle,
+  releaseVersionOf,
 } from './release-naming.mjs';
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -146,6 +171,16 @@ const allowLong = process.argv.includes('--allow-long');
 const releaseRepository = option('--repo') || process.env.PASSPORT_RELEASE_REPO || 'midnightntwrk/passport-demo';
 const requestedCommit = option('--commit');
 const requestedBuildId = option('--build-id');
+/* What this release carries, and so which part of the number moves (2026/09/15).
+   `fix` is the default because most releases are one, and because a release
+   that silently took the whole number up would be the expensive mistake. */
+const releaseKind = option('--kind') ?? 'fix';
+if (!RELEASE_KINDS.includes(releaseKind)) {
+  fail(
+    `--kind is ${RELEASE_KINDS.join(' or ')}, not ${JSON.stringify(releaseKind)}. ` +
+      'A fix moves the decimal (v1.0 -> v1.1); a feature moves the whole number (v1.1 -> v2.0).',
+  );
+}
 const productionUrl = process.env.PASSPORT_RELEASE_URL || 'https://midnightpassport.com';
 const gateSummary = process.env.PASSPORT_RELEASE_NOTES;
 
@@ -393,34 +428,36 @@ if ((already || existingRelease) && !dryRun) {
 
 const existingNames = [...refNames, ...releases.flatMap((r) => [r.tagName, r.name])];
 
-/* Under --dry-run on a build that is already released, the release "being
-   created" is the one that exists, so the body printed is the body THAT
-   release's delta comes to — which is the thing a dry run is asked for. Every
+/* Under --dry-run on a build that is already released UNDER THIS SCHEME, the
+   release "being created" is the one that exists, so the body printed is the
+   body THAT release's delta comes to — which is the thing a dry run is asked
+   for. A build released only under the legacy `v<N>` scheme carries no version
+   to reuse, so the dry run shows what the NEXT release would be instead. Every
    other run takes the next free number. */
-const alreadyReleasedNumber = dryRun
+const alreadyReleasedVersion = dryRun
   ? [existingRelease?.tag_name, existingRelease?.name, already?.tagName, already?.name]
-      .map((name) => releaseNumberOf(name))
-      .find((candidate) => candidate !== null) ?? null
+      .map((name) => releaseVersionOf(name))
+      .find((candidate) => candidate != null) ?? null
   : null;
-const number = alreadyReleasedNumber ?? nextReleaseNumber(existingNames);
-const tag = releaseTag(number);
+const version = alreadyReleasedVersion ?? nextReleaseVersion(existingNames, releaseKind);
+const tag = releaseTag(version);
 const date = releaseDate();
 
 /* The delta is against the release before this one. Its RELEASE-NOTES.md is
    read from its tag; a tag that was never fetched, or a release made before
    the file existed, leaves the previous set empty — every entry is then new,
    and the run says so rather than pretending it knows. */
-const previousNumber = previousReleaseNumber(existingNames, number);
+const previousTag = previousReleaseTag(existingNames, version);
 let previousNotes = null;
-if (previousNumber === null) {
+if (previousTag === null) {
   console.warn(
     `tag-release: no release before ${tag}, so every "## Fixed" entry counts as new.`,
   );
 } else {
-  previousNotes = notesAt(releaseTag(previousNumber));
+  previousNotes = notesAt(previousTag);
   if (previousNotes === null) {
     console.warn(
-      `tag-release: could not read RELEASE-NOTES.md at ${releaseTag(previousNumber)} ` +
+      `tag-release: could not read RELEASE-NOTES.md at ${previousTag} ` +
         '(the tag or the file is missing there), so every "## Fixed" entry counts as new. ' +
         '`git fetch --tags` may be all that is wanted.',
     );
@@ -452,7 +489,7 @@ const args = [
   commit,
   '--latest',
   '--title',
-  releaseTitle(number, date),
+  releaseTitle(version, date),
   '--notes',
   body,
 ];
@@ -461,17 +498,17 @@ if (dryRun) {
   const quoted = args
     .map((arg) => (/^[\w.:/@-]+$/.test(arg) ? arg : `'${arg.replaceAll("'", "'\\''")}'`))
     .join(' ');
-  if (alreadyReleasedNumber !== null) {
+  const against = previousTag === null ? 'no previous release' : previousTag;
+  if (alreadyReleasedVersion !== null) {
     console.log(
       `tag-release: --dry-run. Build ${buildId} is already released in ${releaseRepository} ` +
-        `as ${tag}; nothing would be created. Its body, against ` +
-        `${previousNumber === null ? 'no previous release' : releaseTag(previousNumber)}:`,
+        `as ${tag}; nothing would be created. Its body, against ${against}:`,
     );
   } else {
     console.log(
-      `tag-release: --dry-run, creating nothing. ${delta.length} new ` +
-        `${delta.length === 1 ? 'entry' : 'entries'} against ` +
-        `${previousNumber === null ? 'no previous release' : releaseTag(previousNumber)}; ` +
+      `tag-release: --dry-run, creating nothing. Would create tag ${tag}, titled ` +
+        `"${releaseTitle(version, date)}" (a ${releaseKind}). ${delta.length} new ` +
+        `${delta.length === 1 ? 'entry' : 'entries'} against ${against}; ` +
         `body is ${body.length} characters. Would run:\n\ngh ${quoted} ${zkBundleName}`,
     );
   }
@@ -491,6 +528,6 @@ if (created.status !== 0) {
   fail(`\`gh release create\` failed: ${(created.stderr || '').trim()}`);
 }
 console.log(
-  `tag-release: ${releaseRepository} released ${releaseTitle(number, date)} ` +
+  `tag-release: ${releaseRepository} released ${releaseTitle(version, date)} ` +
     `at ${commit.slice(0, 7)} (build ${buildId}).`,
 );
