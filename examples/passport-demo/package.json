@@ -11,22 +11,26 @@
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:e2e": "playwright test e2e/onboarding.spec.ts",
-    "test:e2e:live": "RUN_LIVE=1 playwright test e2e/stagenet.live.spec.ts",
+    "test:e2e:live": "RUN_LIVE=1 LIVE_URL=https://staging.midnightpassport.com playwright test e2e/stagenet.live.spec.ts",
+    "test:e2e:live:prod": "RUN_LIVE=1 LIVE_URL=https://midnightpassport.com playwright test e2e/stagenet.live.spec.ts",
     "test:pwa": "npm run build && npm run check:pwa",
     "dev": "npm run prepare:zk && vite",
     "preview": "vite preview --host localhost",
-    "build": "npm run prepare:zk && tsc --noEmit && vite build",
-    "vercel-build": "cd ../.. && npm run build:passport:remote"
+    "build": "npm run prepare:zk && tsc --noEmit && vite build"
   },
-  "//vercel-build": [
-    "The name Vercel looks for. A remote build runs with this directory as the",
-    "cwd, so this hands straight back to the repository root, where the real",
-    "sequence lives as `build:passport:remote` \u2014 every input it needs (the",
-    "lockfile, `demo-backend`, the balancer's contract build) is above here.",
+  "//test:e2e:live": [
+    "THE LIVE WALK POINTS AT STAGING BY DEFAULT (2026/09/15). It used to run",
+    "against https://midnightpassport.com \u2014 the spec's own LIVE_URL default \u2014",
+    "which put the one command anybody types to check a build on the link",
+    "stakeholders hold, and left a real account contract and a claimed .night",
+    "name on it each time. The delivery rule is that a build is walked on",
+    "staging and only promoted afterwards, so the default is the environment",
+    "the rule names.",
     "",
-    "`vercel.json` names it as `buildCommand` as well. That is redundant to",
-    "Vercel and deliberate for the reader: the build settings a deploy uses are",
-    "then all in one committed file rather than half of them in a dashboard."
+    "`test:e2e:live:prod` is the same walk against production, for confirming a",
+    "promotion after the fact. Both set LIVE_URL explicitly rather than relying",
+    "on the spec's default, so which site is being walked is visible in the",
+    "command."
   ],
   "dependencies": {
     "@fontsource/space-grotesk": "^5.2.10",
