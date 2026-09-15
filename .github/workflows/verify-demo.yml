@@ -216,16 +216,23 @@ jobs:
         run: npx vitest run
         working-directory: packages/connect
 
-      # `examples/passport-balancer` is NOT an npm workspace and carries its own
-      # `package-lock.json`, so the root install does not cover it. Its test
-      # bundles import `@midnight-ntwrk/wallet-sdk`, `@midnightntwrk/ledger-v9`,
-      # `@polkadot/api` and the rest for real at run time; they resolve against
-      # the hoisted root tree by accident today, and this makes them resolve
-      # against the lockfile that is actually checked in beside them.
-      - name: Install the balancer's own dependencies
-        run: npm ci
-        working-directory: examples/passport-balancer
-
+      # THE BALANCER RUNS OFF THE ROOT INSTALL, and that is a compromise rather
+      # than a design. It is not an npm workspace and carries its own
+      # `package-lock.json`, so installing that lockfile first would be the
+      # honest thing — except `npm ci` refuses it: `package.json` asks for
+      # `@midnight-ntwrk/compact-runtime@0.19.0-rc.0` and the lock beside it
+      # records `0.19.0`, which is a lockfile that has drifted from the manifest
+      # it describes (first run of this job, 2026/09/15). Regenerating it is not
+      # this change's business — locks here are rebuilt from the previous lock
+      # and the resolutions diffed, never recreated.
+      #
+      # Everything its test bundles import at run time — `wallet-sdk`,
+      # `ledger-v9`, `@polkadot/api`, `zkir-v2`, `rxjs`, `ws` — is hoisted to
+      # the root tree by the install above, and `esbuild` with them, so the
+      # suite runs. Note that the hoisted `compact-runtime` is 0.16.0, not the
+      # 0.19.0-rc.0 this package asks for; the tests pass against it, and
+      # whoever repairs the lockfile should put `npm ci` back here in the same
+      # change.
       - name: Balancer tests
         run: npm test
         working-directory: examples/passport-balancer

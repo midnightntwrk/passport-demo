@@ -172,7 +172,12 @@ jobs:
           RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
         run: |
           set -euo pipefail
-          git fetch --no-tags --quiet origin main
+          # Written as a full refspec rather than `git fetch origin main`, which
+          # relies on whatever `remote.origin.fetch` the checkout left behind.
+          # Every line below resolves `origin/main`, and the checkout is now
+          # detached at a tag when a release is named, so this makes the
+          # remote-tracking ref exist because this command created it.
+          git fetch --no-tags --quiet origin +refs/heads/main:refs/remotes/origin/main
 
           if [ -n "${RELEASE_TAG}" ]; then
             git fetch --quiet origin "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}" || true
