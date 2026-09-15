@@ -1420,6 +1420,16 @@ describe('nameLegStepCount', () => {
     expect(nameLegStepCount({ asset: 'shielded', held: null, amount: 40n })).toBe(2);
     expect(nameLegStepCount({ asset: 'shielded', held: 100n, amount: null })).toBe(2);
   });
+
+  it('treats a host that answered null like one that said nothing, and a plan that refuses as two', () => {
+    /* `null` is the host's "I could not read the contract", which is not an
+       answer and must not shadow the plan the picker can make on its own. */
+    expect(nameLegStepCount({ asset: 'shielded', hostSteps: null, held: 100n, amount: 40n })).toBe(3);
+    /* A plan the picker cannot make — more than is held — is not a step count;
+       the sheet says two, the same as knowing nothing, and the send itself is
+       what refuses. */
+    expect(nameLegStepCount({ asset: 'shielded', held: 10n, amount: 40n })).toBe(2);
+  });
 });
 
 /* -------------------------------------------------------------------------- */
