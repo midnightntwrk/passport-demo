@@ -410,6 +410,24 @@ includes(
   'fetchFunc: buildIdFetch(globalThis.fetch.bind(globalThis))',
   'every ZK artefact request carries the build id',
 );
+/* `/zk-params/**` is the OTHER half of the 144 MB, and it was left out of the
+   2026/09/14 fix. It is served the same year-long `immutable` and carries no
+   content hash either, so the same stale-file exposure applied to the wallet's
+   own balancing keys — where it surfaces not as a named error but as a proof
+   that cannot be built. The build id is asserted from this end because these
+   urls are composed in one place by hand, rather than by a provider that can
+   have a `fetchFunc` put in front of it. */
+const wasmProverSource = await text(path.join(root, 'src/lib/wasmProver.ts'));
+includes(
+  wasmProverSource,
+  'const url = withBuildId(path);',
+  'every proving-parameter request carries the build id',
+);
+includes(
+  wasmProverSource,
+  'AbortSignal.timeout(ZK_PARAM_TIMEOUT_MS)',
+  'a proving-parameter download that never answers is abandoned rather than awaited for ever',
+);
 
 const assetNames = (await readdir(path.join(distDir, 'assets'))).filter((name) => name.endsWith('.js'));
 const builtJavascript = (

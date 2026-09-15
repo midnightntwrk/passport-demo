@@ -44,6 +44,8 @@
 import { CostModel } from '@midnightntwrk/ledger-v9';
 import { ZKConfigRegistry, zkConfigToProvingKeyMaterial } from '@midnight-ntwrk/midnight-js-types';
 
+import { withBuildId } from './buildId.js';
+
 interface ZkConfigProviderLike {
   get(keyLocation: string): Promise<unknown>;
 }
@@ -99,21 +101,86 @@ function proveEnded(): void {
 
 const cache = new Map<string, unknown>();
 
+/**
+ * What the reader is told when a proving file did not come down.
+ *
+ * It is DELIBERATELY not the "run scripts/fetch-zk-params.mjs …" sentence
+ * below. That one is advice for a developer about a machine that is not the
+ * reader's, and it was reaching people's screens for what is nearly always a
+ * dropped connection or a phone that went to sleep mid-download — the same
+ * conflation `immutableAsset` in `public/sw.js` was corrected for on
+ * 2026/09/05. The staging sentence now belongs to the one case it is true of,
+ * which is a server ANSWERING and answering with the wrong thing; a request
+ * that never got an answer gets this instead, and it names the one thing the
+ * reader can actually do about it.
+ */
+export const ZK_PARAMS_UNREACHABLE_MESSAGE =
+  'The proving files could not be downloaded. Check your connection and try again.';
+
+/**
+ * How long one attempt at a proving file may take before it is abandoned.
+ *
+ * These are the largest files this origin serves — `/zk-params` is 45 MB and a
+ * first shielded send pulls a good share of it — so the bound has to cover a
+ * slow mobile connection rather than a laptop's. What it is FOR is the request
+ * that never ends at all: a captive portal that accepts the socket and answers
+ * nothing, or a radio handover that leaves a body half-read. Without it the
+ * prover waited for ever, which on the send screen is a spinner with no end
+ * and no sentence — the failure this whole module's idle bounds exist to
+ * prevent, arriving one layer lower down.
+ */
+const ZK_PARAM_TIMEOUT_MS = 120_000;
+
 async function fetchBytes(path: string, what: string): Promise<Uint8Array> {
-  const resp = await fetch(path);
-  // A 404 is only one of the two ways these files can be absent. Vite's dev
-  // server answers an unknown path with the SPA fallback — `index.html`, HTTP
-  // 200, `Content-Type: text/html` (verified against this app's dev server on
-  // 2026/08/05) — so `resp.ok` alone would hand the prover a page of HTML and
-  // produce a baffling wasm error instead of "stage your parameters". Anything
-  // that is HTML is treated as missing.
-  const contentType = resp.headers.get('content-type') ?? '';
-  if (!resp.ok || contentType.includes('text/html')) {
-    throw new Error(
-      `missing ${what} (${path}) — run scripts/fetch-zk-params.mjs to stage examples/passport-demo/public/zk-params`,
-    );
+  /* THE BUILD ID BELONGS HERE TOO (2026/09/14). `/zk-params/**` is served
+     `public, max-age=31536000, immutable` and carries no content hash in its
+     path — the identical shape that let a browser keep a year-old
+     `contract-manifest.json` and refuse the running build's keys against it.
+     The contract artefacts were fixed that day (`buildIdFetch` in
+     `../identity/contractRuntime.ts`); these were fetched with a bare `fetch`
+     and were left carrying the same exposure. A new release now asks for
+     `?b=<build id>`, an address no cache on the path — the browser's, the
+     service worker's, or the CDN's — has ever answered. See `./buildId.ts`. */
+  const url = withBuildId(path);
+  let unreachable: unknown;
+  /* One retry, and only one. A dropped connection is overwhelmingly the
+     transient kind that a second attempt fixes; a third would only add two
+     more minutes to a wait the reader is already staring at, and the answer
+     after it would be the same sentence. */
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    let resp: Response;
+    try {
+      resp = await fetch(url, { signal: AbortSignal.timeout(ZK_PARAM_TIMEOUT_MS) });
+    } catch (cause) {
+      unreachable = cause;
+      continue;
+    }
+    // A 404 is only one of the two ways these files can be absent. Vite's dev
+    // server answers an unknown path with the SPA fallback — `index.html`, HTTP
+    // 200, `Content-Type: text/html` (verified against this app's dev server on
+    // 2026/08/05) — so `resp.ok` alone would hand the prover a page of HTML and
+    // produce a baffling wasm error instead of "stage your parameters". Anything
+    // that is HTML is treated as missing.
+    //
+    // This is the ANSWERED case, so it is not retried: a server that has said
+    // 404 twice has not changed its mind, and staging a tree is not something
+    // waiting achieves.
+    const contentType = resp.headers.get('content-type') ?? '';
+    if (!resp.ok || contentType.includes('text/html')) {
+      throw new Error(
+        `missing ${what} (${path}) — run scripts/fetch-zk-params.mjs to stage examples/passport-demo/public/zk-params`,
+      );
+    }
+    try {
+      return new Uint8Array(await resp.arrayBuffer());
+    } catch (cause) {
+      // The headers arrived and the body did not finish. Same class of fault
+      // as a socket that never opened, so it takes the same retry.
+      unreachable = cause;
+    }
   }
-  return new Uint8Array(await resp.arrayBuffer());
+  console.warn(`[wasm-prover] ${what} (${url}) could not be downloaded`, unreachable);
+  throw new Error(ZK_PARAMS_UNREACHABLE_MESSAGE);
 }
 
 async function getParams(k: number): Promise<Uint8Array> {
