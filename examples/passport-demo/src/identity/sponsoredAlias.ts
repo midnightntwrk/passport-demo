@@ -249,6 +249,15 @@ const PROBE_DATING_CODES = new Set([...SPONSOR_BUSY_CODES, 'rate-limited']);
  *     service can report, and it is the one refusal that is genuinely ABOUT
  *     what the reader typed — so it says so plainly, names no machinery, and
  *     does not promise a queue that would never drain.
+ *   - This Passport already has a name. `already-sponsored`, and since
+ *     2026/09/15 it has its own sentence. It used to fall through to the last
+ *     branch, so a person who had just been told — wrongly — that their own
+ *     name was taken, and had typed a second one, was told that THAT name "was
+ *     not registered, and your name is kept for you". Neither half was true:
+ *     nothing was queued, because a Passport that holds a name will be refused
+ *     the next one for ever, and the name being kept was the one they had been
+ *     sent away from. The sentence now says which name they have and why there
+ *     is only one, which is the only reading that leaves them somewhere to go.
  *   - Anything else. The registration did not happen and the name is kept.
  *     Said in that order, without a party named, because at this point the
  *     honest answer is that we do not know which one is at fault.
@@ -274,9 +283,21 @@ export function aliasRefusalMessage(refusal: {
   domain: string;
   detail: string | null;
   retryAfterMs: number | null;
+  /**
+   * The name this Passport already holds, which the service sends beside an
+   * `already-sponsored` refusal. `null` where the refusal named none — an older
+   * service, or any other code — and the sentence then falls through rather
+   * than referring to a name nobody was told.
+   */
+  heldAlias?: string | null;
 }): string {
   if (refusal.code === 'name-taken') {
     return `${refusal.domain} has already been taken — choose another name.`;
+  }
+  if (refusal.code === 'already-sponsored' && refusal.heldAlias) {
+    /* The name they HAVE, not the one they just asked for. A person reaching
+       this has been told about the wrong name once already. */
+    return `This Passport already has a name, ${aliasDomain(refusal.heldAlias)} — each Passport holds one.`;
   }
   /* BEFORE the busy branches, and it has to be: the per-caller half of this
      refusal carries a `retryAfterMs`, which the next condition reads as the
@@ -293,6 +314,65 @@ export function aliasRefusalMessage(refusal: {
     return SPONSOR_BUSY_SENTENCE;
   }
   return `${refusal.domain} was not registered, and your name is kept for you.`;
+}
+
+/**
+ * What the registry says about a name the service has just called TAKEN.
+ *
+ * WHY THE QUESTION IS ASKED AT ALL (staging, 2026/09/15)
+ * -----------------------------------------------------
+ * A Passport asked for `stagehbtest` at 17:12:00. The service registered it and
+ * confirmed it on chain at 17:12:50. The answer never arrived — a reload, a
+ * dropped socket; the browser cannot know which and it does not matter. At
+ * 17:12:51 the same Passport asked again, was told `name-taken`, and the person
+ * read "stagehbtest.night has already been taken — choose another name" about a
+ * name that was, by then, their own.
+ *
+ * `sponsorAliasRegistrationAcross` has always named this as the ONE window its
+ * ordering rule leaves open: "the primary registered the name and its answer
+ * was lost coming back. That surfaces as `name-taken`." The window is not
+ * closeable — a lost answer is lost — so what has to change is what the client
+ * does when it comes back through it. The registry is public and the account
+ * address is in hand: the app can simply go and look at who holds the name
+ * before it tells somebody they cannot have it.
+ *
+ * THE ONE THING THIS MUST NOT DO
+ * ------------------------------
+ * Claim a name off a read that did not happen. This function is given the
+ * registry's ANSWER, or `null` where there was none; a read that threw or timed
+ * out never reaches it, and its caller keeps the refusal it already had. "We
+ * could not ask" and "it is yours" are the two answers a chain read must never
+ * blur, and blurring them here would hand somebody a name that is not theirs.
+ */
+export type NameTakenReading =
+  /** The name is in the registry, pointing at THIS Passport's own account. */
+  | { kind: 'ours'; resolverAddress: string; resolverTargetHex: string }
+  /** Somebody else's, something other than an account, or nothing at all. */
+  | { kind: 'theirs' };
+
+/**
+ * A `name-taken` refusal read against the registry: a name that resolves to
+ * this account is a registration, not a refusal.
+ *
+ * A name pointing at a bare wallet address or a shielded key is `theirs` rather
+ * than an error, for the reason `lib/nameRecovery.ts` gives: Passport binds
+ * names to account-custody contracts, so such a name is somebody else's
+ * arrangement whatever the registry says about it.
+ */
+export function readNameTaken(
+  resolved: { resolverAddress: string; target: { kind: string; hex: string } } | null,
+  contractAddress: string,
+): NameTakenReading {
+  if (!resolved) return { kind: 'theirs' };
+  if (resolved.target.kind !== 'contract') return { kind: 'theirs' };
+  if (resolved.target.hex.toLowerCase() !== contractAddress.toLowerCase()) {
+    return { kind: 'theirs' };
+  }
+  return {
+    kind: 'ours',
+    resolverAddress: resolved.resolverAddress,
+    resolverTargetHex: resolved.target.hex,
+  };
 }
 
 /** Codes after which the name must NOT be re-attempted — see `selfPayWorthTrying`. */
@@ -557,6 +637,10 @@ export async function sponsorAliasRegistration(
          classify the refusal and never rendered; see `aliasRefusalMessage`. */
       detail?: unknown;
       retryAfterMs?: unknown;
+      /* Sent beside `already-sponsored`: the name this Passport already holds,
+         and the transaction that registered it. The name is the whole of the
+         sentence the reader gets — see `aliasRefusalMessage`. */
+      alias?: unknown;
     };
     const code = typeof refusal.error === 'string' ? refusal.error : 'unreachable';
     const serviceMessage =
@@ -581,6 +665,7 @@ export async function sponsorAliasRegistration(
         domain: aliasDomain(request.alias),
         detail: typeof refusal.detail === 'string' ? refusal.detail : null,
         retryAfterMs,
+        heldAlias: typeof refusal.alias === 'string' ? refusal.alias : null,
       }),
       !NO_FALLBACK_CODES.has(code),
       serviceMessage,
@@ -649,6 +734,10 @@ export async function sponsorAliasRegistration(
     resolverTargetHex: request.contractAddress,
     claimedAt: success.registeredAt,
     registryConfirmed,
+    /* The service answering a repeated ask for the name it has already
+       registered for this Passport. Its transaction ids may be empty on such an
+       answer — see `AliasClaimResult.alreadyRegistered`. */
+    alreadyRegistered: (success as { alreadyRegistered?: unknown }).alreadyRegistered === true,
   };
 }
 

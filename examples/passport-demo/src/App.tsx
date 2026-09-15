@@ -184,6 +184,9 @@ import type {
   AliasClaimResult,
   MidnamesNetwork,
 } from './identity/midnames.js';
+/* Type-only, so the sponsor client stays behind the dynamic import the claim
+   already makes. See the `name-taken` branch in `runClaimBoundToAccount`. */
+import type { NameTakenReading } from './identity/sponsoredAlias.js';
 import { createClaimWarmup } from './identity/claimWarmup.js';
 import {
   forgetPassportContractRecordsForCredential,
@@ -1044,6 +1047,44 @@ function explorerTxLink(
  * whole wallet SDK into its own chunk for one string join.
  */
 const aliasDomainOf = (alias: string) => `${alias}.night`;
+
+/**
+ * Whether a landed claim was FOUND rather than watched — see
+ * `AliasClaimResult.alreadyRegistered`, and the 2026/09/15 staging run behind
+ * it. Such an answer carries no transaction ids, because this browser saw no
+ * transaction, and the record must say so instead of claiming ids it has not
+ * got: `identity/aliasStore.ts` refuses a registered record with neither, and
+ * it is right to.
+ */
+const claimWasRecovered = (result: AliasClaimResult): boolean => result.registerTxId === '';
+
+/**
+ * How long the claim will wait to find out WHO holds a name it has just been
+ * told is taken. Past it the refusal stands: the answer is an improvement on a
+ * refusal, not a reason to hold somebody on a spinner for it.
+ */
+const NAME_TAKEN_READ_MS = 12_000;
+
+/**
+ * The activity line a landed claim writes, in the two readings it can have.
+ *
+ * A name that was already this Passport's is not news of a registration — it is
+ * news that the one the person thought had failed had in fact worked. Told in
+ * those words, because the alternative is a feed that says a name was
+ * registered at a moment when nothing was.
+ */
+const claimActivityLine = (
+  result: AliasClaimResult,
+): { label: string; detail: string } =>
+  result.alreadyRegistered
+    ? {
+        label: 'Your name was already yours',
+        detail: `${result.domain} was found already registered to this Passport on ${result.network}. Anyone can send to the name.`,
+      }
+    : {
+        label: 'Your name is registered',
+        detail: `${result.domain} now points at your Passport account on ${result.network}. Anyone can send to the name.`,
+      };
 
 /* -------------------------------------------------------------------------- */
 /* Demo-grade session persistence — a §2.2 stopgap, NOT a security boundary   */
@@ -4428,7 +4469,7 @@ export default function PassportDemo() {
         { AliasClaimError, deriveMidnamesOwnerKey },
         { submitPassportContract },
         { deriveWalletSeed },
-        { AliasSponsorRefusal, sponsorAliasRegistrationAcross },
+        { AliasSponsorRefusal, readNameTaken, sponsorAliasRegistrationAcross },
       ] = await Promise.all([
         import('./identity/midnames.js'),
         import('./identity/passportContract.js'),
@@ -4857,29 +4898,98 @@ export default function PassportDemo() {
             if (accountDeployFailure !== null) throw accountDeployFailure;
             if (!(cause instanceof AliasSponsorRefusal)) throw cause;
             if (cause.code === 'name-taken') {
-              throw new AliasClaimError('taken', cause.message);
+              /* TAKEN BY WHOM (staging, 2026/09/15). A Passport whose first
+                 answer was lost asks again with the same name and is told the
+                 name is taken — by itself. The registry is public and this
+                 account's address is in hand, so the app goes and looks before
+                 it sends anybody away from their own name. `readNameTaken` is
+                 the rule; this is the one read it needs.
+
+                 A read that throws or times out falls straight through to the
+                 refusal below, unchanged. "We could not ask" is never allowed
+                 to become "it is yours". */
+              let mine: NameTakenReading = { kind: 'theirs' };
+              let tldAddress = '';
+              try {
+                const { MIDNAMES_TLD_ADDRESSES, resolveAliasTarget } = await import(
+                  './identity/midnames.js'
+                );
+                tldAddress = MIDNAMES_TLD_ADDRESSES[registryNetwork];
+                /* BOUNDED. Somebody is watching a screen that has already
+                   waited out a whole registration, and this read is the app
+                   second-guessing a refusal it is holding. A read that has not
+                   answered by then loses its vote rather than the reader's
+                   evening — the rejection lands in the `catch` below and the
+                   refusal stands. */
+                mine = readNameTaken(
+                  await Promise.race([
+                    resolveAliasTarget(registryNetwork, alias),
+                    new Promise<never>((_resolve, reject) => {
+                      setTimeout(
+                        () => reject(new Error('the name could not be looked up in time')),
+                        NAME_TAKEN_READ_MS,
+                      );
+                    }),
+                  ]),
+                  contractAddress,
+                );
+              } catch {
+                mine = { kind: 'theirs' };
+              }
+              if (mine.kind === 'theirs') {
+                throw new AliasClaimError('taken', cause.message);
+              }
+              /* It is this Passport's. The claim is therefore DONE, and it
+                 finishes exactly as a claim the service answered does: the
+                 grant is released, the opening balance is asked for, the
+                 account is noted on the passkey, and the caller writes the
+                 record and lands the person on Home. No transaction ids,
+                 because this browser watched no transaction — the record says
+                 so rather than inventing them. */
+              claimed = {
+                alias,
+                domain: `${alias}.night`,
+                network: registryNetwork,
+                tldAddress,
+                resolverAddress: mine.resolverAddress,
+                resolverDeployTxId: '',
+                registerTxId: '',
+                targetUnshieldedAddress: '',
+                resolverTarget: 'contract',
+                resolverTargetHex: mine.resolverTargetHex,
+                claimedAt: new Date().toISOString(),
+                /* The registry was just read, saying this name resolves to this
+                   account. That IS the confirmation. */
+                registryConfirmed: true,
+                alreadyRegistered: true,
+              };
             }
-            if (!cause.selfPayWorthTrying) {
-              /* `registration-in-flight` or `confirmation-failed`: something
-                 for this name or this Passport may already be on chain, and a
-                 self-paid attempt on top of it could register twice. Stop with
-                 the funder's own sentence. */
-              throw new AliasClaimError('register-rejected', cause.message);
+            /* Every remaining refusal is a refusal. The name-taken branch above
+               is the only one that can leave a claim in hand. */
+            if (!claimed) {
+              if (!cause.selfPayWorthTrying) {
+                /* `registration-in-flight` or `confirmation-failed`: something
+                   for this name or this Passport may already be on chain, and a
+                   self-paid attempt on top of it could register twice. Stop
+                   with the funder's own sentence. */
+                throw new AliasClaimError('register-rejected', cause.message);
+              }
+              /* The wallet never pays for a name. Under the account model the
+                 only transaction the wallet originates is the account deploy;
+                 a registration the sponsor will not carry right now is kept
+                 and retried, never bought from the wallet (ruled 2026/08/25). */
+              throw new AliasClaimError(
+                'register-rejected',
+                /* The service's own sentence, and nothing added to it. What
+                   used to be appended here said the name was kept for a second
+                   time in a row — `aliasRefusalMessage` had already said it —
+                   and volunteered that Passport does not spend from the
+                   account, which the foot of the claim screen says on every
+                   state of it. The card is a heading, one sentence, and two
+                   controls. */
+                cause.message,
+              );
             }
-            /* The wallet never pays for a name. Under the account model the
-               only transaction the wallet originates is the account deploy;
-               a registration the sponsor will not carry right now is kept
-               and retried, never bought from the wallet (ruled 2026/08/25). */
-            throw new AliasClaimError(
-              'register-rejected',
-              /* The service's own sentence, and nothing added to it. What used
-                 to be appended here said the name was kept for a second time
-                 in a row — `aliasRefusalMessage` had already said it — and
-                 volunteered that Passport does not spend from the account,
-                 which the foot of the claim screen says on every state of it.
-                 The card is a heading, one sentence, and two controls. */
-              cause.message,
-            );
           } finally {
             /* The schedule is over, whichever way it went. Both are cleared
                here rather than at each exit so a "Retrying in 40 s" line can
@@ -4999,14 +5109,16 @@ export default function PassportDemo() {
           resolverAddress: result.resolverAddress,
           resolverDeployTxId: result.resolverDeployTxId,
           registerTxId: result.registerTxId,
+          /* A registration this browser FOUND rather than watched has no ids to
+             carry, and says so — see `claimWasRecovered`. */
+          recovered: claimWasRecovered(result),
           registryConfirmed: result.registryConfirmed,
           resolverTarget: result.resolverTarget,
           resolverTargetHex: result.resolverTargetHex,
           updatedAt: result.claimedAt,
         });
         addActivity({
-          label: 'Your name is registered',
-          detail: `${result.domain} now points at your Passport account on ${result.network}. Anyone can send to the name.`,
+          ...claimActivityLine(result),
           status: 'complete',
           source: 'chain',
           txHash: result.registerTxId,
@@ -5201,14 +5313,15 @@ export default function PassportDemo() {
         resolverAddress: result.resolverAddress,
         resolverDeployTxId: result.resolverDeployTxId,
         registerTxId: result.registerTxId,
+        /* Same honesty as the onboarding claim's record above. */
+        recovered: claimWasRecovered(result),
         registryConfirmed: result.registryConfirmed,
         resolverTarget: result.resolverTarget,
         resolverTargetHex: result.resolverTargetHex,
         updatedAt: result.claimedAt,
       });
       addActivity({
-        label: 'Your name is registered',
-        detail: `${result.domain} now points at your Passport account on ${result.network}. Anyone can send to the name.`,
+        ...claimActivityLine(result),
         status: 'complete',
         source: 'chain',
         txHash: result.registerTxId,
