@@ -29,12 +29,12 @@ TypeScript from the root `node_modules` by ordinary upward resolution rather
 than installing its own copies. Its `package.json` lists them so the versions
 it was written against are on the record.
 
-It comes up on `http://localhost:5180`, deliberately a different origin from
-the Passport shell on `http://localhost:5173`. Point it elsewhere with a
+It comes up on `http://localhost:5184`, deliberately a different origin from
+the Passport shell on `http://localhost:5175`. Point it elsewhere with a
 `.env.local`:
 
 ```
-VITE_PASSPORT_ORIGIN=http://localhost:5173
+VITE_PASSPORT_ORIGIN=http://localhost:5175
 VITE_DOORMAN_ACCOUNT=…
 ```
 
@@ -56,7 +56,7 @@ link that is already there.
 
 | Script | What it does |
 | --- | --- |
-| `npm run dev` | Serves Doorman on `localhost:5180`. |
+| `npm run dev` | Serves Doorman on `localhost:5184`. |
 | `npm run typecheck` | `tsc --noEmit` over `src/`. |
 
 There is no build script. Doorman is a reference, not a deliverable.

@@ -36,13 +36,21 @@ silently.
 | `examples/passport-profile-client/` | The original separate-origin consent client, "Atlas". Superseded in the grid by the raffle. | 5176 |
 | `examples/passport-app-hub/` | Public listing site for apps that integrate the bridge. | 5179 |
 | `examples/passport-docs/` | The documentation site. | 5180 |
+| `examples/doorman/` | The reference integration for `packages/connect/`: detect Passport, ask who is at the door, ask for one payment. Written up in [`docs/demo/integrating.md`](docs/demo/integrating.md). | 5184 |
+| `examples/passport-poll/` | Example dApp where identity is the whole product: one vote per Passport account, tallied by a small service beside it. The votes are not on chain, and the app says so. | 5182, and 5183 for the tally service |
+| `examples/passport-swap/` | Example dApp: a swap desk on its own origin, selling one fixed lot of the demo stablecoin for a fixed price in NIGHT that Passport approves. | 5185 |
+| `examples/passport-bench/` | A load bench for the sponsored onboarding path: N virtual Passports, each deploying an account-custody contract and calling `add_grant`, measured against live stagenet. Node scripts, no server. | — |
 | `experiments/` | Cryptographic and feasibility experiments, including the account-custody contract source. Not production dependencies. | — |
 | `docs/`, `research/`, `site/` | The plan, the research behind it, and the published artefacts. | — |
 
-The demo runs against **Preview**. Mainnet is hard-blocked in code, and preprod
-is reachable but unusable in a browser: a cold wallet cannot walk its ~1.98M
-blocks without exhausting the tab's heap, so a depth guard refuses the attempt
-rather than starting it.
+The demo runs against **stagenet**, and stagenet is the only network this build
+can transact on (`examples/passport-demo/src/lib/networks.ts`:
+`TRANSACTABLE_NETWORKS` has one entry). Mainnet is hard-blocked in code.
+Preview and Pre-production are still *known* — records already stored against
+them render, and their explorer links still resolve — but this build cannot
+open an account on either: it runs the ledger-9 protocol and they run ledger-8,
+which a single WASM ledger module cannot do both of. Until 2026/08/24 the demo
+ran against Preview, and the documents written before that date say so.
 
 ## Real, mocked, and untested
 
