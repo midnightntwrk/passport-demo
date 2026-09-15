@@ -34,6 +34,7 @@ import {
   checkAliasSponsorship,
   checkAliasSponsorshipAcross,
   invalidateSponsorshipProbe,
+  readNameTaken,
   sponsorAliasRegistration,
   sponsorAliasRegistrationAcross,
 } from './sponsoredAlias.js';
@@ -714,6 +715,48 @@ describe('aliasRefusalMessage', () => {
     expect(taken).not.toMatch(/kept/i);
   });
 
+  it('names the name a Passport ALREADY has rather than the one it just asked for', () => {
+    /* THE SECOND HALF OF THE 2026/09/15 STAGING DEFECT. A Passport was wrongly
+       told `stagehbtest.night` was taken — it was theirs — so the person typed
+       `stagehbtest2`. That name was genuinely free, the field said so, and the
+       service refused it `already-sponsored` because the Passport already held
+       the first one. The sentence they got was the fall-through: "stagehbtest2
+       .night was not registered, and your name is kept for you", which queues
+       nothing (a Passport with a name is refused the next one for ever) and
+       points at the wrong name twice over.
+
+       What they needed was the name they HAVE. The service sends it beside the
+       code, so the sentence can say it. */
+    expect(
+      aliasRefusalMessage({
+        ...base,
+        code: 'already-sponsored',
+        domain: 'stagehbtest2.night',
+        heldAlias: 'stagehbtest',
+      }),
+    ).toBe('This Passport already has a name, stagehbtest.night — each Passport holds one.');
+  });
+
+  it('falls through rather than referring to a name it was not told', () => {
+    /* An older service, or any refusal that names none. A sentence with a hole
+       in it is worse than the honest non-answer. */
+    expect(aliasRefusalMessage({ ...base, code: 'already-sponsored' })).toBe(KEPT);
+    expect(aliasRefusalMessage({ ...base, code: 'already-sponsored', heldAlias: null })).toBe(KEPT);
+  });
+
+  it('keeps the house rules on the new sentence too', () => {
+    const held = aliasRefusalMessage({
+      ...base,
+      code: 'already-sponsored',
+      heldAlias: 'stagehbtest',
+    });
+    expect(held).not.toMatch(/registry|resolver|indexer|contract|wallet|DUST|ledger|tx\b/i);
+    expect(held).not.toMatch(/rate.?limit|ceiling|quota|429|balancer|sponsor\w*ed\b/i);
+    /* One sentence, one terminal stop — `.night` is not one. */
+    expect(held).toMatch(/\.$/);
+    expect(held.match(/\.(?=\s|$)/g) ?? []).toHaveLength(1);
+  });
+
   it('says the honest non-answer when it cannot tell which party failed', () => {
     expect(aliasRefusalMessage(base)).toBe(KEPT);
     expect(aliasRefusalMessage({ ...base, code: 'confirmation-failed' })).toBe(KEPT);
@@ -951,5 +994,145 @@ describe('sponsorAliasRegistrationAcross', () => {
       code: 'unreachable',
     });
     expect(spy).not.toHaveBeenCalled();
+  });
+});
+
+describe('a name the service calls TAKEN, read against the registry', () => {
+  /**
+   * THE WINDOW THIS CLOSES (staging, 2026/09/15, UTC). 17:12:00 `stagehbtest`
+   * asked for. 17:12:50 registered and confirmed on chain against this very
+   * account. 17:12:51 the same account asks again — the first answer was lost
+   * coming back — and is refused `name-taken`, which the app showed as
+   * "stagehbtest.night has already been taken — choose another name" for a name
+   * that was theirs.
+   *
+   * `sponsorAliasRegistrationAcross` has always named this as the one window
+   * its ordering rule leaves open. It cannot be closed on the way out, so it is
+   * closed on the way back: the registry is public, the account address is in
+   * hand, and the app looks before it sends anybody away.
+   */
+  it('is this Passport’s when the name resolves to this account', () => {
+    expect(
+      readNameTaken({ resolverAddress: RESOLVER, target: { kind: 'contract', hex: ACCOUNT } }, ACCOUNT),
+    ).toEqual({ kind: 'ours', resolverAddress: RESOLVER, resolverTargetHex: ACCOUNT });
+  });
+
+  it('matches however either side is cased', () => {
+    expect(
+      readNameTaken(
+        { resolverAddress: RESOLVER, target: { kind: 'contract', hex: ACCOUNT.toUpperCase() } },
+        ACCOUNT,
+      ).kind,
+    ).toBe('ours');
+  });
+
+  it('is somebody else’s when the name resolves to another account', () => {
+    expect(
+      readNameTaken(
+        { resolverAddress: RESOLVER, target: { kind: 'contract', hex: 'cc'.repeat(32) } },
+        ACCOUNT,
+      ),
+    ).toEqual({ kind: 'theirs' });
+  });
+
+  it('is somebody else’s when the name points at anything but an account', () => {
+    /* A name bound to a bare address or a shielded key is another
+       arrangement entirely, and there is nothing here this app could open. */
+    for (const kind of ['wallet', 'shielded']) {
+      expect(
+        readNameTaken({ resolverAddress: RESOLVER, target: { kind, hex: ACCOUNT } }, ACCOUNT),
+      ).toEqual({ kind: 'theirs' });
+    }
+  });
+
+  it('is somebody else’s when the registry has no such name', () => {
+    /* `null` is the registry ANSWERING. A read that could not be made never
+       arrives here at all — its caller keeps the refusal it already had — so
+       there is no path from a failed read to a name being claimed. */
+    expect(readNameTaken(null, ACCOUNT)).toEqual({ kind: 'theirs' });
+  });
+});
+
+describe('a service that answers a repeat ask as already done', () => {
+  it('carries the already-registered flag through to the claim', async () => {
+    /* The sponsor half of the same 2026/09/15 fix: gate 3 reads WHO holds the
+       taken name, finds this very account, and answers success rather than
+       `name-taken`. The ids are the ones from the registration that really
+       happened. */
+    resolveAliasTarget.mockResolvedValue({
+      resolverAddress: RESOLVER,
+      target: { kind: 'contract', hex: ACCOUNT },
+    });
+    installFetch(async () => json(registeredBody({ alreadyRegistered: true })));
+    const claimed = await sponsorAliasRegistration(FUNDER, request);
+    expect(claimed).toMatchObject({
+      alreadyRegistered: true,
+      registryConfirmed: true,
+      registerTxId: 'bb'.repeat(32),
+    });
+  });
+
+  it('answers with EMPTY ids where the service registered the name but kept no record', () => {
+    /* A registration the service found in the registry rather than in its own
+       ledger. Empty is the honest answer, and the app reads it as a claim it
+       must not say it witnessed. */
+    resolveAliasTarget.mockResolvedValue({
+      resolverAddress: RESOLVER,
+      target: { kind: 'contract', hex: ACCOUNT },
+    });
+    installFetch(async () =>
+      json(registeredBody({ alreadyRegistered: true, registerTx: '', resolverDeployTx: '' })),
+    );
+    return expect(sponsorAliasRegistration(FUNDER, request)).resolves.toMatchObject({
+      alreadyRegistered: true,
+      registerTxId: '',
+      resolverDeployTxId: '',
+    });
+  });
+
+  it('is plain false on an ordinary registration, and on a service that says nothing', async () => {
+    resolveAliasTarget.mockResolvedValue(null);
+    installFetch(async () => json(registeredBody()));
+    expect((await sponsorAliasRegistration(FUNDER, request)).alreadyRegistered).toBe(false);
+  });
+});
+
+describe('an already-sponsored refusal', () => {
+  it('reaches the reader naming the name this Passport actually holds', async () => {
+    /* The body the balancer really sends: the code, its own operator sentence,
+       and `{ alias, registerTx }` beside them. */
+    installFetch(async () =>
+      json(
+        {
+          error: 'already-sponsored',
+          message:
+            'This Passport already had stagehbtest.night sponsored on 2026-09-15T17:12:50.000Z (tx bb…). One sponsored name per Passport.',
+          alias: 'stagehbtest',
+          registerTx: 'bb'.repeat(32),
+        },
+        409,
+      ),
+    );
+    await expect(
+      sponsorAliasRegistration(FUNDER, { ...request, alias: 'stagehbtest2' }),
+    ).rejects.toMatchObject({
+      code: 'already-sponsored',
+      message: 'This Passport already has a name, stagehbtest.night — each Passport holds one.',
+    });
+  });
+
+  it('keeps the operator’s own words off the screen and in serviceMessage', async () => {
+    installFetch(async () =>
+      json({ error: 'already-sponsored', message: 'One sponsored name per Passport.', alias: 'stagehbtest' }, 409),
+    );
+    const refusal = await sponsorAliasRegistration(FUNDER, {
+      ...request,
+      alias: 'stagehbtest2',
+    }).then(
+      () => null,
+      (cause: unknown) => cause as AliasSponsorRefusal,
+    );
+    expect(refusal?.serviceMessage).toBe('One sponsored name per Passport.');
+    expect(refusal?.message).not.toMatch(/sponsored/i);
   });
 });

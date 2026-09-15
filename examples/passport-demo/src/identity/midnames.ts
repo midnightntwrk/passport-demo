@@ -486,5 +486,19 @@ export interface AliasClaimResult {
    * "awaiting the registry" rather than claiming a confirmed lookup.
    */
   registryConfirmed: boolean;
+  /**
+   * True where this answer reports a registration that ALREADY EXISTED rather
+   * than one made just now — the sponsor answering a repeated ask for the name
+   * it has already registered for this Passport, or this client finding the
+   * name in the registry pointing at its own account after a `name-taken`
+   * refusal. See `readNameTaken` in `./sponsoredAlias.ts` for the 2026/09/15
+   * defect both paths close.
+   *
+   * It changes nothing about whether the name is this Passport's — it is,
+   * either way. What it changes is what the app SAYS about it, and whether the
+   * record may carry transaction ids: a registration found rather than watched
+   * has none, and {@link registerTxId} is empty on exactly those answers.
+   */
+  alreadyRegistered?: boolean;
 }
 
