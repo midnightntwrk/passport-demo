@@ -19,11 +19,14 @@
   "workspaces": [
     "demo-backend",
     "packages/connect",
+    "examples/doorman",
     "examples/passport-app-hub",
+    "examples/passport-bench",
     "examples/passport-demo",
     "examples/passport-docs",
     "examples/passport-funder",
     "examples/passport-profile-client",
+    "examples/passport-swap",
     "examples/raffle-demo"
   ],
   "//scripts": [

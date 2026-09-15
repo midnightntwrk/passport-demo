@@ -25,19 +25,26 @@ export default defineConfig({
     ],
   },
   /*
-   * 5175 is not arbitrary: the desk answers a browser only from an origin its
-   * own allow-list names, and `http://localhost:5175` is the one it already
-   * carries for a locally served partner app. A different port is a quote the
-   * browser blocks before the desk ever sees the request.
+   * 5185 is this app's own. It used to pin 5175, which is Passport's — and
+   * Passport pins it with `strictPort` too, so whichever of the two started
+   * second simply failed to bind rather than sliding to a free port. Every
+   * other number between is spoken for: 5176 the profile client, 5177 the
+   * raffle, 5178 the app template, 5179 the hub, 5180 the docs, 5181
+   * clubcoin-mock, 5182 Passport Poll, 5183 its tally service, 5184 Doorman.
+   *
+   * The desk answers a browser only from an origin its own allow-list names,
+   * so a locally served swap needs `http://localhost:5185` on that list. An
+   * origin the desk does not carry is a quote the browser blocks before the
+   * desk ever sees the request.
    */
   server: {
     host: 'localhost',
-    port: 5175,
+    port: 5185,
     strictPort: true,
   },
   preview: {
     host: 'localhost',
-    port: 5175,
+    port: 5185,
     strictPort: true,
   },
 });

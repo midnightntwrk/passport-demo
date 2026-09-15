@@ -6,7 +6,7 @@ import * as esbuild from 'esbuild';
 import { signData, signatureVerifyingKey, addressFromKey } from '@midnight-ntwrk/ledger-v8';
 import { UnshieldedAddress } from '@midnight-ntwrk/wallet-sdk-address-format';
 
-const here = '/Users/utkarshvarma/lab/midnight-passport-dynamic-signing/examples/clubcoin-mock/scripts';
+const here = path.dirname(fileURLToPath(import.meta.url));
 async function bundle(entry, name) {
   const out = path.join(tmpdir(), `${name}-${Date.now()}.mjs`);
   await esbuild.build({ entryPoints: [entry], bundle: true, format: 'esm', platform: 'node', outfile: out });

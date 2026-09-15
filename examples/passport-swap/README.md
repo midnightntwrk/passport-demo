@@ -6,7 +6,7 @@ Passport and answered there.
 
 ```
 npm install            # from the workspace root
-npm run dev -w passport-swap        # http://localhost:5175
+npm run dev -w passport-swap        # http://localhost:5185
 ```
 
 The three things it needs are named in `src/config.ts` and overridable with a
@@ -19,7 +19,17 @@ The three things it needs are named in `src/config.ts` and overridable with a
 | `VITE_SWAP_DESK_KEY` | unset | Sent as `x-passport-key`, when the desk requires one. |
 
 The desk's origin allow-list must name whatever origin this app is served on,
-or the browser refuses the quote before the desk ever sees it.
+or the browser refuses the quote before the desk ever sees it. Served locally
+that is now `http://localhost:5185`: the app pinned 5175 until 2026/09/15,
+which is Passport's own port, and both pin it with `strictPort`, so the second
+of the two to start failed to bind.
+
+**The deployed desk does not carry 5185 yet.** Its allow-list
+(`BALANCER_ALLOWED_ORIGINS` in
+[`examples/passport-balancer/deploy/passport-balancer.service`](../passport-balancer/deploy/passport-balancer.service))
+names `http://localhost:5175` as its one local origin. Until that unit gains
+`http://localhost:5185` on the droplet, a local run of this app is refused by
+the live desk — point `VITE_SWAP_DESK` at a desk of your own instead.
 
 ## The trade, and which way it runs
 

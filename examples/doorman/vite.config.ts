@@ -24,9 +24,14 @@ export default defineConfig({
       { find: /^@midnight-passport\/connect$/, replacement: connect('index.ts') },
     ],
   },
+  /*
+   * 5184 is Doorman's own. It used to pin 5180, which `passport-docs` also
+   * pins with `strictPort`, so whichever of the two started second failed to
+   * bind rather than sliding to a free port.
+   */
   server: {
     host: 'localhost',
-    port: 5180,
+    port: 5184,
     strictPort: true,
   },
 });

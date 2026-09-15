@@ -14,7 +14,8 @@ runbook no longer contains, because earlier versions of it did:
 - **No user-paid name claim.** When a funder is configured and sponsoring, the
   `.night` name is registered *for* the user and their wallet spends nothing.
 - **No `?demoMode=local`.** The query parameter is gone from the client. The
-  demo runs against a public network — Preview by default.
+  demo runs against a public network — **stagenet**, which is the only network
+  this build can transact on.
 
 ## Start Passport
 
@@ -28,8 +29,8 @@ Open `http://localhost:5175`. The port is pinned in the source with
 frames apps by URL, and a handshake against a moving origin fails silently. Do
 not substitute `127.0.0.1`.
 
-Every setting is optional — the defaults run against Preview, with fees
-sponsored through the preview gateway. Copy
+Every setting is optional — the defaults run against stagenet, with fees
+sponsored through the stagenet balancer. Copy
 `examples/passport-demo/.env.example` to `.env.local` to change any of them;
 that file documents each variable and why it exists.
 
@@ -44,9 +45,18 @@ that file documents each variable and why it exists.
 | `examples/clubcoin-mock` | 5181 | The URL-callback (redirect) connector example — the phone-shaped alternative to the popup handshake. |
 | `examples/passport-app-hub` (`npm run demo:hub`) | 5179 | The public app-listing site. Not part of the wallet flow. |
 | `examples/passport-docs` (`npm run demo:docs`) | 5180 | The documentation site. Not part of the wallet flow. |
+| `examples/doorman` (`npm run dev -w doorman`) | 5184 | The reference integration for `packages/connect` — detect Passport, ask who is at the door, ask for one payment. The written version is [`integrating.md`](integrating.md). |
+| `examples/passport-poll` | 5182, plus 5183 for its tally service | The example dApp where identity is the product: one vote per Passport account. Run `npm run service` beside `npm run dev`, or the app has nothing to count against. |
+| `examples/passport-swap` (`npm run dev -w passport-swap`) | 5185 | The example swap desk: one fixed lot of the demo stablecoin for a fixed price in NIGHT. Needs the desk's origin allow-list to name `http://localhost:5185`. |
+| `examples/passport-bench` | — | A load bench for the sponsored onboarding path, run against live stagenet. Not a server, and it spends real DUST — `--confirm-live` or it only prints its plan. |
 
 Passport alone is enough to demonstrate onboarding, the wallet, and sending.
 Everything else is a counterparty for one specific handshake.
+
+Every port above is pinned with `strictPort` where a Vite server serves it, so
+a collision fails the second server outright rather than sliding to the next
+free number. Two of them used to collide: `passport-swap` pinned Passport's own
+5175 and `doorman` pinned the docs' 5180, and both were moved on 2026/09/15.
 
 ## Bring the funder up before you demonstrate onboarding
 
