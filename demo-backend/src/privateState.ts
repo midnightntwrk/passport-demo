@@ -112,6 +112,25 @@ export class IndexedDbPassportEncryptedRecordStore implements PassportEncryptedR
     await this.request('readwrite', (store) => store.clear());
   }
 
+  /**
+   * THE CACHED CONNECTION IS WHAT BLOCKED A VERSIONED OPEN (2026/09/15).
+   *
+   * This opener asks for no version on purpose — see the comment below — and it
+   * keeps the connection it gets in `dbPromise` for the life of the page. Both
+   * of those are wanted. Together, and with no `versionchange` listener, they
+   * were also a hang: a browser will not raise a database's version while
+   * another connection to it is open, so it asks the open one to close by
+   * firing `versionchange`. Nothing was listening, so nothing closed, and the
+   * OTHER opener of this same database by name — `publicProfile.ts` in the
+   * Passport demo, which does name a version — got `blocked` instead of
+   * `success`. `blocked` leaves the request pending rather than failing it, so
+   * that side waited for ever on a profile read it never got.
+   *
+   * `onversionchange` closes and FORGETS this connection, so the next request
+   * opens a fresh one against whatever version the upgrade settled on. That is
+   * safe here because nothing holds a transaction across an await: a
+   * transaction is created, used, and settled inside one `request()` call.
+   */
   private async database(): Promise<IDBDatabase> {
     if (!globalThis.indexedDB) {
       throw new Error('IndexedDB is unavailable. Use a browser storage adapter.');
@@ -125,8 +144,27 @@ export class IndexedDbPassportEncryptedRecordStore implements PassportEncryptedR
           request.result.createObjectStore(this.objectStoreName);
         }
       };
-      request.onerror = () => reject(request.error ?? new Error('Unable to open Passport storage.'));
-      request.onsuccess = () => resolve(request.result);
+      /* A failed open must not be remembered: a cached rejected promise makes
+         one bad moment permanent for the rest of the page's life. */
+      request.onerror = () => {
+        this.dbPromise = null;
+        reject(request.error ?? new Error('Unable to open Passport storage.'));
+      };
+      /* This open names no version, so it can only be blocked by a DELETE of
+         the database. Handled for the same reason as above — pending for ever
+         is the one outcome a caller cannot recover from. */
+      request.onblocked = () => {
+        this.dbPromise = null;
+        reject(new Error('Passport storage is held open elsewhere. Close the other tabs and retry.'));
+      };
+      request.onsuccess = () => {
+        const db = request.result;
+        db.onversionchange = () => {
+          db.close();
+          this.dbPromise = null;
+        };
+        resolve(db);
+      };
     });
     return this.dbPromise;
   }
@@ -141,6 +179,11 @@ export class IndexedDbPassportEncryptedRecordStore implements PassportEncryptedR
       const request = operation(transaction.objectStore(this.objectStoreName));
       request.onerror = () => reject(request.error ?? new Error('Passport storage request failed.'));
       request.onsuccess = () => resolve(request.result);
+      /* An aborted transaction fires neither `success` nor `error` on the
+         request, so without this a request interrupted by a closing connection
+         or refused for quota never settles at all. */
+      transaction.onabort = () =>
+        reject(transaction.error ?? new Error('Passport storage was interrupted.'));
     });
   }
 }

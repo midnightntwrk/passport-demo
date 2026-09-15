@@ -42,6 +42,37 @@ export interface DemoPassportProfile {
   accountOnPasskey?: PassportAccountOnPasskey;
 }
 
+/**
+ * "A VERSIONED OPEN CAN NEVER SETTLE" — the hang this handles (2026/09/15).
+ *
+ * `midnight-passport` is opened from TWO places, and only one of them names a
+ * version. This one asks for version 2. `IndexedDbPassportEncryptedRecordStore`
+ * in `passport-demo-backend` opens the SAME DATABASE BY NAME with no version at
+ * all, deliberately, so an integrator can add stores of their own to it — and
+ * it CACHES the connection it gets for the life of the page.
+ *
+ * A browser will not raise a database's version while another connection to it
+ * is still open. It asks the open connection to close, by firing
+ * `versionchange` on it; if nothing is listening, nothing closes, and the
+ * versioned open fires `blocked` instead. `blocked` is not an error: the
+ * request stays pending, so with no `onblocked` handler the promise below
+ * SETTLES NEVER. Every await of it — reading the profile a passkey belongs to,
+ * writing one, listing them — waits for ever, and a screen that is waiting for
+ * a profile shows a spinner rather than a sentence.
+ *
+ * All three halves of the answer are here and in the sibling opener:
+ *
+ *   - `onversionchange` closes this connection when the OTHER opener needs to
+ *     upgrade, so the upgrade proceeds instead of blocking;
+ *   - `onblocked` rejects with something a reader can act on, for the case the
+ *     other end has no such handler (an older build, another tab);
+ *   - `transaction.onabort` settles a request whose transaction was torn down
+ *     rather than completed — a closing connection, or a quota refusal — which
+ *     fires neither `success` nor `error` on the request itself.
+ *
+ * The same shape as `./lib/walletSnapshot.ts`, which takes no cached connection
+ * at all and so needed only two of the three.
+ */
 async function database(): Promise<IDBDatabase> {
   if (!globalThis.indexedDB) throw new Error('IndexedDB is unavailable in this browser.');
   return new Promise((resolve, reject) => {
@@ -53,7 +84,20 @@ async function database(): Promise<IDBDatabase> {
       }
     };
     request.onerror = () => reject(request.error ?? new Error('Unable to open Passport profile storage.'));
-    request.onsuccess = () => resolve(request.result);
+    request.onblocked = () =>
+      reject(
+        new Error(
+          'Passport profile storage is held open elsewhere. Close Passport’s other tabs and try again.',
+        ),
+      );
+    request.onsuccess = () => {
+      const db = request.result;
+      /* Let the other opener upgrade rather than making it wait on us. Nothing
+         here holds a transaction across awaits, so closing is always safe: the
+         next call opens again. */
+      db.onversionchange = () => db.close();
+      resolve(db);
+    };
   });
 }
 
@@ -67,6 +111,10 @@ async function request<T>(
     const result = operation(transaction.objectStore(STORE));
     result.onsuccess = () => resolve(result.result);
     result.onerror = () => reject(result.error ?? new Error('Passport profile storage request failed.'));
+    /* An aborted transaction fires nothing on the request, so without this the
+       promise is another one that never settles. */
+    transaction.onabort = () =>
+      reject(transaction.error ?? new Error('Passport profile storage was interrupted.'));
   });
 }
 
