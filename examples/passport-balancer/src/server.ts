@@ -140,10 +140,16 @@ import {
   createAccountFunder,
   type AccountFunder,
 } from './account.js';
+import {
+  aliasSuccessBody,
+  existingRegistration,
+  type ExistingRegistrationContext,
+  type RegistryReading,
+} from './aliasOwnership.js';
 import { walletAvailability } from './availability.js';
 import { createChainHeadProbe, type ChainHeadProbe } from './chainHead.js';
 import { ASSET_SYMBOL, applyEnvFile, loadConfig, type BalancerConfig } from './config.js';
-import { queryIndexerHeight, rawContractAddress } from './contractRuntime.js';
+import { bytesToHex, queryIndexerHeight, rawContractAddress } from './contractRuntime.js';
 import { rollbackDustSnapshot } from './dustRollback.js';
 import { NO_SOCKET_HEAD } from './submission.js';
 import { indexerUrlInUse } from './endpoints.js';
@@ -2312,12 +2318,66 @@ async function main(): Promise<void> {
     }
     aliasInFlight.add(aliasKey);
     aliasInFlight.add(contractKey);
+    /* Everything an already-done registration has to name back, assembled once
+       and used by gates 3 and 5 alike. See `./aliasOwnership.ts` for the
+       2026/09/15 defect both of them were half of. */
+    const answerContext = (): ExistingRegistrationContext => ({
+      label,
+      domain: aliasDomain(label),
+      network: config.networkId,
+      tldAddress: midnames.tldAddress,
+      contractAddress,
+      ownerKeyHex: bytesToHex(ownerKey),
+      now: new Date().toISOString(),
+    });
+    const answerAlreadyRegistered = (
+      reading: RegistryReading,
+    ): { status: number; body: Record<string, unknown> } | null => {
+      const already = existingRegistration({
+        context: answerContext(),
+        reading,
+        entry: aliasLedger.get(contractAddress),
+      });
+      if (!already) return null;
+      console.log(
+        `[alias] ${aliasDomain(label)} is already this Passport's — answered as registered`,
+      );
+      return { status: 200, body: aliasSuccessBody(already, true) };
+    };
     try {
       /* 3. Availability. A real read of the deployed registry, never a cache
             and never an optimistic assumption: a registry we cannot read is
-            reported as unreachable, not as free. */
+            reported as unreachable, not as free.
+
+            A NAME THAT IS TAKEN MAY BE TAKEN BY THE CALLER (2026/09/15). The
+            registry is asked WHO holds it before anybody is told to choose
+            another name: a Passport whose first answer was lost asks again with
+            the same name, and the honest answer to that is the one it did not
+            receive. Only the registry decides this — a resolve that throws, or
+            that cannot read the leaf, leaves `name-taken` exactly as it was. */
       try {
         if (!(await midnames.isAvailable(label))) {
+          let reading: RegistryReading = { kind: 'unread' };
+          try {
+            const resolved = await midnames.resolve(label);
+            if (resolved) {
+              reading = {
+                kind: 'resolved',
+                resolverAddress: resolved.resolverAddress,
+                target: resolved.target,
+              };
+            }
+          } catch (cause) {
+            /* Not `registry-unreachable`: availability was read successfully
+               and the name IS taken. Who by is the question we could not put,
+               and the answer that stands without it is the one this route has
+               always given. */
+            console.warn(
+              `[alias] ${aliasDomain(label)} is taken and its owner could not be read: ${cause instanceof Error ? cause.message : String(cause)}`,
+            );
+          }
+          const already = answerAlreadyRegistered(reading);
+          if (already) return already;
           return fail(
             refusal(
               409,
@@ -2390,6 +2450,15 @@ async function main(): Promise<void> {
             is what a Passport has exactly one of. */
       const previous = aliasLedger.get(contractAddress);
       if (previous) {
+        /* ASKING FOR THE NAME IT ALREADY HAS IS NOT A SECOND NAME (2026/09/15).
+           The ceiling is one sponsored name per Passport, and a Passport asking
+           again for the one it was sponsored is inside it. The registry is not
+           re-read here: gate 3 has already passed, meaning it reported the label
+           free, and this service's own record of registering it outranks a
+           registry that has not caught up with itself. A DIFFERENT name still
+           gets `already-sponsored`, which is the whole of the limit. */
+        const already = answerAlreadyRegistered({ kind: 'unread' });
+        if (already) return already;
         return fail(
           refusal(
             409,
@@ -2515,25 +2584,9 @@ async function main(): Promise<void> {
         console.log(
           `[alias] ${result.domain} → ${contractAddress} (resolver ${result.resolverAddress}${result.fromPool ? ', off the shelf' : ''}, deploy ${result.resolverDeployTx}, register ${result.registerTx}${result.registerBlock ? `, block ${result.registerBlock}` : ''})`,
         );
-        return {
-          status: 200,
-          body: {
-            alias: result.alias,
-            domain: result.domain,
-            network: result.network,
-            tldAddress: result.tldAddress,
-            resolverAddress: result.resolverAddress,
-            resolverDeployTx: result.resolverDeployTx,
-            registerTx: result.registerTx,
-            resolverDeployBlock: result.resolverDeployBlock,
-            registerBlock: result.registerBlock,
-            target: result.target,
-            ownerKey: result.ownerKey,
-            costAtomic: result.costAtomic.toString(),
-            registeredAt: result.registeredAt,
-            fromPool: result.fromPool,
-          },
-        };
+        /* The SAME builder the already-registered answers above use, so the two
+           cannot drift apart — see `./aliasOwnership.ts`. */
+        return { status: 200, body: aliasSuccessBody(result, false) };
       } catch (cause) {
         /* The window ran out with no coin free. Reported as the DUST shortfall
            it is — never as `register-rejected`, which is what a caller used to
