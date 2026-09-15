@@ -251,6 +251,15 @@ jobs:
       - name: Verify the ZK artefacts against the committed manifests
         run: node .github/workflows/scripts/verify-zk-artefacts.mjs
 
+      # TypeScript imports the generated contract modules from this workspace.
+      # They are deliberately ignored build output, so restore and stage them
+      # before typechecking rather than relying on a developer's local files.
+      # Without this step the typecheck stops at "Cannot find module
+      # '../../contracts/stagenet/account/contract/index.js'" (run 34853722025,
+      # 2026/09/14, the first run to get past the ancestor check).
+      - name: Stage the verified Passport contract modules
+        run: npm run prepare:zk --workspace passport-demo
+
       # zk-params are the in-tab prover's KZG SRS slices — ~45 MB fetched from a
       # public bucket, not part of the contract build and not in the manifests.
       # This deploy sets VITE_MIDNIGHT_PROVING_URL, so the default path uses the
