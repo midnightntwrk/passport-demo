@@ -111,6 +111,8 @@ import {
   sendBlockedByChangeReturn,
   sendBlockedByUnfinishedSend,
   sendRefusalText,
+  /* The same table's other ending, for a balance moving INTO the account. */
+  accountMoveRefusalText,
   nameSendKind,
   serialisePendingSends,
   watchForSettlement,
@@ -119,6 +121,10 @@ import {
   type SendLegTiming,
   type PendingSendKind,
 } from './lib/sendLegs.js';
+/* The bounded schedule that keeps asking whether this Passport's own account
+   can pay in one transaction, for as long as the chain cannot say. A Passport
+   minted seconds ago is the case it exists for. See `lib/oneTxProbe.ts`. */
+import { probeOneTransactionSupport } from './lib/oneTxProbe.js';
 /* How long to wait for a step to settle, where the node never said it had the
    transaction. See `lib/chainWait.ts`. */
 import { settleDeadlineFor } from './lib/chainWait.js';
@@ -6509,16 +6515,28 @@ export default function PassportDemo() {
    * WHETHER THIS PASSPORT CAN PAY ANOTHER IN ONE TRANSACTION.
    *
    * A fact about the SENDER's deployed contract and about nothing else — see
-   * `senderSupportsOneTransactionSend` — so it is read once, when the account
-   * is known, and held for the session. `false` until it has been read, which
-   * is the right default in both directions: the two-leg path works against
-   * every account there is, and a review sheet that promised one transaction
-   * before anything had been asked would be promising on a guess.
+   * `senderOneTransactionSupport` — so it is read when the account is known
+   * and held for the session once it has a DEFINITE answer. `false` until
+   * then, which is the right default in both directions: the two-leg path
+   * works against every account there is, and a review sheet that promised one
+   * transaction before anything had been asked would be promising on a guess.
    *
    * It reaches the Send sheet BEFORE a send starts, because the review step has
    * to say what somebody is about to wait through.
    */
   const [oneTransactionSend, setOneTransactionSend] = useState(false);
+
+  /**
+   * Whether the question above has been ANSWERED, as opposed to defaulted.
+   *
+   * `oneTransactionSend` is `false` both for a Passport that cannot pay in one
+   * transaction and for one nobody has managed to ask about yet, and until
+   * 2026/09/15 nothing could tell those apart — which is exactly why a
+   * brand-new Passport spent its first session on the slow path. This is the
+   * bit that says "asked and settled", so the schedule below knows to stop and
+   * the Send sheet knows whether there is anything left to find out.
+   */
+  const oneTransactionSendKnown = useRef(false);
 
   /**
    * Which attempt at the running leg this is, for the sheet's progress line.
@@ -6620,36 +6638,99 @@ export default function PassportDemo() {
   }, [pendingSendsCredentialId]);
 
   /**
-   * Asks the chain which build this Passport's account is, once there is one.
+   * The wallet has walked the chain. A boolean rather than the percentage,
+   * because what depends on it wants the EDGE and not the count.
+   */
+  const walletSynced = localSyncPercent === 100;
+
+  /**
+   * Asks the chain which build this Passport's account is, once there is one —
+   * and KEEPS asking while the chain cannot say.
    *
-   * ONE READ PER ADDRESS PER SESSION — the module caches it, and the answer
-   * cannot change under this app — so the effect is free to re-run whenever the
-   * wallet opens or the account changes. A failure is silently `false`, which
-   * is the two-leg path: it works against every account there is, so a
-   * question that could not be asked costs a slower send and nothing else.
+   * ONE DEFINITE READ PER ADDRESS PER SESSION — the module caches those, and
+   * the answer cannot change under this app — so the effect is free to re-run
+   * whenever the wallet opens or the account changes.
+   *
+   * WHY IT IS A SCHEDULE AND NOT A READ (2026/09/15). A Passport created
+   * seconds ago has an account this session deployed itself, and the chain has
+   * not served it back yet. The read answers "could not ask", and until now
+   * that arrived here as `false` and was never revisited, so a brand-new
+   * Passport sent in two steps for the whole of its first session — although
+   * the contract it had just deployed carries the circuit that does it in one.
+   * `senderOneTransactionSupport` now keeps `null` distinct from `false`, and
+   * `lib/oneTxProbe.ts` turns that into five seconds, ten, twenty, forty, and
+   * then stop. A definite answer ends it at once.
+   *
+   * AND WHY `walletSynced` IS A DEPENDENCY. A wallet that has caught up with
+   * the chain is the clearest evidence this browser can reach it at all, so
+   * the schedule is worth one more run from the top at that moment — the same
+   * gate the upgrade probe below uses, and for the same reason. It is a
+   * BOOLEAN rather than the percentage: depending on the percentage would
+   * restart the schedule on every tick of the sync and it would never advance.
    */
   useEffect(() => {
+    oneTransactionSendKnown.current = false;
     if (!localSessionActive || !accountContractAddress) {
       setOneTransactionSend(false);
       return;
     }
+    const account = accountContractOf();
+    if (!account) return;
     let live = true;
+    const stop = probeOneTransactionSupport({
+      read: async () => {
+        const { senderOneTransactionSupport } = await import(
+          './identity/accountCustody.js'
+        );
+        return senderOneTransactionSupport(account.handle.network, account.address);
+      },
+      onAnswer: (supported) => {
+        if (!live) return;
+        oneTransactionSendKnown.current = true;
+        setOneTransactionSend(supported);
+      },
+      timers: {
+        set: (run, ms) => window.setTimeout(run, ms),
+        clear: (handle) => window.clearTimeout(handle),
+      },
+    });
+    return () => {
+      live = false;
+      stop();
+    };
+  }, [accountContractAddress, accountContractOf, localSessionActive, walletSynced]);
+
+  /**
+   * One more ask, at the moment the Send sheet opens.
+   *
+   * The schedule above stops after about seventy-five seconds. Somebody who
+   * set up a Passport, read the welcome, and then pressed Send is comfortably
+   * past that — and is the exact person whose account the chain could not
+   * serve when the question was first asked. So the sheet opening asks once
+   * more, before the review step renders and commits to saying how many steps
+   * the payment takes.
+   *
+   * It costs nothing where the answer is already known: the flag short-circuits
+   * it, and the module's own cache would anyway. Nothing waits on it — the
+   * sheet opens immediately either way, and a late answer simply arrives.
+   */
+  const refreshOneTransactionSupport = useCallback(() => {
+    if (oneTransactionSendKnown.current) return;
+    const account = accountContractOf();
+    if (!account) return;
     void (async () => {
-      const account = accountContractOf();
-      if (!account) return;
-      const { senderSupportsOneTransactionSend } = await import(
+      const { senderOneTransactionSupport } = await import(
         './identity/accountCustody.js'
       );
-      const supported = await senderSupportsOneTransactionSend(
+      const supported = await senderOneTransactionSupport(
         account.handle.network,
         account.address,
       );
-      if (live) setOneTransactionSend(supported);
+      if (supported === null) return;
+      oneTransactionSendKnown.current = true;
+      setOneTransactionSend(supported);
     })();
-    return () => {
-      live = false;
-    };
-  }, [accountContractAddress, accountContractOf, localSessionActive]);
+  }, [accountContractOf]);
 
   /**
    * Paying a `.night` name — and why it is two transactions rather than one.
@@ -8292,9 +8373,17 @@ export default function PassportDemo() {
       });
       void refreshLocalBalances();
     } catch (cause) {
-      const message = cause instanceof Error ? cause.message : String(cause);
-      const detail = (cause as { detail?: string })?.detail;
-      const reason = detail ? `${message} — ${detail}` : message;
+      /* ONE SENTENCE ON THE BANNER, AND THE MACHINERY IN THE CONSOLE
+         (2026/09/15). This used to join the thrown message to the failure's
+         own `detail` with an em dash and put the pair straight into Home's
+         alert — which is how "SubmissionError: 1010: Invalid Transaction:
+         Custom error: 239" came to sit at the top of somebody's Home screen.
+         `sendRefusalText` is the same table the send panel has read from since
+         2026/09/03, so the two surfaces say the same thing about the same
+         failure, and the activity trail gets that sentence too rather than a
+         second wording of it. */
+      console.debug('[deposit] moving the balance into the account failed', cause);
+      const reason = accountMoveRefusalText(cause);
       if (entryId) {
         updateActivity(entryId, { status: 'error', detail: reason, source: 'local' });
       }
@@ -8334,6 +8423,11 @@ export default function PassportDemo() {
       ? {
           networkId: localWalletNetworkId,
           provingMode: localWalletProvingMode,
+          /* Raised the moment the sheet is asked for, before the review step
+             renders. The one thing it does is ask the chain again which build
+             this Passport's account is, where nothing has managed to find out
+             yet — see `refreshOneTransactionSupport`. Nothing waits on it. */
+          onOpen: refreshOneTransactionSupport,
           readFeeReadiness: readLocalFeeReadiness,
           onSend: executeOwnSend,
           readShieldedHoldings: readAccountShieldedHoldings,
@@ -8979,8 +9073,15 @@ export default function PassportDemo() {
         setUpgradeError(cause instanceof Error ? cause.message : String(cause));
       }
     } catch (cause) {
-      // The machine itself could not be fetched. Same line, same two controls.
-      setUpgradeError(cause instanceof Error ? cause.message : String(cause));
+      /* The machine itself could not be fetched. Same line, same two controls
+         — but NOT the loader's own words (2026/09/15). A chunk that does not
+         arrive throws "Failed to fetch dynamically imported module: https://…/
+         assets/accountUpgrade-Ckq2f9.js", and that is what this screen printed:
+         a URL, a build hash, and nothing anybody reading it can act on. The
+         cause keeps its whole self in the console, where the hash is the only
+         useful thing about it. */
+      console.debug('[upgrade] the upgrade could not be loaded', cause);
+      setUpgradeError('The upgrade could not start. Check your connection and try again.');
     } finally {
       upgradeRunning.current = false;
       setUpgradeBusy(false);

@@ -275,6 +275,20 @@ export interface HomeScreenProps {
     /** Where this wallet proves — the send sheet's progress line names it. */
     provingMode: LocalWalletProvingMode
     readFeeReadiness: (options?: { force?: boolean }) => Promise<FeeReadiness>
+    /**
+     * Raised when the sheet is asked for, before it renders.
+     *
+     * A place for the host to re-read anything the review step is about to
+     * commit to saying, and it exists for one such thing: how many steps the
+     * payment takes. That is a fact about this Passport's own deployed
+     * account, and a Passport minted minutes ago is one the chain could not
+     * answer for when the question was first asked (see
+     * `refreshOneTransactionSupport` in `App.tsx`).
+     *
+     * Nothing is awaited and nothing is returned: the sheet opens either way,
+     * exactly as it did before this existed, and a late answer simply arrives.
+     */
+    onOpen?: () => void
     onSend: (params: { recipientAddress: string; amount: bigint }) => Promise<void>
     /**
      * The shielded half of the send seam — see the Send sheet's own header
@@ -830,7 +844,10 @@ export default function HomeScreen(props: HomeScreenProps) {
               <button
                 type="button"
                 className="mnhome-action mnhome-action-primary"
-                onClick={() => setSendOpen(true)}
+                onClick={() => {
+                  send?.onOpen?.()
+                  setSendOpen(true)
+                }}
                 aria-haspopup="dialog"
               >
                 <SendHorizontal size={16} aria-hidden="true" />

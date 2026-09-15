@@ -54,6 +54,8 @@ import {
   sendLegTotalMs,
   SEND_REFUSED_TEXT,
   sendRefusalText,
+  accountMoveRefusalText,
+  ACCOUNT_MOVE_REFUSED_TEXT,
   readPendingSends,
   resumesWithoutPrompt,
   retryDelayMs,
@@ -707,6 +709,55 @@ describe('sendRefusalText', () => {
     });
     expect(classifyLegError(refused).rebuild).toBe(true);
     expect(sendRefusalText(refused)).toBe(SEND_REFUSED_TEXT);
+  });
+});
+
+describe('accountMoveRefusalText', () => {
+  /** The same machinery, on the banner that reports the move INTO an account. */
+  const MACHINERY = /account contract|deposit_night|SubmissionError|Custom error|circuit|contract|1010|239/i;
+
+  it('says one sentence about the move a user reported, not the node’s', () => {
+    /* 2026/09/15: Home's alert was composed as `${message} — ${detail}`, which
+       is how a node refusal came to sit at the top of somebody's Home screen. */
+    const refusal = Object.assign(
+      new Error('SubmissionError: 1010: Invalid Transaction: Custom error: 239'),
+      { name: 'SubmissionError' },
+    );
+    const wrapped = Object.assign(new Error('The account contract rejected deposit_night.'), {
+      cause: refusal,
+      detail: 'node refused at height 918442',
+    });
+    const said = accountMoveRefusalText(wrapped);
+    expect(said).toBe(ACCOUNT_MOVE_REFUSED_TEXT);
+    expect(said).not.toMatch(MACHINERY);
+    expect(said).not.toMatch(/918442/);
+  });
+
+  it('does not claim the money LEFT the account, because this one was arriving', () => {
+    /* The single reason this is not just `sendRefusalText`. */
+    expect(ACCOUNT_MOVE_REFUSED_TEXT).not.toMatch(/left your account/);
+    expect(SEND_REFUSED_TEXT).toMatch(/left your account/);
+  });
+
+  it('shares the send’s walk: a classified message and the not-enough sentence', () => {
+    const balancing = Object.assign(new Error('balancing failed'), {
+      name: 'BalancingFailure',
+      retryable: true,
+      userMessage: 'The fee sponsor is busy. Passport will try again.',
+      stage: 'balance',
+    });
+    expect(accountMoveRefusalText(balancing)).toBe(
+      'The fee sponsor is busy. Passport will try again.',
+    );
+    expect(accountMoveRefusalText(new Error('insufficient funds for the offer'))).toBe(
+      'There was not enough to cover this step, so nothing further was sent.',
+    );
+  });
+
+  it('is total — a string, an object, and nothing at all', () => {
+    expect(accountMoveRefusalText('boom')).toBe(ACCOUNT_MOVE_REFUSED_TEXT);
+    expect(accountMoveRefusalText({ nope: true })).toBe(ACCOUNT_MOVE_REFUSED_TEXT);
+    expect(accountMoveRefusalText(undefined)).toBe(ACCOUNT_MOVE_REFUSED_TEXT);
   });
 });
 

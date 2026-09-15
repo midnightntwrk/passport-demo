@@ -887,6 +887,30 @@ export const SEND_REFUSED_TEXT =
  * the whole of what a debugger wants.
  */
 export function sendRefusalText(error: unknown): string {
+  return refusalText(error, SEND_REFUSED_TEXT);
+}
+
+/**
+ * THE SAME SENTENCE, FOR VALUE MOVING INTO AN ACCOUNT RATHER THAN OUT OF IT.
+ *
+ * {@link SEND_REFUSED_TEXT} ends with a claim — "nothing left your account" —
+ * and on the move that puts a balance INTO the account that claim is about the
+ * wrong direction, so this path gets its own last line and the same first two.
+ *
+ * It exists because on 2026/09/15 the Home banner that reports this move was
+ * still composing `${message} — ${detail}` out of the thrown failure, which is
+ * how "SubmissionError: 1010: Invalid Transaction: Custom error: 239" came to
+ * sit at the top of somebody's Home screen. One table, two endings.
+ */
+export const ACCOUNT_MOVE_REFUSED_TEXT =
+  'Those funds could not be moved into your account just now. Nothing was lost — try again.';
+
+/** The same walk for both, differing only in what they say when nothing matched. */
+export function accountMoveRefusalText(error: unknown): string {
+  return refusalText(error, ACCOUNT_MOVE_REFUSED_TEXT);
+}
+
+function refusalText(error: unknown, fallback: string): string {
   const chain = chainOf(error);
   for (const node of chain) {
     /* Written for a reader by the runtime that classified it. */
@@ -900,7 +924,7 @@ export function sendRefusalText(error: unknown): string {
      rejected, an error nobody has classified — is the one sentence. The
      alternative is the head of the chain, and the head of the chain is where
      "The account contract rejected withdraw_shielded" came from. */
-  return SEND_REFUSED_TEXT;
+  return fallback;
 }
 
 /**

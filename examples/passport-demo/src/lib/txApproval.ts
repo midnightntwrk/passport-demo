@@ -104,40 +104,17 @@ export function messageOf(cause: unknown): string {
   return typeof cause === 'string' && cause ? cause : 'No further detail was reported.'
 }
 
-/**
- * Maps a payment failure onto the bridge's fixed error vocabulary. The thrown
- * value is the account module's `AccountCustodyError` shape — `{ code, message }`
- * — but this is postMessage-adjacent code, so an unrecognised throw becomes
- * `submit-failed` with its real message rather than a guess at a nicer code.
- * `insufficient-night` is recognised because App.tsx translates the contract's
- * own shortfall codes into this vocabulary before they arrive. `fee-unavailable`
- * deliberately is NOT mapped to `insufficient-funds`: the fee sponsor standing
- * down is not the user running short, and telling an app otherwise would put
- * the shortfall on the wrong party. It falls through to `submit-failed`,
- * carrying the sponsor's own sentence as the detail.
+/* WHERE THE MAPPING FROM A FAILURE ONTO THE WIRE VOCABULARY WENT (2026/09/15).
+ *
+ * `transferErrorFrom` lived here and paired each code with `messageOf(cause)`
+ * — the thrown message, verbatim — so a node refusal reached an integrating
+ * app, and the sheet the person was watching, as "SubmissionError: 1010:
+ * Invalid Transaction: Custom error: 239". It is now `txFailureForApp` in
+ * `./txFailure.ts`, which keeps every wire code exactly as it was and takes
+ * the sentence from a table instead. It is not re-exported from here and the
+ * old function is gone rather than deprecated: a mapper that can emit a thrown
+ * message is precisely the thing somebody reaches for again by accident.
  */
-export function transferErrorFrom(cause: unknown): {
-  error: NonNullable<PassportTxResponse['error']>
-  detail: string
-} {
-  const code =
-    typeof cause === 'object' && cause !== null && typeof (cause as { code?: unknown }).code === 'string'
-      ? (cause as { code: string }).code
-      : null
-  const detail = messageOf(cause)
-  if (code === 'insufficient-night') return { error: 'insufficient-funds', detail }
-  if (code === 'wrong-network') return { error: 'network-mismatch', detail }
-  if (code === 'invalid-recipient') return { error: 'invalid-request', detail }
-  /* The signing session went away between the sheet appearing and the approval
-     landing — genuinely unavailable, not a failed submission. The wire code is
-     `wallet-unavailable` because that is the versioned protocol's word for it;
-     nothing a user reads says "wallet". */
-  if (code === 'wallet-closed') return { error: 'wallet-unavailable', detail }
-  /* The session's passkey could not be asserted at all, so no transaction can
-     be approved until the user signs in again. */
-  if (code === 'presence-unavailable') return { error: 'wallet-unavailable', detail }
-  return { error: 'submit-failed', detail }
-}
 
 /**
  * Truncates `detail` to the cap the app's own parser enforces.
