@@ -3,7 +3,6 @@
 
   "framework": "vite",
   "installCommand": "cd ../.. && npm ci",
-  "buildCommand": "npm run vercel-build",
   "outputDirectory": "dist",
 
   "rewrites": [

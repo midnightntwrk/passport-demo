@@ -8,6 +8,12 @@
 # replaces `npm run deploy:passport` from a developer laptop, which is now
 # `deploy:passport:manual` and is break-glass only. See docs/demo/deployment.md.
 #
+# A RUN THAT NAMES A RELEASE BUILDS THAT RELEASE. The checkout takes
+# `inputs.release_tag` as its ref, so a promotion builds the immutable tag
+# rather than whatever the dispatch was started from, and a production
+# promotion additionally has to be dispatched FROM that tag so the commit the
+# run reports is the commit it shipped.
+#
 # WHY THIS IS NOT A PLAIN `npm ci && npm run build`
 # --------------------------------------------------
 # `examples/passport-demo`'s build stages ~97 MB of prover keys and ZKIR from
@@ -36,7 +42,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Release whose ZK artefact bundle to use. Blank uses the latest published release. The commit deployed is this run''s ref, which must still be on main.'
+        description: 'The release to deploy. THE COMMIT DEPLOYED IS THE ONE THIS TAG POINTS AT, and its ZK artefact bundle is the one built with. Blank deploys this run''s ref and takes the bundle from scripts/zk-artefacts.lock.json; a production deploy must name a tag, and must be dispatched from that tag.'
         required: false
         type: string
       target:
@@ -141,10 +147,20 @@ jobs:
     steps:
       # fetch-depth: 0 — `git merge-base --is-ancestor` below needs real
       # history, and a shallow clone has none.
+      #
+      # `ref:` IS THE RELEASE, NOT THE RUN'S REF. A dispatch that names
+      # `release_tag` used to build whatever the run was started from and take
+      # only the ZK bundle from the tag, so "promote v15 to production" from a
+      # branch that had moved on shipped the branch and called it v15
+      # (2026/09/15). The tag is immutable, so naming it here makes the release
+      # body, the tree that is built, and what reaches the site one revision.
+      # A release event leaves `inputs` empty and falls through to `github.sha`,
+      # which for that event already IS the tag's commit.
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  #v6.1.0
         with:
           fetch-depth: 0
+          ref: ${{ inputs.release_tag || github.sha }}
 
       # ---------------------------------------------------------------------
       # THE GUARD. Nothing installs, builds, or deploys before this passes.
@@ -153,16 +169,32 @@ jobs:
         env:
           # Through env, never interpolated into the shell: a tag name is
           # attacker-shaped input the moment anyone can cut a release.
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
         run: |
           set -euo pipefail
-          git fetch --no-tags --quiet origin main
+          # Written as a full refspec rather than `git fetch origin main`, which
+          # relies on whatever `remote.origin.fetch` the checkout left behind.
+          # Every line below resolves `origin/main`, and the checkout is now
+          # detached at a tag when a release is named, so this makes the
+          # remote-tracking ref exist because this command created it.
+          git fetch --no-tags --quiet origin +refs/heads/main:refs/remotes/origin/main
 
-          if [ "$EVENT_NAME" = "release" ]; then
+          if [ -n "${RELEASE_TAG}" ]; then
             git fetch --quiet origin "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}" || true
             target="$(git rev-list -n 1 "refs/tags/${RELEASE_TAG}")"
-            echo "Release ${RELEASE_TAG} points at ${target}."
+            echo "Release ${RELEASE_TAG} points at ${target}, and that is the tree checked out above."
+
+            # GITHUB_SHA is still the ref the run was STARTED from. It is what
+            # the summary reports, what the deployment is recorded against, and
+            # what anyone reading the run believes shipped — so for production
+            # it has to be the same commit as the release being promoted. The
+            # checkout above already builds the tag either way; this is what
+            # stops the run from describing itself wrongly.
+            if [ "${DEPLOY_TARGET}" = "production" ] && [ "${target}" != "${GITHUB_SHA}" ]; then
+              echo "::error::This run was started from ${GITHUB_SHA}, and ${RELEASE_TAG} points at ${target}."
+              echo "::error::A production deploy promotes exactly one release. Dispatch this workflow from the tag itself: Run workflow -> Use workflow from -> Tags -> ${RELEASE_TAG}."
+              exit 1
+            fi
           else
             target="${GITHUB_SHA}"
             echo "Manual run against ${GITHUB_REF} (${target})."
@@ -204,6 +236,81 @@ jobs:
             exit 1
           fi
 
+      # ---------------------------------------------------------------------
+      # WHERE THIS IS GOING, DECIDED BEFORE ANYTHING IS BUILT.
+      #
+      # Two projects, one direction of travel: a published release is deployed
+      # to the STAGING project; the production project is deployed only by a
+      # dispatch that names `target: production`, after the release was
+      # confirmed on staging (delivery rule, .claude/CLAUDE.md, 2026/09/15).
+      #
+      # Both checks used to sit just before `vercel deploy`, forty minutes of
+      # gates later. Failing here costs seconds.
+      # ---------------------------------------------------------------------
+      - name: Refuse a production deploy that names no release
+        if: env.DEPLOY_TARGET == 'production' && inputs.release_tag == ''
+        run: |
+          echo "::error::A production deploy promotes a release that was confirmed on staging. Name it in release_tag."
+          exit 1
+
+      # `.vercel/project.json` is gitignored, so the CLI is told which project
+      # this is through the environment instead. Both ids are non-secret
+      # identifiers; they are repository secrets so that all five deploy inputs
+      # are managed in one place.
+      #
+      # RESOLVED IN A STEP, NOT IN `${{ cond && secrets.A || secrets.B }}`.
+      # That expression silently yields the STAGING id whenever the production
+      # one is unset, because an empty secret is falsey and `||` then takes the
+      # right-hand side — so the one configuration mistake this most needs to
+      # catch, a production secret that was never added, deployed the build to
+      # staging a second time and reported it as production (2026/09/15). Here
+      # the per-target pair is checked explicitly and the missing secret is
+      # named.
+      - name: Resolve the Vercel project for this target
+        id: vercel-project
+        env:
+          PRODUCTION_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          PRODUCTION_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          STAGING_ORG_ID: ${{ secrets.VERCEL_STAGING_ORG_ID }}
+          STAGING_PROJECT_ID: ${{ secrets.VERCEL_STAGING_PROJECT_ID }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [ "${DEPLOY_TARGET}" = "production" ]; then
+            org_secret=VERCEL_ORG_ID
+            project_secret=VERCEL_PROJECT_ID
+            org_id="${PRODUCTION_ORG_ID}"
+            project_id="${PRODUCTION_PROJECT_ID}"
+          else
+            org_secret=VERCEL_STAGING_ORG_ID
+            project_secret=VERCEL_STAGING_PROJECT_ID
+            org_id="${STAGING_ORG_ID}"
+            project_id="${STAGING_PROJECT_ID}"
+          fi
+
+          missing=0
+          if [ -z "${VERCEL_TOKEN}" ]; then
+            echo "::error::VERCEL_TOKEN is not set as a repository secret."
+            missing=1
+          fi
+          if [ -z "${org_id}" ]; then
+            echo "::error::${org_secret} is not set as a repository secret, and it is the ${DEPLOY_TARGET} organisation id."
+            missing=1
+          fi
+          if [ -z "${project_id}" ]; then
+            echo "::error::${project_secret} is not set as a repository secret, and it is the ${DEPLOY_TARGET} project id."
+            missing=1
+          fi
+          if [ "${missing}" -ne 0 ]; then
+            echo "::error::Refusing to deploy to ${DEPLOY_TARGET} without its own project ids — the other target's would deploy to the other site. The five secrets are listed in docs/demo/deployment.md."
+            exit 1
+          fi
+
+          echo "org_id=${org_id}" >> "$GITHUB_OUTPUT"
+          echo "project_id=${project_id}" >> "$GITHUB_OUTPUT"
+          echo "Deploying to the ${DEPLOY_TARGET} project, from ${org_secret} and ${project_secret}."
+
       - name: Set up Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  #v7.0.0
         with:
@@ -218,7 +325,7 @@ jobs:
       # ---------------------------------------------------------------------
       - name: Restore the pinned ZK artefacts
         id: zk-cache
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  #v4.3.0
         with:
           key: zk-artefacts-${{ hashFiles('examples/passport-balancer/contracts-stagenet/managed/*/compiler/contract-manifest.json') }}
           path: |
@@ -229,7 +336,16 @@ jobs:
 
       # Hard failure here, unlike verify-demo.yml. A deploy that cannot build
       # must not be green.
-      - name: Fetch the ZK artefact bundle from the release
+      #
+      # THE BUNDLE IS ALWAYS FETCHED BY TAG. `gh release download` with no tag
+      # takes whatever is Latest at the moment the step runs, which is a
+      # different build from the one being deployed the instant anyone cuts a
+      # release while a promotion is in flight. A run that names a release uses
+      # that release's asset; a run that names none uses the pin in
+      # scripts/zk-artefacts.lock.json, which is the same asset a Vercel
+      # builder and a developer on a fresh clone get. Nothing here resolves to
+      # "newest".
+      - name: Fetch the ZK artefact bundle
         if: steps.zk-cache.outputs.cache-hit != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -237,23 +353,19 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Written as two calls rather than one with an array argument: under
-          # `set -u`, expanding an empty array is an unbound-variable error on
-          # bash 3.2. Runners carry bash 5, but this costs nothing to avoid.
-          download() {
-            if [ -n "${RELEASE_TAG}" ]; then
-              echo "Downloading ${ZK_BUNDLE_ASSET} from release ${RELEASE_TAG}."
-              gh release download "${RELEASE_TAG}" --pattern "${ZK_BUNDLE_ASSET}" --dir /tmp --clobber
-            else
-              echo "Downloading ${ZK_BUNDLE_ASSET} from the latest published release."
-              gh release download --pattern "${ZK_BUNDLE_ASSET}" --dir /tmp --clobber
-            fi
-          }
+          repository="${GITHUB_REPOSITORY}"
+          tag="${RELEASE_TAG}"
+          if [ -z "${tag}" ]; then
+            tag="$(node -p 'JSON.parse(require("node:fs").readFileSync("scripts/zk-artefacts.lock.json", "utf8")).tag')"
+            repository="$(node -p 'JSON.parse(require("node:fs").readFileSync("scripts/zk-artefacts.lock.json", "utf8")).repository')"
+            echo "This run names no release, so the bundle comes from the pin in scripts/zk-artefacts.lock.json."
+          fi
 
-          if ! download; then
-            echo "::error::Could not download ${ZK_BUNDLE_ASSET} from the release."
-            echo "::error::The PWA build stages ~97 MB of prover keys and ZKIR that are not in git and cannot be rebuilt in CI (compiler 0.33.0-rc.2 is not installable)."
-            echo "::error::Attach the bundle to the release and re-run. docs/demo/deployment.md has the command."
+          echo "Downloading ${ZK_BUNDLE_ASSET} from ${repository} ${tag}."
+          if ! gh release download "${tag}" --repo "${repository}" --pattern "${ZK_BUNDLE_ASSET}" --dir /tmp --clobber; then
+            echo "::error::Could not download ${ZK_BUNDLE_ASSET} from ${repository} ${tag}."
+            echo "::error::The PWA build stages ~97 MB of prover keys and ZKIR that are not in git, and no machine in this pipeline has a compiler."
+            echo "::error::Attach the bundle to that release, or move the pin in scripts/zk-artefacts.lock.json forward, and re-run. docs/demo/deployment.md has the command."
             exit 1
           fi
           tar --zstd -xf "/tmp/${ZK_BUNDLE_ASSET}" -C .
@@ -278,7 +390,7 @@ jobs:
       # they ship today, and `?prover=browser` on the live site needs them.
       - name: Stage the browser prover's parameters
         id: zk-params-cache
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  #v4.3.0
         with:
           key: zk-params-${{ hashFiles('examples/passport-demo/scripts/fetch-zk-params.mjs') }}
           path: examples/passport-demo/public/zk-params
@@ -348,35 +460,16 @@ jobs:
       - name: Install the Vercel CLI
         run: npm install --global "vercel@${VERCEL_CLI_VERSION}"
 
-      # `.vercel/project.json` is gitignored, so the CLI is told which project
-      # this is through the environment instead. Both ids are non-secret
-      # identifiers; they are repository secrets so that all three deploy inputs
-      # are managed in one place.
-      # Two projects, one direction of travel: a published release is deployed
-      # to the STAGING project; the production project is deployed only by a
-      # dispatch that names `target: production`, after the release was
-      # confirmed on staging (delivery rule, .claude/CLAUDE.md, 2026/09/15).
-      # A production dispatch must name the release it promotes.
-      - name: Refuse a production deploy that names no release
-        if: env.DEPLOY_TARGET == 'production' && inputs.release_tag == ''
-        run: |
-          echo "::error::A production deploy promotes a release that was confirmed on staging. Name it in release_tag."
-          exit 1
-
+      # The project was resolved, and both its ids checked, before the build —
+      # see "Resolve the Vercel project for this target" above.
       - name: Deploy to Vercel
         id: vercel
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
-          VERCEL_ORG_ID: ${{ env.DEPLOY_TARGET == 'production' && secrets.VERCEL_ORG_ID || secrets.VERCEL_STAGING_ORG_ID }}
-          VERCEL_PROJECT_ID: ${{ env.DEPLOY_TARGET == 'production' && secrets.VERCEL_PROJECT_ID || secrets.VERCEL_STAGING_PROJECT_ID }}
+          VERCEL_ORG_ID: ${{ steps.vercel-project.outputs.org_id }}
+          VERCEL_PROJECT_ID: ${{ steps.vercel-project.outputs.project_id }}
         run: |
           set -euo pipefail
-          for name in VERCEL_TOKEN VERCEL_ORG_ID VERCEL_PROJECT_ID; do
-            if [ -z "${!name}" ]; then
-              echo "::error::The Vercel ${name} for ${DEPLOY_TARGET} is not set as a repository secret (VERCEL_TOKEN, and VERCEL_ORG_ID/VERCEL_PROJECT_ID for production or VERCEL_STAGING_ORG_ID/VERCEL_STAGING_PROJECT_ID for staging). See docs/demo/deployment.md."
-              exit 1
-            fi
-          done
           echo "Deploying ${GITHUB_SHA} to ${DEPLOY_TARGET}."
           url="$(vercel deploy --prebuilt --prod --yes --token "$VERCEL_TOKEN")"
           echo "url=${url}" >> "$GITHUB_OUTPUT"

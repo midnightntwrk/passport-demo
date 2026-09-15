@@ -1,5 +1,6 @@
-# Runs the demo's gates on every pull request that touches it, so drift is
-# caught before merge rather than after a deploy.
+# Runs the demo's gates on every pull request that touches it AND on the merge
+# that lands it, so drift is caught before a release is cut rather than after a
+# deploy.
 #
 # WHY THIS EXISTS
 # ---------------
@@ -20,25 +21,49 @@
 # So the ordering in the `gates` job below — build the backend, THEN type-check
 # the app — is the whole point of the job, not housekeeping.
 #
-# TWO JOBS, BECAUSE THE GATES HAVE DIFFERENT INPUTS
-# -------------------------------------------------
-# `gates` needs nothing that is not in a git checkout. `bundle` needs the ~97 MB
+# THREE JOBS, BECAUSE THE GATES HAVE DIFFERENT INPUTS
+# ---------------------------------------------------
+# `gates` needs nothing that is not in a git checkout. `suites` needs one more
+# install, for a project that is not an npm workspace. `bundle` needs the ~97 MB
 # of prover keys and ZKIR that `vite build` stages, which are deliberately not
 # in git. See the header of `deploy-demo.yml` for where those come from and why
-# they cannot be rebuilt in CI.
+# no machine in this pipeline can rebuild them.
 
 name: Verify Passport demo
 
+# The two path lists are written out twice on purpose: GitHub Actions rejects
+# YAML anchors in a workflow file, so there is no way to say "the same list".
+# Keep them identical.
 on:
   pull_request:
     paths:
       - 'examples/passport-demo/**'
+      - 'examples/passport-balancer/**'
       - 'demo-backend/**'
-      - 'examples/passport-balancer/contracts-stagenet/**'
-      - 'scripts/build-vercel-output.mjs'
+      - 'packages/connect/**'
+      - 'patches/**'
+      - 'scripts/**'
       - 'package.json'
       - 'package-lock.json'
       - '.github/workflows/verify-demo.yml'
+      - '.github/workflows/scripts/**'
+  # A MERGE IS VERIFIED TOO. Every gate here ran only on the pull request, so a
+  # merge commit — a tree no run had ever seen, and the tree a release is cut
+  # from — was the first thing to reach a deploy unverified. A push run is also
+  # what leaves the ZK bundle cache warm on `main` for the next one.
+  push:
+    branches: [main]
+    paths:
+      - 'examples/passport-demo/**'
+      - 'examples/passport-balancer/**'
+      - 'demo-backend/**'
+      - 'packages/connect/**'
+      - 'patches/**'
+      - 'scripts/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/verify-demo.yml'
+      - '.github/workflows/scripts/**'
   workflow_dispatch:
 
 permissions:
@@ -64,7 +89,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  #v6.1.0
 
       - name: Refuse to run against a ref that has no demo
         run: |
@@ -147,6 +172,67 @@ jobs:
         run: npm run test:coverage --workspace passport-demo
 
   # ---------------------------------------------------------------------------
+  # THE SUITES NOTHING RAN. Test suites existed in this repository that no
+  # workflow executed, so the only thing keeping them passing was whoever last
+  # remembered to run them by hand:
+  #
+  #   packages/connect        166 tests — the pairing protocol partner apps
+  #                           build against. A break here is a break in
+  #                           somebody else's site.
+  #   scripts/release-naming  19 tests — the `v<N> - YYYY/MM/DD` derivation
+  #                           every promotion is recorded by.
+  #
+  # Its own job rather than steps on `gates`: neither depends on the demo
+  # backend being rebuilt first, and running them in parallel costs nothing.
+  #
+  # TWO SUITES ARE MISSING FROM THIS JOB, AND NEITHER IS AN OVERSIGHT. Both
+  # were added here, run, and taken out again, because a gate that is red on
+  # arrival is not a gate — it is a thing everyone learns to ignore.
+  #
+  #   `npm run lint` at the root does not pass on `main`: 2,046 errors over 20
+  #   directories, 1,794 of them nothing to do with the generated contract
+  #   modules a checkout lacks (measured 2026/09/15).
+  #
+  #   `examples/passport-balancer`'s 621 tests — the fee sponsor's only gate
+  #   before a droplet, which makes their absence the worst of the two — do not
+  #   pass on Node 22, the version everything else here runs. 593 pass, 0 fail,
+  #   and 28 are CANCELLED: `reservation.test.mjs` loses its watchdog, lane and
+  #   coin-reservation suites to "Promise resolution is still pending but the
+  #   event loop has already resolved" (run 35008543080, 2026/09/15). The same
+  #   621 pass on Node 25. The suite is also not installed from its own
+  #   `package-lock.json` — it is not a workspace, and `npm ci` refuses that
+  #   lock because `package.json` asks for
+  #   `@midnight-ntwrk/compact-runtime@0.19.0-rc.0` where the lock records
+  #   `0.19.0`. Both are real defects in that package rather than in this
+  #   workflow, and neither is this change's to repair.
+  #
+  # Whoever fixes either one adds its step here in the same change.
+  # ---------------------------------------------------------------------------
+  suites:
+    name: Connect and release-naming suites
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  #v6.1.0
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  #v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Connect package tests
+        run: npx vitest run
+        working-directory: packages/connect
+
+      - name: Release-naming tests
+        run: npm run test:release-naming
+
+  # ---------------------------------------------------------------------------
   # The gates that need a real `vite build`, and therefore the ZK artefacts.
   # ---------------------------------------------------------------------------
   bundle:
@@ -156,7 +242,7 @@ jobs:
     timeout-minutes: 40
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  #v6.1.0
 
       - name: Set up Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  #v7.0.0
@@ -169,7 +255,7 @@ jobs:
 
       - name: Restore the pinned ZK artefacts
         id: zk-cache
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  #v4.3.0
         with:
           key: zk-artefacts-${{ hashFiles('examples/passport-balancer/contracts-stagenet/managed/*/compiler/contract-manifest.json') }}
           path: |
@@ -178,40 +264,45 @@ jobs:
             examples/passport-balancer/contracts-stagenet/managed/midnames/keys
             examples/passport-balancer/contracts-stagenet/managed/midnames/zkir
 
-      # On a pull request this is allowed to come up empty: the bundle is
-      # published with a release, and before the first release there is nothing
-      # to fetch. The build-dependent gates below then skip LOUDLY — the reason
-      # is written into the job summary. `deploy-demo.yml` makes the same step
-      # a hard failure, because a deploy that cannot build must never be green.
-      - name: Fetch the ZK artefact bundle from the latest release
+      # FETCHED BY TAG, FROM THE PIN. This used to be a bare
+      # `gh release download`, which takes whatever is Latest when the step
+      # runs — so a pull request was built against a bundle nothing in the tree
+      # named, and against a different one after the next release. The pin in
+      # `scripts/zk-artefacts.lock.json` is the same asset a Vercel builder and
+      # a developer on a fresh clone get, and it is a tracked file, so moving it
+      # is a reviewable change rather than a side effect of publishing.
+      - name: Fetch the pinned ZK artefact bundle
         id: zk-fetch
         if: steps.zk-cache.outputs.cache-hit != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if gh release download --pattern "${ZK_BUNDLE_ASSET}" --dir /tmp --clobber 2>/tmp/gh.err; then
+          tag="$(node -p 'JSON.parse(require("node:fs").readFileSync("scripts/zk-artefacts.lock.json", "utf8")).tag')"
+          repository="$(node -p 'JSON.parse(require("node:fs").readFileSync("scripts/zk-artefacts.lock.json", "utf8")).repository')"
+          echo "Downloading ${ZK_BUNDLE_ASSET} from ${repository} ${tag} (scripts/zk-artefacts.lock.json)."
+          if gh release download "${tag}" --repo "${repository}" --pattern "${ZK_BUNDLE_ASSET}" --dir /tmp --clobber 2>/tmp/gh.err; then
             tar --zstd -xf "/tmp/${ZK_BUNDLE_ASSET}" -C .
             echo "available=true" >> "$GITHUB_OUTPUT"
           else
             echo "available=false" >> "$GITHUB_OUTPUT"
             {
-              echo "### PWA and end-to-end gates were skipped"
+              echo "### The ZK artefact bundle could not be fetched"
               echo
-              echo "No \`${ZK_BUNDLE_ASSET}\` asset could be downloaded from a release, and the"
-              echo "cache held no copy. Those ~97 MB of prover keys and ZKIR are not in git and"
-              echo "cannot be rebuilt in CI — the compiler that produced them, 0.33.0-rc.2, is not"
-              echo "an installable version. \`npm run test:pwa\` and the Playwright tier-1 run need"
-              echo "a real \`vite build\`, so they did not run on this pull request."
+              echo "\`${ZK_BUNDLE_ASSET}\` was not downloadable from **${repository} ${tag}**, the"
+              echo "release pinned in \`scripts/zk-artefacts.lock.json\`, and the cache held no copy."
+              echo "Those ~97 MB of prover keys and ZKIR are not in git and no machine in this"
+              echo "pipeline has a compiler, so \`npm run test:pwa\` and the Playwright tier-1 run"
+              echo "cannot run at all."
               echo
-              echo "See \`docs/demo/deployment.md\` for how to publish the bundle."
+              echo "Either the pinned release lost its asset, or the pin is stale. Move it forward"
+              echo "in the same commit that lands new manifests — \`docs/demo/deployment.md\`."
               echo
               echo "\`gh release download\` said:"
               echo '```'
               cat /tmp/gh.err
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
-            echo "::warning::ZK artefact bundle unavailable — the PWA and end-to-end gates did not run."
           fi
 
       - name: Note whether the build-dependent gates can run
@@ -223,6 +314,23 @@ jobs:
           else
             echo "ok=false" >> "$GITHUB_OUTPUT"
           fi
+
+      # A JOB THAT RAN NO GATES IS NOT GREEN (2026/09/15). Until today an
+      # unavailable bundle left every step below skipped and the job reported
+      # success, so "PWA checks and tier-1 end-to-end" was a green tick next to
+      # a build that had never been attempted — on exactly the pull requests
+      # most likely to have broken it, since the bundle goes missing when the
+      # pin or the manifests move. The reason was written to the job summary,
+      # which nobody reads when the check is green.
+      #
+      # The `if: steps.buildable.outputs.ok == 'true'` guards below are left in
+      # place behind this: this is the braces, they are the belt.
+      - name: Refuse to report success without the ZK artefact bundle
+        if: steps.buildable.outputs.ok != 'true'
+        run: |
+          echo "::error::The ZK artefact bundle is unavailable, so the PWA check and the tier-1 end-to-end run could not be attempted."
+          echo "::error::Refusing to report success on gates that did not run. The step summary above says what gh release download answered; docs/demo/deployment.md says how to fix the pin."
+          exit 1
 
       # Every file the manifests name, hashed and compared. This is what stops a
       # bundle from a DIFFERENT build of the same contracts reaching a build:

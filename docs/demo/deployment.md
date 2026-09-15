@@ -1,49 +1,59 @@
 # Deploying the Passport demo
 
-**The rule: only what is on `demo/pwa-demo` is deployed, and a deploy is a
-published GitHub release.** `main` is the planning branch and does not contain
-the PWA. Deploying by hand is possible and is documented below, but it is not
-the normal path and it runs none of the gates.
+**The rule: only what is on `main` is deployed, a deploy is a published GitHub
+release, and a release goes to STAGING.** Production is a separate, deliberate
+promotion of a release that was confirmed on staging. Deploying by hand is
+possible and is documented below, but it is not the normal path and it runs
+none of the gates.
 
-## What deploys, and from where
+## What deploys, and where to
 
 | | |
 |---|---|
-| Site | <https://midnightpassport.com> |
+| Staging | <https://staging.midnightpassport.com> — every build lands here first, experiments included |
+| Production | <https://midnightpassport.com> — the link stakeholders hold; only a build that passed every gate on staging |
 | App | [`examples/passport-demo/`](../../examples/passport-demo/) |
-| Vercel project | `midnight-passport-app` |
+| Vercel projects | `midnight-passport-staging` and `midnight-passport-app` (team Webisoft) |
 | Workflow | [`.github/workflows/deploy-demo.yml`](../../.github/workflows/deploy-demo.yml) |
-| Triggers | a published GitHub release, or a manual `workflow_dispatch` |
+| Branch | `main`, and nothing else |
+| Releases | `v<N> - YYYY/MM/DD` on **this repository**, `midnightntwrk/passport-demo` |
+
+Two triggers, and they are not interchangeable:
+
+| Trigger | Where it goes |
+|---|---|
+| a published GitHub release | **staging** |
+| `workflow_dispatch` with `target: production` and `release_tag` | **production** |
+| `workflow_dispatch` with `target: staging` | staging |
 
 The sibling services under `examples/` — `passport-balancer` and
 `passport-funder` — are **not** part of this. They run on the droplet and are
 shipped by rsync, as described in `examples/passport-balancer/README.md`. This
-page is about the PWA on Vercel only.
+page is about the PWA on Vercel only. Sponsor changes are deployed to the
+droplet **before** the build that needs them is promoted.
 
-## The deploy command
+## The guards
 
-```sh
-vercel --prod          # from the REPOSITORY ROOT, not from examples/passport-demo
-```
+The workflow refuses to run unless the commit being deployed is an **ancestor
+of `origin/main`**, so a release cut from a feature branch cannot ship, however
+it was tagged. It also refuses a ref that does not contain the demo, rather
+than uploading an empty build over the live site.
 
-That is the whole command, and it works from a fresh clone with nothing built.
-The builder produces the ZK artefacts itself; see [Deploying by
-hand](#deploying-by-hand) below for how, and for the one-off `vercel link` a new
-working copy needs. It is still not the *sanctioned* path — it runs no gates and
-uploads whatever is on disk, uncommitted changes included — so the rest of this
-page, about releases, remains the procedure.
+A run that names `release_tag` **checks out that tag**, so a promotion builds
+the immutable release rather than whatever the dispatch was started from. A
+production promotion must additionally be dispatched *from* that tag — **Run
+workflow → Use workflow from → Tags → `v<N>`** — so the commit the run reports
+is the commit it shipped.
 
-The workflow refuses to run unless the release commit is an **ancestor of
-`origin/demo/pwa-demo`**, then checks out that immutable tag before building.
-This makes the release body, the checked-out code, and the production upload the
-same revision. It also refuses a ref that does not actually contain the demo,
-rather than uploading an empty build over the live site.
+The project ids are resolved before anything is built, from the pair belonging
+to the target: a production deploy with `VERCEL_ORG_ID` or `VERCEL_PROJECT_ID`
+unset fails by name rather than falling back to the staging project.
 
 ## Cutting a release
 
-1. Land the change on `demo/pwa-demo` and let
-   [`verify-demo.yml`](../../.github/workflows/verify-demo.yml) go green on the
-   pull request.
+1. Land the change on `main` and let
+   [`verify-demo.yml`](../../.github/workflows/verify-demo.yml) go green — on
+   the pull request, and again on the merge.
 2. Pack the ZK artefacts from a tree that has them (see below). The
    break-glass `scripts/tag-release.mjs` command does this automatically; use
    the following when creating the release directly:
@@ -56,17 +66,17 @@ rather than uploading an empty build over the live site.
      examples/passport-balancer/contracts-stagenet/managed/midnames/zkir
    ```
 
-3. Cut the release from `demo/pwa-demo` and attach that file:
+3. Cut the release from `main` and attach that file:
 
    ```sh
-   gh release create v2026.08.26 --target demo/pwa-demo \
-     --title 'Passport demo 2026/08/26' \
+   gh release create v17 --target main \
+     --title 'v17 - 2026/09/15' \
      --notes 'What changed.' \
      passport-zk-artefacts.tar.zst
    ```
 
-Publishing the release runs the gates and deploys. The run summary carries the
-deployment URL.
+Publishing the release runs the gates and deploys **to staging**. The run
+summary carries the deployment URL.
 
 ### Why the release carries a 97 MB attachment
 
@@ -76,11 +86,14 @@ directories are gitignored; the `contract/` and `compiler/` halves beside them
 are tracked. A fresh checkout therefore stops at `prepare:zk` with
 "the account build is incomplete — keys/ is missing".
 
-They cannot be rebuilt in CI. The manifests name compiler **0.33.0-rc.2**, and
-`compact list` offers 0.31.1 then 0.34.0 — the compiler that produced what is
-deployed on stagenet is not installable any more. Recompiling with a different
-one would produce different verifier keys, and the deployed contract knows only
-the keys it was deployed with.
+They cannot be rebuilt *here*, which is not the same as not being reproducible.
+The manifests name compiler **0.33.0-rc.2** and `compact list` offers 0.31.1
+then 0.34.0, so this page used to say a rebuild was impossible. Measured on
+2026/09/10 it is not: compactc 0.34.0 reproduces every one of these verifier
+keys bit-identically. Nothing in this pipeline installs `compact`, though, so
+the bundle still travels with the release — see
+[`scripts/fetch-zk-artefacts.mjs`](../../scripts/fetch-zk-artefacts.mjs), which
+makes the same point at length.
 
 So the bundle travels with the release, and every file in it is checked against
 the tracked `contract-manifest.json` by
@@ -88,27 +101,71 @@ the tracked `contract-manifest.json` by
 before anything is built. Bundles are cached by manifest hash, so only the first
 run after a contract rebuild pays the download.
 
-The attachment is no longer only CI's. A remote build downloads the same asset,
-pinned by sha256 in [`scripts/zk-artefacts.lock.json`](../../scripts/zk-artefacts.lock.json)
-— see [How the builder gets artefacts it cannot compile](#how-the-builder-gets-artefacts-it-cannot-compile).
-So a release without the bundle now breaks both paths, and the lock file has to
-be moved forward in the same commit that lands new manifests.
+The attachment is no longer only CI's. `scripts/fetch-zk-artefacts.mjs`
+downloads the same asset, pinned by sha256 in
+[`scripts/zk-artefacts.lock.json`](../../scripts/zk-artefacts.lock.json) — see
+[How a build gets artefacts it cannot compile](#how-a-build-gets-artefacts-it-cannot-compile).
+So a release without the bundle breaks every path, and the lock file has to be
+moved forward in the same commit that lands new manifests.
+
+**The pin is what every run that names no release uses**, including
+`verify-demo.yml` on a pull request and a `workflow_dispatch` with a blank
+`release_tag`. Nothing resolves to "whatever is Latest": until 2026/09/15 both
+workflows ran a bare `gh release download`, so a pull request was built against
+a bundle nothing in the tree named, and against a different one the moment
+somebody published.
+
+## Promoting a release to production
+
+Nothing reaches <https://midnightpassport.com> directly, ever, for any reason,
+including "it is a one-line fix". A release is promoted only when all of these
+are true **on staging**:
+
+1. `tsc`, the unit suites, `check-pwa`, and the mocked Playwright tier are
+   green on the exact commit.
+2. The live walk passes against staging:
+   `npm run test:e2e:live --workspace passport-demo` (which is
+   `RUN_LIVE=1 LIVE_URL=https://staging.midnightpassport.com playwright test e2e/stagenet.live.spec.ts`).
+3. A **returning-browser** check: a browser or installed PWA that already held
+   the previous build opens the new one and completes onboarding and a send.
+   The automated walk is fresh-browser only and cannot see cache defects — on
+   2026/09/14 a year-long immutable cache on the contract manifest broke
+   new-account setup for every returning reviewer while the walk passed.
+4. A real-device walk on Android and iPhone of the three scoped flows: passkey
+   onboarding, `.night` name, shielded balance with send and receive.
+
+Then, from the release tag:
+
+```sh
+gh workflow run deploy-demo.yml --ref v17 -f target=production -f release_tag=v17
+```
+
+Every promotion is mirrored as a release on `midnightntwrk/passport` at the
+carried commit, with the ZK artefact bundle attached.
 
 ## Secrets
 
-Three repository secrets, set by whoever administers `midnightntwrk/passport`
+Five repository secrets, set by whoever administers this repository
 (**Settings → Secrets and variables → Actions**):
 
-| Secret | Value | Where it comes from |
+| Secret | Target | Where it comes from |
 |---|---|---|
-| `VERCEL_TOKEN` | a Vercel access token | Vercel → Account Settings → Tokens, scoped to the team that owns `midnight-passport-app`. Not in this repository, and never printed by the workflow. |
-| `VERCEL_ORG_ID` | `team_hVVRen2qWHNNHCLPg6LcMIH8` | `orgId` in `examples/passport-demo/.vercel/project.json` on a linked working copy. |
-| `VERCEL_PROJECT_ID` | `prj_1t0WkAkp0oiPWEHVrdehKInWj8p0` | `projectId` in the same file. |
+| `VERCEL_TOKEN` | both | Vercel → Account Settings → Tokens, scoped to the team that owns both projects. Not in this repository, and never printed by the workflow. |
+| `VERCEL_ORG_ID` | production | `orgId` in `examples/passport-demo/.vercel/project.json` on a copy linked to `midnight-passport-app`. |
+| `VERCEL_PROJECT_ID` | production | `projectId` in the same file. |
+| `VERCEL_STAGING_ORG_ID` | staging | `orgId` on a copy linked to `midnight-passport-staging`. |
+| `VERCEL_STAGING_PROJECT_ID` | staging | `projectId` in the same file. |
 
-The two ids are not sensitive — `.vercel/` is gitignored, so the CLI is told
+The four ids are not sensitive — `.vercel/` is gitignored, so the CLI is told
 which project this is through the environment instead. They are secrets only so
-that all three deploy inputs are managed in one place. The workflow fails with a
-named error if any is unset.
+that all five deploy inputs are managed in one place.
+
+**The workflow names the missing one and stops.** It checks the pair belonging
+to the target it was asked for, before installing or building anything. It used
+to select them with `${{ ... && secrets.A || secrets.B }}`, where an unset
+production secret is falsey and the expression quietly yields the *staging*
+value — so the one mistake this most needs to catch deployed the build to
+staging a second time and reported it as production.
 
 To require a human approval before each production deploy, add a `production`
 environment under **Settings → Environments** with required reviewers and a
@@ -199,34 +256,38 @@ vercel promote <deployment-url>          # make it production again
 ```
 
 Or in the dashboard: **midnight-passport-app → Deployments → … → Promote to
-Production**. Then fix forward on `demo/pwa-demo` and cut a new release; a
-promotion is not a state that branch knows about.
+Production**. Then fix forward on `main`, cut a new release, confirm it on
+staging, and promote that; a Vercel rollback is not a state `main` knows about.
 
 ## Deploying by hand
 
-Two commands reach production without GitHub Actions. Both run **no gates** — no
-typecheck, no tests, no PWA check, no end-to-end run — and both ship whatever is
+One command reaches a site without GitHub Actions. It runs **no gates** — no
+typecheck, no tests, no PWA check, no end-to-end run — and it ships whatever is
 in the working tree, including uncommitted changes. That is precisely the
-incoherence between the release branch and production this page exists to end,
-so if you use either, say so in the pull request or the channel and cut a
-release from `demo/pwa-demo` afterwards so the two agree again.
+incoherence between `main` and what is live that this page exists to end, so if
+you use it, say so in the pull request or the channel and cut a release from
+`main` afterwards so the two agree again.
 
-### `vercel --prod` — the deploy command
+### Only prebuilt deploys are supported
 
-```sh
-vercel --prod        # from the repository root
-```
+**`vercel --prod` from the repository root — a remote build — does not work,
+and this page used to say it did.** The Vercel project's `buildCommand` was
+`npm run vercel-build` in `examples/passport-demo/package.json`, which ran
+`cd ../.. && npm run build:passport:remote`; there has never been a
+`build:passport:remote` script in the root `package.json`, so any remote build
+stopped at `Missing script`. Both have been removed (2026/09/15) rather than
+left as an instruction that cannot be followed.
 
-Run once per working copy first, to write the gitignored root
-`.vercel/project.json`:
+Everything that deploys today is **prebuilt**: the workflow and
+`deploy:passport:manual` both build locally, assemble a Build Output API
+directory with `scripts/build-vercel-output.mjs`, and upload it with
+`vercel deploy --prebuilt`. A prebuilt upload has no build step for the project
+settings to apply to. Restoring the remote path means adding the root script
+the workflow's own build steps describe (`prepare:zk`, `build`,
+`build-vercel-output`) and putting `buildCommand` back in the same change.
 
-```sh
-vercel link --scope dominion-webisoft --project midnight-passport-app --yes
-rm -f .env.local     # link leaves a VERCEL_OIDC_TOKEN behind; nothing here needs it
-```
-
-Everything else is committed. The Vercel project carries two settings that make
-it work, both already applied:
+The Vercel projects still carry the settings below, which matter to anything
+that does build remotely and to the reader trying to understand the project:
 
 | Setting | Value | Why |
 |---|---|---|
@@ -251,32 +312,20 @@ builds of one tree gave `187b9233…` and `9103d568…`; with it off, both gave
 `bfad1f8e87ebcfb2` and identical asset hashes.
 
 `examples/passport-demo/vercel.json` names the rest: `installCommand`
-(`cd ../.. && npm ci`), `buildCommand` (`npm run vercel-build`, which hands back
-to the root's `build:passport:remote`), and `outputDirectory` (`dist`). The
-root `.vercelignore` decides what is uploaded — a deny list, so a new workspace
-is included by default, and it deliberately withholds every generated ZK tree so
-that what ships does not depend on what a laptop happens to have built.
+(`cd ../.. && npm ci`) and `outputDirectory` (`dist`). The root `.vercelignore`
+decides what is uploaded — a deny list, so a new workspace is included by
+default, and it deliberately withholds every generated ZK tree so that what
+ships does not depend on what a laptop happens to have built. Its rules are
+.gitignore syntax, where a bare name matches at every level, so anything meant
+to name one directory at the root is written with a leading slash.
 
-The `VITE_*` values a remote build compiles in come from the **project's
+The `VITE_*` values a remote build would compile in come from the **project's
 Environment Variables**, not from this repository — a builder cannot see
 `package.json`'s script line or `deploy-demo.yml`'s `env:` block. `vercel env ls`
 reads them back; they are the same five values as those two copies, and all
 three change together.
 
-Measured on a first, cold build (no build cache), 2026/09/08:
-
-| Step | |
-|---|---|
-| `npm ci` at the root | 27 s |
-| ZK bundle: download, sha256, manifest check | 2.5 s |
-| `zk-params` from the upstream bucket | 7 s |
-| `prepare:zk`, `tsc --noEmit`, `vite build` | 40 s |
-| **Total, queued to READY** | **91 s** |
-
-With a warm build cache it is 61–63 s. The prebuilt fallback's upload, for
-comparison, is 7 s — but it is preceded by the full build on the laptop.
-
-#### How the builder gets artefacts it cannot compile
+#### How a build gets artefacts it cannot compile
 
 `node scripts/fetch-zk-artefacts.mjs` runs first. It downloads the
 `passport-zk-artefacts.tar.zst` asset named by
@@ -313,10 +362,10 @@ check, loudly, before anything is built.
 ### `npm run deploy:passport:manual` — the fallback
 
 Builds locally and uploads the finished output with `vercel deploy --prebuilt`,
-which is how this repository deployed before the remote build existed. Use it
-when the builder cannot get the artefacts — the pinned release asset is gone,
-the upstream parameter bucket is down — or when what you are shipping is not a
-tree any release describes.
+which is the only way anything has ever reached a site from a laptop here. Use
+it when the workflow cannot get the artefacts — the pinned release asset is
+gone, the upstream parameter bucket is down — or when what you are shipping is
+not a tree any release describes.
 
 ```sh
 npm run deploy:passport:manual
@@ -341,7 +390,7 @@ change nothing about what it emits. Both were confirmed by preview deployment on
 
 ## Every deploy is backed by a release
 
-Every production deploy must be backed by a GitHub release (Hector, 2026/09/03: "nothing fancy, just the release tag"). `deploy:passport:manual` ends by running `scripts/tag-release.mjs`, which reads the service-worker build id from `examples/passport-demo/dist/sw.js`, refuses a dirty tree, verifies and packages the pinned ZK artefacts, and creates a release on `midnightntwrk/passport` targeting the deployed commit. A published release without that bundle is invalid: GitHub makes published releases immutable, so it must be superseded by a new release that includes the artefact.
+Every production deploy must be backed by a GitHub release (Hector, 2026/09/03: "nothing fancy, just the release tag"). **Releases are cut on this repository, `midnightntwrk/passport-demo`** — the one the Foundation watches — and mirrored onto `midnightntwrk/passport` at the carried commit. `deploy:passport:manual` ends by running `scripts/tag-release.mjs`, which reads the service-worker build id from `examples/passport-demo/dist/sw.js`, refuses a dirty tree, verifies and packages the pinned ZK artefacts, and creates the release targeting the deployed commit; pass `--repo` for the mirror. A published release without that bundle is invalid: GitHub makes published releases immutable, so it must be superseded by a new release that includes the artefact.
 
 The release is tagged `v<N>`, where N is one past the highest `v<N>` that already exists — counted from both the tag refs (`git ls-remote --tags`) and the releases (`gh release list`), so a tag pushed without a release, or a release whose tag was deleted, still counts. A repository holding only the older `demo-YYYY.MM.DD-<build id>` tags therefore starts at `v1`. The title is `v<N> - YYYY/MM/DD` (UTC). The body opens with the build id, the commit, and the production URL, then carries the "## Fixed" section of `RELEASE-NOTES.md` (`PASSPORT_RELEASE_NOTES` appends a gate summary).
 
@@ -353,7 +402,7 @@ Options, for releasing something other than "what was just built here":
 
 | Option | What it is for |
 | --- | --- |
-| `--repo <owner/name>` | The repository to release in. Default `midnightntwrk/passport` (or `PASSPORT_RELEASE_REPO`). The carry into `midnightntwrk/passport-demo` passes that repository, so the same deploy is released the same way in both places. |
+| `--repo <owner/name>` | The repository to release in. Default `midnightntwrk/passport-demo`, this one (or `PASSPORT_RELEASE_REPO`). Pass `midnightntwrk/passport` for the mirror, so the same deploy is released the same way in both places. |
 | `--commit <sha>` | The commit the release points at. Default HEAD. The carried commit has a different sha in `passport-demo`, and an older deploy is no longer at HEAD. Naming it also makes the notes come from THAT commit's `RELEASE-NOTES.md`, so the release says what that build shipped rather than what has been fixed since. |
 | `--build-id <id>` | The service-worker build id, when `dist/` has moved on — mirroring into `passport-demo`, or filling in a release after the fact. Default: read from the stamped `dist/sw.js`. |
 
