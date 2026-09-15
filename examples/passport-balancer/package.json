@@ -10,8 +10,8 @@
     "sync-check": "npm run build && node dist/sync-check.mjs",
     "dust-rollback": "npm run build && node dist/dust-rollback.mjs",
     "start": "npm run build && node dist/server.mjs",
-    "build:test": "esbuild test/*.test.ts --bundle --format=esm --platform=node --packages=external --outdir=dist/test --out-extension:.js=.mjs",
-    "test": "npm run build:test && node --test dist/test/*.test.mjs",
+    "build:test": "esbuild test/*.test.ts --bundle --format=esm --platform=node --packages=external --outdir=dist/test --out-extension:.js=.mjs && esbuild ops/*.test.ts --bundle --format=esm --platform=node --packages=external --outdir=dist/test/ops --out-extension:.js=.mjs",
+    "test": "npm run build:test && node --test dist/test/*.test.mjs dist/test/ops/*.test.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

@@ -629,6 +629,111 @@ export function nextFeeLegPadding(input: {
  * wallet, for this transaction shape, does not — so its inputs are held here
  * from the transaction itself.
  */
+/**
+ * How many times ONE contract job may rebuild its fee leg on a ledger verdict
+ * before it gives up and says so.
+ *
+ * WHY A SECOND COUNTER EXISTS AT ALL, when `padRounds` already stops at
+ * {@link MAX_FEE_LEG_PADDING}. The two verdicts move the padding in opposite
+ * directions: `time to dismiss` says "more bytes", and the climb answers it by
+ * raising `padRounds`; `exceeded block limit` says "fewer bytes", and the only
+ * answer to that is to put `padRounds` back to nothing. A transaction that
+ * draws one verdict at a low padding and the other at a high one therefore
+ * climbs, is reset, and climbs again — and because the reset also clears the
+ * counter the climb is measured by, the `>= 8` guard is never reached. The loop
+ * has no bound of its own; it runs until the job's deadline, holding a spend
+ * lane and this wallet's coins for the duration.
+ *
+ * Six rounds is the bound, counted across BOTH verdict kinds, so the oscillation
+ * ends after at most six ledger answers however they alternate. It is above
+ * every climb seen to succeed here — the measured ones reach a shape under the
+ * target in two rounds, three where the crumbs were scarce — and far below the
+ * number a wedge would reach.
+ */
+export const MAX_FEE_LEG_REBUILDS = 6;
+
+/** Which way the ledger's refusal points: more bytes, or fewer. */
+export type RebuildVerdict = 'time-to-dismiss' | 'block-limit';
+
+/**
+ * What a contract job should do next, having been refused.
+ *
+ * `pad` rebuilds straight away with the padding named — which is zero for a
+ * block-limit verdict, because bytes are the problem. `wait` holds for a
+ * covering DUST coin to come free and then rebuilds unpadded. `refuse` ends the
+ * job with the sentence {@link feeLegRefusalSentence} builds for it.
+ */
+export type FeeLegRebuild =
+  | { kind: 'pad'; padRounds: number }
+  | { kind: 'wait' }
+  | { kind: 'refuse'; reason: 'too-small' | 'unpriceable' };
+
+/**
+ * One step of the contract fee-leg rebuild, with no wallet in it.
+ *
+ * Hoisted out of `createBalancerWallet` for the same reason
+ * {@link nextFeeLegPadding} was: the arithmetic is the whole of the decision,
+ * and a test can alternate the two verdicts against it and watch the loop stop
+ * without standing a wallet, a facade, or a chain up.
+ */
+export function nextFeeLegRebuild(input: {
+  /** Which refusal the ledger just gave. */
+  verdict: RebuildVerdict;
+  /** The ledger's own sentence, verbatim — read for the padding it calls for. */
+  message: string;
+  /** The padding the last balance ASKED for. */
+  padRounds: number;
+  /** The crumbs the last balance actually CARRIED. */
+  appliedPadding: number;
+  /** Rebuilds already spent on this job, BEFORE this verdict. */
+  rebuildRounds: number;
+  /**
+   * Block-limit only: has the job already spent its wait for a covering coin?
+   * A job with padding to drop never waits — dropping it is the remedy.
+   */
+  waitedOut: boolean;
+  cap?: number;
+  rebuildCap?: number;
+}): FeeLegRebuild {
+  const cap = input.cap ?? 8;
+  const rebuildCap = input.rebuildCap ?? MAX_FEE_LEG_REBUILDS;
+  /* THE BOUND ACROSS BOTH VERDICTS, asked first so neither branch can slip past
+     it. `rebuildRounds` is what this verdict would make the seventh round. */
+  if (input.rebuildRounds >= rebuildCap) {
+    return {
+      kind: 'refuse',
+      reason: input.verdict === 'block-limit' ? 'unpriceable' : 'too-small',
+    };
+  }
+  if (input.verdict === 'time-to-dismiss') {
+    if (input.padRounds >= cap) return { kind: 'refuse', reason: 'too-small' };
+    /* Strictly upward, so the cap above always ends the climb. The verdict is
+       read against the crumbs the transaction CARRIED, which can be fewer than
+       the round asked for; without the `padRounds + 1` a scarce-crumb job would
+       ask for the same number for ever. */
+    return {
+      kind: 'pad',
+      padRounds: Math.min(cap, Math.max(input.padRounds + 1, paddingForVerdict(input.message, input.appliedPadding))),
+    };
+  }
+  /* More bytes cannot help a block limit — bytes are the problem — so the
+     padding goes back to nothing, and a job that had none to drop waits for a
+     covering DUST coin instead of rebuilding the identical transaction. */
+  if (input.padRounds > 0) return { kind: 'pad', padRounds: 0 };
+  if (!input.waitedOut) return { kind: 'wait' };
+  return { kind: 'refuse', reason: 'unpriceable' };
+}
+
+/** The sentence a job ends with when {@link nextFeeLegRebuild} refuses. */
+export function feeLegRefusalSentence(
+  reason: 'too-small' | 'unpriceable',
+  message: string,
+): string {
+  return reason === 'too-small'
+    ? `this transaction is too small for its compute at every padding tried (the ledger says: ${message.slice(0, 160)})`
+    : `the chain will not price this transaction at any input count this service will build (${message.slice(0, 160)})`;
+}
+
 export function unshieldedInputsOf(recipe: unknown): SelectableCoin[] {
   const out: SelectableCoin[] = [];
   if (!recipe || typeof recipe !== 'object') return out;

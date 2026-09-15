@@ -28,6 +28,17 @@ Description=Midnight Passport stagenet balancer (fee, name, and activation spons
 Documentation=https://github.com/midnightntwrk/passport/tree/demo/pwa-demo/examples/passport-balancer
 After=network-online.target
 Wants=network-online.target
+# THE COMPANION TO `Restart=always`, and the thing that stops it being a lie.
+# systemd's default start limit is five starts in ten seconds, and a process
+# that fails FAST — a bad environment file, an unreadable state directory, a
+# port already held — exhausts that in well under a second. The unit then goes
+# to `failed` with `start-limit-hit` and stays there: `Restart=always` does not
+# apply any more, the watchdog's `systemctl restart` is refused without a
+# `reset-failed` first, and the service is down until somebody logs in. With
+# the interval at zero the limit never applies, so a fast-failing start is
+# retried every `RestartSec` for as long as it takes the cause to be fixed,
+# which is exactly what the health loop's last-resort rung assumes.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -92,7 +103,12 @@ Environment=BALANCER_PORT=8807
 Environment=BALANCER_PROVER_URL=https://67-205-177-162.sslip.io/prover
 # Reached only by the TLS proxy on the funder host; the firewall admits it alone.
 Environment=BALANCER_HOST=0.0.0.0
-Environment=BALANCER_ALLOWED_ORIGINS=https://midnightpassport.com,https://raffle.midnightpassport.com,https://template.midnightpassport.com,http://localhost:5175
+# Staging is first on the list after production because every build lands there
+# before it is promoted: an origin staging cannot call is an origin no build can
+# be walked from. The running droplet has carried it in its environment since
+# 2026/09/14; this file did not, so a rebuild from the repository would have
+# taken it away again.
+Environment=BALANCER_ALLOWED_ORIGINS=https://midnightpassport.com,https://staging.midnightpassport.com,https://raffle.midnightpassport.com,https://template.midnightpassport.com,http://localhost:5175
 Environment=NODE_OPTIONS=--max-old-space-size=4096
 # The resolver shelf is OFF pending proof that its filler is safe to leave
 # running. Until 2026/09/03 every contract job leaked its indexer client — eight
