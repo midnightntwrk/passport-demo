@@ -1,47 +1,52 @@
-# --------------------------------------------------------------------------
-# Foundations demo (unchanged — every rule below was already here)
-# --------------------------------------------------------------------------
-node_modules/
-dist/
-contracts/managed/
-midnight-level-db/
-infra/.env
-deployment.json
-faucet-deployment.json
-identity-registry-deployment.json
-*.log
-app/public/zk-params/
+# Internal-only (never committed)
+.planning/
+.serena/
+.arcsop/
 
-# --------------------------------------------------------------------------
-# Passport app (added)
-# --------------------------------------------------------------------------
+# Generated exports
+output/
 
 # Local demo sandboxes and generated chain state
-/midnight-level-db/
+/demo/
+experiments/dynamic-midnight-sdk-validation/
 
-# Generated ZK assets and staged contract builds.
-#
-# Both of the first two are staged by
-# examples/passport-demo/scripts/prepare-zk-assets.mjs from the stagenet
-# contract build. The compiled contract modules live inside the workspace so
-# they resolve the ledger-9 compact-runtime; they are generated output either
-# way and are never committed.
+# Build artefacts
+/target/
+**/target/
+*.rlib
+/midnight-level-db/
 examples/passport-demo/.generated/
 examples/passport-demo/public/zk/
+# Both are staged by examples/passport-demo/scripts/prepare-zk-assets.mjs from
+# the stagenet contract build. The compiled contract modules live inside the
+# workspace so they resolve the ledger-9 compact-runtime; they are generated
+# output either way and are never committed.
 examples/passport-demo/contracts/stagenet/
 # The stagenet contract build itself: ~103 MB of prover and verifier keys,
 # produced by the deployment harness and shared with the demo through the
-# staging script above. The contract/ and compiler/ halves beside these two
-# ARE tracked — see .github/workflows/deploy-demo.yml.
-examples/passport-balancer/contracts-stagenet/managed/*/keys/
-examples/passport-balancer/contracts-stagenet/managed/*/zkir/
+# staging script above. The rule lives in that directory's own .gitignore, which
+# ignores managed/*/keys and managed/*/zkir and leaves the sources, the generated
+# contract modules, and the manifests tracked.
+#
+# It used to be a blanket `examples/passport-balancer/contracts-stagenet/` here,
+# which was a trap rather than a shortcut: git does not descend into an excluded
+# directory, so a NEW file anywhere under it — a renamed contract source, say —
+# was invisible to `git status` and silently absent from the commit, while the
+# files already tracked went on being tracked. It hid nothing the local rule and
+# the `node_modules/` rule below do not already hide. Removed 2026/09/10.
 
 # Vercel CLI link state and the locally assembled Build Output (see
 # scripts/build-vercel-output.mjs). Never committed — the deployed artefacts
-# are produced locally or in CI and uploaded with `vercel deploy --prebuilt`.
+# are produced locally and uploaded with `vercel deploy --prebuilt`.
 .vercel/
 
 # Node
+node_modules/
+dist/
+# TypeScript's incremental cache. It names absolute paths on the machine that
+# built it, so it belongs to nobody but that machine.
+*.tsbuildinfo
+.tsbuildinfo
 npm-debug.log
 yarn-error.log
 .npm/
@@ -65,7 +70,8 @@ coverage/
 playwright-report/
 test-results/
 
-# The foundations demo's `*.log` rule above is unchanged, but the Passport app
-# carries one deliberately committed log: the stagenet shielded-receipt drill
-# transcript, which is evidence rather than output. Re-admit just that file.
-!examples/passport-balancer/deploy-stagenet/shielded-receipt-drill.log
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
