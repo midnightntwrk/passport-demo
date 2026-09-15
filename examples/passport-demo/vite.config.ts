@@ -8,7 +8,6 @@ import wasm from 'vite-plugin-wasm';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const workspaceBuffer = path.resolve(__dirname, '..', '..', 'node_modules', 'buffer', 'index.js');
-const custodyRoot = path.resolve(__dirname, '..', '..', 'experiments', 'account-custody-prototype');
 /**
  * Where `/zk/**` is served from in DEV.
  *
@@ -186,7 +185,7 @@ export default defineConfig({
       },
       {
         find: 'isomorphic-ws',
-        replacement: path.resolve(custodyRoot, 'app', 'src', 'lib', 'ws-shim.ts'),
+        replacement: path.resolve(__dirname, 'src', 'lib', 'ws-shim.ts'),
       },
     ],
     /* One module record per package, whatever the import path.
