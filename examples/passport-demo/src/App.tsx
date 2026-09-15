@@ -184,6 +184,7 @@ import type {
 } from './identity/midnames.js';
 import { createClaimWarmup } from './identity/claimWarmup.js';
 import {
+  clearPassportUpgradeProgress,
   forgetPassportContractRecordsForCredential,
   loadPassportContractRecord,
   loadPassportContractRecords,
@@ -8737,6 +8738,39 @@ export default function PassportDemo() {
     setUpgradeBusy(true);
     setUpgradeError(null);
     try {
+      /* CONFIRM THE UPGRADE IS STILL NEEDED BEFORE ASKING FOR A PASSKEY.
+         The account's own on-chain build is the authority: one that already
+         carries the one-transaction transfer has nothing to upgrade, and a
+         progress block left by an attempt that finished on another device or
+         was abandoned must not cost a passkey prompt on every launch to
+         discover that. The machine reads exactly this fact in its `detect`
+         step, but only AFTER the ceremony — so the same three-answer check is
+         lifted HERE, ahead of the prompt.
+
+         `true` clears any stale block and takes the screen down with no prompt;
+         `null` is the chain not answering, where an upgrade must never be
+         started on a blind read; only `false` — a real pre-upgrade account —
+         goes on to the passkey and the machine below. */
+      const { accountHasOneTxTransfer } = await import('./identity/passportContract.js');
+      const carries = await accountHasOneTxTransfer(
+        account.handle.network.indexerHttpUrl,
+        account.address,
+      );
+      if (carries !== false) {
+        if (carries === true) {
+          clearPassportUpgradeProgress(
+            activeProfile.passkey.credentialId,
+            account.handle.network.networkId,
+          );
+          setIdentityStep((current) => (current === 'upgrade' ? null : current));
+        } else {
+          /* Leave the screen up with its "Try again" control rather than
+             prompt for — and act on — a passkey we may not need. */
+          setUpgradeError('Your Passport could not be checked just now. Try again in a moment.');
+        }
+        return;
+      }
+
       /* The machine reaches this app HERE and nowhere else. It statically
          imports the account module and the ledger behind it — 9.84 MB — and
          a Passport that never upgrades must never fetch a byte of it. */
