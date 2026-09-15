@@ -38,6 +38,7 @@
     "which is also the repository the Foundation watches, so the pin follows",
     "them. Pinned to v16 (2026/09/15), verified against the published asset:",
     "110,732,705 bytes, sha256 0669e0e5…",
+    "Releases are named v<major>.<minor> from 2026/09/15; v16 is the last of the legacy undotted ones, and the pin stays on it because it exists and carries the bundle. It moves to v1.0 once that release exists.",
     "",
     "Overridable for a one-off with PASSPORT_ZK_BUNDLE_TAG,",
     "PASSPORT_ZK_BUNDLE_SHA256, and PASSPORT_ZK_BUNDLE_REPO."

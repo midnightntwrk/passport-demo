@@ -179,8 +179,8 @@ jobs:
   #   packages/connect        166 tests — the pairing protocol partner apps
   #                           build against. A break here is a break in
   #                           somebody else's site.
-  #   scripts/release-naming  19 tests — the `v<N> - YYYY/MM/DD` derivation
-  #                           every promotion is recorded by.
+  #   scripts/release-naming  21 tests — the `v<major>.<minor> - YYYY/MM/DD`
+  #                           derivation every promotion is recorded by.
   #
   # Its own job rather than steps on `gates`: neither depends on the demo
   # backend being rebuilt first, and running them in parallel costs nothing.

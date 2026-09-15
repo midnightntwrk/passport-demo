@@ -11,35 +11,95 @@
  * and a build id answers "which build is this?" but not "which release is
  * this?" — there is no way to say "we are on release four" in a sentence.
  *
- * So: `v<N>`, counting up from the releases that already exist, titled
- * `v<N> - YYYY/MM/DD`. The date stays, because a release number with no date is
- * a fact nobody can place. The build id and the commit move into the body,
- * where they are still checkable against a running client.
+ * So the tag became `v<N>`, counting up from the releases that already existed,
+ * titled `v<N> - YYYY/MM/DD`. The date stays, because a release number with no
+ * date is a fact nobody can place. The build id and the commit move into the
+ * body, where they are still checkable against a running client.
+ *
+ * WHAT CHANGED (2026/09/15)
+ * -------------------------
+ * A flat count says which release is live and nothing else. Sixteen of them
+ * went by without the reviewer ever being able to tell, from the number alone,
+ * whether v14 had added something or repaired something. So the number now
+ * carries that:
+ *
+ *   - the next release is **v1.0** — the count starts again, deliberately;
+ *   - a patch or a bug fix moves the DECIMAL: v1.0 → v1.1 → v1.2;
+ *   - a new feature moves the WHOLE NUMBER, and the decimal resets: v1.2 → v2.0.
+ *
+ * Tags are `v<major>.<minor>` and titles `v<major>.<minor> - YYYY/MM/DD`.
+ *
+ * The old undotted `v1`–`v16` stay exactly where they are — they are history,
+ * and the builds they carry are still downloadable — but they take no part in
+ * deriving the next number. That is what makes the next release v1.0 rather
+ * than v17.0: `releaseVersionOf` reads `^v(\d+)\.(\d+)$` and nothing else, so
+ * a legacy tag is simply not a candidate.
+ *
+ * They do still decide ONE thing: which release the notes delta is taken
+ * against. With no dotted release yet, the release before v1.0 is v16, so
+ * v1.0's body is what has changed since v16 rather than the whole cumulative
+ * file. See `previousReleaseTag`.
  *
  * Everything here is pure, so `scripts/release-naming.test.mjs` can hold the
- * number derivation and the title to their contract without touching a network.
+ * derivation and the title to their contract without touching a network.
  */
 
+/** The kinds of change a release can carry, and which part of the number moves. */
+export const RELEASE_KINDS = ['fix', 'feature'];
+
 /**
- * The release number a tag or release title carries, or `null` for a name that
- * is not one of ours.
+ * Strip a candidate down to the name it carries.
  *
  * Accepts what both sources of truth actually print:
- *   - `git ls-remote --tags`:  `refs/tags/v4`, and its `refs/tags/v4^{}` peel
- *   - `gh release list`:       the tag `v4`, and the title `v4 - 2026/09/07`
- *
- * A legacy `demo-2026.09.04-19729c64` tag carries no number and is ignored,
- * which is what starts the count at v1 on a repository that has only those.
+ *   - `git ls-remote --tags`:  `refs/tags/v1.0`, and its `refs/tags/v1.0^{}` peel
+ *   - `gh release list`:       the tag `v1.0`, and the title `v1.0 - 2026/09/15`
  */
-export function releaseNumberOf(candidate) {
+function bareName(candidate) {
   if (typeof candidate !== 'string') {
     return null;
   }
-  const name = candidate
+  return candidate
     .trim()
     .replace(/^[0-9a-f]{40}\s+/, '') // a full `git ls-remote` line, sha and all
     .replace(/^refs\/tags\//, '')
     .replace(/\^\{\}$/, '');
+}
+
+/**
+ * The `{ major, minor }` a tag or release title carries, or `null` for a name
+ * that is not one of ours.
+ *
+ * ONLY the dotted shape counts. A legacy `v16`, and a `demo-2026.09.04-…` tag
+ * older still, both answer `null` — which is what starts the count at v1.0 on a
+ * repository that has only those.
+ */
+export function releaseVersionOf(candidate) {
+  const name = bareName(candidate);
+  if (name === null) {
+    return null;
+  }
+  const match = /^v(\d+)\.(\d+)(?:\s|$)/.exec(name);
+  if (!match) {
+    return null;
+  }
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  if (!Number.isSafeInteger(major) || !Number.isSafeInteger(minor) || major < 1 || minor < 0) {
+    return null;
+  }
+  return { major, minor };
+}
+
+/**
+ * The number a LEGACY `v<N>` tag carries — v1 to v16 — or `null`. Used for one
+ * thing only: finding the release that v1.0's notes delta is taken against.
+ * It never contributes to the next number.
+ */
+export function legacyReleaseNumberOf(candidate) {
+  const name = bareName(candidate);
+  if (name === null) {
+    return null;
+  }
   const match = /^v(\d+)(?:\s|$)/.exec(name);
   if (!match) {
     return null;
@@ -48,37 +108,68 @@ export function releaseNumberOf(candidate) {
   return Number.isSafeInteger(number) && number > 0 ? number : null;
 }
 
+/** Negative when `a` is the earlier release, positive when it is the later one. */
+export function compareVersions(a, b) {
+  return a.major - b.major || a.minor - b.minor;
+}
+
 /**
- * The highest `v<N>` among the given tags and titles; 0 when there is none.
+ * The highest `v<major>.<minor>` among the given tags and titles, or `null`
+ * when there is none.
  */
-export function highestReleaseNumber(candidates) {
+export function highestReleaseVersion(candidates) {
   return (candidates ?? []).reduce((highest, candidate) => {
-    const number = releaseNumberOf(candidate);
+    const version = releaseVersionOf(candidate);
+    if (version === null) {
+      return highest;
+    }
+    return highest === null || compareVersions(version, highest) > 0 ? version : highest;
+  }, null);
+}
+
+/** The highest legacy `v<N>`; 0 when there is none. */
+export function highestLegacyReleaseNumber(candidates) {
+  return (candidates ?? []).reduce((highest, candidate) => {
+    if (releaseVersionOf(candidate) !== null) {
+      return highest; // a dotted tag is not a legacy one
+    }
+    const number = legacyReleaseNumberOf(candidate);
     return number !== null && number > highest ? number : highest;
   }, 0);
 }
 
 /**
- * The number the next release takes: one past the highest that exists, so a
- * repository with no `v<N>` releases starts at v1.
+ * The version the next release takes.
+ *
+ * With no dotted release yet, the first one is **v1.0**, whatever legacy tags
+ * the repository holds. After that, `kind` decides which part moves: a `fix`
+ * takes the decimal up one, a `feature` takes the whole number up one and
+ * resets the decimal to 0.
  */
-export function nextReleaseNumber(candidates) {
-  return highestReleaseNumber(candidates) + 1;
+export function nextReleaseVersion(candidates, kind = 'fix') {
+  assertKind(kind);
+  const highest = highestReleaseVersion(candidates);
+  if (highest === null) {
+    return { major: 1, minor: 0 };
+  }
+  return kind === 'feature'
+    ? { major: highest.major + 1, minor: 0 }
+    : { major: highest.major, minor: highest.minor + 1 };
 }
 
-/** `v4`. */
-export function releaseTag(number) {
-  assertNumber(number);
-  return `v${number}`;
+/** `v1.0`. */
+export function releaseTag(version) {
+  assertVersion(version);
+  return `v${version.major}.${version.minor}`;
 }
 
-/** `v4 - 2026/09/07`. */
-export function releaseTitle(number, date) {
-  assertNumber(number);
+/** `v1.0 - 2026/09/15`. */
+export function releaseTitle(version, date) {
+  assertVersion(version);
   if (!/^\d{4}\/\d{2}\/\d{2}$/.test(date ?? '')) {
     throw new TypeError(`release date must be YYYY/MM/DD, got ${JSON.stringify(date)}`);
   }
-  return `${releaseTag(number)} - ${date}`;
+  return `${releaseTag(version)} - ${date}`;
 }
 
 /**
@@ -232,17 +323,29 @@ export function releaseBody({
 }
 
 /**
- * The release before number `below`: the highest `v<N>` among the given tags
- * and titles that is lower than it, or `null` when there is none. That is the
- * release whose RELEASE-NOTES.md the delta is taken against.
+ * The TAG of the release before `version` — the one whose RELEASE-NOTES.md the
+ * delta is taken against — or `null` when there is none.
+ *
+ * The highest dotted release below `version` wins. When there is no dotted
+ * release below it (which is the case for v1.0, the first of the new scheme),
+ * the highest LEGACY `v<N>` stands in, so v1.0's body is what has changed since
+ * v16 rather than the entire cumulative file. Legacy tags are ignored for
+ * everything else, including deriving the next number.
  */
-export function previousReleaseNumber(candidates, below) {
-  assertNumber(below);
-  const previous = (candidates ?? []).reduce((highest, candidate) => {
-    const number = releaseNumberOf(candidate);
-    return number !== null && number < below && number > highest ? number : highest;
-  }, 0);
-  return previous > 0 ? previous : null;
+export function previousReleaseTag(candidates, version) {
+  assertVersion(version);
+  const below = (candidates ?? []).reduce((highest, candidate) => {
+    const other = releaseVersionOf(candidate);
+    if (other === null || compareVersions(other, version) >= 0) {
+      return highest;
+    }
+    return highest === null || compareVersions(other, highest) > 0 ? other : highest;
+  }, null);
+  if (below !== null) {
+    return releaseTag(below);
+  }
+  const legacy = highestLegacyReleaseNumber(candidates);
+  return legacy > 0 ? `v${legacy}` : null;
 }
 
 function firstSentence(text) {
@@ -269,8 +372,21 @@ function capSentence(sentence, limit) {
   return `${trimmed.replace(/[\s,;:.]+$/, '')}…`;
 }
 
-function assertNumber(number) {
-  if (!Number.isSafeInteger(number) || number < 1) {
-    throw new TypeError(`release number must be a positive integer, got ${JSON.stringify(number)}`);
+function assertVersion(version) {
+  const major = version?.major;
+  const minor = version?.minor;
+  if (!Number.isSafeInteger(major) || major < 1 || !Number.isSafeInteger(minor) || minor < 0) {
+    throw new TypeError(
+      `a release version is { major >= 1, minor >= 0 }, got ${JSON.stringify(version)}`,
+    );
+  }
+}
+
+function assertKind(kind) {
+  if (!RELEASE_KINDS.includes(kind)) {
+    throw new TypeError(
+      `a release is a ${RELEASE_KINDS.join(' or a ')}, got ${JSON.stringify(kind)}. ` +
+        'A fix moves the decimal; a feature moves the whole number.',
+    );
   }
 }

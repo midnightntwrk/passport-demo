@@ -18,7 +18,7 @@ One path, in this order, for every change — code, docs, sponsor, contracts —
 
 1. **Every change is a pull request** on `midnightntwrk/passport-demo`, the repository the Foundation reviews and releases from. No direct pushes to `main`. No deploy from a branch, a worktree, or a local build.
 2. **Every pull request is reviewed and approved** before it is merged. The merge target is `main`.
-3. **A release is cut from `main`** (`v<N> - YYYY/MM/DD`, with the ZK artefact bundle), and **that release is deployed to staging** (`https://staging.midnightpassport.com`). Staging never runs anything that is not a release cut from `main`.
+3. **A release is cut from `main`** (`v<major>.<minor> - YYYY/MM/DD`, with the ZK artefact bundle), and **that release is deployed to staging** (`https://staging.midnightpassport.com`). Staging never runs anything that is not a release cut from `main`. The next release is **v1.0**: a patch or bug fix moves the decimal (v1.0 → v1.1 → v1.2), a new feature moves the whole number and resets the decimal (v1.2 → v2.0). The undotted `v1`–`v16` stay as history and take no part in the count.
 4. **Staging is tested, and only when the change is confirmed working there is the same release deployed to production** (`https://midnightpassport.com`). The tests are the four gates below.
 
 This is the sequence Hector set on 2026/09/15: open PRs → merge to `main` → release from `main` → deploy the release on staging → confirm on staging → deploy the same release on production.
@@ -43,7 +43,7 @@ A build is promoted from staging to production only when all of these are true o
 3. A **returning-browser** check passes: a browser or installed PWA that already held the previous build opens the new one and completes onboarding and a send. The automated walk is fresh-browser only and cannot see cache defects (2026/09/14: a year-long immutable cache on the contract manifest broke new-account setup for every returning reviewer while the walk passed).
 4. A real-device walk on Android and iPhone of the three scoped flows: passkey onboarding, `.night` name, shielded balance with send and receive.
 
-Every promotion is backed by a `v<N> - YYYY/MM/DD` release on **midnightntwrk/passport-demo** at the carried commit (the repository the Foundation watches), with the ZK artefact bundle attached, and mirrored on midnightntwrk/passport. Lockfiles are never regenerated from scratch: rebuild from the previous lock and diff the resolutions.
+Every promotion is backed by a `v<major>.<minor> - YYYY/MM/DD` release on **midnightntwrk/passport-demo** at the carried commit (the repository the Foundation watches), with the ZK artefact bundle attached, and mirrored on midnightntwrk/passport. Lockfiles are never regenerated from scratch: rebuild from the previous lock and diff the resolutions.
 
 ## Repository layout
 
