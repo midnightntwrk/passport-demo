@@ -15,6 +15,8 @@ import {
   balancingFailure,
   hexToBytes,
   resetSharedProviders,
+  resolveTransactionHash,
+  resolveTxHashOnce,
   sharedPublicDataProvider,
   walletProviderFor,
   BalancingFailure,
@@ -860,5 +862,85 @@ describe('sharedPublicDataProvider', () => {
       'wss://indexer.example/api/v4/graphql/ws',
     );
     expect(after).not.toBe(before);
+  });
+});
+
+/**
+ * Asking the chain what a transaction identifier resolved to — and the answer
+ * that is not an answer.
+ *
+ * The ids midnight-js reports are 33-byte identifiers, not the 32-byte hashes
+ * a block explorer links to. One GraphQL query maps one to the other, and
+ * `resolveTransactionHash` repeats it twenty times half a second apart and
+ * calls that a ten-second window.
+ *
+ * It was only a ten-second window if each attempt ENDED. The query had no
+ * timeout at all, so an endpoint that accepts the socket and answers nothing —
+ * a captive portal, a reverse proxy whose upstream has gone — held the first
+ * attempt open for as long as the platform's own default allowed, and the
+ * nineteen behind it never ran. What is drilled below is the bound, and the
+ * thing that matters more than the bound: that no way out of here is ever read
+ * as the chain saying there is no such transaction.
+ */
+describe('resolveTxHashOnce', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it('bounds the question, rather than leaving it to the platform', async () => {
+    const asked: Array<RequestInit | undefined> = [];
+    vi.stubGlobal('fetch', async (_url: string, init?: RequestInit) => {
+      asked.push(init);
+      return { json: async () => ({ data: { transactions: [{ hash: 'abc123' }] } }) };
+    });
+
+    await expect(resolveTxHashOnce('https://indexer.example/graphql', '00ff')).resolves.toBe(
+      'abc123',
+    );
+    expect(asked[0]?.signal).toBeInstanceOf(AbortSignal);
+    expect(asked[0]?.signal?.aborted).toBe(false);
+  });
+
+  it('reads an abort as “could not ask”, never as “no such transaction”', async () => {
+    vi.stubGlobal('fetch', async () => {
+      throw new DOMException('The operation was aborted.', 'TimeoutError');
+    });
+    /* `null` is the module's word for "no answer yet", which is what both
+       callers act on: the loop tries again and a caller out of attempts
+       records the id as unresolved and builds no link. */
+    await expect(resolveTxHashOnce('https://indexer.example/graphql', '00ff')).resolves.toBeNull();
+  });
+
+  it('reads a body that is not an answer the same way', async () => {
+    for (const json of [
+      async () => {
+        throw new SyntaxError('Unexpected token < in JSON at position 0');
+      },
+      async () => ({ data: { transactions: [] } }),
+      async () => ({ errors: [{ message: 'unknown field' }] }),
+    ]) {
+      vi.stubGlobal('fetch', async () => ({ json }));
+      await expect(
+        resolveTxHashOnce('https://indexer.example/graphql', '00ff'),
+      ).resolves.toBeNull();
+    }
+  });
+
+  it('hands the identifier back unchanged when every attempt came up empty', async () => {
+    vi.useFakeTimers();
+    let attempts = 0;
+    vi.stubGlobal('fetch', async () => {
+      attempts += 1;
+      throw new DOMException('The operation was aborted.', 'TimeoutError');
+    });
+
+    const settled = resolveTransactionHash('https://indexer.example/graphql', 'ff00', 3);
+    await vi.runAllTimersAsync();
+    /* The identifier itself, which every caller records as UNRESOLVED rather
+       than linking. A lagging or unreachable indexer costs a link, never a
+       wrong one. */
+    await expect(settled).resolves.toBe('ff00');
+    expect(attempts).toBe(3);
   });
 });

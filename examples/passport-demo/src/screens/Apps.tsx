@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { ArrowUpRight, Loader2, RotateCw, Search, X } from 'lucide-react'
 import {
   fetchAppRegistry,
-  RAFFLE_DEMO_APP,
+  RAFFLE_DEMO_APP_ID,
   withLocalApps,
   type RegistryApp,
   type RegistryCategory,
@@ -87,7 +87,7 @@ function AppCard({ app, onOpen }: { app: RegistryApp; onOpen: () => void }) {
   /* The raffle is the one entry we author ourselves, so it is the one entry we
      can illustrate honestly — registry apps get their own icon or a letter
      tile, never art we invented for them. */
-  const illustrated = app.id === RAFFLE_DEMO_APP.id
+  const illustrated = app.id === RAFFLE_DEMO_APP_ID
   return (
     <button
       type="button"

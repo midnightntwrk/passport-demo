@@ -1324,13 +1324,29 @@ export async function resolveTxHashOnce(
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ query }),
+      /* A BOUND, because this had none (2026/09/15). `resolveTransactionHash`
+         wraps this in twenty attempts half a second apart and calls that a ten
+         second window — but the window is only ten seconds if each attempt
+         ends. An endpoint that accepts the socket and answers nothing (a
+         captive portal, a reverse proxy whose upstream is gone) left the first
+         attempt pending for as long as the platform's own default allowed,
+         which on some browsers is minutes, and the nineteen retries behind it
+         never ran. The same ten-second ceiling `../lib/walletSnapshot.ts` puts
+         on its own block-height query, for the same reason. */
+      signal: AbortSignal.timeout(10_000),
     });
     const body = (await response.json()) as {
       data?: { transactions?: Array<{ hash?: string }> };
     };
     return body.data?.transactions?.[0]?.hash ?? null;
   } catch {
-    // Transient network or parse failure — indistinguishable from "not yet".
+    /* EVERY path out of here means "the chain could not be asked", never "the
+       chain says there is no such transaction" — a timeout, a dropped socket,
+       and a body that is not JSON are all indistinguishable from an indexer
+       that has simply not caught up yet. `null` is read as exactly that by
+       both callers: the loop above tries again, and a caller out of attempts
+       records `txIdResolved: false` and builds no link. Nothing downstream
+       treats a `null` from here as a fact about the transaction. */
     return null;
   }
 }

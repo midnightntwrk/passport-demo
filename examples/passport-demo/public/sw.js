@@ -67,16 +67,60 @@ const SHELL_ASSETS = [
   '/icons/apple-touch-icon.png',
 ];
 
+/**
+ * The two shell assets an install is NOT allowed to go without.
+ *
+ * `/index.html` is the app, and `/offline.html` is what `networkNavigation`
+ * answers with when there is no network — the one screen whose whole purpose is
+ * to exist when nothing else does. Every other entry in `SHELL_ASSETS` is art,
+ * an icon, or the manifest: a missing one costs a letterbox where a picture
+ * should be, and the runtime rule at the bottom of this file fetches it again
+ * the moment a page asks for it.
+ */
+const REQUIRED_SHELL_ASSETS = ['/index.html', '/offline.html'];
+
+/**
+ * Precaches the shell ONE ASSET AT A TIME, and why that is not fussiness.
+ *
+ * This used to be a single `cache.addAll(SHELL_ASSETS)`. `addAll` is all or
+ * nothing: one asset answering 404 — a renamed icon, a CDN hiccup on the
+ * wordmark, a request that lost the network mid-install — rejects the WHOLE
+ * batch, nothing at all is written, `install` fails, and the browser DISCARDS
+ * the worker. Nothing reaches the screen when that happens: the page carries on
+ * being served by whichever worker is already in charge, which is the old build
+ * — the exact silent-staleness this file's header is about, arriving by a
+ * second route. And a discarded install is not retried on a timer; the browser
+ * waits for the next update check to hand it the same bytes it has already
+ * rejected.
+ *
+ * So each asset is fetched and put on its own, the install fails ONLY when one
+ * of {@link REQUIRED_SHELL_ASSETS} could not be stored, and anything else that
+ * did not make it is named in one warning a reviewer can read off a console
+ * rather than inferred from a worker that quietly never appeared.
+ */
+async function precacheShell() {
+  const cache = await caches.open(SHELL_CACHE);
+  const outcomes = await Promise.allSettled(
+    SHELL_ASSETS.map(async (asset) => {
+      // `cache: 'reload'` and not a plain URL: precaching the shell through
+      // the HTTP cache is how a worker installs a copy of the deploy it is
+      // replacing. Every one of these is fetched from the network.
+      const response = await fetch(new Request(asset, { cache: 'reload' }));
+      // A 404 resolves rather than throwing, and caching it would put the
+      // "not found" page under the shell's own address.
+      if (!response.ok) throw new Error(`${asset} answered ${response.status}`);
+      await cache.put(asset, response);
+    }),
+  );
+  const missed = SHELL_ASSETS.filter((_, index) => outcomes[index].status === 'rejected');
+  if (missed.length > 0) console.warn(`[sw] these shell assets were not cached: ${missed.join(', ')}`);
+  const required = missed.filter((asset) => REQUIRED_SHELL_ASSETS.includes(asset));
+  if (required.length > 0) throw new Error(`the app shell is incomplete: ${required.join(', ')}`);
+}
+
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches
-      .open(SHELL_CACHE)
-      .then((cache) =>
-        // `cache: 'reload'` and not a plain URL: precaching the shell through
-        // the HTTP cache is how a worker installs a copy of the deploy it is
-        // replacing. Every one of these is fetched from the network.
-        cache.addAll(SHELL_ASSETS.map((asset) => new Request(asset, { cache: 'reload' }))),
-      )
+    precacheShell()
       // Activate as soon as the shell is in place instead of waiting for every
       // client on the origin to close. See the header: on an installed PWA
       // that moment never comes.
@@ -207,12 +251,28 @@ async function immutableAsset(request) {
  * cached answer is always chased with a network refresh.
  */
 async function staticAsset(request, event) {
-  const cached = await caches.match(request);
+  /* `caches.open(STATIC_CACHE)` and then `.match`, NOT the
+     `caches.match(request)` this used to be — the correction `immutableAsset`
+     got on 2026/09/14, for the same reason, applied to the sibling that was
+     left behind. The bare form searches EVERY cache on the origin in creation
+     order, so the PREVIOUS build's copy of a stable url — an icon, the
+     wordmark, the manifest — can answer for this build in the window between
+     `skipWaiting()` and `activate` finishing its deletions, which is precisely
+     the window a worker that has just claimed a page is serving fetches in.
+     Confined to this build's own cache, it cannot be reached at all.
+
+     The window is short and the cost of losing that race is not: `pwa.tsx`
+     reloads an idle page the instant this worker claims it, and the manifest
+     the reloaded page reads decides which icons an installed Passport shows. */
+  const cache = await caches.open(STATIC_CACHE).catch(() => null);
+  const cached = await cache?.match(request);
   const network = fetch(request)
     .then(async (response) => {
       if (response.ok && response.type === 'basic') {
-        const cache = await caches.open(STATIC_CACHE);
-        await cache.put(request, response.clone());
+        /* Best effort, for the reason spelled out in `immutableAsset`: a
+           rejected write must never turn a download that in fact succeeded
+           into a network error at the caller. */
+        await cache?.put(request, response.clone()).catch(() => undefined);
       }
       return response;
     })

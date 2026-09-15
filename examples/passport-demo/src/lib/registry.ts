@@ -59,36 +59,79 @@ export const FALLBACK_APPS: readonly RegistryApp[] = [
 /** The port `examples/raffle-demo` pins in its own `vite.config.ts`. */
 const RAFFLE_FALLBACK_URL = 'http://localhost:5177'
 
+/** The id of the raffle entry, whether or not this build has one to show. */
+export const RAFFLE_DEMO_APP_ID = 'raffle-demo'
+
 /**
  * Local demo entry for the separate-origin Midnight Raffle example dApp —
  * decided 2026/08/05, replacing the earlier Atlas entry. This is the entry
  * that demonstrably completes the Passport profile handshake end-to-end.
  *
- * Unlike {@link LOCAL_DEV_APP} this entry always exists: with `VITE_RAFFLE_URL`
- * unset it falls back to the pinned local port, so a plain `npm run demo` still
- * shows the handshake. Both halves of the entry read from the environment on
- * the same terms the local-app slot uses — `VITE_RAFFLE_URL`/`VITE_RAFFLE_NAME`
- * against `VITE_LOCAL_APP_URL`/`VITE_LOCAL_APP_NAME` — because a build that
- * moves the raffle to a deployed origin (the release deployment, or the
- * break-glass `npm run deploy:passport:manual`) must be able to rename it there
- * too, rather than shipping a label naming a demo the configured origin may no
- * longer serve.
+ * Both halves read from the environment on the same terms the local-app slot
+ * uses — `VITE_RAFFLE_URL`/`VITE_RAFFLE_NAME` against
+ * `VITE_LOCAL_APP_URL`/`VITE_LOCAL_APP_NAME` — because a build that moves the
+ * raffle to a deployed origin (the release deployment, or the break-glass
+ * `npm run deploy:passport:manual`) must be able to rename it there too, rather
+ * than shipping a label naming a demo the configured origin may no longer
+ * serve.
+ *
+ * `null` WHEN THERE IS NOWHERE TO SEND ANYONE (2026/09/15). This entry used to
+ * exist unconditionally, falling back to `http://localhost:5177` whenever
+ * `VITE_RAFFLE_URL` was unset. In a development build that is the point — the
+ * raffle really is on that port and `npm run demo` should show the handshake.
+ * In a DEPLOYED build it shipped a card on a stranger's phone whose only
+ * destination was a port on their own machine: a tap opened the in-app browser
+ * on a connection that cannot be made, and the reader has no way to know that
+ * the app they were offered was never theirs to open. A missing variable is not
+ * a reason to advertise an app, so the card is simply not there.
  */
-export const RAFFLE_DEMO_APP: RegistryApp = {
-  id: 'raffle-demo',
-  name: optionalString(import.meta.env.VITE_RAFFLE_NAME) ?? 'Midnight Raffle',
-  description:
-    'Connect your Passport to claim a race-weekend perk and a demo raffle ticket',
-  url: webUrl(import.meta.env.VITE_RAFFLE_URL, true) ?? RAFFLE_FALLBACK_URL,
-  category: 'other',
-  // The raffle runs against whichever network Passport's wallet is on, because
-  // the only thing it asks Passport for is a profile and (when an operator
-  // address is configured) a transfer that Passport itself signs. Declaring it
-  // on one fixed network hid it from the grid the moment the build moved —
-  // found on 2026/08/06 while trialling a pre-production build, where the grid
-  // filters to preprod and a preview-only entry simply vanishes.
-  networks: walletNetwork() ? [walletNetwork() as RegistryNetwork] : ['stagenet'],
-  featured: true,
+export const RAFFLE_DEMO_APP: RegistryApp | null = raffleDemoApp(raffleEnvironment())
+
+/** The slice of the build environment the raffle entry is decided from. */
+export interface RaffleEnvironment {
+  VITE_RAFFLE_URL?: string
+  VITE_RAFFLE_NAME?: string
+  /** Vite's own flag. `true` only under `npm run dev` and the unit suite. */
+  DEV?: boolean
+}
+
+/**
+ * Safe outside Vite, where there is no `import.meta.env` — the same shim
+ * `./networks.ts` and `./localWallet.ts` carry, and for the same reason: this
+ * module is imported by harnesses that run under plain Node.
+ */
+function raffleEnvironment(): RaffleEnvironment {
+  /* v8 ignore next */
+  return (import.meta as unknown as { env?: RaffleEnvironment }).env ?? {}
+}
+
+/**
+ * The raffle entry a given environment earns, or `null` for none. Takes its
+ * environment explicitly so both answers can be drilled; {@link RAFFLE_DEMO_APP}
+ * is this against the build's own.
+ */
+export function raffleDemoApp(env: RaffleEnvironment): RegistryApp | null {
+  /* `allowHttp` because this URL comes from the build's own environment rather
+     than from the fetched registry, and a local raffle is plain http. */
+  const configured = webUrl(env.VITE_RAFFLE_URL, true)
+  const url = configured ?? (env.DEV === true ? RAFFLE_FALLBACK_URL : undefined)
+  if (!url) return null
+  return {
+    id: RAFFLE_DEMO_APP_ID,
+    name: optionalString(env.VITE_RAFFLE_NAME) ?? 'Midnight Raffle',
+    description:
+      'Connect your Passport to claim a race-weekend perk and a demo raffle ticket',
+    url,
+    category: 'other',
+    // The raffle runs against whichever network Passport's wallet is on, because
+    // the only thing it asks Passport for is a profile and (when an operator
+    // address is configured) a transfer that Passport itself signs. Declaring it
+    // on one fixed network hid it from the grid the moment the build moved —
+    // found on 2026/08/06 while trialling a pre-production build, where the grid
+    // filters to preprod and a preview-only entry simply vanishes.
+    networks: walletNetwork() ? [walletNetwork() as RegistryNetwork] : ['stagenet'],
+    featured: true,
+  }
 }
 
 /**
@@ -129,11 +172,14 @@ function buildLocalDevApp(): RegistryApp | null {
 
 /**
  * Prepends the locally configured entries — the generic `VITE_LOCAL_APP_URL`
- * one when it is configured, and the Midnight Raffle demo — to a fetched
- * registry list. Both, when both are present; neither replaces the other.
+ * one and the Midnight Raffle demo — to a fetched registry list. Each is
+ * included when this build has one; neither replaces the other, and with
+ * neither configured the fetched list is returned as it arrived.
  */
 export function withLocalApps(apps: RegistryApp[]): RegistryApp[] {
-  const local = LOCAL_DEV_APP ? [LOCAL_DEV_APP, RAFFLE_DEMO_APP] : [RAFFLE_DEMO_APP]
+  const local = [LOCAL_DEV_APP, RAFFLE_DEMO_APP].filter(
+    (app): app is RegistryApp => app !== null,
+  )
   const localIds = new Set(local.map((app) => app.id))
   return [...local, ...apps.filter((app) => !localIds.has(app.id))]
 }

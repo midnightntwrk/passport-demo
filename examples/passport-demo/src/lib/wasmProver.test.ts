@@ -30,12 +30,14 @@ vi.mock('@midnight-ntwrk/midnight-js-types', () => ({
   zkConfigToProvingKeyMaterial: (value: unknown) => value,
 }));
 
+import { BUILD_ID } from './buildId.js';
 import {
   PROOF_UNFINISHED_MESSAGE,
   PROOF_WORKER_IDLE_MS,
   PROOF_WORKER_PROVE_IDLE_MS,
   setProofWorkerSpawn,
   wasmWalletProvingService,
+  ZK_PARAMS_UNREACHABLE_MESSAGE,
 } from './wasmProver.js';
 
 /**
@@ -271,12 +273,131 @@ describe('the proof worker channel', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     const reply = worker.posted.find((post) => post.message.kmReply !== undefined);
-    expect(reply?.message.error).toContain('offline');
+    /* The sentence the reader gets, not the `offline` the network threw. A
+       dropped connection used to arrive as "run scripts/fetch-zk-params.mjs to
+       stage …", which is advice about a machine that is not theirs. */
+    expect(reply?.message.error).toContain(ZK_PARAMS_UNREACHABLE_MESSAGE);
 
     worker.onmessage?.({
       data: { id: worker.posted[0].message.id, err: 'the key never arrived' },
     } as MessageEvent);
     await expect(settled).rejects.toThrow('the key never arrived');
+  });
+});
+
+/**
+ * The proving-file download, and the three ways it used to end badly.
+ *
+ * `/zk-params` is 45 MB of files served `max-age=31536000, immutable` with no
+ * content hash in any url. They were fetched with a bare `fetch`: no build id,
+ * so a browser that had run an earlier release answered from a year-old copy;
+ * no timeout, so a request that was accepted and never answered waited for
+ * ever on the send screen; and one failure of any kind reached the reader as
+ * "run scripts/fetch-zk-params.mjs", which is a developer's instruction about
+ * somebody else's machine.
+ *
+ * Drilled through `getParams`, which is the only caller a test can reach
+ * without exporting the fetch itself. Each case uses a `k` no other test in
+ * this file uses, because the module's success cache is per-slice and shared
+ * across the whole run.
+ */
+describe('downloading the proving files', () => {
+  /** Drives one `getParams(k)` and hands back what the worker was told. */
+  async function askForSlice(k: number): Promise<{ result?: unknown; error?: string }> {
+    setProofWorkerSpawn(spawnFake as unknown as () => Worker);
+    const service = wasmWalletProvingService();
+    const settled = service
+      .prove(transactionCalling((provider) => provider.prove(new Uint8Array([9]), 'x')))
+      .catch(() => undefined);
+    await Promise.resolve();
+    const worker = FakeWorker.live[0];
+    const id = worker.posted[0].message.id;
+    worker.requestKey(id, 'getParams', k);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const reply = worker.posted.find((post) => post.message.kmReply !== undefined);
+    worker.onmessage?.({ data: { id, ok: 'done' } } as MessageEvent);
+    await settled;
+    return { result: reply?.message.result, error: reply?.message.error as string | undefined };
+  }
+
+  it('names this build in the url, so a new release never reads last release’s copy', async () => {
+    const asked: Array<{ url: string; signal: unknown }> = [];
+    vi.stubGlobal('fetch', async (url: string, init: { signal?: unknown }) => {
+      asked.push({ url, signal: init?.signal });
+      return {
+        ok: true,
+        headers: { get: () => 'application/octet-stream' },
+        arrayBuffer: async () => new Uint8Array(8).buffer,
+      };
+    });
+
+    const { error } = await askForSlice(21);
+    expect(error).toBeUndefined();
+    expect(asked).toHaveLength(1);
+    expect(asked[0].url).toBe(`/zk-params/bls_midnight_2p21?b=${BUILD_ID}`);
+    // And it is bounded, rather than left to whatever the platform allows.
+    expect(asked[0].signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('tries a second time, because a dropped connection is usually just that', async () => {
+    let attempts = 0;
+    vi.stubGlobal('fetch', async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error('network error');
+      return {
+        ok: true,
+        headers: { get: () => 'application/octet-stream' },
+        arrayBuffer: async () => new Uint8Array(16).buffer,
+      };
+    });
+
+    const { result, error } = await askForSlice(22);
+    expect(attempts).toBe(2);
+    expect(error).toBeUndefined();
+    expect(result).toHaveLength(16);
+  });
+
+  it('gives up after the retry with a sentence about the connection', async () => {
+    let attempts = 0;
+    vi.stubGlobal('fetch', async () => {
+      attempts += 1;
+      throw new DOMException('The operation was aborted.', 'TimeoutError');
+    });
+
+    const { error } = await askForSlice(23);
+    // One retry, not a loop: a third attempt is two more minutes of waiting
+    // for the same answer.
+    expect(attempts).toBe(2);
+    expect(error).toContain(ZK_PARAMS_UNREACHABLE_MESSAGE);
+    // It must not be the developer's staging instruction.
+    expect(error).not.toContain('fetch-zk-params');
+  });
+
+  it('keeps the staging instruction for the one case it is true of', async () => {
+    let attempts = 0;
+    /* Vite's dev server answers an unknown path with index.html, HTTP 200 —
+       so this is what an unstaged /zk-params tree looks like from here. */
+    vi.stubGlobal('fetch', async () => {
+      attempts += 1;
+      return { ok: true, headers: { get: () => 'text/html' }, arrayBuffer: async () => new ArrayBuffer(0) };
+    });
+
+    const { error } = await askForSlice(24);
+    // Answered, so NOT retried — a server does not change its mind, and
+    // staging a tree is not something waiting achieves.
+    expect(attempts).toBe(1);
+    expect(error).toContain('fetch-zk-params.mjs');
+    expect(error).not.toContain(ZK_PARAMS_UNREACHABLE_MESSAGE);
+  });
+
+  it('says nothing about the machinery in the sentence a reader gets', () => {
+    for (const word of ['zk-params', 'wasm', 'fetch', 'HTTP', 'abort', 'signal']) {
+      expect(ZK_PARAMS_UNREACHABLE_MESSAGE).not.toContain(word);
+    }
+    // And nothing from the demo's banned vocabulary.
+    for (const word of ['wallet address', 'DUST', 'contract', 'registry', 'indexer', 'resolver', 'sponsor', 'SDK']) {
+      expect(ZK_PARAMS_UNREACHABLE_MESSAGE).not.toContain(word);
+    }
   });
 });
 
