@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { randomBytes } from 'node:crypto';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
@@ -57,10 +57,16 @@ function envFromFile() {
 }
 
 function ensureContracts() {
-  const account = resolve(root, 'contracts/managed/account/contract/index.js');
-  const faucet = resolve(root, 'contracts/managed/faucet/contract/index.js');
-  const identityRegistry = resolve(root, 'contracts/managed/identity_registry/contract/index.js');
-  if (existsSync(account) && existsSync(faucet) && existsSync(identityRegistry)) return;
+  const runtimeVersion = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf-8'))
+    .dependencies['@midnight-ntwrk/compact-runtime'];
+  const current = ['account', 'faucet', 'identity_registry'].every((name) => {
+    const source = resolve(root, `contracts/${name}.compact`);
+    const output = resolve(root, `contracts/managed/${name}/contract/index.js`);
+    return existsSync(output)
+      && statSync(output).mtimeMs >= statSync(source).mtimeMs
+      && readFileSync(output, 'utf-8').includes(`checkRuntimeVersion('${runtimeVersion}')`);
+  });
+  if (current) return;
   log('compiling Compact contracts');
   run('npm', ['run', 'compile']);
 }

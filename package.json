@@ -35,7 +35,7 @@
   ],
   "scripts": {
     "lint": "eslint .",
-    "compile": "compact compile contracts/account.compact contracts/managed/account && compact compile contracts/faucet.compact contracts/managed/faucet && compact compile contracts/identity_registry.compact contracts/managed/identity_registry",
+    "compile": "compact compile +0.31.1 contracts/account.compact contracts/managed/account && compact compile +0.31.1 contracts/faucet.compact contracts/managed/faucet && compact compile +0.31.1 contracts/identity_registry.compact contracts/managed/identity_registry",
     "build": "tsc",
     "demo": "node scripts/demo-local.mjs",
     "demo:e2e": "node app/scripts/e2e-devmode.mjs http://127.0.0.1:5173/",
@@ -61,7 +61,7 @@
     "deploy:hub": "npm run build --workspace passport-app-hub && node scripts/build-vercel-output.mjs examples/passport-app-hub && cd examples/passport-app-hub && vercel deploy --prebuilt --prod --yes",
     "deploy:docs": "npm run build --workspace passport-docs && node scripts/build-vercel-output.mjs examples/passport-docs && cd examples/passport-docs && vercel deploy --prebuilt --prod --yes",
     "test:release-naming": "node --test scripts/release-naming.test.mjs",
-    "postinstall": "patch-package"
+    "postinstall": "cd examples/passport-demo && patch-package --patch-dir ../../patches --error-on-fail"
   },
   "//deploy:passport:manual": [
     "BREAK GLASS ONLY \u2014 `deploy:passport:manual` is not how the Passport demo",
@@ -173,19 +173,19 @@
     "patch-package": "^8.0.1"
   },
   "dependencies": {
-    "@midnight-ntwrk/compact-js": "2.5.5-rc.8",
-    "@midnight-ntwrk/compact-runtime": "0.19.0-rc.0",
+    "@midnight-ntwrk/compact-js": "2.5.1",
+    "@midnight-ntwrk/compact-runtime": "0.16.0",
     "@midnight-ntwrk/ledger-v8": "8.1.0",
-    "@midnight-ntwrk/midnight-js-contracts": "5.0.0-beta.7",
-    "@midnight-ntwrk/midnight-js-fetch-zk-config-provider": "5.0.0-beta.7",
-    "@midnight-ntwrk/midnight-js-http-client-proof-provider": "5.0.0-beta.7",
-    "@midnight-ntwrk/midnight-js-indexer-public-data-provider": "5.0.0-beta.7",
-    "@midnight-ntwrk/midnight-js-level-private-state-provider": "5.0.0-beta.7",
-    "@midnight-ntwrk/midnight-js-network-id": "5.0.0-beta.7",
-    "@midnight-ntwrk/midnight-js-node-zk-config-provider": "5.0.0-beta.7",
-    "@midnight-ntwrk/midnight-js-protocol": "5.0.0-beta.7",
-    "@midnight-ntwrk/midnight-js-types": "5.0.0-beta.7",
-    "@midnight-ntwrk/midnight-js-utils": "5.0.0-beta.7",
+    "@midnight-ntwrk/midnight-js-contracts": "4.1.1",
+    "@midnight-ntwrk/midnight-js-fetch-zk-config-provider": "4.1.1",
+    "@midnight-ntwrk/midnight-js-http-client-proof-provider": "4.1.1",
+    "@midnight-ntwrk/midnight-js-indexer-public-data-provider": "4.1.1",
+    "@midnight-ntwrk/midnight-js-level-private-state-provider": "4.1.1",
+    "@midnight-ntwrk/midnight-js-network-id": "4.1.1",
+    "@midnight-ntwrk/midnight-js-node-zk-config-provider": "4.1.1",
+    "@midnight-ntwrk/midnight-js-protocol": "4.1.1",
+    "@midnight-ntwrk/midnight-js-types": "4.1.1",
+    "@midnight-ntwrk/midnight-js-utils": "4.1.1",
     "@midnight-ntwrk/wallet-api": "5.0.0",
     "@midnight-ntwrk/wallet-sdk-address-format": "3.1.2",
     "@midnight-ntwrk/wallet-sdk-dust-wallet": "4.1.0",
@@ -247,9 +247,9 @@
     }
   },
   "//postinstall": [
-    "patch-package re-applies patches/ after every install; both patches are dated 2026/09/10 and explain themselves. See docs/demo/one-tx-transfer-drill.md sections 3c and 3d."
+    "Apply ledger-9 patches from the ledger-9 Passport workspace, where the matching package versions are installed. The root foundations demo uses unpatched ledger-8 packages."
   ],
   "//compact-runtime": [
-    "Pinned to 0.19.0-rc.0 on purpose (2026/09/11): byte-identical to 0.19.0 apart from the version string, and exactly what compact-js 2.5.5-rc.8 and midnight-js-protocol 5.0.0-beta.7 depend on, so every npm resolves ONE runtime with no override. Contract code compiled by compactc 0.34.0 asserts 0.19.0 and ignores the pre-release tag."
+    "The local foundations demo uses ledger 8: compiler 0.31.1, language 0.23, compact-runtime 0.16.0, and midnight-js 4.1.1. Ledger-9 workspaces declare their own newer dependencies."
   ]
 }
