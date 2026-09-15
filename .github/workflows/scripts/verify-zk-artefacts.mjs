@@ -23,20 +23,79 @@
  */
 
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 const MANAGED_ROOT =
   process.env.MANAGED_ROOT ?? 'examples/passport-balancer/contracts-stagenet/managed';
 
-/** The contracts the PWA proves circuits for, as named by prepare-zk-assets.mjs. */
-const CONTRACTS = ['account', 'midnames'];
-
 /** The two untracked directories. `contract/` and `compiler/` come from git. */
 const DIRECTORIES = ['keys', 'zkir'];
 
+/**
+ * The contracts to check, read off the tree rather than written down.
+ *
+ * This was `['account', 'midnames']` until 2026/09/15, which is what the bundle
+ * happens to carry today — so the list was right by coincidence and would have
+ * gone quietly stale the first time a third contract shipped artefacts. A
+ * contract is checked when `managed/<name>/` carries a tracked
+ * `compiler/contract-manifest.json` AND the bundle actually shipped its
+ * artefacts.
+ *
+ * NOT EVERY MANIFEST NAMES ARTEFACTS THAT SHIP, and that is deliberate rather
+ * than an omission. All four builds here — `account`, `account-v1`, `faucet`,
+ * `midnames` — carry a manifest with full `keys` and `zkir` sections, but the
+ * v16 bundle holds 25 files each for `account` and 23 each for `midnames` and
+ * nothing at all under the other two names:
+ *
+ *   - `account-v1` is MODULE-ONLY. It is the eleven-circuit build every
+ *     Passport set up before `transfer_shielded_to_account` is running, and its
+ *     keys are byte-identical to the current build's, so the PWA points the v1
+ *     module at `/zk/account` and ships one tree. `prepare-zk-assets.mjs` says
+ *     the same thing with `assets: false`; asking for artefacts under this name
+ *     failed every build that did not happen on the machine that compiled it
+ *     (found 2026/09/14).
+ *   - `faucet` is the mUSD faucet, which has no caller in the PWA. Checked
+ *     2026/09/15: its two circuits are in neither the bundle nor the app.
+ *
+ * So a contract whose `keys/` and `zkir/` are both absent is skipped and said
+ * to be skipped. That is not a hole a bad bundle can hide in: a bundle missing
+ * `account/keys` stops at `prepare:zk` — "the account build is incomplete —
+ * keys/ is missing" — which is the next step in both workflows and on a
+ * builder. A bundle carrying only HALF a contract is refused here, because that
+ * is a truncated extraction rather than a build that ships no artefacts.
+ */
+function contractsToCheck() {
+  const names = readdirSync(MANAGED_ROOT, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort();
+
+  const checkable = [];
+  for (const name of names) {
+    const base = resolve(MANAGED_ROOT, name);
+    if (!existsSync(resolve(base, 'compiler', 'contract-manifest.json'))) continue;
+
+    const shipped = DIRECTORIES.filter((directory) => existsSync(resolve(base, directory)));
+    if (shipped.length === DIRECTORIES.length) {
+      checkable.push(name);
+    } else if (shipped.length === 0) {
+      console.log(`${name}: no artefacts shipped under this name — skipped.`);
+    } else {
+      failures.push(
+        `partial  ${name}: ${shipped.join(' and ')} present, ${DIRECTORIES.filter(
+          (directory) => !shipped.includes(directory),
+        ).join(' and ')} missing. A bundle carries both or neither.`,
+      );
+    }
+  }
+  return checkable;
+}
+
 let checked = 0;
 const failures = [];
+
+const CONTRACTS = contractsToCheck();
 
 for (const contract of CONTRACTS) {
   const base = resolve(MANAGED_ROOT, contract);
@@ -105,8 +164,12 @@ if (failures.length > 0) {
 }
 
 if (checked === 0) {
-  console.error('ZK artefact verification FAILED: the manifests named no files to check.');
+  console.error('ZK artefact verification FAILED: no contract under');
+  console.error(`${MANAGED_ROOT} shipped artefacts to check. Either the bundle was never`);
+  console.error('extracted, or it carries nothing this tree has a manifest for.');
   process.exit(1);
 }
 
-console.log(`ZK artefacts verified against the committed manifests: ${checked} files.`);
+console.log(
+  `ZK artefacts verified against the committed manifests: ${checked} files across ${CONTRACTS.join(', ')}.`,
+);
