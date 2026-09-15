@@ -39,12 +39,13 @@ Prerequisites:
 
 - Docker
 - Node.js >= 22
-- `compact` 0.30.0 on PATH
+- `compact` on PATH with toolchain 0.31.1 installed (Compact language 0.23)
 - Chrome for the headless E2E script
 
 ```sh
 npm install
 cd app && npm install && cd ..
+compact update 0.31.1 --no-set-default
 npm run demo
 ```
 
