@@ -394,6 +394,30 @@
  * stop — and in the other sends somebody on an arrangement they did not
  * confirm. Its whole contract is drivable on an injected clock.
  *
+ * `src/lib/oneTxProbe.ts` and `src/lib/txFailure.ts` went IN on 2026/09/15, the
+ * day they were written, and both are in the denominator because both are
+ * rules whose failure is invisible from inside the app.
+ *
+ * `oneTxProbe.ts` is the schedule that decides whether a brand-new Passport
+ * sends in one step or two for the whole of its first session. It was written
+ * because the previous rule — ask once, and read "could not ask" as "no" — is
+ * indistinguishable from working: every send still goes through, just slower,
+ * for exactly the accounts that had earned the fast path by being new. A
+ * schedule that stops too early, loops forever, or answers on a guess all look
+ * the same from the outside, so the clock is injected and all three are
+ * drilled. It holds no React, no timers of its own, and no idea what is being
+ * asked.
+ *
+ * `txFailure.ts` is the one place that decides what a PARTNER APP is told when
+ * a payment fails, which makes its output the only string in this app that is
+ * rendered by software nobody here wrote. It replaced a mapper that paired the
+ * wire code with the thrown message, and so shipped "SubmissionError: 1010:
+ * Invalid Transaction: Custom error: 239" to every integrating app's users. Its
+ * drill holds both halves to a standard: nothing rendered may contain the
+ * machinery, and every wire code must be the one that was on the wire before,
+ * because a copy fix that quietly re-coded failures is a breaking change in
+ * disguise. A cause in, a reply out — no DOM, no React, no wallet.
+ *
  * `src/lib/sendLegs.ts` and `src/lib/walletProver.ts` went IN on 2026/09/02.
  * Both were written on 2026/09/02 WITH their drills — `sendLegs.test.ts` and
  * `walletProver.test.ts` — and both were left out of this list, which is worse
@@ -575,6 +599,7 @@ export default mergeConfig(
           'src/lib/indexerFailover.ts',
           'src/lib/installPrompt.ts',
           'src/lib/nameRecovery.ts',
+          'src/lib/oneTxProbe.ts',
           'src/lib/networks.ts',
           'src/lib/notifications.ts',
           'src/lib/passkeyRecovery.ts',
@@ -587,6 +612,7 @@ export default mergeConfig(
           'src/lib/sheetHistory.ts',
           'src/lib/shieldedNote.ts',
           'src/lib/sponsor.ts',
+          'src/lib/txFailure.ts',
           'src/lib/walletProver.ts',
           'src/lib/waitingGame.ts',
           'src/lib/zkArtefactCache.ts',

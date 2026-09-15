@@ -13,12 +13,15 @@ import {
   explorerTxHref,
   formatNight,
   shortAddress,
-  transferErrorFrom,
   txBoundaryCopy,
   accountHoldsCopy,
   type PassportTransferContext,
   type PassportTxResponseBody,
 } from './lib/txApproval.js';
+/* What a failed payment is reported AS — a wire code from the protocol's fixed
+   vocabulary and one sentence from a table, never the thrown message. See
+   `lib/txFailure.ts` for what used to reach a partner app instead. */
+import { txFailureForApp } from './lib/txFailure.js';
 import { holdCriticalWork } from './lib/appBusy.js';
 import {
   CONSENT_NO_CHANNEL_MESSAGE,
@@ -367,7 +370,16 @@ export function PassportTxConsent({
         reply(pending, { status: 'declined', error: 'declined' });
         setOutcome({ kind: 'declined' });
       } else {
-        const { error, detail } = transferErrorFrom(cause);
+        /* THE CAUSE GOES TO THE CONSOLE AND THE SENTENCE GOES EVERYWHERE ELSE
+           (2026/09/15). What used to travel on `detail` was the thrown message
+           itself, so a node refusal arrived at the partner app — and at the
+           sheet this person is watching — as "SubmissionError: 1010: Invalid
+           Transaction: Custom error: 239". `txFailureForApp` keeps the wire
+           code exactly as it was and takes the sentence from the send panel's
+           own table instead. The value is logged rather than a string of it:
+           an error printed as an object keeps its cause chain. */
+        console.debug('[tx-consent] the payment failed', cause);
+        const { error, detail } = txFailureForApp(cause);
         reply(pending, { status: 'failed', error, detail });
         setOutcome({ kind: 'failed', message: detail });
       }

@@ -167,8 +167,18 @@ async function fetchBytes(path: string, what: string): Promise<Uint8Array> {
     // waiting achieves.
     const contentType = resp.headers.get('content-type') ?? '';
     if (!resp.ok || contentType.includes('text/html')) {
+      /* TWO READERS, TWO MESSAGES (2026/09/15). In a dev server the person who
+         sees this is the person who can fix it, and the fix is one command — so
+         the command, the file it stages, and which parameter is missing are all
+         worth saying. In a BUILD the same throw travels to whoever is trying to
+         make a payment, and a repository path with a script name in it tells
+         them to run something they do not have, in a checkout they do not have.
+         The console keeps the path either way. */
+      console.warn(`[wasm-prover] missing ${what} (${path})`);
       throw new Error(
-        `missing ${what} (${path}) — run scripts/fetch-zk-params.mjs to stage examples/passport-demo/public/zk-params`,
+        import.meta.env.DEV
+          ? `missing ${what} (${path}) — run scripts/fetch-zk-params.mjs to stage examples/passport-demo/public/zk-params`
+          : 'The proving files are missing from this build.',
       );
     }
     try {

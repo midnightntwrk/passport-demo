@@ -92,6 +92,7 @@ import {
   nightColourHex,
   accountModuleFor,
   resetOneTransactionSendSupport,
+  senderOneTransactionSupport,
   senderSupportsOneTransactionSend,
   shieldedCoinFromWalletCoin,
   transferShieldedToAccount,
@@ -634,6 +635,64 @@ describe('senderSupportsOneTransactionSend', () => {
     accountHasOneTxTransfer.mockResolvedValue(true);
     await senderSupportsOneTransactionSend(NETWORK, `0x${SENDER.toUpperCase()}`);
     await senderSupportsOneTransactionSend(NETWORK, SENDER);
+    expect(accountHasOneTxTransfer).toHaveBeenCalledTimes(1);
+    expect(accountHasOneTxTransfer).toHaveBeenCalledWith(NETWORK.indexerHttpUrl, SENDER);
+  });
+});
+
+describe('senderOneTransactionSupport', () => {
+  beforeEach(() => {
+    resetOneTransactionSendSupport();
+    accountHasOneTxTransfer.mockReset();
+  });
+
+  it('keeps "could not ask" distinct from "no"', async () => {
+    /* THE WHOLE POINT, and the defect of 2026/09/15 in one assertion. A
+       Passport created seconds ago has an account the chain has not served
+       back yet; the boolean form answers `false`, which is a fine thing for a
+       send about to happen and a ruinous thing for a session's only reading of
+       the question. These two lines are the same chain state seen by the two
+       callers, and they must not agree. */
+    accountHasOneTxTransfer.mockResolvedValue(null);
+    await expect(senderOneTransactionSupport(NETWORK, SENDER)).resolves.toBeNull();
+    await expect(senderSupportsOneTransactionSend(NETWORK, SENDER)).resolves.toBe(false);
+  });
+
+  it('hands back both definite answers as themselves', async () => {
+    accountHasOneTxTransfer.mockResolvedValue(true);
+    await expect(senderOneTransactionSupport(NETWORK, SENDER)).resolves.toBe(true);
+    accountHasOneTxTransfer.mockResolvedValue(false);
+    await expect(senderOneTransactionSupport(NETWORK, PEER)).resolves.toBe(false);
+  });
+
+  it('caches a definite answer and never caches `null`', async () => {
+    /* One unreachable read must not hold a Passport on the slow path for the
+       rest of the session — which is exactly what caching it would do, and
+       exactly what the schedule in `lib/oneTxProbe.ts` exists to ask again. */
+    accountHasOneTxTransfer.mockResolvedValue(null);
+    await expect(senderOneTransactionSupport(NETWORK, SENDER)).resolves.toBeNull();
+    await expect(senderOneTransactionSupport(NETWORK, SENDER)).resolves.toBeNull();
+    expect(accountHasOneTxTransfer).toHaveBeenCalledTimes(2);
+
+    accountHasOneTxTransfer.mockResolvedValue(true);
+    await expect(senderOneTransactionSupport(NETWORK, SENDER)).resolves.toBe(true);
+    await expect(senderOneTransactionSupport(NETWORK, SENDER)).resolves.toBe(true);
+    expect(accountHasOneTxTransfer).toHaveBeenCalledTimes(3);
+  });
+
+  it('shares the one cache with the boolean form', async () => {
+    /* Two spellings of the same question is how a Passport comes to be asked
+       twice and answered differently. */
+    accountHasOneTxTransfer.mockResolvedValue(true);
+    await expect(senderOneTransactionSupport(NETWORK, SENDER)).resolves.toBe(true);
+    await expect(senderSupportsOneTransactionSend(NETWORK, SENDER)).resolves.toBe(true);
+    expect(accountHasOneTxTransfer).toHaveBeenCalledTimes(1);
+  });
+
+  it('normalises the address before it caches or asks', async () => {
+    accountHasOneTxTransfer.mockResolvedValue(true);
+    await senderOneTransactionSupport(NETWORK, `0x${SENDER.toUpperCase()}`);
+    await senderOneTransactionSupport(NETWORK, SENDER);
     expect(accountHasOneTxTransfer).toHaveBeenCalledTimes(1);
     expect(accountHasOneTxTransfer).toHaveBeenCalledWith(NETWORK.indexerHttpUrl, SENDER);
   });

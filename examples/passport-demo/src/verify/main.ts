@@ -422,6 +422,10 @@ for (const [id, address] of [
 
 let inFlight = 0;
 
+/** The one line a lookup that did not finish gets. See the catch in {@link run}. */
+const LOOKUP_FAILED_TEXT =
+  'That could not be looked up just now. Check the name or address and try again.';
+
 function setStatus(message: string, isError = false): void {
   status.textContent = message;
   status.classList.toggle('is-error', isError);
@@ -455,7 +459,15 @@ async function run(target: string): Promise<void> {
     );
   } catch (cause) {
     if (ticket !== inFlight) return;
-    setStatus(cause instanceof Error ? cause.message : String(cause), true);
+    /* THIS PAGE IS PUBLIC (2026/09/15). Whatever the read threw used to be
+       printed here verbatim, and what it throws is a GraphQL transport's own
+       account of itself — a query fragment, an endpoint, an HTTP status. None
+       of that is the reader's, and all of it is in the console for whoever is
+       actually debugging the lookup. The line they get says what happened to
+       the thing they typed and what to do about it, which is the whole of
+       what they asked. */
+    console.warn('[verify] the lookup failed', cause);
+    setStatus(LOOKUP_FAILED_TEXT, true);
   } finally {
     if (ticket === inFlight) submit.disabled = false;
   }

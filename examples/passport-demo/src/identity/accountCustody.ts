@@ -884,11 +884,41 @@ export async function senderSupportsOneTransactionSend(
   network: AccountNetwork,
   contractAddress: string,
 ): Promise<boolean> {
+  return (await senderOneTransactionSupport(network, contractAddress)) ?? false;
+}
+
+/**
+ * THE SAME QUESTION, WITH "COULD NOT ASK" KEPT DISTINCT FROM "NO".
+ *
+ * {@link senderSupportsOneTransactionSend} is the answer for a caller that has
+ * to send RIGHT NOW: it cannot wait, and the two-leg path it falls back to
+ * works against every account there is, so an unanswerable question costs it a
+ * slower send and nothing else. That collapse is correct there and is kept.
+ *
+ * It is wrong for a caller that can ASK AGAIN, and on 2026/09/15 that was the
+ * whole of a defect. A Passport created seconds earlier has an account the
+ * chain has not served back yet; the read answers `null`; the app read `false`
+ * out of it, wrote the session's answer down, and a brand-new Passport sent in
+ * two steps for its entire first session — although the contract it had just
+ * deployed carries the one-transaction circuit. Nothing asked again because,
+ * from the caller's side, `false` and "we could not ask" were the same value.
+ *
+ * So this one hands the three answers back as three answers. `null` is not
+ * cached, for exactly the reason the boolean form does not cache it: one
+ * unreachable read must not hold a Passport on the slow path for a session.
+ * What the caller does with `null` — wait five seconds and ask again, see
+ * `lib/oneTxProbe.ts` — is the caller's business, and could not be its business
+ * at all while the value it received said "no".
+ */
+export async function senderOneTransactionSupport(
+  network: AccountNetwork,
+  contractAddress: string,
+): Promise<boolean | null> {
   const address = rawContractAddress(contractAddress);
   const known = oneTransactionSendSupport.get(address);
   if (known !== undefined) return known;
   const supported = await accountHasOneTxTransfer(network.indexerHttpUrl, address);
-  if (supported === null) return false;
+  if (supported === null) return null;
   oneTransactionSendSupport.set(address, supported);
   return supported;
 }

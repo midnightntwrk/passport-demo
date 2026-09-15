@@ -35,11 +35,13 @@ import {
   explorerTxHref,
   formatNight,
   shortAddress,
-  transferErrorFrom,
   txBoundaryCopy,
   accountHoldsCopy,
   type PassportTxResponseBody,
 } from '../lib/txApproval.js'
+/* What a failed payment is reported AS, on both channels: a wire code and one
+   sentence, never the thrown message. See `../lib/txFailure.ts`. */
+import { txFailureForApp } from '../lib/txFailure.js'
 import type { RegistryApp } from '../lib/registry.js'
 import './apps.css'
 
@@ -651,7 +653,12 @@ export default function AppBrowser(props: AppBrowserProps) {
         postTx(pendingTx.request, { status: 'declined', error: 'declined' })
         setTxOutcome({ kind: 'declined' })
       } else {
-        const { error, detail } = transferErrorFrom(cause)
+        /* Word for word the popup surface's rule (2026/09/15): the thrown
+           message goes to the console as a value, and what the framed app and
+           this sheet are both told is a wire code plus one sentence from a
+           table. Two channels, one vocabulary — see `lib/txFailure.ts`. */
+        console.debug('[app-browser] the payment failed', cause)
+        const { error, detail } = txFailureForApp(cause)
         postTx(pendingTx.request, { status: 'failed', error, detail })
         setTxOutcome({ kind: 'failed', message: detail })
       }
