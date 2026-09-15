@@ -92,7 +92,13 @@ function stampBuildId(): Plugin {
     apply: 'build',
     closeBundle: {
       order: 'post',
-      handler() {
+      handler(error?: Error) {
+        /* ROLLUP CALLS THIS ON A FAILED BUILD TOO, and there is nothing to
+           stamp then: `dist/` was never written. Reading `dist/sw.js` here
+           threw ENOENT and buried the build's own error under it — which is
+           what CI showed on 2026/09/15, "[stamp-build-id] ENOENT" and not a
+           word about what had actually failed. Stand down and let it surface. */
+        if (error) return;
         const outDir = path.resolve(__dirname, 'dist');
         const workerPath = path.join(outDir, 'sw.js');
         const source = fs.readFileSync(workerPath, 'utf8');
