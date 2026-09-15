@@ -12,7 +12,24 @@ This repository is the planning and knowledge-gathering workspace for Midnight P
 
 **Core value:** produce a coordinated plan — scope, parallelisation map, delegation, decision records — that identifies what can be built simultaneously across teams (or sequenced by a single team), drives toward a public demo in October 2026, and ultimately produces a set of MIPs and CIPs the wider ecosystem can adopt.
 
-## Deployment rule (2026/09/14, non-negotiable)
+## Delivery rule (2026/09/15, non-negotiable)
+
+One path, in this order, for every change — code, docs, sponsor, contracts — with no exceptions for size ("a one-line fix"), urgency ("the call is in an hour"), or who is asking (a partner, a stakeholder):
+
+1. **Every change is a pull request** on `midnightntwrk/passport-demo`, the repository the Foundation reviews and releases from. No direct pushes to `main`. No deploy from a branch, a worktree, or a local build.
+2. **Every pull request is reviewed and approved** before it is merged. The merge target is `main`.
+3. **A release is cut from `main`** (`v<N> - YYYY/MM/DD`, with the ZK artefact bundle), and **that release is deployed to staging** (`https://staging.midnightpassport.com`). Staging never runs anything that is not a release cut from `main`.
+4. **Staging is tested, and only when the change is confirmed working there is the same release deployed to production** (`https://midnightpassport.com`). The tests are the four gates below.
+
+This is the sequence Hector set on 2026/09/15: open PRs → merge to `main` → release from `main` → deploy the release on staging → confirm on staging → deploy the same release on production.
+
+Sponsor (droplet) changes take the same path: pull request → review → `main` → droplet. The droplet serves both environments, so a sponsor change is live for production the moment it is deployed; that is a reason for the review, not a reason to skip it.
+
+If something is broken in production, the fix still enters at step 1. The only thing that may go to production without passing through staging is a rollback to the previous release.
+
+**The old working repository (`midnightntwrk/passport`) is retired for pushes.** Its push URL is set to `DISABLED` and a `pre-push` hook refuses it, along with any direct push to `main`. Do not undo either. No release, tag, branch, or commit goes there.
+
+## The two environments
 
 Two environments, one direction of travel:
 
