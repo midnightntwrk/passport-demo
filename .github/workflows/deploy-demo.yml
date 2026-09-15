@@ -39,6 +39,14 @@ on:
         description: 'Release whose ZK artefact bundle to use. Blank uses the latest published release. The commit deployed is this run''s ref, which must still be on main.'
         required: false
         type: string
+      target:
+        description: 'Where to deploy. A published release always goes to staging; production is only ever a promotion of a release that was confirmed on staging (delivery rule, 2026/09/15).'
+        required: true
+        default: staging
+        type: choice
+        options:
+          - staging
+          - production
 
 permissions:
   contents: read
@@ -51,6 +59,8 @@ concurrency:
 env:
   NODE_VERSION: '22'
   VERCEL_CLI_VERSION: '59.3.0'
+  # A release lands on staging; production is a separate, deliberate dispatch.
+  DEPLOY_TARGET: ${{ github.event_name == 'release' && 'staging' || inputs.target }}
   ZK_BUNDLE_ASSET: passport-zk-artefacts.tar.zst
   MANAGED_ROOT: examples/passport-balancer/contracts-stagenet/managed
 
@@ -125,7 +135,7 @@ env:
 
 jobs:
   deploy:
-    name: Build and deploy to Vercel production
+    name: Build and deploy to Vercel (staging on release, production on request)
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -342,20 +352,32 @@ jobs:
       # this is through the environment instead. Both ids are non-secret
       # identifiers; they are repository secrets so that all three deploy inputs
       # are managed in one place.
-      - name: Deploy to Vercel production
+      # Two projects, one direction of travel: a published release is deployed
+      # to the STAGING project; the production project is deployed only by a
+      # dispatch that names `target: production`, after the release was
+      # confirmed on staging (delivery rule, .claude/CLAUDE.md, 2026/09/15).
+      # A production dispatch must name the release it promotes.
+      - name: Refuse a production deploy that names no release
+        if: env.DEPLOY_TARGET == 'production' && inputs.release_tag == ''
+        run: |
+          echo "::error::A production deploy promotes a release that was confirmed on staging. Name it in release_tag."
+          exit 1
+
+      - name: Deploy to Vercel
         id: vercel
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
-          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          VERCEL_ORG_ID: ${{ env.DEPLOY_TARGET == 'production' && secrets.VERCEL_ORG_ID || secrets.VERCEL_STAGING_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ env.DEPLOY_TARGET == 'production' && secrets.VERCEL_PROJECT_ID || secrets.VERCEL_STAGING_PROJECT_ID }}
         run: |
           set -euo pipefail
           for name in VERCEL_TOKEN VERCEL_ORG_ID VERCEL_PROJECT_ID; do
             if [ -z "${!name}" ]; then
-              echo "::error::Repository secret ${name} is not set. See docs/demo/deployment.md."
+              echo "::error::The Vercel ${name} for ${DEPLOY_TARGET} is not set as a repository secret (VERCEL_TOKEN, and VERCEL_ORG_ID/VERCEL_PROJECT_ID for production or VERCEL_STAGING_ORG_ID/VERCEL_STAGING_PROJECT_ID for staging). See docs/demo/deployment.md."
               exit 1
             fi
           done
+          echo "Deploying ${GITHUB_SHA} to ${DEPLOY_TARGET}."
           url="$(vercel deploy --prebuilt --prod --yes --token "$VERCEL_TOKEN")"
           echo "url=${url}" >> "$GITHUB_OUTPUT"
           echo "Deployed ${url}"
@@ -369,7 +391,8 @@ jobs:
             echo "| | |"
             echo "|---|---|"
             echo "| Commit | \`${GITHUB_SHA}\` |"
-            echo "| Trigger | ${{ github.event_name }} ${{ github.event.release.tag_name }} |"
+            echo "| Trigger | ${{ github.event_name }} ${{ github.event.release.tag_name }}${{ inputs.release_tag }} |"
+            echo "| Target | ${DEPLOY_TARGET} |"
             echo "| Deployment | ${{ steps.vercel.outputs.url }} |"
-            echo "| Live | https://midnightpassport.com |"
+            echo "| Live | ${{ env.DEPLOY_TARGET == 'production' && 'https://midnightpassport.com' || 'https://staging.midnightpassport.com' }} |"
           } >> "$GITHUB_STEP_SUMMARY"
