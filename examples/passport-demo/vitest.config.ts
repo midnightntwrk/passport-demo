@@ -490,6 +490,28 @@
  * makes it drillable at all — the real build is ~100 MB of prover keys that a
  * unit test cannot load. It is not wired into the app; `App.tsx` is untouched.
  *
+ * `src/identity/accountK1Plan.ts` went IN on 2026/09/16, beside it, and for the
+ * same kind of reason one step further out: it holds the decisions a k1 deploy
+ * makes BEFORE anything is signed. Three of them cost a sponsored transaction
+ * when they are wrong and cannot be checked by running the flow. A wave plan
+ * that leaves `activate_initial_device_with_k256` out of wave 1 deploys an
+ * account nobody can ever open, and no later wave can repair it. A proving
+ * endpoint on the wrong origin is a 404 arriving after a proof has been waited
+ * for — and the endpoint does not exist yet, so nothing else in the tree can
+ * hold it. A stale use counter derives a device entry the ledger does not hold,
+ * and the call is refused in-circuit after the holder has approved it. It holds
+ * no React, no DOM, no network and no contract module; its storage is an
+ * injected three-method interface.
+ *
+ * `src/identity/accountK1Custody.ts` is deliberately OUT, and it is the sibling
+ * of the module above rather than an oversight. It is the half with the sockets
+ * on the end of it: a wallet, a sponsor, an indexer, a proof service that does
+ * not exist yet, and midnight-js's deploy and call entry points. Every decision
+ * it makes has been lifted into `accountK1Plan.ts` precisely so that what is
+ * left is wiring, and it is drilled through its injected `K1Deps` seams in
+ * `accountK1Custody.test.ts` rather than being held to a percentage that would
+ * only measure how much of midnight-js a fake can imitate.
+ *
  *   assert-shim.ts      A three-line stand-in for Node's `assert`, aliased in
  *                       by `vite.config.ts` for @subsquid/scale-codec. It has
  *                       no behaviour of ours in it.
@@ -653,6 +675,7 @@ export default mergeConfig(
           'src/lib/waitingGame.ts',
           'src/lib/zkArtefactCache.ts',
           'src/identity/accountK1.ts',
+          'src/identity/accountK1Plan.ts',
           'src/identity/aliasStore.ts',
           'src/identity/backup.ts',
           'src/identity/claimWarmup.ts',
