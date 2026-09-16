@@ -25,9 +25,14 @@ Verified on 2026/09/16 against the compiled reference contract (`compactc 0.34.0
 - Dynamic's `signRawMessage({ accountAddress, message })` signs a 64-hex digest verbatim
   and returns `0x` + `r‖s‖v`. That is envelope 0 and nothing else.
 
-Still not true, and it gates everything below: **ZKIR v3 proving on stagenet.** The
-in-browser prover (`src/lib/wasmProver.ts`, `@midnight-ntwrk/zkir-v2` 2.1.0) is v2 only,
-and the 1AM gateway is `ledger9-zkir2-dispatch`. See §1.4.
+Proven the same night, 2026/09/16: **stagenet verifies ZKIR v3 proofs** made by the
+droplet's `proof-server:9.0.0-rc.6`. The reference contract was deployed in three
+sponsored waves; `activate_initial_device_with_k256` landed at block 490985 (tx
+`15ba523c…`) and `append_inbox_with_k256` at block 490999 (tx `e961946c…`), both
+SUCCESS, with `device_count 1` and `auth_nonce 0 → 1` on the ledger. What remains true
+is that the in-browser prover (`src/lib/wasmProver.ts`, `@midnight-ntwrk/zkir-v2` 2.1.0)
+is v2 only and the 1AM gateway is `ledger9-zkir2-dispatch`, so k1 calls prove through the
+droplet's server by name. See §1.4.
 
 ## 1. A third account module, `account-k1`
 
