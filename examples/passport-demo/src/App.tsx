@@ -104,8 +104,8 @@ import {
   planOfRecord,
   planShieldedSend,
   pendingSendAmountLabel,
+  nextAutomaticResume,
   readPendingSends,
-  resumesWithoutPrompt,
   retryDelayMs,
   SEND_LEG_ATTEMPTS,
   sendBlockedByChangeReturn,
@@ -6582,6 +6582,29 @@ export default function PassportDemo() {
    * the one thing that says "this one already has somebody on it".
    */
   const changeReturnsInFlight = useRef<Set<string>>(new Set());
+  /**
+   * Every send this tab is running right now, by record id — the whole run,
+   * not only a detached third leg.
+   *
+   * The automatic resume and the card's Continue both read it, for the same
+   * reason `changeReturnsInFlight` exists: a record is written with its first
+   * leg's hash while the run that wrote it is still walking the second, and
+   * that is exactly the shape the resume offers to carry on. On staging on
+   * 2026/09/16 it did, three seconds into a NIGHT send's settle wait, and two
+   * deposits were built against one coin. See `nextAutomaticResume` in
+   * `lib/sendLegs.ts` for what that looked like to the person sending.
+   */
+  const sendsInFlight = useRef<Set<string>>(new Set());
+  /**
+   * Records this tab has closed, so a copy still held by a run that outlived
+   * the close cannot write them back. A run keeps its own copy of its record
+   * and saves patches over it; if another run of the same record finished
+   * first and dropped it, the late save would put a finished send back on
+   * Home as unfinished. With `sendsInFlight` there is no second run, so this
+   * is the backstop for the one shape that guard cannot see: a drop by
+   * anything other than a run.
+   */
+  const droppedSendIds = useRef<Set<string>>(new Set());
 
   const persistPendingSends = useCallback((next: PendingSend[]) => {
     pendingSendsRef.current = next;
@@ -6601,6 +6624,10 @@ export default function PassportDemo() {
 
   const writePendingSend = useCallback(
     (record: PendingSend) => {
+      if (droppedSendIds.current.has(record.id)) {
+        console.info('[send] a closed record was not written back', record.id);
+        return;
+      }
       persistPendingSends([
         record,
         ...pendingSendsRef.current.filter((entry) => entry.id !== record.id),
@@ -6611,6 +6638,7 @@ export default function PassportDemo() {
 
   const dropPendingSend = useCallback(
     (id: string) => {
+      droppedSendIds.current.add(id);
       persistPendingSends(pendingSendsRef.current.filter((entry) => entry.id !== id));
     },
     [persistPendingSends],
@@ -7663,6 +7691,11 @@ export default function PassportDemo() {
         })();
       };
 
+      /* CLAIMED FOR THE WHOLE RUN, released in the `finally` below. Every save
+         between here and there is a render the automatic resume gets to look
+         at, and the record has the shape it offers to carry on from the moment
+         leg one's hash is written — see `sendsInFlight`. */
+      sendsInFlight.current.add(initial.id);
       try {
         /* ONE LEG, AND IT IS THE WHOLE RUN. A `transfer` record has no settle
            wait for a note, no paying leg, and no change to put back: it submits
@@ -7849,6 +7882,7 @@ export default function PassportDemo() {
         }
         throw cause;
       } finally {
+        sendsInFlight.current.delete(initial.id);
         setNameSendLeg(null);
         setNameSendAttempt(null);
         setAccountPhase(null);
@@ -7898,6 +7932,9 @@ export default function PassportDemo() {
          see `detachChange`. A second walk of the same leg would prove against a
          state the first is moving, and the node would refuse it. */
       if (changeReturnsInFlight.current.has(id)) return;
+      /* Already being walked by the run that wrote it. A Continue pressed, or
+         scheduled, while that run is still going would be the second copy. */
+      if (sendsInFlight.current.has(id)) return;
       if (resumingSendIdRef.current !== null) return;
       resumingSendIdRef.current = id;
       setResumingSendId(id);
@@ -7947,13 +7984,22 @@ export default function PassportDemo() {
    */
   useEffect(() => {
     if (!localSessionActive || !accountContractAddress) return;
-    const record = pendingSends.find(
-      (entry) => resumesWithoutPrompt(entry) && !autoResumedSends.current.has(entry.id),
+    const next = nextAutomaticResume(
+      pendingSends,
+      autoResumedSends.current,
+      sendsInFlight.current,
     );
-    if (!record) return;
-    autoResumedSends.current.add(record.id);
+    if (!next) return;
+    autoResumedSends.current.add(next.id);
+    /* THE RUN THAT WROTE THIS RECORD IS STILL GOING (2026/09/16). It is this
+       session's attempt at the record, and it has the retry ladder; a second
+       run started underneath it would build the same leg against the same
+       coin. Looked at, so it is not looked at again this session; not started.
+       A reload is a new session, where nothing is in flight and the resume
+       behaves as it did on 2026/09/04. */
+    if (!next.start) return;
     const handle = window.setTimeout(() => {
-      void continuePendingSend(record.id, { prompt: false });
+      void continuePendingSend(next.id, { prompt: false });
     }, PENDING_SEND_AUTO_RESUME_DELAY_MS);
     return () => window.clearTimeout(handle);
   }, [accountContractAddress, continuePendingSend, localSessionActive, pendingSends]);
