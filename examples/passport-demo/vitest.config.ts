@@ -455,6 +455,24 @@
  * server resolves the protocol builtins itself — are drilled against a local
  * HTTP server rather than a real prover.
  *
+ * `src/identity/accountK1.ts` went IN on 2026/09/16, the day it was written,
+ * and it is in the denominator because every function in it decides what a key
+ * SIGNS. The k1-arm account contract gates each asset-releasing circuit on a
+ * signature over a challenge, and that signature is single-use: the wrong
+ * digest, the wrong envelope id, or two signature scalars read out of the bytes
+ * in the wrong order all produce a call the circuit refuses AFTER somebody has
+ * been asked to approve it. None of those are visible from inside the app — a
+ * refused proof looks the same whichever of them caused it — so the rules are
+ * held directly, and two of them are held against evidence rather than against
+ * themselves: the digest fixtures are the values the compiled contract's own
+ * `envelope_digest` pure circuit returned, and the signature round trip goes
+ * back through the curve rather than comparing bigints to bigints.
+ *
+ * The module holds no React, no DOM, no network, no storage, and no contract
+ * module: the compiled contract's pure circuits are INJECTED, which is what
+ * makes it drillable at all — the real build is ~100 MB of prover keys that a
+ * unit test cannot load. It is not wired into the app; `App.tsx` is untouched.
+ *
  *   assert-shim.ts      A three-line stand-in for Node's `assert`, aliased in
  *                       by `vite.config.ts` for @subsquid/scale-codec. It has
  *                       no behaviour of ours in it.
@@ -616,6 +634,7 @@ export default mergeConfig(
           'src/lib/walletProver.ts',
           'src/lib/waitingGame.ts',
           'src/lib/zkArtefactCache.ts',
+          'src/identity/accountK1.ts',
           'src/identity/aliasStore.ts',
           'src/identity/backup.ts',
           'src/identity/claimWarmup.ts',
