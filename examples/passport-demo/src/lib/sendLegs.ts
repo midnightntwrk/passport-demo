@@ -716,6 +716,38 @@ export function resumesWithoutPrompt(record: PendingSend): boolean {
   return typeof record.withdrawTxHash === 'string' && record.withdrawTxHash.length > 0;
 }
 
+/**
+ * Which record the automatic resume looks at next — and whether it may start.
+ *
+ * `id` is the record the caller marks as looked at, so it is looked at once
+ * per session whatever the answer. `start` is the answer: `false` when a run
+ * in THIS tab is already walking the record, which is the one case where
+ * "carry it on" means "start a second copy".
+ *
+ * THE SECOND COPY, SEEN ON STAGING 2026/09/16. A NIGHT send wrote its record
+ * with the first leg's hash, waited for the coin to settle, and three seconds
+ * later — the automatic resume's whole delay — a second run of the same record
+ * began underneath it. Both built the deposit against the same coin. The first
+ * landed and paid the recipient; the network refused the second, twice, for
+ * spending a coin that was gone, and its last attempt read the wallet as
+ * holding nothing. That second run finished LAST, so it overwrote the record
+ * the first had closed: Home showed "Payment not finished" with the wallet's
+ * own sentence on it, and the activity row said the recipient was not paid —
+ * for a payment that had gone through. The detached change leg already had
+ * this guard (`changeReturnsInFlight`); the run itself did not.
+ */
+export function nextAutomaticResume(
+  records: readonly PendingSend[],
+  lookedAt: ReadonlySet<string>,
+  inFlight: ReadonlySet<string>,
+): { id: string; start: boolean } | null {
+  const record = records.find(
+    (entry) => resumesWithoutPrompt(entry) && !lookedAt.has(entry.id),
+  );
+  if (!record) return null;
+  return { id: record.id, start: !inFlight.has(record.id) };
+}
+
 /* -------------------------------------------------------------------------- */
 /* What a failure means                                                        */
 /* -------------------------------------------------------------------------- */
@@ -837,8 +869,15 @@ export function classifyLegError(error: unknown): LegErrorVerdict {
   };
 }
 
-/** What "there is not enough" looks like, wherever in the chain it is said. */
-const INSUFFICIENT_PATTERN = /insufficient funds|insufficient balance|not enough/i;
+/**
+ * What "there is not enough" looks like, wherever in the chain it is said.
+ * The last alternative is `identity/accountCustody.ts`'s own pre-check —
+ * "This wallet holds 0 of that colour, and the deposit would move 1000." —
+ * which reached a screen on staging on 2026/09/16 because nothing here knew
+ * it as a shortfall.
+ */
+const INSUFFICIENT_PATTERN =
+  /insufficient funds|insufficient balance|not enough|holds \d+ (?:shielded )?of that colour/i;
 
 /** And what a reader is told about it — a sentence, not a classification. */
 const INSUFFICIENT_TEXT = 'There was not enough to cover this step, so nothing further was sent.';

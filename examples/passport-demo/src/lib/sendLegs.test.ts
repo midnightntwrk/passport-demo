@@ -57,6 +57,7 @@ import {
   accountMoveRefusalText,
   ACCOUNT_MOVE_REFUSED_TEXT,
   readPendingSends,
+  nextAutomaticResume,
   resumesWithoutPrompt,
   retryDelayMs,
   SEND_LEG_ATTEMPTS,
@@ -279,6 +280,25 @@ describe('classifyLegError', () => {
     expect(verdict.message).toBe(
       'There was not enough to cover this step, so nothing further was sent.',
     );
+  });
+
+  it("knows the account custody pre-check's own sentence as a shortfall", () => {
+    /* Reached a screen on staging on 2026/09/16, on a deposit retried after
+       the coin it needed had been spent by the run that paid the recipient:
+       "This wallet holds 0 of that colour, and the deposit would move 1000." */
+    for (const text of [
+      'This wallet holds 0 of that colour, and the deposit would move 1000.',
+      'This account holds 5 of that colour, and the withdrawal would move 1000.',
+      'This account holds 0 shielded of that colour, and the withdrawal would move 7.',
+    ]) {
+      const verdict = classifyLegError(
+        new Error('The account contract rejected deposit_night.', { cause: new Error(text) }),
+      );
+      expect(verdict.retryable).toBe(false);
+      expect(verdict.message).toBe(
+        'There was not enough to cover this step, so nothing further was sent.',
+      );
+    }
   });
 
   it('prefers the shortfall to a node refusal that carries it', () => {
@@ -1004,6 +1024,43 @@ describe('pendingSendAmountLabel', () => {
     expect(pendingSendAmountLabel(nightSend({ amount: 'nonsense' }), NIGHT)).toBe(
       'nonsense NIGHT',
     );
+  });
+});
+
+describe('nextAutomaticResume', () => {
+  const landed = (id: string) => ({ ...shieldedSend({ leg: 'settle' }), id });
+  const none = new Set<string>();
+
+  it('offers the first record whose first leg landed and has not been looked at', () => {
+    const records = [
+      { ...shieldedSend({ leg: 'withdraw', withdrawTxHash: undefined }), id: 'unspent' },
+      landed('a'),
+      landed('b'),
+    ];
+    expect(nextAutomaticResume(records, none, none)).toEqual({ id: 'a', start: true });
+    expect(nextAutomaticResume(records, new Set(['a']), none)).toEqual({ id: 'b', start: true });
+    expect(nextAutomaticResume(records, new Set(['a', 'b']), none)).toBeNull();
+    expect(nextAutomaticResume([], none, none)).toBeNull();
+  });
+
+  it('does not start a record the run that wrote it is still walking', () => {
+    /* STAGING, 2026/09/16. A NIGHT send wrote its record with leg one's hash
+       and settled for longer than the resume's three-second delay; the resume
+       started a second run of the same record, both built the deposit against
+       the same coin, and the second — refused by the network, then reading the
+       wallet as empty — finished last and overwrote a payment that had gone
+       through. The record is still LOOKED AT (its id comes back, so it is not
+       offered again this session), and it is not STARTED. */
+    const records = [landed('running'), landed('idle')];
+    expect(nextAutomaticResume(records, none, new Set(['running']))).toEqual({
+      id: 'running',
+      start: false,
+    });
+    /* Once looked at, the next candidate is the idle one, which may start. */
+    expect(nextAutomaticResume(records, new Set(['running']), new Set(['running']))).toEqual({
+      id: 'idle',
+      start: true,
+    });
   });
 });
 
