@@ -186,8 +186,7 @@ the shielded balance depends on all of it.
 
 Extend the machine, do not rewrite it. Drain → deploy → re-point → refund → switch, with
 a chain check before every step and a write the moment each lands, is exactly the right
-shape for a longer sequence.
-
+shape for a longer sequence. Evidence (2026/09/16, SDK 5.8.0 on disk and Dynamic's docs): `@dynamic-labs/waas-evm/src/DynamicWaasEVMConnector.js` lines 754–777 pass a `hashAuthorization(...).slice(2)` digest (32 bytes, hex, no `0x`) to `signRawMessage` and hand the result straight to viem's `parseSignature`, which requires `0x` + 64 bytes + v; `@dynamic-labs-sdk/client/dist/waasCore.esm.js` line 208 enforces `RAW_MESSAGE_MESSAGE_REQUIRED_LENGTH = 64` and throws at line 483 otherwise; the raw-signing doc page states the SDK adds no prefix and no re-hash. Not yet observed against a live embedded wallet from this code — the first gated call in PR 3 is where that observation is made, and it is the go/no-go for PR 6.
 - **The seam is `UpgradeDeps.submitAccount`** (`accountUpgrade.ts:283`, defaulted at
   `:372`). `submitPassportContract` (`passportContract.ts:720`) hardcodes `'account'`
   twice; parameterise it by module. This is the first time a deploy chooses.
