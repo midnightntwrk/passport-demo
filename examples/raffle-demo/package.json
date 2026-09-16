@@ -1,7 +1,7 @@
 {
   "name": "midnight-raffle-demo",
   "version": "0.1.0",
-  "description": "An open-source example dApp that connects to Midnight Passport, reads a shared profile, and asks Passport to pay for a raffle entry on the Midnight preview network.",
+  "description": "An open-source example dApp that connects to Midnight Passport, reads a shared profile, and asks Passport to pay for a raffle entry on the Midnight network Passport runs on.",
   "license": "Apache-2.0",
   "type": "module",
   "scripts": {

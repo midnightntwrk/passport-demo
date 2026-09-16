@@ -50,7 +50,7 @@ const TELEGRAM_URL = import.meta.env.VITE_TELEGRAM_URL;
 const EXPLORER_URL = 'https://explorer.1am.xyz';
 
 function explorerTxHref(txId: string): string {
-  return `${EXPLORER_URL}/tx/${encodeURIComponent(txId)}?network=preview`;
+  return `${EXPLORER_URL}/tx/${encodeURIComponent(txId)}?network=${NETWORK}`;
 }
 
 // The raffle runs two ways: standalone (it opens Passport as a popup and
@@ -75,6 +75,16 @@ const EMBEDDED = window.parent !== window;
  */
 const COLLECTION_ADDRESS = import.meta.env.VITE_RAFFLE_COLLECTION_ADDRESS?.trim() ?? '';
 const ENTRY_AMOUNT = (import.meta.env.VITE_RAFFLE_ENTRY_AMOUNT ?? '100000').trim();
+/**
+ * The network this raffle collects on — read off the collection address, so
+ * the explorer link and the footer can never disagree with where the money
+ * goes. Passport refuses a payment to an address on any other network ("That
+ * address belongs to the preview network; this Passport is on stagenet", seen
+ * by a reviewer on 2026/09/16 when this demo still carried its August preview
+ * address), so a mismatch here is not a cosmetic one. Stagenet is what
+ * Passport runs on today, and what an unset address is documented against.
+ */
+const NETWORK = addressNetwork(COLLECTION_ADDRESS) ?? 'stagenet';
 const ON_CHAIN = COLLECTION_ADDRESS.length > 0 && /^[0-9]{1,20}$/.test(ENTRY_AMOUNT);
 
 /** Passport signs and submits; the wait covers proving as well as the node. */
@@ -406,8 +416,8 @@ function App() {
       setState('entered');
       setDetail(`Entry paid. Transaction ${shortHash(txId)} was submitted to the node.`);
       /* The confirmation the user actually reads, with the explorer one tap
-         away. Preview is the only network with a public explorer, and it is
-         the only network Passport submits on today. */
+         away. The 1AM explorer resolves preview and stagenet; the link names
+         whichever network the collection address is on. */
       pushRaffleToast({
         title: 'You are in the draw',
         body: `Entry paid — ${shortHash(txId)}.`,
@@ -965,7 +975,7 @@ function App() {
 
       <footer className="raffle-footer">
         {ON_CHAIN
-          ? `Demo raffle — entries are real ${ENTRY_PRICE} NIGHT preview transactions; prizes are not.`
+          ? `Demo raffle — entries are real ${ENTRY_PRICE} NIGHT ${NETWORK} transactions; prizes are not.`
           : 'Demo raffle — no real prizes, nothing on-chain yet.'}
       </footer>
     </div>
