@@ -146,6 +146,17 @@ export interface BalancerConfig extends BalancerNetworkEndpoints {
   /** The per-client ceiling on `/fund-account`. */
   accountRate: RateLimit;
   /**
+   * The per-client ceiling on `/prove-k1`.
+   *
+   * Its own bucket rather than a share of `accountRate`, because it meters a
+   * different cost: that route spends nothing at all and burns tens of seconds
+   * of CPU, so a caller that has used up its grants should still be able to
+   * finish proving the Passport those grants opened. Same default ceiling as
+   * the spend routes, which is the point — three a minute per client is already
+   * more than a browser walking one Passport through its four steps needs.
+   */
+  proveK1Rate: RateLimit;
+  /**
    * How many spend requests may be in flight at once, across every client.
    * Zero means unbounded.
    */
@@ -895,6 +906,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BalancerConfig
     DEFAULT_SPEND_MAX_PER_MIN,
     DEFAULT_SPEND_BURST,
   );
+  const proveK1Rate = rateLimit(
+    'PROVE_K1',
+    trimmed(env.BALANCER_PROVE_K1_MAX_PER_MIN),
+    trimmed(env.BALANCER_PROVE_K1_BURST),
+    DEFAULT_SPEND_MAX_PER_MIN,
+    DEFAULT_SPEND_BURST,
+  );
   const spendQueueMax = wholeNumber(
     'BALANCER_SPEND_QUEUE_MAX',
     trimmed(env.BALANCER_SPEND_QUEUE_MAX),
@@ -1060,6 +1078,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BalancerConfig
     balanceRate,
     aliasRate,
     accountRate,
+    proveK1Rate,
     spendQueueMax,
     spendLanes,
     dustWaitMs,

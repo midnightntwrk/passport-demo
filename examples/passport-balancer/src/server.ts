@@ -190,6 +190,7 @@ import {
 } from './midnames.js';
 import { startLivenessWatch } from './liveness.js';
 import { countingProof, proofsInFlight } from './proving.js';
+import { PROVE_K1_PATH, PROVE_K1_PREFIX, k1ProverFromConfig } from './proveK1.js';
 import { SpendPriority } from './reservation.js';
 import {
   FEE_CAPABLE_SPECKS,
@@ -309,7 +310,7 @@ async function main(): Promise<void> {
       ? `${limit.perMinute}/min per client (burst ${limit.burst})`
       : 'no per-client limit';
   console.log(
-    `limits    /balance-only ${describeRate(config.balanceRate)}; /register-alias ${describeRate(config.aliasRate)}; /fund-account ${describeRate(config.accountRate)}`,
+    `limits    /balance-only ${describeRate(config.balanceRate)}; /register-alias ${describeRate(config.aliasRate)}; /fund-account ${describeRate(config.accountRate)}; /prove-k1 ${describeRate(config.proveK1Rate)}`,
   );
   console.log(
     `dust      a name claim or a grant waits up to ${Math.round(config.dustWaitMs / 1_000)} s, outside the spend queue, for a fee-capable DUST coin before it refuses`,
@@ -387,7 +388,25 @@ async function main(): Promise<void> {
     ratePerMinute: config.accountRate.perMinute,
     burst: config.accountRate.burst,
   });
+  /* `/prove-k1` spends nothing, so it is not on any of the three above: a
+     caller that has used its grant allowance for the hour must still be able to
+     finish proving the Passport that allowance opened. See `./proveK1.ts`. */
+  const proveK1Bucket = new TokenBucket({
+    ratePerMinute: config.proveK1Rate.perMinute,
+    burst: config.proveK1Rate.burst,
+  });
   const spendAdmission = new SpendAdmission(config.spendQueueMax);
+
+  /**
+   * The k1-arm proving route.
+   *
+   * Built unconditionally, and 503 `prover-unavailable` when this host has no
+   * artefacts or no ZKIR v3 proof server. A route that DISAPPEARED when
+   * unconfigured would answer 404, which is the reverse proxy's answer as well
+   * as ours, and the client would have to guess which — so the route is always
+   * there and the refusal is always the same sentence.
+   */
+  const k1Prover = k1ProverFromConfig(config);
 
   /**
    * Alias registrations in progress, keyed BOTH ways: `alias:<label>` and
@@ -1101,6 +1120,13 @@ async function main(): Promise<void> {
       proving: wallet.provingMode,
       provingReadiness: wallet.provingReadiness(),
       provingServerUrl: config.provingServerUrl ?? null,
+      /* `/prove-k1`'s own book, and nothing of the sponsor's. `configured`
+         false is the whole of what a client needs to know before it offers a
+         Dynamic Passport at all; the queue and the last measured proof are what
+         an operator reads when it is slow. No path, no URL, and every refusal's
+         detail has this host's geography taken out of it — `/status` is on the
+         internet. See `./proveK1.ts`. */
+      k1Proving: k1Prover.snapshot(),
       dustRegistration: registration,
       dustRegistrationDetail: registrationDetail,
       balancesServed,
@@ -1220,7 +1246,8 @@ async function main(): Promise<void> {
         accountBurst: config.accountRate.burst,
         spendQueueDepth: spendAdmission.depth,
         spendQueueMax: config.spendQueueMax,
-        clientsTracked: balanceBucket.size + aliasBucket.size + accountBucket.size,
+        clientsTracked:
+          balanceBucket.size + aliasBucket.size + accountBucket.size + proveK1Bucket.size,
         clientKeyRequired: config.clientKey !== undefined,
       },
       /* Not ready, but only because a spend's change is still in flight — the
@@ -3017,6 +3044,22 @@ async function main(): Promise<void> {
         retryAfterMs: 5_000,
       };
     }
+    return guardRate(request, guard, who);
+  };
+
+  /**
+   * The half of {@link guardSpend} that is about the CALLER: its bucket and its
+   * key, and nothing about this wallet.
+   *
+   * Split out for `/prove-k1`, which meters a caller exactly like a spend route
+   * and must not be refused by a DUST repair — it spends nothing, so a wallet
+   * whose coins are hidden has no bearing on whether it can be served.
+   */
+  const guardRate = (
+    request: IncomingMessage,
+    guard: { prefix: string; bucket: TokenBucket },
+    who: string,
+  ): { refusal: Refusal; retryAfterMs: number } | null => {
     const verdict = guard.bucket.take(who);
     if (!verdict.allowed) {
       refusals.countRateLimited();
@@ -3099,6 +3142,56 @@ async function main(): Promise<void> {
           return;
         }
         releaseSlot = () => spendAdmission.leave();
+      }
+
+      /* METERED BUT NOT ADMITTED. `/prove-k1` gets the same per-client bucket
+         and the same client-key gate as a spend route, and deliberately not a
+         `SpendAdmission` slot: those bound how many callers may be waiting on
+         this WALLET, and a proof does not touch it. Its own concurrency is one
+         at a time, bounded inside `./proveK1.ts`. */
+      if (request.method === 'POST' && path === PROVE_K1_PATH) {
+        const proveGuard = { prefix: PROVE_K1_PREFIX, bucket: proveK1Bucket };
+        const client = clientAddress({
+          socketAddress: request.socket.remoteAddress,
+          forwardedFor: request.headers['x-forwarded-for'],
+          trustedProxies: config.trustedProxies,
+        });
+        const refused = guardRate(request, proveGuard, client);
+        if (refused) {
+          refuseSpend(
+            request,
+            response,
+            proveGuard.prefix,
+            client,
+            refused.refusal,
+            refused.retryAfterMs,
+          );
+          return;
+        }
+        let body: Buffer;
+        try {
+          body = await readRawBody(request);
+        } catch (cause) {
+          console.warn(
+            `[${PROVE_K1_PREFIX}] refused: invalid-request — ${cause instanceof Error ? cause.message : String(cause)}`,
+          );
+          respond(request, response, 413, {
+            error: 'invalid-request',
+            detail: `The request body is larger than this service will read (${MAX_BODY_BYTES} bytes).`,
+          });
+          return;
+        }
+        const outcome = await k1Prover.prove(body);
+        respond(
+          request,
+          response,
+          outcome.status,
+          outcome.body,
+          outcome.retryAfterMs === undefined
+            ? {}
+            : { 'retry-after': String(Math.max(1, Math.round(outcome.retryAfterMs / 1_000))) },
+        );
+        return;
       }
 
       /* MEMOISED FOR A SECOND, BOTH OF THEM — see `./readCache.ts`. These are
