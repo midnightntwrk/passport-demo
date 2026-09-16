@@ -1,9 +1,10 @@
-import { Monitor, Moon, Sun } from 'lucide-react'
+import { Moon, Sun } from 'lucide-react'
 import { useSyncExternalStore } from 'react'
 
 import {
   DEFAULT_THEME,
   getThemePreference,
+  resolveTheme,
   setTheme,
   subscribeToTheme,
   type ThemePreference,
@@ -43,8 +44,17 @@ const OPTIONS: {
 }[] = [
   { value: 'light', label: 'Light', icon: Sun },
   { value: 'dark', label: 'Dark', icon: Moon },
-  { value: 'system', label: 'Match system', icon: Monitor },
 ]
+/*
+ * TWO OPTIONS, NOT THREE (2026/09/16). The third was "Match system", drawn
+ * as a monitor. A reviewer read the monitor as "desktop mode", pressed it,
+ * and nothing visible happened — on a machine whose system theme was the one
+ * already showing, it never can, and there is no text on a 30 px button to
+ * say so. Passport defaults to light, so "match system" was never what a new
+ * Passport showed anyway. The preference itself stays in `lib/theme.ts` — a
+ * browser that already stored `system` keeps following its system, and the
+ * control shows whichever of the two that resolves to as the one that is on.
+ */
 
 function subscribe(onChange: () => void): () => void {
   return subscribeToTheme(onChange)
@@ -70,7 +80,7 @@ export default function ThemeToggle(props: ThemeToggleProps) {
     <div className={classes.join(' ')} role="group" aria-label={label}>
       {OPTIONS.map((option) => {
         const Icon = option.icon
-        const on = option.value === preference
+        const on = option.value === resolveTheme(preference)
         return (
           <button
             key={option.value}
