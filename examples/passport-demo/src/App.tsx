@@ -6596,6 +6596,14 @@ export default function PassportDemo() {
    */
   const sendsInFlight = useRef<Set<string>>(new Set());
   /**
+   * The same set as state, so the Home card can say "carrying on" while the
+   * run that wrote the record is still going. Review of 2026/09/16: with only
+   * the ref, a Continue pressed during a live run was refused silently and the
+   * card offered a button that did nothing. The ref stays the guard; this is
+   * what renders.
+   */
+  const [runningSendIds, setRunningSendIds] = useState<ReadonlySet<string>>(() => new Set());
+  /**
    * Records this tab has closed, so a copy still held by a run that outlived
    * the close cannot write them back. A run keeps its own copy of its record
    * and saves patches over it; if another run of the same record finished
@@ -7696,6 +7704,7 @@ export default function PassportDemo() {
          at, and the record has the shape it offers to carry on from the moment
          leg one's hash is written — see `sendsInFlight`. */
       sendsInFlight.current.add(initial.id);
+      setRunningSendIds((previous) => new Set(previous).add(initial.id));
       try {
         /* ONE LEG, AND IT IS THE WHOLE RUN. A `transfer` record has no settle
            wait for a note, no paying leg, and no change to put back: it submits
@@ -7883,6 +7892,12 @@ export default function PassportDemo() {
         throw cause;
       } finally {
         sendsInFlight.current.delete(initial.id);
+        setRunningSendIds((previous) => {
+          if (!previous.has(initial.id)) return previous;
+          const next = new Set(previous);
+          next.delete(initial.id);
+          return next;
+        });
         setNameSendLeg(null);
         setNameSendAttempt(null);
         setAccountPhase(null);
@@ -8709,13 +8724,20 @@ export default function PassportDemo() {
           reason: record.lastError?.message ?? null,
           /* Carrying on by itself, so the card says so. The step line above it
              advances as each leg is written down, which is the progress. */
-          busy: resumingSendId === record.id,
+          busy: resumingSendId === record.id || runningSendIds.has(record.id),
           onContinue: () => void continuePendingSend(record.id),
           ...(record.withdrawTxHash
             ? {}
             : { onGiveUp: () => dropPendingSend(record.id) }),
         })),
-    [continuePendingSend, dropPendingSend, pendingSendAsset, pendingSends, resumingSendId],
+    [
+      continuePendingSend,
+      dropPendingSend,
+      pendingSendAsset,
+      pendingSends,
+      resumingSendId,
+      runningSendIds,
+    ],
   );
 
   const homeLegacyFunds =

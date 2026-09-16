@@ -27,6 +27,8 @@ Sponsor (droplet) changes take the same path: pull request → review → `main`
 
 If something is broken in production, the fix still enters at step 1. The only thing that may go to production without passing through staging is a rollback to the previous release.
 
+Two clarifications from the 2026/09/16 review: (a) an **unaliased preview deployment** of a branch build on the staging Vercel project is allowed for verification only — it is never aliased, never announced as staging, and is torn down or left to expire; (b) the raffle site (`examples/raffle-demo`, its own Vercel project) has **no staging environment** and its previews sit behind Vercel login, so a raffle change is tested by serving the build locally against `staging.midnightpassport.com`, and its production deploy needs an explicit go like any other production step.
+
 **The old working repository (`midnightntwrk/passport`) is retired for pushes.** Its push URL is set to `DISABLED` and a `pre-push` hook refuses it, along with any direct push to `main`. Do not undo either. No release, tag, branch, or commit goes there.
 
 ## The two environments

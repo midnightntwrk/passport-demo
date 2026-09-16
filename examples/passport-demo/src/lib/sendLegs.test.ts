@@ -286,18 +286,25 @@ describe('classifyLegError', () => {
     /* Reached a screen on staging on 2026/09/16, on a deposit retried after
        the coin it needed had been spent by the run that paid the recipient:
        "This wallet holds 0 of that colour, and the deposit would move 1000." */
+    const verdict = classifyLegError(
+      new Error('The account contract rejected deposit_night.', {
+        cause: new Error('This wallet holds 0 of that colour, and the deposit would move 1000.'),
+      }),
+    );
+    expect(verdict.retryable).toBe(false);
+    expect(verdict.message).toBe(
+      'There was not enough to cover this step, so nothing further was sent.',
+    );
+    /* The ACCOUNT's sentences come from a chain read that can be stale on a
+       freshly funded account, so they are not read as a shortfall — they keep
+       the head message, as before (review, 2026/09/16). */
     for (const text of [
-      'This wallet holds 0 of that colour, and the deposit would move 1000.',
       'This account holds 5 of that colour, and the withdrawal would move 1000.',
       'This account holds 0 shielded of that colour, and the withdrawal would move 7.',
     ]) {
-      const verdict = classifyLegError(
-        new Error('The account contract rejected deposit_night.', { cause: new Error(text) }),
-      );
-      expect(verdict.retryable).toBe(false);
-      expect(verdict.message).toBe(
-        'There was not enough to cover this step, so nothing further was sent.',
-      );
+      const account = classifyLegError(new Error(text));
+      expect(account.retryable).toBe(false);
+      expect(account.message).toBe(text);
     }
   });
 

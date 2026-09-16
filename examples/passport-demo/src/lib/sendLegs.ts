@@ -871,13 +871,16 @@ export function classifyLegError(error: unknown): LegErrorVerdict {
 
 /**
  * What "there is not enough" looks like, wherever in the chain it is said.
- * The last alternative is `identity/accountCustody.ts`'s own pre-check —
- * "This wallet holds 0 of that colour, and the deposit would move 1000." —
- * which reached a screen on staging on 2026/09/16 because nothing here knew
- * it as a shortfall.
+ * The last alternative is `identity/accountCustody.ts`'s pre-check of THIS
+ * WALLET — "This wallet holds 0 of that colour, and the deposit would move
+ * 1000." — which reached a screen on staging on 2026/09/16 because nothing
+ * here knew it as a shortfall. The sibling sentences about what the ACCOUNT
+ * holds are deliberately not matched: they come from a read of the chain,
+ * which can be stale on a freshly funded account, and they keep their own
+ * path (review, 2026/09/16).
  */
 const INSUFFICIENT_PATTERN =
-  /insufficient funds|insufficient balance|not enough|holds \d+ (?:shielded )?of that colour/i;
+  /insufficient funds|insufficient balance|not enough|wallet holds \d+ of that colour/i;
 
 /** And what a reader is told about it — a sentence, not a classification. */
 const INSUFFICIENT_TEXT = 'There was not enough to cover this step, so nothing further was sent.';
