@@ -1,0 +1,115 @@
+@import './tokens.css';
+
+/* The Dynamic Passport milestone. Loaded by `K1Milestone.tsx`, which `main.tsx`
+   mounts only behind `?k1=1` or a build carrying `VITE_K1_MILESTONE=1` — so in
+   every build shipped today none of this ever matches.
+
+   It renders on a root of its own, over the app, rather than inside any screen:
+   it is a developer surface and it must not be able to change how the Passport
+   tree reconciles. Hence the fixed panel and the scroll of its own. */
+.mnk1 {
+  position: fixed;
+  inset: auto 0 0 0;
+  z-index: 40;
+  max-height: 70vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
+  border-top: var(--mn-hairline) solid var(--mn-border-hairline);
+  background: var(--mn-surface-raised, var(--mn-surface, #fff));
+  font-family: var(--mn-font-body, system-ui, sans-serif);
+}
+
+.mnk1-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.mnk1-who {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: 13px;
+}
+
+.mnk1-addr {
+  margin: 0;
+  font-size: 12px;
+  opacity: 0.72;
+}
+
+.mnk1-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mnk1-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 8px 14px;
+  border: var(--mn-hairline) solid var(--mn-border-hairline);
+  border-radius: var(--mn-radius-md, 10px);
+  background: transparent;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.mnk1-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.mnk1-note {
+  margin: 0;
+  font-size: 12px;
+  opacity: 0.8;
+}
+
+.mnk1-note-error {
+  color: var(--mn-danger, #c0392b);
+  opacity: 1;
+}
+
+/* The hash is the evidence, so it wraps rather than truncating: a reader
+   checking it against an explorer needs all of it, and a recording that shows
+   half of one shows nothing. */
+.mnk1-tx {
+  margin: 0;
+  font-size: 11px;
+  word-break: break-all;
+}
+
+.mnk1-tx a {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.mnk1-hash {
+  font-family: var(--mn-font-mono, ui-monospace, monospace);
+}
+
+.mnk1-spin {
+  animation: mnk1-spin 900ms linear infinite;
+}
+
+@keyframes mnk1-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mnk1-spin {
+    animation: none;
+  }
+}
