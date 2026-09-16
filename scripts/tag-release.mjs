@@ -138,7 +138,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -164,6 +164,13 @@ const zkArtefactDirectories = [
   'examples/passport-balancer/contracts-stagenet/managed/account/zkir',
   'examples/passport-balancer/contracts-stagenet/managed/midnames/keys',
   'examples/passport-balancer/contracts-stagenet/managed/midnames/zkir',
+  /* The k1 build ships VERIFIER keys and IR only; its prover keys (3.2 GB) live
+     on the proving server. `refuseProverKeysIn` below keeps the bundle honest. */
+  'examples/passport-balancer/contracts-stagenet/managed/account-k1/keys',
+  'examples/passport-balancer/contracts-stagenet/managed/account-k1/zkir',
+];
+const verifierOnlyKeyDirectories = [
+  'examples/passport-balancer/contracts-stagenet/managed/account-k1/keys',
 ];
 
 const dryRun = process.argv.includes('--dry-run');
@@ -242,6 +249,16 @@ function packageZkArtefacts() {
     );
   }
 
+  for (const relative of verifierOnlyKeyDirectories) {
+    const provers = readdirSync(path.join(repositoryRoot, relative)).filter((name) =>
+      name.endsWith('.prover'),
+    );
+    if (provers.length > 0) {
+      fail(
+        `${relative} holds ${provers.length} prover key file(s); this build ships verifier keys only. Remove them before packing.`,
+      );
+    }
+  }
   const directory = mkdtempSync(path.join(tmpdir(), 'passport-zk-'));
   const archive = path.join(directory, zkBundleName);
   const packed = run('tar', [

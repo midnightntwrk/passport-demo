@@ -120,6 +120,14 @@ const CONTRACTS = [
   { name: 'midnames', assets: true },
 ];
 const STAGED_SUBDIRECTORIES = ['compiler', 'keys', 'zkir'];
+/**
+ * Builds whose PROVER keys never reach a browser. The k1 build's prover keys
+ * are 3.2 GB (224 MB per k256 circuit); its proofs are made on the server, so
+ * a browser needs only the verifier keys (74 KB for all thirty) and the IR
+ * (under 1 MB). Their `keys/` ships verifier files only, and a `.prover` that
+ * happens to be on a developer's disk is left behind here.
+ */
+const SERVER_ONLY_PROVER = new Set(['account-k1']);
 
 function fail(message) {
   console.error(`prepare-zk-assets: ${message}`);
@@ -192,7 +200,7 @@ function stage({ name, assets }) {
           `(${STAGED_SUBDIRECTORIES.filter((subdirectory) => !staged.includes(subdirectory)).join(
             ' and ',
           )} missing), so nothing is served under /zk/${name}. The module is staged. ` +
-          'No release bundle carries them yet; nothing in the app asks for them yet.',
+          'Run `node scripts/fetch-zk-artefacts.mjs` for a bundle that carries them.',
       );
       return;
     }
@@ -224,7 +232,13 @@ function stage({ name, assets }) {
   rmSync(next, { recursive: true, force: true });
   mkdirSync(next, { recursive: true });
   for (const subdirectory of STAGED_SUBDIRECTORIES) {
-    cpSync(resolve(source, subdirectory), resolve(next, subdirectory), { recursive: true });
+    cpSync(resolve(source, subdirectory), resolve(next, subdirectory), {
+      recursive: true,
+      filter:
+        subdirectory === 'keys' && SERVER_ONLY_PROVER.has(name)
+          ? (from) => !from.endsWith('.prover')
+          : undefined,
+    });
   }
   replaceDirectory(next, destination);
 
