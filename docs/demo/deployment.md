@@ -66,6 +66,24 @@ unset fails by name rather than falling back to the staging project.
      examples/passport-balancer/contracts-stagenet/managed/midnames/zkir
    ```
 
+   **`account-k1` is not in that list, and a future release has to put it
+   there.** The k1-arm build landed on 2026/09/16 with its `contract/` and
+   `compiler/` halves tracked like every other build's, and with no artefacts
+   in any bundle. Nothing in the app asks for the module yet, so nothing is
+   broken by the gap: `prepare-zk-assets.mjs` stages the module, says the
+   artefacts are absent, and serves nothing under `/zk/account-k1`;
+   `verify-zk-artefacts.mjs` skips a contract that shipped neither `keys/` nor
+   `zkir/`, by design. The moment a flow asks for that module, the bundle must
+   carry `managed/account-k1/{keys,zkir}` and this pin must move to the release
+   that does.
+
+   **Measure before you add it.** `managed/account-k1/keys` is **3.2 GB** —
+   thirty circuits against the account build's twelve, with the k256 arm's
+   circuits far larger — where the whole bundle is 110 MB today. That is past
+   what a Vercel deployment will accept, so adding it is a decision about where
+   the artefacts are served from (`PASSPORT_ZK_ORIGIN`, `.vercelignore`) and not
+   a line in a `tar` command.
+
 3. Cut the release from `main` and attach that file. The tag is
    `v<major>.<minor>` — see [How it is numbered](#how-it-is-numbered-hector-20260915)
    — and the next one is `v1.0`:

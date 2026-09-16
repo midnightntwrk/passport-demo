@@ -98,6 +98,11 @@ import {
   transferShieldedToAccount,
   unshieldedAddressBytes,
 } from './accountCustody.js';
+import {
+  K256_ARM_OPERATION,
+  ONE_TX_TRANSFER_OPERATION,
+  accountBuildFromOperations,
+} from './passportContract.js';
 
 /**
  * THE ONE MOCK IN THIS FILE, AND WHAT IT REPLACES.
@@ -115,10 +120,17 @@ import {
  * the derivations below are the real derivations.
  */
 const accountHasOneTxTransfer = vi.fn<(url: string, address: string) => Promise<boolean | null>>();
+/* The same read, asked for all three builds rather than for one circuit.
+   `accountModuleFor` moved onto this on 2026/09/16 when `account-k1` became a
+   third possible answer; `senderSupportsOneTransactionSend` still asks the
+   boolean question, because a boolean is what it wants. */
+const readAccountBuild =
+  vi.fn<(url: string, address: string) => Promise<'account' | 'account-v1' | 'account-k1' | null>>();
 vi.mock('./passportContract.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./passportContract.js')>()),
   accountHasOneTxTransfer: (url: string, address: string) =>
     accountHasOneTxTransfer(url, address),
+  readAccountBuild: (url: string, address: string) => readAccountBuild(url, address),
 }));
 
 /** Enough of a network for a read. Nothing in these tests reaches it. */
@@ -719,10 +731,11 @@ describe('accountModuleFor', () => {
   beforeEach(() => {
     resetOneTransactionSendSupport();
     accountHasOneTxTransfer.mockReset();
+    readAccountBuild.mockReset();
   });
 
   it('opens an upgraded account with the current twelve-circuit module', async () => {
-    accountHasOneTxTransfer.mockResolvedValue(true);
+    readAccountBuild.mockResolvedValue('account');
     await expect(accountModuleFor(NETWORK, SENDER)).resolves.toBe('account');
   });
 
@@ -730,8 +743,17 @@ describe('accountModuleFor', () => {
     /* The defect itself: this recipient is a Passport deployed before the
        account contract gained the circuit, and the current module is refused
        against it by name. */
-    accountHasOneTxTransfer.mockResolvedValue(false);
+    readAccountBuild.mockResolvedValue('account-v1');
     await expect(accountModuleFor(NETWORK, PEER)).resolves.toBe('account-v1');
+  });
+
+  it('opens a k1-arm account with the k1 module', async () => {
+    /* The third build, since 2026/09/16. Nothing deploys one yet, so this is
+       the only place in the app where the answer can be reached at all — and
+       it is here so that when something does, the module it is handed is the
+       one whose circuits that account actually carries. */
+    readAccountBuild.mockResolvedValue('account-k1');
+    await expect(accountModuleFor(NETWORK, PEER)).resolves.toBe('account-k1');
   });
 
   it('refuses when the read itself failed, rather than guessing a module', async () => {
@@ -739,7 +761,7 @@ describe('accountModuleFor', () => {
        module is refused against a pre-upgrade account, and the v1 module lacks
        the circuit an upgraded sender is about to call. Both guesses cost the
        user a wait and then a refusal, so this one says so first. */
-    accountHasOneTxTransfer.mockResolvedValue(null);
+    readAccountBuild.mockResolvedValue(null);
     const error = await accountModuleFor(NETWORK, PEER).catch((cause) => cause);
     expect(error).toBeInstanceOf(AccountCustodyError);
     expect((error as AccountCustodyError).code).toBe('network-unreachable');
@@ -750,36 +772,79 @@ describe('accountModuleFor', () => {
     /* A device-authorised call is against the Passport this device holds; its
        module has always been the current one, and refusing to open it over an
        indexer blink would stop somebody sending at all. */
-    accountHasOneTxTransfer.mockResolvedValue(null);
+    readAccountBuild.mockResolvedValue(null);
     await expect(
       accountModuleFor(NETWORK, SENDER, { whenUnreadable: 'current' }),
     ).resolves.toBe('account');
   });
 
   it('asks the chain ONCE per address, and never caches a failed read', async () => {
-    accountHasOneTxTransfer.mockResolvedValue(false);
+    readAccountBuild.mockResolvedValue('account-v1');
     await accountModuleFor(NETWORK, PEER);
     await accountModuleFor(NETWORK, PEER);
-    expect(accountHasOneTxTransfer).toHaveBeenCalledTimes(1);
+    expect(readAccountBuild).toHaveBeenCalledTimes(1);
 
-    accountHasOneTxTransfer.mockResolvedValue(null);
+    readAccountBuild.mockResolvedValue(null);
     await expect(
       accountModuleFor(NETWORK, SENDER, { whenUnreadable: 'current' }),
     ).resolves.toBe('account');
-    accountHasOneTxTransfer.mockResolvedValue(true);
+    readAccountBuild.mockResolvedValue('account');
     await expect(accountModuleFor(NETWORK, SENDER)).resolves.toBe('account');
-    expect(accountHasOneTxTransfer).toHaveBeenCalledTimes(3);
+    expect(readAccountBuild).toHaveBeenCalledTimes(3);
     /* And the pre-upgrade address's answer is still its own. */
     await expect(accountModuleFor(NETWORK, PEER)).resolves.toBe('account-v1');
-    expect(accountHasOneTxTransfer).toHaveBeenCalledTimes(3);
+    expect(readAccountBuild).toHaveBeenCalledTimes(3);
   });
 
   it('normalises the address before it caches or asks', async () => {
-    accountHasOneTxTransfer.mockResolvedValue(false);
+    readAccountBuild.mockResolvedValue('account-v1');
     await accountModuleFor(NETWORK, `0x${PEER.toUpperCase()}`);
     await accountModuleFor(NETWORK, PEER);
-    expect(accountHasOneTxTransfer).toHaveBeenCalledTimes(1);
-    expect(accountHasOneTxTransfer).toHaveBeenCalledWith(NETWORK.indexerHttpUrl, PEER);
+    expect(readAccountBuild).toHaveBeenCalledTimes(1);
+    expect(readAccountBuild).toHaveBeenCalledWith(NETWORK.indexerHttpUrl, PEER);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* Which build an account is, read off its own entry points                   */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The three-way discriminator, on a list of names rather than through a read.
+ *
+ * THE ORDER IS THE WHOLE OF IT. The k1-arm build has a shielded-transfer
+ * surface of its own, so the older question — does this account carry
+ * `transfer_shielded_to_account` — answers "yes" for a k1 account and would
+ * hand it a module that cannot open it. The k256 question has no such
+ * ambiguity in either direction, so it is asked first.
+ */
+describe('accountBuildFromOperations', () => {
+  /* The eleven entry points every pre-upgrade Passport carries, trimmed to the
+     ones this decision reads plus enough company to be a realistic list. */
+  const V1 = ['deposit_unshielded', 'withdraw_unshielded', 'withdraw_shielded', 'add_device'];
+
+  it('reads a pre-upgrade account as the eleven-circuit build', () => {
+    expect(accountBuildFromOperations(V1)).toBe('account-v1');
+  });
+
+  it('reads an upgraded account as the current build', () => {
+    expect(accountBuildFromOperations([...V1, ONE_TX_TRANSFER_OPERATION])).toBe('account');
+  });
+
+  it('reads a k1-arm account as the k1 build', () => {
+    expect(accountBuildFromOperations([...V1, K256_ARM_OPERATION])).toBe('account-k1');
+  });
+
+  it('asks the k256 question FIRST, so a k1 account is never read as a prototype one', () => {
+    /* The k1 build carries both names. Answering `account` here is the bug
+       this order exists to prevent. */
+    expect(
+      accountBuildFromOperations([...V1, ONE_TX_TRANSFER_OPERATION, K256_ARM_OPERATION]),
+    ).toBe('account-k1');
+  });
+
+  it('reads an empty list as the oldest build, which is what an empty read means', () => {
+    expect(accountBuildFromOperations([])).toBe('account-v1');
   });
 });
 

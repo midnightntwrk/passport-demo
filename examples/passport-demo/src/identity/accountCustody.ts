@@ -91,6 +91,7 @@ import {
   accountWitnesses,
   derivePassportContractSecrets,
   rawContractAddress,
+  readAccountBuild,
   resolveDeployTxHashOnce,
 } from './passportContract.js';
 
@@ -958,11 +959,18 @@ export function resetAccountModuleChoice(): void {
  * Passports are running, and it opens them.
  *
  * THE CHOICE IS THE ACCOUNT'S OWN STATE, not a guess and not the caller's.
- * `accountHasOneTxTransfer` reads `ContractState.operations()` — the deployed
- * contract answering for itself — and the module follows it: present is
- * `account`, absent is `account-v1`. The read and the name of the circuit are
- * `./passportContract.ts`'s, so there is one spelling of "which build is this"
- * in this app and not two.
+ * `readAccountBuild` reads `ContractState.operations()` — the deployed contract
+ * answering for itself — and the module follows it. The read, the names of the
+ * circuits, and the order they are asked in are `./passportContract.ts`'s, so
+ * there is one spelling of "which build is this" in this app and not two.
+ *
+ * THREE BUILDS SINCE 2026/09/16. `withdraw_shielded_with_k256` is asked about
+ * FIRST, because it is the only one of the three questions whose answer is
+ * unambiguous: it is on the k1-arm build and on neither prototype build, while
+ * the k1 build has a shielded-transfer surface of its own that the older
+ * question would read as `account`. Nothing deploys a k1 account yet, so in
+ * practice every account on the chain still answers `account` or `account-v1`,
+ * exactly as it did.
  *
  * `null` IS NOT "NO", and this is the one caller that cannot smooth it over.
  * {@link senderSupportsOneTransactionSend} may treat an unanswerable question
@@ -986,8 +994,8 @@ export async function accountModuleFor(
   const address = rawContractAddress(contractAddress);
   const known = accountModules.get(address);
   if (known !== undefined) return known;
-  const carries = await accountHasOneTxTransfer(network.indexerHttpUrl, address);
-  if (carries === null) {
+  const build = await readAccountBuild(network.indexerHttpUrl, address);
+  if (build === null) {
     if (options.whenUnreadable === 'current') return 'account';
     throw new AccountCustodyError(
       'network-unreachable',
@@ -995,9 +1003,8 @@ export async function accountModuleFor(
       `operations() could not be read for ${address.slice(0, 10)}…`,
     );
   }
-  const module: PassportContractName = carries ? 'account' : 'account-v1';
-  accountModules.set(address, module);
-  return module;
+  accountModules.set(address, build);
+  return build;
 }
 
 /* -------------------------------------------------------------------------- */

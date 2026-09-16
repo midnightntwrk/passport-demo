@@ -513,6 +513,50 @@ export async function accountHasOneTxTransfer(
 }
 
 /**
+ * The circuit only the k1-arm build has, and so the thing that identifies it.
+ *
+ * It is a WITHDRAWAL circuit rather than one of the cheaper-looking `derive_*`
+ * ones on purpose: pure circuits do not appear in `operations()` at all, which
+ * lists the deployed contract's entry points. This one does, it is named for
+ * the arm it belongs to, and no build of the prototype account contract has
+ * ever carried a `_with_k256` anything.
+ */
+export const K256_ARM_OPERATION = 'withdraw_shielded_with_k256';
+
+/** Which compiled build a deployed account is, read off its own entry points. */
+export type AccountBuild = 'account' | 'account-v1' | 'account-k1';
+
+/**
+ * The build, from the entry points the chain reports.
+ *
+ * THE K1 QUESTION IS ASKED FIRST, and the order is the whole of the rule. The
+ * k1 build carries a `transfer_shielded_to_account`-shaped surface of its own,
+ * so asking the older question first would answer `account` for a k1 account
+ * and hand it a module that cannot open it. Asking for the k256 arm first is
+ * unambiguous in both directions: the prototype builds have never had one.
+ *
+ * Kept separate from the read so it can be drilled on a list of names.
+ */
+export function accountBuildFromOperations(operations: readonly string[]): AccountBuild {
+  if (operations.includes(K256_ARM_OPERATION)) return 'account-k1';
+  if (operations.includes(ONE_TX_TRANSFER_OPERATION)) return 'account';
+  return 'account-v1';
+}
+
+/**
+ * Which build the account at `address` is — or `null` when the chain could not
+ * be asked, for the reason {@link accountHasOneTxTransfer} gives at length.
+ */
+export async function readAccountBuild(
+  indexerHttpUrl: string,
+  address: string,
+): Promise<AccountBuild | null> {
+  const operations = await readAccountOperations(indexerHttpUrl, address);
+  if (operations === null) return null;
+  return accountBuildFromOperations(operations);
+}
+
+/**
  * How long a deploy this browser SUBMITTED and never heard back about is given
  * to appear, when the app is opened again.
  *
