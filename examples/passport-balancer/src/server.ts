@@ -603,6 +603,7 @@ async function main(): Promise<void> {
     console.log(
       `[account] funding accounts with ${formatNight(accountFunder.grantAtomic)} NIGHT from ${accountFunder.assetsPath} (proving ${accountFunder.provingMode === 'server' ? config.provingServerUrl : 'in this process'})`,
     );
+    console.log(`[account] ${accountFunder.k1Readiness}`);
     if (accountFunder.assetAvailable) {
       console.log(
         `[asset] each account also opens holding ${accountFunder.assetGrant} ${accountFunder.assetSymbol}, minted from faucet ${accountFunder.assetFaucetAddress} (artefacts ${accountFunder.assetAssetsPath})`,
@@ -2050,7 +2051,13 @@ async function main(): Promise<void> {
                 ? 503
                 : cause.code === 'not-an-account'
                   ? 400
-                  : 502;
+                  : /* This service cannot prove that build here — a gap in what
+                       the droplet is configured with, not a bad answer from
+                       anything upstream. 503 with no retry: see
+                       `shouldRetryGrant`. */
+                    cause.code === 'prover-unavailable'
+                    ? 503
+                    : 502;
             if (shouldRetryGrant(cause.code)) retryGrantLater(cause.code);
             return fail(
               refusal(
