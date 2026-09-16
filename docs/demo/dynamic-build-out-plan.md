@@ -21,7 +21,7 @@
 | Are Dynamic's MPC signatures deterministic (same key, same digest, same signature)? | **No.** DKLs23 (eprint 2023/765, Protocol 3.1, signing step 5) has every party sample a fresh instance key per signature; the docs name DKLs23 for EVM and nothing in Dynamic's stack applies RFC 6979. The client share's rounds run in Dynamic's cross-origin iframe (`browser-wallet-client` → `requestChannel.request('signRawMessage')`), so nothing on our side can seed them. An empirical run was attempted on the sandbox environment; a user created through an external-wallet login gets no embedded wallet there, so the protocol reading stands as the answer. | research 2026/09/16 evening (docs, paper, SDK source) |
 | What does `signRawMessage` return? | `0x` + 65 bytes, r‖s‖v; the input is a 64-hex digest without `0x`, signed as supplied (enforced at 64 characters). Low-s normalisation not established — the k256 arm accepts either form. | `waas-evm/DynamicWaasEVMConnector.js`, `waasCore.esm.js`, raw-signing doc |
 | Is the embedded key the same on a second device after social-login recovery? | **Yes.** The encrypted user share is delivered to the new device; reshares keep the address. | Dynamic docs, recovery and glossary |
-| Can stagenet prove ZKIR v3 circuits? | **Not proven.** Compiled IR is v3.0. The 1AM prover is `ledger9-zkir2-dispatch`; the droplet runs `proof-server:9.0.0-rc.6`; the in-browser prover is `zkir-v2` only. Ledger 9.1.0.0-rc.4 (2026/08/11) carries ZKIR v3 as an *experimental* prove path; "move zkir-v3 out of experimental" landed in 10.1.0.0-alpha.1 (2026/09/14). | prover `/health`, droplet `docker inspect`, ledger release notes |
+| Can stagenet prove ZKIR v3 circuits? | **Yes — proven the same night** (see §6). Stagenet node 2.0.0 verified proofs from the droplet's `proof-server:9.0.0-rc.6`; the 1AM gateway (`ledger9-zkir2-dispatch`) and the in-browser prover (zkir-v2) still cannot make them, so k1 calls go to the droplet's server by name. | indexer: txs 15ba523c… (block 490985), e961946c… (block 490999) |
 
 ## 3. The two ways to Hector's expectations
 
@@ -44,9 +44,9 @@ Roughly **two weeks** if step 1 passes on day one. It is the design that makes H
 
 This would have been the `experiment/metamask-device` shape: a deterministic signature over a fixed message → HKDF → the same device secret on every device → `add_device` on the existing contract. It needs a deterministic signature or a derived-secret API, and Dynamic has neither (table above). The only no-contract alternative left is escrow of the secret behind the Dynamic identity on our backend, which is custody and is not proposed.
 
-## 4. The one question left, and how it is answered
+## 4. The one question that was left — answered
 
-**ZKIR v3 proving on stagenet** — step B1. Compiled IR is v3.0. Images available on Docker Hub as of 2026/09/16: `proof-server:9.0.0-rc.6` (what the droplet runs, 2026/08/10), `9.0.0-rc.7` (2026/09/08), and `10.0.0-alpha.1` (2026/09/16; the ledger 10.1 alpha is where "zkir-v3 out of experimental" landed). The test: deploy the reference contract on stagenet from a script with a software secp256k1 key and prove `activate_initial_device_with_k256` through the droplet's proof server, first on rc.6, then on rc.7 or 10.0.0-alpha.1 if rc.6 refuses. The 1AM prover (`ledger9-zkir2-dispatch`) and the in-browser prover (zkir-v2) will not prove it; a Passport that signs with Dynamic proves through the droplet's server until they do.
+**ZKIR v3 proving on stagenet: yes.** Established the same night; the evidence and the three lessons are in §6. The 1AM prover and the in-browser prover remain ZKIR v2, so a Passport that signs with Dynamic proves through the droplet's proof server by name (a `/prover-v3` route) until they catch up.
 
 ## 5. Recommendation
 
