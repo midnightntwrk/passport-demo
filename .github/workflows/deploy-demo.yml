@@ -42,7 +42,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'The release to deploy. THE COMMIT DEPLOYED IS THE ONE THIS TAG POINTS AT, and its ZK artefact bundle is the one built with. Blank deploys this run''s ref and takes the bundle from scripts/zk-artefacts.lock.json; a production deploy must name a tag, and must be dispatched from that tag.'
+        description: 'The release to deploy, as v<major>.<minor> (for example v1.0; a fix moves the decimal, a feature the whole number). THE COMMIT DEPLOYED IS THE ONE THIS TAG POINTS AT, and its ZK artefact bundle is the one built with. The legacy undotted v1-v16 still resolve, for a rollback to one of them. Blank deploys this run''s ref and takes the bundle from scripts/zk-artefacts.lock.json; a production deploy must name a tag, and must be dispatched from that tag.'
         required: false
         type: string
       target:
@@ -150,8 +150,8 @@ jobs:
       #
       # `ref:` IS THE RELEASE, NOT THE RUN'S REF. A dispatch that names
       # `release_tag` used to build whatever the run was started from and take
-      # only the ZK bundle from the tag, so "promote v15 to production" from a
-      # branch that had moved on shipped the branch and called it v15
+      # only the ZK bundle from the tag, so "promote v1.0 to production" from a
+      # branch that had moved on shipped the branch and called it v1.0
       # (2026/09/15). The tag is immutable, so naming it here makes the release
       # body, the tree that is built, and what reaches the site one revision.
       # A release event leaves `inputs` empty and falls through to `github.sha`,
@@ -204,7 +204,7 @@ jobs:
             echo "${target} is on origin/main ($(git rev-parse origin/main)). Proceeding."
           else
             echo "::error::${target} is NOT an ancestor of origin/main ($(git rev-parse origin/main))."
-            echo "::error::Only what is on main is deployed. Merge this work into main and cut the release from main."
+            echo "::error::Only what is on main is deployed. Merge this work into main and cut the release (v<major>.<minor>) from main."
             exit 1
           fi
 
@@ -250,7 +250,7 @@ jobs:
       - name: Refuse a production deploy that names no release
         if: env.DEPLOY_TARGET == 'production' && inputs.release_tag == ''
         run: |
-          echo "::error::A production deploy promotes a release that was confirmed on staging. Name it in release_tag."
+          echo "::error::A production deploy promotes a release that was confirmed on staging. Name it in release_tag, as v<major>.<minor> (for example v1.0)."
           exit 1
 
       # `.vercel/project.json` is gitignored, so the CLI is told which project
