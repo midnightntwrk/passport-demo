@@ -143,8 +143,8 @@ test.describe('@live the account model on stagenet', () => {
 
   test('a passkey creates a Passport and lands on the name step', async () => {
     await page.goto('/');
-    await expect(page.getByRole('button', { name: /Continue with Passport/i })).toBeVisible();
-    await page.getByRole('button', { name: /Continue with Passport/i }).click();
+    await expect(page.getByRole('button', { name: /Continue with Passkey/i })).toBeVisible();
+    await page.getByRole('button', { name: /Continue with Passkey/i }).click();
 
     /* A brand-new Passport is welcomed before it is asked for a name — the
        screen added on 2026/08/30. One control; the reading is the price. */

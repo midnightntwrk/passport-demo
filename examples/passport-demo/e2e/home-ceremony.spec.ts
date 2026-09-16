@@ -157,7 +157,7 @@ test('a finished claim lands on Home without asking for anything', async () => {
 
   /* ---- The enrolment leg. One create, and then nothing. ---- */
   await page.goto('/');
-  await page.getByRole('button', { name: /Continue with Passport/i }).click();
+  await page.getByRole('button', { name: /Continue with Passkey/i }).click();
   await expect(page.getByRole('heading', { name: /Welcome to Passport/i })).toBeVisible({
     timeout: 60_000,
   });
@@ -280,7 +280,7 @@ test('the account reaches the passkey on the next sign-in, for no extra prompt',
   );
 
   await page.reload();
-  const signIn = page.getByRole('button', { name: /Continue with Passport/i });
+  const signIn = page.getByRole('button', { name: /Continue with Passkey/i });
   await expect(signIn).toBeVisible({ timeout: 60_000 });
   await mark('signin');
   await signIn.click();

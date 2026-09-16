@@ -417,6 +417,23 @@
  * machinery, and every wire code must be the one that was on the wire before,
  * because a copy fix that quietly re-coded failures is a breaking change in
  * disguise. A cause in, a reply out — no DOM, no React, no wallet.
+ * `src/lib/dynamicSession.ts` went IN on 2026/09/14, the day it was written.
+ * It is the gate the whole social sign-in slice hangs off — `isDynamicEnabled`
+ * decides whether an SDK that once cost this app 5.7 MB of entry chunk is
+ * fetched at all — plus the pure mapping from Dynamic's user object to the two
+ * strings a screen renders. It holds no DOM, no React, no network, and no SDK
+ * import, so every branch is reachable from a plain object in
+ * `dynamicSession.test.ts`. Its React half is next, and it is out:
+ *
+ * `src/lib/dynamic.tsx` is OUT, on the `.tsx` rule that keeps every other
+ * component out. It is the SDK's two `import()` calls, a bridge component, and
+ * a `useSyncExternalStore` wrapper; exercising any of it needs a DOM this
+ * workspace deliberately does not have, and there is no decision in it — the
+ * one computation it performs is `describeDynamicSession`, which lives next
+ * door and is drilled. What guards it instead is
+ * `src/lib/dynamicBundle.test.ts`, which walks the static import graph from
+ * `main.tsx` and fails if `@dynamic-labs` ever reappears on it. That is the
+ * property that actually broke last time, and it is not a coverage property.
  *
  * `src/lib/sendLegs.ts` and `src/lib/walletProver.ts` went IN on 2026/09/02.
  * Both were written on 2026/09/02 WITH their drills — `sendLegs.test.ts` and
@@ -609,6 +626,7 @@ export default mergeConfig(
           'src/lib/claimSteps.ts',
           'src/lib/companionLink.ts',
           'src/lib/colour.ts',
+          'src/lib/dynamicSession.ts',
           'src/lib/endpoints.ts',
           'src/lib/feeReadinessPoll.ts',
           'src/lib/feeRecheck.ts',

@@ -56,7 +56,7 @@ test.beforeAll(async ({ browser }) => {
      claim writes — the returning-Passport path, through the same components
      with the same props. */
   await page.goto('/');
-  await page.getByRole('button', { name: /Continue with Passport/i }).click();
+  await page.getByRole('button', { name: /Continue with Passkey/i }).click();
   await expect(page.getByRole('heading', { name: /Welcome to Passport/i })).toBeVisible({
     timeout: 90_000,
   });

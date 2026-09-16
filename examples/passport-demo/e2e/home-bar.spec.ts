@@ -42,7 +42,7 @@ test.beforeAll(async ({ browser }) => {
   /* The returning Passport, seeded exactly as `assets.spec.ts` seeds it: the
      ceremony is drilled elsewhere, and what is read here is the bar. */
   await page.goto('/');
-  await page.getByRole('button', { name: /Continue with Passport/i }).click();
+  await page.getByRole('button', { name: /Continue with Passkey/i }).click();
   await expect(page.getByRole('heading', { name: /Welcome to Passport/i })).toBeVisible({
     timeout: 90_000,
   });
