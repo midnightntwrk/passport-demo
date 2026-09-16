@@ -270,7 +270,7 @@ released, staged, and only then promoted — the path of the delivery rule.
 |---|---|---|---|
 | 1 | **This PR.** Design plus `src/identity/accountK1.ts` and its drill; nothing wired. | done | — |
 | 2 | Prove one k256 circuit on stagenet from a script, through the droplet's proof server. | 1 day | — |
-| 3 | `account-k1` as a module: `PassportContractName`, the literal import arm, `ASSET_CONTRACT`, `prepare-zk-assets.mjs`, the three-way `accountModuleFor`, the module-aware proof-provider refusal, and an `accountModule.test.ts` clone. | 2 days | 2 |
+| 3 | **Landed 2026/09/16 — see §7a.** `account-k1` as a module: `PassportContractName`, the literal import arm, `ASSET_CONTRACT`, `prepare-zk-assets.mjs`, the three-way `accountModuleFor`, the module-aware proof-provider refusal, and an `accountModule.test.ts` clone. | 2 days | 2 |
 | 4 | The coin store: `held_coin`, a durable private-state id, `mt_index` carried end to end, and the inbox reader. | 4–5 days | 3 |
 | 5 | The JubJub device: the third HKDF label, the rejection-sampled scalar, the grind loop, and `callK1Circuit` — read, resolve, challenge, sign, submit. | 3 days | 3 |
 | 6 | Dynamic as a k256 device: point recovery at enrolment, `dynamicK256Signer` wired behind the lazy boundary, `add_device_with_jubjub`. | 2 days | 5 |
@@ -282,6 +282,138 @@ released, staged, and only then promoted — the path of the delivery rule.
 Roughly three weeks of engineering after PR 2 passes, with 4, 5, and 9 able to run in
 parallel across people. That is longer than the plan's "about two weeks", and the
 difference is §3 and §1.5: the coin store and the wave deploy were both under-counted.
+
+## 7a. As built — PR 3, 2026/09/16
+
+PR 3 of §7 landed as `src/identity/accountK1Custody.ts` and
+`src/identity/accountK1Plan.ts`, with a developer milestone screen behind a flag.
+Four things in the design above are different in the built version, and each is a
+finding rather than a preference.
+
+### 7a.1 Proving does not go through `VITE_MIDNIGHT_PROVING_URL_V3`
+
+§1.4 routed `account-k1` at a v3-capable proof server, and `contractProvingRoute`
+(PR #58) does exactly that. **It cannot work**, and the reason is not the image.
+`httpClientProofProvider` uploads the prover key with every request, and the k1
+build's keys are **3.2 GB — 224 MB per k256 circuit**. A browser can neither hold
+one nor upload one per call. The droplet's `/prover-v3` is up (`HTTP 200` on
+2026/09/16) and it is still the wrong shape for this traffic.
+
+So proving for a k1 account is **server-side, and takes a transaction rather than
+a key**. The keys live on the balancer, which already holds them at
+`/opt/passport-k1-artefacts/managed/account-k1/{keys,zkir,contract,compiler}`.
+
+**The endpoint contract, coded against and stubbed in tests:**
+
+```
+POST  {VITE_SPONSOR_URL first entry}/prove-k1
+      e.g. https://67-205-177-162.sslip.io/balancer/prove-k1
+
+request  application/json
+  { "circuit":    "append_inbox_with_k256",
+    "unprovenTx": "<lower-case hex, no 0x, of the serialised unproven transaction>",
+    "network":    "stagenet" }
+
+200      { "provenTx": "<lower-case hex, no 0x, of the serialised proven transaction>" }
+4xx/5xx  { "error": "<code>", "detail": "<text>" }
+```
+
+`unprovenTx` is `Transaction<SignatureEnabled, PreProof, PreBinding>.serialize()`.
+`provenTx` must deserialise as
+`Transaction.deserialize('signature', 'proof', 'pre-binding', bytes)` — **proven
+but not yet bound**, because `proveTx` returns an `UnboundTransaction` and it is
+`walletProvider.balanceTx` that binds. Getting the third marker wrong is the
+mistake this paragraph exists to prevent.
+
+**Why the sponsor's origin and not the v3 list.** The v3 list names a proof
+server, whose contract is midnight-js's own; `/prove-k1` is a balancer route, and
+the balancer is the service that holds the keys and already serves
+`/balance-only`. `VITE_MIDNIGHT_PROVING_URL_V3` keeps the job PR #58 gave it —
+the switch that says a v3 route exists at all — and nothing reads it for this
+traffic.
+
+**It does not exist yet.** Probed 2026/09/16:
+`POST https://67-205-177-162.sslip.io/balancer/prove-k1` → `404`,
+`{"error":"not-found","message":"Routes: GET /status, GET /wallet-status, …"}`.
+Until it lands, every k1 path fails immediately with one plain sentence and a
+console line naming the endpoint — never the ten-minute `PROOF_TIMEOUT_MS` wait an
+unreachable proof server would otherwise give.
+
+### 7a.2 The deploy is three transactions, and wave 1 is fixed
+
+The wave plan is `accountK1Plan.ts`'s `planK1Waves`, and it is the reference
+client's, measured: a 25,000-verifier-byte budget per maintenance update lands the
+thirty-circuit roster on **three** waves — the deploy carrying the two deposits
+plus the whole eight-circuit k256 arm, then two updates of ten verifier keys, the
+last of which retires the maintenance authority.
+
+**Wave 1 is fixed rather than packed by size**, and that is the one place the
+implementation refuses to be clever. `activate_initial_device_with_k256` must be
+in the deploy, or the account is deployed and can never be opened — and no later
+wave can repair it. Two details that cost a transaction each if they are wrong:
+`VerifierKeyInsert` takes `ContractOperationVersionedVerifierKey('v4', key)`
+(`compact-js` hardcodes `'v3'`, whose keys carry a different header), and the
+retiring `ReplaceAuthority` carries `counter + 1n` — the counter its own
+application will expect.
+
+### 7a.3 A reload mid-deploy cannot continue
+
+`K1AccountRecord` (`passport-k1-account:v1`, keyed by lower-cased Dynamic EVM
+address and network) remembers the address, the salt, the recovered point, the
+waves done, and the chain hashes, and the chain's own authority counter is read
+before every wave. But the **maintenance signing key** lives in the private-state
+provider, which is still `inMemoryPrivateStateProvider` with a fresh id per
+connection (§3.2). It is held in a tab-lifetime cache here; a reload between wave
+1 and wave 3 therefore cannot carry on, and says so in a sentence rather than
+retrying into a rejection. **A durable private-state provider — PR 4 — is what
+actually fixes this**, and it is a second reason for that PR beyond the coin store.
+
+### 7a.4 The Dynamic key, and what it needed from the seam
+
+`DynamicActions` gained `signRaw(digestHex)`, reached through
+`primaryWallet.connector.signRawMessage` rather than `wallet.signMessage`. They
+are different calls, not a flag: `signMessage` is `personal_sign` and wraps its
+argument in the EIP-191 preamble before a keccak, which nothing on the k256 arm
+can express. Only Dynamic's own embedded connector exposes the raw path; an
+externally connected wallet does not, and the seam says so in a sentence.
+
+The public point is recovered once, at enrolment, from a signature over
+`SHA-256("midnight-passport:k1-device-enrolment:v1")`, using the recovery byte
+`parseEvmSignature` keeps. `@dynamic-labs/waas-evm` offers no `getPublicKey`.
+`src/lib/k1Recover.ts` is the only file in `src` that names `@noble/curves`, inside
+an `import()`; it is now a **declared, exactly pinned** dependency (`2.4.0`, not a
+caret — the v11 `@scure/base` float is why).
+
+### 7a.5 What is stubbed
+
+- `POST /prove-k1` — the service (above).
+- The `held_coin` witness **refuses**. The coin store is PR 4, and nothing this
+  layer calls invokes it: activation and `append_inbox` declare no witness. A
+  witness answering with a zero coin would build a transaction the node rejects
+  for a reason naming none of this.
+- The account's X25519 `encryption_key` is generated and advertised so the
+  constructor's shape is the real one, but its secret half is discarded — the
+  inbox cannot be read back. §3 is where that is fixed.
+- The jubjub arm is deployed (waves 2 and 3 carry its verifier keys) but nothing
+  signs with it. PR 5.
+
+### 7a.6 What a live run would need
+
+The sponsor is live and ready (`/wallet-status`, 2026/09/16: one wallet, synced,
+259 DUST UTxOs), so fees are not the blocker. Three things are:
+
+1. `POST /prove-k1` on the balancer.
+2. The `account-k1` artefacts staged where the client can read them. The client
+   needs **verifier keys and `zkir/` only** — `getVerifierKey` is what the wave
+   deploy reads, and it fetches the small file. The 3.2 GB of `.prover` keys never
+   need to reach a browser, which means `prepare-zk-assets.mjs`'s all-three-or-
+   nothing `when-present` rule is the wrong shape for this build: it should stage
+   `compiler/`, `zkir/`, and the verifier half of `keys/`, and leave the prover
+   keys on the balancer. **This is a change for the artefacts PR, not this one.**
+3. The demo's origin in Dynamic's Allowed Origins. A local build at
+   `http://localhost:5176` is refused at `app.dynamicauth.com/api/v0/sdk/…/nonce`
+   by CORS, so the session never leaves `loading` and no sign-in can be driven —
+   which is also why the flow is drilled with a fake session rather than walked.
 
 ## 8. Notes for the reviewer
 
