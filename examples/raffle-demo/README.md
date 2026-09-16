@@ -3,7 +3,7 @@
 An open-source example of a dApp that talks to **Midnight Passport**: it asks
 for a profile, gets an address back only if the user approves, and then asks
 Passport to pay for a raffle entry with a real transaction on the Midnight
-**preview** network.
+network Passport runs on — **stagenet** for the deployed demo.
 
 It is deliberately small. Everything interesting is in `src/main.tsx` and the
 two vendored protocol modules under `src/bridge/`.
@@ -103,13 +103,13 @@ All variables are optional; every one has a working default or a documented
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `VITE_PASSPORT_ORIGIN` | `http://localhost:5175` | The Passport origin this app talks to. Must be a **different** origin from the raffle, or the handshake proves nothing. |
-| `VITE_RAFFLE_COLLECTION_ADDRESS` | unset | A preview unshielded address (`mn_addr…`) the operator controls. **Unset** keeps the raffle profile-only: no transaction is ever requested, and the footer says nothing is on-chain. **Set** makes "Enter the raffle" ask Passport for a real NIGHT transfer. |
+| `VITE_RAFFLE_COLLECTION_ADDRESS` | unset | An unshielded address (`mn_addr…`) the operator controls, on the network Passport runs on (`mn_addr_stagenet…` for the deployed demo; Passport refuses a payment to an address on any other network). **Unset** keeps the raffle profile-only: no transaction is ever requested, and the footer says nothing is on-chain. **Set** makes "Enter the raffle" ask Passport for a real NIGHT transfer. |
 | `VITE_RAFFLE_ENTRY_AMOUNT` | `100000` | Entry price in atomic NIGHT (`100000` = 0.1 NIGHT). |
 | `VITE_TELEGRAM_URL` | unset | Support link on the ticket. No link is rendered when unset. |
 
-The explorer is fixed to `https://explorer.preview.midnight.network`, and a
-transaction link is only ever rendered on preview — the route is
-`/transactions/{hash}`.
+The explorer is `https://explorer.1am.xyz`, which resolves preview and
+stagenet; the transaction link names whichever network the collection address
+is on — the route is `/tx/{hash}?network={network}`.
 
 ---
 
@@ -137,8 +137,9 @@ a passkey Passport created and its wallet open.
 
 ## Honest caveats
 
-- **Preview network only.** Passport signs and submits on Midnight preview and
-  nowhere else. On any other network the raffle stays profile-only.
+- **One network at a time.** The collection address decides the network, and
+  Passport pays only on the network it is on (stagenet today). With no address
+  set the raffle stays profile-only.
 - **A demo sponsor may not be there.** Where fee sponsorship is configured, it
   is best-effort: if the sponsor service is unreachable or has not authorised
   the request, the transaction falls back to real, user-paid fees, and the
