@@ -10,7 +10,7 @@
 
 A build given a `VITE_DYNAMIC_ENVIRONMENT_ID` gains three things, and nothing else:
 
-1. **A secondary entry on the welcome screen.** Beneath "Continue with Passport" and its hint, a "Continue with Google, Discord, Microsoft, or X" pill opens Dynamic's own sign-in overlay in a pop-up.
+1. **A secondary entry on the welcome screen.** Beneath "Continue with Passkey" and its hint, a "Continue with Google, Microsoft, X, or Discord" pill opens Dynamic's own sign-in overlay in a pop-up.
 2. **A Dynamic session, remembered.** Dynamic's SDK persists its session itself, in this browser's storage, so a signed-in person is still signed in after a reload. It sits *beside* the passkey profile; neither one is stored inside the other, and neither can revoke the other.
 3. **An identity row on Home**, in the quiet footer beside "Back up or restore": the provider and handle, the embedded Ethereum address, and a "Sign a test message" action that prints the signature it gets back.
 

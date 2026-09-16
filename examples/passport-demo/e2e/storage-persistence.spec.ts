@@ -62,7 +62,7 @@ test('onboarding finishes even when the browser never answers about persistent s
   });
 
   await page.goto('/');
-  await page.getByRole('button', { name: /Continue with Passport/i }).click();
+  await page.getByRole('button', { name: /Continue with Passkey/i }).click();
 
   /* The Passport is made either way. What must not happen is the walk stopping
      on a busy label with a nicety it does not need. */

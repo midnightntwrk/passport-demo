@@ -165,7 +165,7 @@ test.beforeAll(async ({ browser }) => {
   /* A Passport that already exists — the state Receive is opened in. The
      ceremony itself is drilled by `onboarding.spec.ts`. */
   await page.goto('/');
-  await page.getByRole('button', { name: /Continue with Passport/i }).click();
+  await page.getByRole('button', { name: /Continue with Passkey/i }).click();
   await expect(page.getByRole('heading', { name: /Welcome to Passport/i })).toBeVisible({
     timeout: 90_000,
   });

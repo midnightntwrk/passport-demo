@@ -350,7 +350,7 @@ export default function OnboardingScreen(props: OnboardingProps) {
             >
               <span className="mnob-primary-copy">
                 <Fingerprint size={18} strokeWidth={2} aria-hidden="true" />
-                Continue with Passport
+                Continue with Passkey
               </span>
               <ArrowRight size={17} strokeWidth={2.2} aria-hidden="true" />
             </button>
