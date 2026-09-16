@@ -529,11 +529,16 @@ export type AccountBuild = 'account' | 'account-v1' | 'account-k1';
 /**
  * The build, from the entry points the chain reports.
  *
- * THE K1 QUESTION IS ASKED FIRST, and the order is the whole of the rule. The
- * k1 build carries a `transfer_shielded_to_account`-shaped surface of its own,
- * so asking the older question first would answer `account` for a k1 account
- * and hand it a module that cannot open it. Asking for the k256 arm first is
- * unambiguous in both directions: the prototype builds have never had one.
+ * THE K1 QUESTION IS ASKED FIRST, AND IT IS THE ONLY POSITIVE ONE. The two
+ * prototype builds are told apart by an ABSENCE — no
+ * `transfer_shielded_to_account` means the older of the two — and an absence
+ * cannot tell "the old build" from "a build that is neither". The k1 build
+ * shares not one circuit name with either prototype (checked 2026/09/16: its
+ * thirty names and the account build's twelve do not intersect at all), so the
+ * older question answers `account-v1` for a k1 account, and `account-v1` is a
+ * module that cannot open it. `withdraw_shielded_with_k256` is the one name
+ * that identifies a build rather than ruling one out, so it is asked first and
+ * the absence-based question is left to decide between the two it can.
  *
  * Kept separate from the read so it can be drilled on a list of names.
  */

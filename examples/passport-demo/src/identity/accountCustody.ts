@@ -965,12 +965,13 @@ export function resetAccountModuleChoice(): void {
  * there is one spelling of "which build is this" in this app and not two.
  *
  * THREE BUILDS SINCE 2026/09/16. `withdraw_shielded_with_k256` is asked about
- * FIRST, because it is the only one of the three questions whose answer is
- * unambiguous: it is on the k1-arm build and on neither prototype build, while
- * the k1 build has a shielded-transfer surface of its own that the older
- * question would read as `account`. Nothing deploys a k1 account yet, so in
- * practice every account on the chain still answers `account` or `account-v1`,
- * exactly as it did.
+ * FIRST, because it is the only one of the three questions that identifies a
+ * build rather than ruling one out: the two prototypes are told apart by the
+ * ABSENCE of `transfer_shielded_to_account`, and the k1 build — which shares
+ * no circuit name with either — is absent it too, so the older question alone
+ * would read a k1 account as `account-v1` and hand it a module that cannot
+ * open it. Nothing deploys a k1 account yet, so in practice every account on
+ * the chain still answers `account` or `account-v1`, exactly as it did.
  *
  * `null` IS NOT "NO", and this is the one caller that cannot smooth it over.
  * {@link senderSupportsOneTransactionSend} may treat an unanswerable question

@@ -812,11 +812,12 @@ describe('accountModuleFor', () => {
 /**
  * The three-way discriminator, on a list of names rather than through a read.
  *
- * THE ORDER IS THE WHOLE OF IT. The k1-arm build has a shielded-transfer
- * surface of its own, so the older question — does this account carry
- * `transfer_shielded_to_account` — answers "yes" for a k1 account and would
- * hand it a module that cannot open it. The k256 question has no such
- * ambiguity in either direction, so it is asked first.
+ * THE ORDER IS THE WHOLE OF IT, and the reason is that only one of the two
+ * questions IDENTIFIES anything. The prototypes are told apart by an absence —
+ * no `transfer_shielded_to_account` means the older of the two — and the k1
+ * build, which shares no circuit name with either, is absent it as well. So
+ * the older question alone reads a k1 account as `account-v1`: a module that
+ * cannot open it. The k256 question is positive, so it goes first.
  */
 describe('accountBuildFromOperations', () => {
   /* The eleven entry points every pre-upgrade Passport carries, trimmed to the
@@ -835,9 +836,26 @@ describe('accountBuildFromOperations', () => {
     expect(accountBuildFromOperations([...V1, K256_ARM_OPERATION])).toBe('account-k1');
   });
 
-  it('asks the k256 question FIRST, so a k1 account is never read as a prototype one', () => {
-    /* The k1 build carries both names. Answering `account` here is the bug
-       this order exists to prevent. */
+  it('never reads a real k1 entry-point list as a prototype build', () => {
+    /* The k1 build's own names, none of which the prototypes have. Under the
+       two-way rule this list carries no `transfer_shielded_to_account` and so
+       would have answered `account-v1` — a module that cannot open it. */
+    expect(
+      accountBuildFromOperations([
+        'deposit_unshielded',
+        'deposit_shielded',
+        'withdraw_unshielded_with_jubjub',
+        'withdraw_shielded_with_jubjub',
+        'withdraw_unshielded_with_k256',
+        K256_ARM_OPERATION,
+      ]),
+    ).toBe('account-k1');
+  });
+
+  it('asks the k256 question first even where both names are present', () => {
+    /* Not a list any build produces today — the two share no circuit name —
+       but the order is a rule rather than a coincidence, and a future build
+       that carried both must still be read as the one that can prove k256. */
     expect(
       accountBuildFromOperations([...V1, ONE_TX_TRANSFER_OPERATION, K256_ARM_OPERATION]),
     ).toBe('account-k1');
