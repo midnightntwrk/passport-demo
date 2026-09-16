@@ -17,8 +17,10 @@
 |---|---|---|
 | Can the demo compile the k1-arm reference account contract? | **Yes.** `compact compile +0.34.0 --feature-zkir-v3` builds `contract/contracts/account.compact` (old repo `main`): 30 circuits, prover and verifier keys for every `_with_k256` and `_with_jubjub` export, IR version 3.0. The 2026/09/04 "unbound identifier" finding was the missing feature flag. | scratchpad compile, 2026/09/16 |
 | Does Dynamic expose raw signing to the app? | **Yes.** `signRawMessage({ accountAddress, context, message, password })` on the EVM WaaS connector, in the installed SDK typings. It signs a 32-byte digest as given — the shape the k256 arm's envelope 0 needs (`SHA-256(challenge)`). | `node_modules/@dynamic-labs/wallet-connector-core`, `@dynamic-labs/waas-evm` |
-| Does Dynamic hand the app the private key, so a secret could be derived from it? | **No.** `exportPrivateKey({ accountAddress, displayContainer })` renders the key into a container for the *person* to read and returns nothing. The pre-`e1593bb` integration relied on that reveal; it is not an app-side API. | same typings |
-| Are Dynamic's MPC signatures deterministic (same key, same digest, same signature)? | **Unknown.** Nothing in the raw-signing or MPC architecture docs says either way; DKLs23 is randomised by construction. This is question 4 of the 2026/09/14 list to Dynamic, still unanswered. | docs fetched 2026/09/16 |
+| Does Dynamic hand the app the private key, or any deterministic key-bound material? | **No.** `exportPrivateKey` and `exportClientKeyshares` both return `void` and render into a cross-origin iframe the app cannot read; the `IDynamicWaasConnector` surface has no HMAC, derive, or session-key method; Delegated Access (enterprise) issues a server-side share and still signs with randomised DKLs23. | SDK typings and source, Dynamic docs (import-export, delegated-access) |
+| Are Dynamic's MPC signatures deterministic (same key, same digest, same signature)? | **No.** DKLs23 (eprint 2023/765, Protocol 3.1, signing step 5) has every party sample a fresh instance key per signature; the docs name DKLs23 for EVM and nothing in Dynamic's stack applies RFC 6979. The client share's rounds run in Dynamic's cross-origin iframe (`browser-wallet-client` → `requestChannel.request('signRawMessage')`), so nothing on our side can seed them. An empirical run was attempted on the sandbox environment; a user created through an external-wallet login gets no embedded wallet there, so the protocol reading stands as the answer. | research 2026/09/16 evening (docs, paper, SDK source) |
+| What does `signRawMessage` return? | `0x` + 65 bytes, r‖s‖v; the input is a 64-hex digest without `0x`, signed as supplied (enforced at 64 characters). Low-s normalisation not established — the k256 arm accepts either form. | `waas-evm/DynamicWaasEVMConnector.js`, `waasCore.esm.js`, raw-signing doc |
+| Is the embedded key the same on a second device after social-login recovery? | **Yes.** The encrypted user share is delivered to the new device; reshares keep the address. | Dynamic docs, recovery and glossary |
 | Can stagenet prove ZKIR v3 circuits? | **Not proven.** Compiled IR is v3.0. The 1AM prover is `ledger9-zkir2-dispatch`; the droplet runs `proof-server:9.0.0-rc.6`; the in-browser prover is `zkir-v2` only. Ledger 9.1.0.0-rc.4 (2026/08/11) carries ZKIR v3 as an *experimental* prove path; "move zkir-v3 out of experimental" landed in 10.1.0.0-alpha.1 (2026/09/14). | prover `/health`, droplet `docker inspect`, ledger release notes |
 
 ## 3. The two ways to Hector's expectations
@@ -38,25 +40,16 @@ What it takes, in order, each a PR on passport-demo:
 
 Roughly **two weeks** if step 1 passes on day one. It is the design that makes Hector's sentence literally true.
 
-### Path A — Dynamic recovers the passkey-style secret (no contract change)
+### Path A — Dynamic recovers the passkey-style secret (no contract change) — **closed 2026/09/16**
 
-If Dynamic's raw signature over a fixed message is **deterministic**, the `experiment/metamask-device` shape applies unchanged: sign a fixed message at enrolment → HKDF → the same 32-byte device secret on every device → `add_device` on the *existing* prototype contract. Social login on a new device re-derives the secret; recovery works; nothing on chain changes; existing Passports gain it through one `add_device`. **Three to four days**, and stage-1 code carries most of it.
+This would have been the `experiment/metamask-device` shape: a deterministic signature over a fixed message → HKDF → the same device secret on every device → `add_device` on the existing contract. It needs a deterministic signature or a derived-secret API, and Dynamic has neither (table above). The only no-contract alternative left is escrow of the secret behind the Dynamic identity on our backend, which is custody and is not proposed.
 
-It does **not** satisfy expectation (2) as stated: Dynamic signs the enrolment message, but the account calls are still authorised by the derived secret on the device, exactly as the passkey path is today. It is a recovery feature, not a signing feature.
+## 4. The one question left, and how it is answered
 
-If the signatures are not deterministic, path A does not exist. Then the only no-contract alternative is escrow of the secret behind the Dynamic identity on our backend, which is custody and is not proposed.
-
-## 4. The two questions that decide the route, and how each is answered
-
-1. **Determinism.** Sign the same digest twice with one Dynamic embedded wallet and compare. A signed-in person can do it today on the flag-set preview build (the "Sign a test message" row on Home, pressed twice, same text). Ten minutes once a Dynamic login exists on that origin; the preview origin has to be in the Dynamic environment's CORS list first.
-2. **ZKIR v3 proving on stagenet.** Step B1 above. One day, and it is worth doing whatever the answer to 1, because path B is where the design ends up.
+**ZKIR v3 proving on stagenet** — step B1. Compiled IR is v3.0. Images available on Docker Hub as of 2026/09/16: `proof-server:9.0.0-rc.6` (what the droplet runs, 2026/08/10), `9.0.0-rc.7` (2026/09/08), and `10.0.0-alpha.1` (2026/09/16; the ledger 10.1 alpha is where "zkir-v3 out of experimental" landed). The test: deploy the reference contract on stagenet from a script with a software secp256k1 key and prove `activate_initial_device_with_k256` through the droplet's proof server, first on rc.6, then on rc.7 or 10.0.0-alpha.1 if rc.6 refuses. The 1AM prover (`ledger9-zkir2-dispatch`) and the in-browser prover (zkir-v2) will not prove it; a Passport that signs with Dynamic proves through the droplet's server until they do.
 
 ## 5. Recommendation
 
-Run both answers tomorrow morning, before the staging session. Then:
-
-- Deterministic **and** v3 proves: ship path A as v2.0 for the demo date (recovery on any device, days not weeks), and start path B behind it as v3.0 with the migration.
-- Not deterministic, v3 proves: path B is v2.0; two weeks; say so.
-- v3 does not prove: path A if deterministic, and the v3 proving ask goes out today with names on it.
+Path B is v2.0, and the sentence to say to Hector is that it is about two weeks after the proving test passes, not tomorrow. Tomorrow's staging session can still show stage 1 (social sign-in, the identity row) from a release of `main` once PR #54 is reviewed, with the honest label that it is sign-in, not yet recovery. The proving test is the first task of the morning, and if the droplet's proof server will not prove v3 IR, the ask goes to Webisoft (1AM prover) and to the Foundation (proof-server release) the same day.
 
 Whatever the route: PRs on passport-demo, review, `main`, a release, staging, Hector's go, production — the same path v1.0 and v1.1 took.
