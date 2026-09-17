@@ -625,6 +625,26 @@
  * this one. It holds no DOM, no React, and no network: keys, bytes, and an
  * injected reader.
  *
+ * `src/identity/custodyInboxIndex.ts` went IN on 2026/09/17 with the module
+ * itself. It answers "which transaction wrote inbox entry k" by COUNTING a
+ * contract's action history, and the count is the only thing standing between a
+ * recovered coin and a confident wrong position in the commitment tree — which
+ * proves nothing, for ever, while looking perfectly spendable. Every branch is
+ * either an entry point read off the compiled build as one that appends, one
+ * that may append and therefore stops the count, or a row the answer did not
+ * carry; all three are drilled in `custodyInboxIndex.test.ts`. It holds no
+ * network: a GraphQL document out, somebody else's answer in.
+ *
+ * `src/lib/custodyAssets.ts` went IN on 2026/09/17 with the module itself. It is
+ * what the Dynamic Passport's Home and Send read money through: which rows
+ * exist, what each is called, how many decimal places an amount of it carries,
+ * and what a typed amount means in atomic units. Both halves have an expensive
+ * wrong answer — a decimal scale applied to a colour that has none sends a
+ * millionth of what somebody typed, and a coin left off the rows is money the
+ * holder cannot see — so every branch is drilled in `custodyAssets.test.ts`,
+ * including the copy rule that none of its sentences names a vendor, a fee
+ * token, or a piece of machinery.
+ *
  * `src/lib/custodyDelivery.ts` went IN on 2026/09/17 with the module itself. It
  * decides ONE thing — whether a shielded payment into an account that keeps no
  * readable balance was seen to arrive — and both wrong answers are a sentence
@@ -702,6 +722,7 @@ export default mergeConfig(
           'src/lib/claimSteps.ts',
           'src/lib/companionLink.ts',
           'src/lib/colour.ts',
+          'src/lib/custodyAssets.ts',
           'src/lib/custodyDelivery.ts',
           'src/lib/dynamicSession.ts',
           'src/lib/endpoints.ts',
@@ -738,6 +759,7 @@ export default mergeConfig(
           'src/identity/claimWarmup.ts',
           'src/identity/k1CoinStore.ts',
           'src/identity/custodyInbox.ts',
+          'src/identity/custodyInboxIndex.ts',
           'src/identity/midnamesText.ts',
           'src/identity/sponsoredAlias.ts',
           'src/identity/timestamps.ts',
