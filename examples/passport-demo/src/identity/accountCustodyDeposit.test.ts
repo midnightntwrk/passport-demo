@@ -219,14 +219,29 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-/** What the delivery watch is given, in fake time, before it gives up.
+/**
+ * Runs a payment's delivery watch out, in fake time, and hands back what it
+ * answered.
  *
- * Stepped rather than advanced in one jump, because the watch does not exist
- * yet when the test starts advancing: the sealing in front of it is real
- * asynchronous work, and each step flushes what has settled since the last. */
-const runOutTheDeliveryWatch = async (): Promise<void> => {
-  for (let tick = 0; tick < 40; tick += 1) await vi.advanceTimersByTimeAsync(3_000);
-};
+ * ADVANCED UNTIL THE PAYMENT SETTLES rather than by a fixed number of steps.
+ * The watch does not exist yet when this starts: the sealing in front of it is
+ * AES-GCM through `crypto.subtle`, which resolves off the event loop rather
+ * than in a microtask, so a fixed count can spend every step before there is a
+ * timer to advance and then wait for ever on timers that are no longer moving.
+ * Bounded so a watch that genuinely never settles fails the drill rather than
+ * hanging it.
+ */
+async function runOutTheDeliveryWatch<T>(pending: Promise<T>): Promise<T> {
+  let settled = false;
+  const mark = (): void => {
+    settled = true;
+  };
+  void pending.then(mark, mark);
+  for (let tick = 0; tick < 200 && !settled; tick += 1) {
+    await vi.advanceTimersByTimeAsync(3_000);
+  }
+  return pending;
+}
 
 /* -------------------------------------------------------------------------- */
 /* NIGHT                                                                      */
@@ -391,9 +406,10 @@ describe('depositShielded, into the newer build', () => {
     readAccountBuild.mockResolvedValue('account-custody');
     const { depositShielded } = await loadModule();
     vi.useFakeTimers();
-    const pending = depositShielded(walletHolding(0n), { contractAddress: PEER, coin: COIN });
-    await runOutTheDeliveryWatch();
-    await expect(pending).resolves.toMatchObject({ delivery: 'unconfirmed' });
+    const watched = runOutTheDeliveryWatch(
+      depositShielded(walletHolding(0n), { contractAddress: PEER, coin: COIN }),
+    );
+    await expect(watched).resolves.toMatchObject({ delivery: 'unconfirmed' });
     expect(calls).toHaveLength(1);
   });
 
@@ -410,9 +426,10 @@ describe('depositShielded, into the newer build', () => {
     };
     const { depositShielded } = await loadModule();
     vi.useFakeTimers();
-    const pending = depositShielded(walletHolding(0n), { contractAddress: PEER, coin: COIN });
-    await runOutTheDeliveryWatch();
-    await expect(pending).resolves.toMatchObject({ delivery: 'unconfirmed' });
+    const watched = runOutTheDeliveryWatch(
+      depositShielded(walletHolding(0n), { contractAddress: PEER, coin: COIN }),
+    );
+    await expect(watched).resolves.toMatchObject({ delivery: 'unconfirmed' });
   });
 });
 
