@@ -430,13 +430,18 @@ function requireAccount(account: K1Account): K1Account {
 /* -------------------------------------------------------------------------- */
 
 /**
- * A fresh empty state.
+ * A fresh empty state — what an account that holds nothing serves to a witness.
  *
  * A FUNCTION, not a shared constant, because the maps in it are mutable
  * objects: one shared instance handed to two accounts is one account's coin
  * appearing in the other's store the moment anything wrote to it in place.
+ *
+ * Exported because a connection made before the account has an address has no
+ * store to read and still has to open with a state of the right SHAPE — a
+ * private state missing a field the witness reads fails at proving time rather
+ * than here (`./custodyContractClient.ts`).
  */
-function emptyState(): K1CoinStoreState {
+export function emptyK1CoinStoreState(): K1CoinStoreState {
   return {
     encSecretKeyHex: null,
     coins: emptyMap(),
@@ -452,10 +457,10 @@ function emptyState(): K1CoinStoreState {
  */
 export function loadK1CoinStore(account: K1Account): K1CoinStoreState {
   const normalised = normalisedAccount(account);
-  if (normalised === null) return emptyState();
+  if (normalised === null) return emptyK1CoinStoreState();
   const accounts = readAll();
   const key = k1AccountKey(normalised);
-  return Object.hasOwn(accounts, key) ? accounts[key] : emptyState();
+  return Object.hasOwn(accounts, key) ? accounts[key] : emptyK1CoinStoreState();
 }
 
 function saveK1CoinStore(account: K1Account, state: K1CoinStoreState): void {

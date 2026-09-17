@@ -126,7 +126,16 @@ import {
   resolveTransactionHash,
   transactionId,
 } from './contractRuntime.js';
-import { rememberK1EncSecretKey } from './k1CoinStore.js';
+import {
+  emptyK1CoinStoreState,
+  k1PrivateStateId,
+  k1PrivateStateProvider,
+  loadK1CoinStore,
+  rememberK1EncSecretKey,
+  type K1Account,
+  type K1CoinStoreState,
+} from './k1CoinStore.js';
+import { normalisedColourHex } from '../lib/colour.js';
 import { custodyEncKeyPair } from './custodyInbox.js';
 import { createLocalMidnightWallet, type LocalMidnightWallet } from '../lib/localWallet.js';
 import { sponsorConfig } from '../lib/sponsor.js';
@@ -173,10 +182,18 @@ export interface CustodyDeps {
   wallet(user: string): Promise<LocalMidnightWallet>;
   /** The compiled `account-custody` module, for its pure circuits and its ABI. */
   contractModule(): Promise<CustodyContractModule>;
-  /** Providers, with this module's own proof provider already substituted in. */
+  /**
+   * Providers for one connection.
+   *
+   * `account` is the coin store this connection's private state IS — null
+   * before the deploy has an address, and for a connection to SOMEBODY ELSE's
+   * account, where serving our own coins would be both wrong and pointless
+   * (the deposits declare no witness). See {@link custodyPrivateStateId}.
+   */
   providers(
     wallet: LocalMidnightWallet,
     privateStateId: string,
+    account?: K1Account | null,
   ): Promise<Record<string, unknown>>;
   /** The ledger primitives the wave deploy builds transactions out of. */
   ledger(): Promise<CustodyLedgerApi>;
@@ -523,6 +540,36 @@ export interface CustodyStepResult {
   /** The chain hash, when one was resolved, and the explorer link for it. */
   readonly txHash: string | null;
   readonly explorerUrl: string | null;
+  /**
+   * The JS value the circuit returned, for the circuits that return one.
+   *
+   * `withdraw_shielded_with_k256` returns the CHANGE COIN
+   * (`{is_some, value:{nonce,color,value}}`) and that value exists nowhere
+   * else: the chain carries the note and not its description, so a caller that
+   * did not keep this has an account holding a coin nobody can ever name. See
+   * {@link circuitResultOf} for why only this one field of the call result
+   * crosses back.
+   */
+  readonly result?: unknown;
+}
+
+/**
+ * The circuit's own return value, and NOTHING else from the call result.
+ *
+ * midnight-js hands back a `CallResult` whose `private` half is marked
+ * privacy-sensitive in as many words: the ZK-aligned input and output, the
+ * private transcript outputs of every witness call, the next private state,
+ * and the next Zswap local state (`@midnight-ntwrk/midnight-js-contracts`,
+ * `CallResultPrivate`). Its own guidance is to extract the field you need
+ * rather than carry the object across a boundary, and this is that extraction:
+ * `private.result`, by name, never the object it sits on. Nothing above this
+ * line can log, serialise, or hand on what it never received.
+ */
+function circuitResultOf(callResult: unknown): unknown {
+  if (!callResult || typeof callResult !== 'object') return undefined;
+  const privatePart = (callResult as { private?: unknown }).private;
+  if (!privatePart || typeof privatePart !== 'object') return undefined;
+  return (privatePart as { result?: unknown }).result;
 }
 
 /**
@@ -584,7 +631,11 @@ export async function deployCustodyAccount(
     deps.contracts(),
   ]);
 
-  const providers = await deps.providers(wallet, record.privateStateId);
+  const providers = await deps.providers(
+    wallet,
+    custodyPrivateStateId(record),
+    custodyStoreAccount(record),
+  );
   const verifierKeys = await readVerifierKeys(providers, module);
   const sizes = new Map([...verifierKeys].map(([id, key]) => [id, key.length]));
   const waves = planCustodyWaves(sizes, 'k256');
@@ -749,8 +800,8 @@ async function runWaveOne(
 
   const deployData = await contracts.createUnprovenDeployTx(providers, {
     compiledContract: providers.compiledContract,
-    privateStateId: context.record.privateStateId,
-    initialPrivateState: custodyPrivateState(),
+    privateStateId: custodyPrivateStateId(context.record),
+    initialPrivateState: custodyPrivateState(context.record),
     args: [boot, encryptionKey],
   });
 
@@ -781,7 +832,7 @@ async function runWaveOne(
   };
   priv.setContractAddress?.(address);
   await priv.setSigningKey(address, signingKey);
-  await priv.set(context.record.privateStateId, deployData.private.initialPrivateState);
+  await priv.set(custodyPrivateStateId(context.record), deployData.private.initialPrivateState);
   rememberSigningKey(storage, address, signingKey);
 
   /* The coin store keeps the viewing secret beside the coins it will decrypt,
@@ -801,6 +852,14 @@ async function runWaveOne(
   const next: CustodyAccountRecord = {
     ...context.record,
     address,
+    /* THE ID BECOMES THE COIN STORE'S, now that there is an address to key it
+       by. Until this line the record carried an id derived from the Dynamic
+       user, because that was all there was before the deploy; from here the
+       account has an address and the store, the witness, and midnight-js all
+       have to be talking about the same private state. Written into the record
+       as well as computed, so a reader of the record sees one id and not two.
+       See {@link custodyPrivateStateId}. */
+    privateStateId: k1PrivateStateId({ network: context.record.network, address }),
     wavesDone: 1,
     txHashes: txHash ? [...context.record.txHashes, txHash] : context.record.txHashes,
   };
@@ -992,7 +1051,11 @@ export async function activateK1Device(
   );
 
   onPhase?.({ step: 'confirm' });
-  const providers = await deps.providers(wallet, record.privateStateId);
+  const providers = await deps.providers(
+    wallet,
+    custodyPrivateStateId(record),
+    custodyStoreAccount(record),
+  );
   const txHash = await resolveHash(providers, result);
   const next: CustodyAccountRecord = {
     ...record,
@@ -1100,7 +1163,12 @@ export async function k1Call(
     txHashes: txHash ? [...record.txHashes, txHash] : record.txHashes,
   };
   saveCustodyRecord(storage, next);
-  return { record: next, txHash, explorerUrl: txHash ? custodyExplorerLink(txHash, network) : null };
+  return {
+    record: next,
+    txHash,
+    explorerUrl: txHash ? custodyExplorerLink(txHash, network) : null,
+    result: circuitResultOf(result),
+  };
 }
 
 /**
@@ -1151,6 +1219,75 @@ export async function custodyPermissionlessCall(
   return { record: next, txHash, explorerUrl: txHash ? custodyExplorerLink(txHash, network) : null };
 }
 
+/**
+ * A permissionless call on SOMEBODY ELSE's custody account — paying one.
+ *
+ * The same circuits as {@link custodyPermissionlessCall} and a different
+ * contract at the other end, which is the whole of the difference and is worth
+ * the separate entry point: `deposit_shielded(coin, entry)` on the recipient's
+ * account is how a shielded payment lands, and everything about that call is
+ * the SENDER's except the address — the sender's own wallet builds the
+ * transaction, the sender's own fees pay for it, and the note being deposited
+ * is one the sender holds.
+ *
+ * THIS PASSPORT'S COIN STORE IS NOT SERVED TO IT. The connection is opened
+ * with `account: null`, so the private state is a session-only one under an id
+ * of the recipient's address. That is not caution for its own sake: the
+ * deposits declare no witness, so there is nothing for a private state to
+ * answer, and serving our own store to a connection addressed at somebody
+ * else's account would put our coins in the one place a mix-up is expensive.
+ *
+ * The recipient's record is not ours and is not written. What comes back is
+ * the sender's own record, untouched apart from the transaction hash, because
+ * that hash is the only thing the sender learned.
+ */
+export async function custodyPermissionlessCallAt(
+  session: CustodyDynamicSession,
+  targetAddress: string,
+  request: { operation: string; args: readonly unknown[] },
+  onPhase?: (phase: CustodyPhase) => void,
+  overrides: Partial<CustodyDeps> = {},
+): Promise<CustodyStepResult> {
+  const deps = withDefaults(overrides);
+  const user = k1UserKey(session);
+  const wallet = await deps.wallet(user);
+  const network = wallet.network.networkId;
+  const storage = deps.storage();
+  const record = loadCustodyRecord(storage, user, network);
+  if (!record || record.address === null || nextCustodyStep(record) !== 'ready') {
+    throw new Error('This Passport is not finished being set up yet.');
+  }
+  if (normalisedColourHex(targetAddress) === null) {
+    throw new Error('That Passport cannot be paid from here.');
+  }
+  const { callTx, providers } = await openCustodyContract(deps, wallet, {
+    address: targetAddress,
+    /* An id of the RECIPIENT's address, served by the session half of the
+       provider rather than by the store — see the header above. */
+    privateStateId: `passport-account-custody-peer-${network}-${targetAddress}`,
+    account: null,
+    initialPrivateState: emptyK1CoinStoreState(),
+    circuit: request.operation,
+  });
+  onPhase?.({ step: 'submit' });
+  const call = callTx[request.operation];
+  if (!call) throw new Error('That Passport cannot be paid this way.');
+  const result = await call(...request.args);
+  onPhase?.({ step: 'confirm' });
+  const txHash = await resolveHash(providers, result);
+  const next: CustodyAccountRecord = {
+    ...record,
+    txHashes: txHash ? [...record.txHashes, txHash] : record.txHashes,
+  };
+  saveCustodyRecord(storage, next);
+  return {
+    record: next,
+    txHash,
+    explorerUrl: txHash ? custodyExplorerLink(txHash, network) : null,
+    result: circuitResultOf(result),
+  };
+}
+
 export async function appendInboxK1(
   session: CustodyDynamicSession,
   device: K256DeviceIdentity,
@@ -1179,54 +1316,180 @@ export async function appendInboxK1(
 /* -------------------------------------------------------------------------- */
 
 /**
- * The private state the account custody build takes.
- *
- * ONE WITNESS, AND IT REFUSES. `held_coin` is the only witness this contract
- * declares, and the coin store that would answer it is PR 4. Nothing this
- * module calls invokes it — activation and `append_inbox` declare no witness —
- * so refusing is both correct today and the thing that will name itself the
- * moment a shielded spend is wired up.
+ * The shielded coin `held_coin` hands the circuit, in the compiled build's own
+ * field names (`examples/passport-balancer/contracts-stagenet/managed/
+ * account-custody/contract/index.d.ts`, `Witnesses<PS>`).
  */
-export function custodyWitnesses(): Record<string, () => never> {
+export interface CustodyHeldCoin {
+  readonly nonce: Uint8Array;
+  readonly color: Uint8Array;
+  readonly value: bigint;
+  readonly mt_index: bigint;
+}
+
+/**
+ * The one witness the account custody build declares, answered from the coin store.
+ *
+ * `held_coin(color)` is how a shielded spend learns WHICH note it is spending:
+ * the nonce, the colour, the value, and the note's position in the commitment
+ * tree, none of which the chain carries. `./k1CoinStore.ts` is where those
+ * live, and because that store is also the private state this connection is
+ * served ({@link custodyPrivateStateId}), the witness is a plain read of
+ * `context.privateState.coins[colourHex]` — no closure, no second source, and
+ * nothing to go stale between the read that built the challenge and the read
+ * that builds the proof.
+ *
+ * A MISSING COIN THROWS ONE SENTENCE. It is a real outcome — a Passport that
+ * has been paid nothing of that colour, or one whose store was cleared — and
+ * the alternative is worse than an error: a witness returning a zero coin
+ * builds a transaction the node rejects for a reason that names none of this.
+ * The sentence carries no machinery, because it reaches a person.
+ */
+export function custodyWitnesses(): {
+  held_coin(
+    context: { privateState: K1CoinStoreState },
+    color: Uint8Array,
+  ): [K1CoinStoreState, CustodyHeldCoin];
+} {
   return {
-    held_coin(): never {
-      throw new Error('Sending shielded value from this kind of Passport is not built yet.');
+    held_coin(context: { privateState: K1CoinStoreState }, color: Uint8Array) {
+      const colourHex = normalisedColourHex(bytesToHex(color));
+      const coins = context.privateState?.coins;
+      const row = colourHex !== null && coins && Object.hasOwn(coins, colourHex)
+        ? coins[colourHex]
+        : null;
+      if (row === null) {
+        throw new Error('There is nothing of that kind in this Passport to send.');
+      }
+      /* The private state is returned UNCHANGED, which is what makes this a
+         read. midnight-js writes whatever a witness returns back through the
+         provider after the call, so a witness that edited here would be a
+         second writer to the store with no idea what the store has learned
+         since — see `mergeIntoK1CoinStore`. */
+      return [
+        context.privateState,
+        {
+          nonce: hexToBytes(row.nonceHex),
+          color: hexToBytes(row.colorHex),
+          value: BigInt(row.value),
+          mt_index: BigInt(row.mtIndex),
+        },
+      ];
     },
   };
 }
 
-/** The private-state value. Empty: the coin store is PR 4. */
-function custodyPrivateState(): Record<string, unknown> {
-  return { coins: {} };
+/**
+ * THE private-state id for a custody account. One account, one id, for ever.
+ *
+ * There were two, and that was the defect this resolves. The record makes its
+ * own id at deploy time (`passport-account-custody-<user8>`) because the
+ * account has no address yet; the coin store keys everything it knows by
+ * network and address ({@link k1PrivateStateId}), because a coin belongs to an
+ * account on a chain and not to whoever happened to deploy it. Serving the
+ * store under one id while midnight-js read and wrote another would mean the
+ * witness reading an empty state on every connection — a Passport that can be
+ * paid and can never spend.
+ *
+ * So the address decides as soon as there is one, and the record is rewritten
+ * to agree the moment wave 1 lands ({@link runWaveOne}). A record from before
+ * this change still resolves to the same id, because this is computed from the
+ * address rather than read from the record.
+ */
+export function custodyPrivateStateId(
+  record: Pick<CustodyAccountRecord, 'network' | 'address' | 'privateStateId'>,
+): string {
+  if (record.address === null) return record.privateStateId;
+  return k1PrivateStateId({ network: record.network, address: record.address });
 }
 
-/** Open the deployed contract for one circuit's proof route. */
+/** The account a record names, or null before the deploy has landed. */
+function custodyStoreAccount(
+  record: Pick<CustodyAccountRecord, 'network' | 'address'>,
+): K1Account | null {
+  return record.address === null ? null : { network: record.network, address: record.address };
+}
+
+/**
+ * The private state a connection opens with.
+ *
+ * It is the STORE's current contents, not an empty map, and the difference is
+ * not cosmetic: `findDeployedContract` writes `initialPrivateState` through the
+ * provider before it returns anything (`setOrGetInitialPrivateState`), so a
+ * connection opening with `{coins:{}}` would be a write of nothing over
+ * everything on every call. The provider's merge would survive it; opening
+ * with the truth means it never has to.
+ */
+function custodyPrivateState(record: Pick<CustodyAccountRecord, 'network' | 'address'>): unknown {
+  const account = custodyStoreAccount(record);
+  return account === null ? emptyK1CoinStoreState() : loadK1CoinStore(account);
+}
+
+/**
+ * Whether a circuit's proof has to go to the service that holds the big keys.
+ *
+ * The gated circuits' prover keys are 235 MB and cannot cross a browser, so
+ * they go to the sponsor's own proving route ({@link custodyProofProvider}).
+ * The permissionless ones — the deposits — are 0.4 MB and 11 MB and prove
+ * through the ordinary v3 route `createContractProviders` already built, which
+ * is the route every other contract in this app uses. Sending a deposit to the
+ * big-key service would work and would put a queue for 235 MB proofs in front
+ * of a payment that does not need one.
+ */
+function custodyNeedsBigKeyProver(circuit: string): boolean {
+  return circuit.endsWith('_with_k256') || circuit.endsWith('_with_jubjub');
+}
+
+/** Open a deployed custody account for one circuit's proof route. */
+async function openCustodyContract(
+  deps: CustodyDeps,
+  wallet: LocalMidnightWallet,
+  target: {
+    readonly address: string;
+    readonly privateStateId: string;
+    readonly account: K1Account | null;
+    readonly initialPrivateState: unknown;
+    readonly circuit: string;
+  },
+): Promise<{ callTx: CustodyCallTx; providers: Record<string, unknown> }> {
+  const providers = await deps.providers(wallet, target.privateStateId, target.account);
+  /* The proof provider is per-CIRCUIT, because the service is told which key to
+     use. Everything else in the set is shared. */
+  const scoped = custodyNeedsBigKeyProver(target.circuit)
+    ? {
+        ...providers,
+        proofProvider: custodyProofProvider({
+          endpoint: custodyProvingEndpoint(sponsorConfig()?.url ?? null),
+          network: wallet.network.networkId,
+          circuit: target.circuit,
+          deserialise: (providers.deserialiseUnbound as (b: Uint8Array) => unknown) ?? identity,
+        }),
+      }
+    : providers;
+  const contracts = await deps.contracts();
+  const deployed = await contracts.findDeployedContract(scoped, {
+    compiledContract: providers.compiledContract,
+    contractAddress: target.address,
+    privateStateId: target.privateStateId,
+    initialPrivateState: target.initialPrivateState,
+  });
+  return { callTx: deployed.callTx, providers: scoped };
+}
+
+/** Open THIS Passport's own account — the common case. */
 async function openCustodyAccount(
   deps: CustodyDeps,
   wallet: LocalMidnightWallet,
   record: CustodyAccountRecord,
   circuit: string,
 ): Promise<{ callTx: CustodyCallTx; providers: Record<string, unknown> }> {
-  const providers = await deps.providers(wallet, record.privateStateId);
-  /* The proof provider is per-CIRCUIT, because the service is told which key to
-     use. Everything else in the set is shared. */
-  const scoped = {
-    ...providers,
-    proofProvider: custodyProofProvider({
-      endpoint: custodyProvingEndpoint(sponsorConfig()?.url ?? null),
-      network: wallet.network.networkId,
-      circuit,
-      deserialise: (providers.deserialiseUnbound as (b: Uint8Array) => unknown) ?? identity,
-    }),
-  };
-  const contracts = await deps.contracts();
-  const deployed = await contracts.findDeployedContract(scoped, {
-    compiledContract: providers.compiledContract,
-    contractAddress: record.address,
-    privateStateId: record.privateStateId,
-    initialPrivateState: custodyPrivateState(),
+  return openCustodyContract(deps, wallet, {
+    address: record.address as string,
+    privateStateId: custodyPrivateStateId(record),
+    account: custodyStoreAccount(record),
+    initialPrivateState: custodyPrivateState(record),
+    circuit,
   });
-  return { callTx: deployed.callTx, providers: scoped };
 }
 
 const identity = (value: unknown): unknown => value;
@@ -1381,18 +1644,29 @@ export function defaultCustodyDeps(): CustodyDeps {
     },
     contractModule: async () =>
       (await loadContractModule(ACCOUNT_CUSTODY_CONTRACT)) as unknown as CustodyContractModule,
-    providers: async (wallet, privateStateId) => {
+    providers: async (wallet, privateStateId, account = null) => {
       const [providers, compiledContract, ledgerModule] = await Promise.all([
         createContractProviders(wallet, {
           contract: ACCOUNT_CUSTODY_CONTRACT,
           privateStateId,
-          initialPrivateState: custodyPrivateState(),
+          initialPrivateState:
+            account === null ? emptyK1CoinStoreState() : loadK1CoinStore(account),
         }),
         compiledContractFor(ACCOUNT_CUSTODY_CONTRACT, ACCOUNT_CUSTODY_LABEL, custodyWitnesses()),
         import('@midnightntwrk/ledger-v9'),
       ]);
       return {
         ...(providers as Record<string, unknown>),
+        /* THE STORE IS THE PRIVATE STATE. `createContractProviders` builds an
+           in-memory provider, which is the right answer for a device secret
+           the caller has just handed over and the wrong one for a coin: a
+           qualified description exists nowhere but here, so a provider that
+           does not outlive the connection is a balance that cannot be spent
+           after a reload. Substituted rather than parameterised inside
+           `contractRuntime.ts`, because the coin store is this module's
+           concern and every other contract in the app wants the in-memory
+           one. */
+        ...(account === null ? {} : { privateStateProvider: k1PrivateStateProvider(account) }),
         compiledContract,
         indexerHttpUrl: wallet.network.indexerHttpUrl,
         /* The proven-but-unbound rehydration the proof provider hands back:

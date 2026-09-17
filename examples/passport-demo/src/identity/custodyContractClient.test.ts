@@ -25,7 +25,10 @@ import {
   activateK1Device,
   appendInboxK1,
   deployCustodyAccount,
+  custodyPermissionlessCallAt,
+  custodyPrivateStateId,
   custodyProofProvider,
+  k1Call,
   k1UserKey,
   custodyWalletSeed,
   custodyWitnesses,
@@ -145,6 +148,8 @@ interface FakeChain {
   authorityCounter: bigint;
   deployed: boolean;
   operations: Set<string>;
+  /** What the circuit returns — the change coin, for the shielded withdrawal. */
+  circuitResult?: unknown;
 }
 
 function moduleFake(chain: FakeChain): CustodyContractModule {
@@ -280,6 +285,10 @@ interface Harness {
   chain: FakeChain;
   built: unknown[][];
   calls: { circuit: string; args: unknown[] }[];
+  /** Every connection opened: the id it was opened under, and whose store it serves. */
+  connections: { privateStateId: string; account: unknown }[];
+  /** Every address `findDeployedContract` was pointed at. */
+  opened: string[];
   submits: number;
 }
 
@@ -308,6 +317,8 @@ function harness(
   /* Every fake resolves rather than being `async`: a promise-returning stub with
      nothing to await is what `@typescript-eslint/require-await` objects to, and
      the objection is fair — an `async` here would be decoration. */
+  const connections: { privateStateId: string; account: unknown }[] = [];
+  const opened: string[] = [];
   const providers: Record<string, unknown> = {
     zkConfigProvider: {
       getVerifierKey: (circuit: string) =>
@@ -355,7 +366,18 @@ function harness(
           } else {
             chain.authNonce += 1n;
           }
-          return Promise.resolve({ public: { txId: `id-${calls.length}` } });
+          /* The shape midnight-js hands back: a `public` half and a `private`
+             half that is marked privacy-sensitive in its own type. The fake
+             carries both so the drill can hold the rule that only
+             `private.result` crosses back out of this module. */
+          return Promise.resolve({
+            public: { txId: `id-${calls.length}` },
+            private: {
+              result: chain.circuitResult,
+              input: 'ZK-aligned input, which must never leave',
+              nextPrivateState: { coins: {} },
+            },
+          });
         },
     },
   );
@@ -368,7 +390,10 @@ function harness(
         network: { networkId: 'stagenet', indexerHttpUrl: '' },
       } as never),
     contractModule: () => Promise.resolve(moduleFake(chain)),
-    providers: () => Promise.resolve(providers),
+    providers: (_wallet: unknown, privateStateId: string, account: unknown = null) => {
+      connections.push({ privateStateId, account });
+      return Promise.resolve(providers);
+    },
     ledger: () => Promise.resolve(ledgerFake(chain, built)),
     contracts: () =>
       Promise.resolve({
@@ -398,7 +423,10 @@ function harness(
           }
           return Promise.resolve({ public: { txId: `wave-${state.submits}` } });
         },
-        findDeployedContract: () => Promise.resolve({ callTx }),
+        findDeployedContract: (_providers: unknown, options: unknown) => {
+          opened.push((options as { contractAddress: string }).contractAddress);
+          return Promise.resolve({ callTx });
+        },
       }),
     /* A CLOCK THAT MOVES. `awaitAuthorityCounter` gives up on a deadline, and a
        frozen clock would spin for ever in the one drill that wants to see it
@@ -416,6 +444,8 @@ function harness(
     chain,
     built,
     calls,
+    connections,
+    opened,
     get submits() {
       return state.submits;
     },
@@ -889,15 +919,188 @@ describe('a gated call', () => {
   });
 });
 
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The connection, the id it is made under, and what comes back out of a call.
+ *
+ * ONE PRIVATE-STATE ID. There were two — the record made one from the Dynamic
+ * user before the account had an address, and the coin store keys everything
+ * by network and address — and a witness reading one while the store writes
+ * the other is a Passport that can be paid and can never spend.
+ */
+describe('the private state a connection is opened with', () => {
+  async function readyPassport() {
+    const test = harness();
+    const fake = deviceFake();
+    await deployCustodyAccount(fake.session, fake.device, undefined, test.deps);
+    await activateK1Device(fake.session, fake.device, undefined, test.deps);
+    return { test, ...fake };
+  }
+
+  it('is the coin store\'s, from the moment the account has an address', async () => {
+    const { test, session } = await readyPassport();
+    const record = loadCustodyRecord(test.storage, k1UserKey(session), 'stagenet');
+    expect(record?.address).toBe(ADDRESS);
+    /* The record's own id and the store's are now the same string, and the
+       helper agrees with both — so a record written by an older build resolves
+       to the same place. */
+    expect(record?.privateStateId).toBe(`passport-account-custody-stagenet-${ADDRESS}`);
+    expect(custodyPrivateStateId(record!)).toBe(record?.privateStateId);
+    expect(
+      custodyPrivateStateId({ network: 'stagenet', address: null, privateStateId: 'before-deploy' }),
+    ).toBe('before-deploy');
+
+    /* And every connection after the deploy is opened under it, serving THIS
+       account's store. */
+    const afterDeploy = test.connections.slice(1);
+    expect(afterDeploy.length).toBeGreaterThan(0);
+    for (const connection of afterDeploy) {
+      expect(connection.privateStateId).toBe(record?.privateStateId);
+      expect(connection.account).toEqual({ network: 'stagenet', address: ADDRESS });
+    }
+  });
+
+  it('hands back the circuit\'s own result and nothing else from the call', async () => {
+    const { test, session, device } = await readyPassport();
+    const change = { is_some: true, value: { nonce: new Uint8Array(32), color: new Uint8Array(32), value: 40n } };
+    test.chain.circuitResult = change;
+
+    const result = await k1Call(
+      session,
+      device,
+      {
+        operation: 'append_inbox',
+        args: [new Uint8Array(192)],
+        challenge: (pure, context, pk) =>
+          pure.challenge_append_inbox_with_k256({ bytes: context.contractAddress }, pk, new Uint8Array(192), context.authNonce),
+      },
+      undefined,
+      test.deps,
+    );
+
+    expect(result.result).toBe(change);
+    /* The ZK-aligned input, the private transcript, and the next private state
+       are all on the object midnight-js returned and none of them are on this
+       one. `CallResultPrivate` says in as many words that the field you need
+       is extracted rather than the object carried. */
+    expect(Object.keys(result).sort()).toEqual(['explorerUrl', 'record', 'result', 'txHash']);
+    expect(JSON.stringify(Object.keys(result))).not.toContain('private');
+  });
+
+  it('reads no result out of a call that returned none', async () => {
+    const { test, session, device } = await readyPassport();
+    test.chain.circuitResult = undefined;
+    const result = await appendInboxK1(session, device, new Uint8Array(192), undefined, test.deps);
+    expect(result.result).toBeUndefined();
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Paying somebody else's Passport: the same permissionless circuit, a
+ * different contract at the other end, and — deliberately — none of this
+ * Passport's own private state served to it.
+ */
+describe('a permissionless call on another account', () => {
+  async function readyPassport() {
+    const test = harness();
+    const fake = deviceFake();
+    await deployCustodyAccount(fake.session, fake.device, undefined, test.deps);
+    await activateK1Device(fake.session, fake.device, undefined, test.deps);
+    return { test, ...fake };
+  }
+
+  const PEER = 'cd'.repeat(32);
+
+  it('calls the circuit on the target, with the circuit\'s own arguments only', async () => {
+    const { test, session } = await readyPassport();
+    const coin = { nonce: new Uint8Array(32), color: new Uint8Array(32), value: 40n };
+    const entry = new Uint8Array(192).fill(3);
+
+    const result = await custodyPermissionlessCallAt(
+      session,
+      PEER,
+      { operation: 'deposit_shielded', args: [coin, entry] },
+      undefined,
+      test.deps,
+    );
+
+    const call = test.calls.find((c) => c.circuit === 'deposit_shielded');
+    /* Two arguments and no authorisation trailer: nobody signs a deposit. */
+    expect(call?.args).toEqual([coin, entry]);
+    expect(test.opened[test.opened.length - 1]).toBe(PEER);
+    expect(result.txHash).toBe('id-2');
+
+    /* The connection was made under an id of the RECIPIENT's address, with no
+       account — so the store this Passport spends from is never served to a
+       connection addressed at somebody else's account. */
+    const connection = test.connections[test.connections.length - 1];
+    expect(connection.privateStateId).toBe(`passport-account-custody-peer-stagenet-${PEER}`);
+    expect(connection.account).toBeNull();
+  });
+
+  it('refuses an address that is not one', async () => {
+    const { test, session } = await readyPassport();
+    await expect(
+      custodyPermissionlessCallAt(session, 'not-an-address', { operation: 'deposit_shielded', args: [] }, undefined, test.deps),
+    ).rejects.toThrow(/cannot be paid from here/);
+  });
+
+  it('refuses before this Passport is finished being set up', async () => {
+    const test = harness();
+    const { session } = deviceFake();
+    await expect(
+      custodyPermissionlessCallAt(session, PEER, { operation: 'deposit_shielded', args: [] }, undefined, test.deps),
+    ).rejects.toThrow(/not finished being set up/);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+
 describe('the witnesses', () => {
-  /* One witness, and it refuses. The coin store is PR 4, nothing this module
-     calls invokes `held_coin`, and a witness that answered with a zero coin
-     would build a transaction the node rejects for a reason naming none of
-     this. */
-  it('refuses held_coin in words a person can read', () => {
+  /* ONE WITNESS, AND IT READS THE COIN STORE. `held_coin` is the only witness
+     the compiled build declares, and the private state this connection is
+     served IS the store (`k1PrivateStateProvider`), so the witness is a read
+     of `coins[colourHex]` and a spend is a read of the same thing the balance
+     was shown from. */
+  const COLOUR = new Uint8Array(32).fill(0x1a);
+  const COLOUR_HEX = '1a'.repeat(32);
+  const NONCE_HEX = '7f'.repeat(32);
+
+  function storeState(coins: Record<string, unknown>) {
+    return { encSecretKeyHex: null, coins, queued: {}, spentNonces: [], mtIndexCandidates: {} };
+  }
+
+  it('answers held_coin from the private state, in the contract\'s own field names', () => {
     const witnesses = custodyWitnesses();
     expect(Object.keys(witnesses)).toEqual(['held_coin']);
-    expect(() => witnesses.held_coin?.()).toThrow(/not built yet/);
+    const privateState = storeState({
+      [COLOUR_HEX]: { nonceHex: NONCE_HEX, colorHex: COLOUR_HEX, value: '250', mtIndex: '7' },
+    });
+    const [returned, coin] = witnesses.held_coin({ privateState } as never, COLOUR);
+    /* Returned UNCHANGED: a witness that edited the private state would be a
+       second writer to the store, and midnight-js writes whatever it returns
+       back through the provider after the call. */
+    expect(returned).toBe(privateState);
+    expect(bytesToHex(coin.nonce)).toBe(NONCE_HEX);
+    expect(bytesToHex(coin.color)).toBe(COLOUR_HEX);
+    expect(coin.value).toBe(250n);
+    expect(coin.mt_index).toBe(7n);
+  });
+
+  it('refuses in one sentence when the store holds nothing of that colour', () => {
+    const witnesses = custodyWitnesses();
+    expect(() =>
+      witnesses.held_coin({ privateState: storeState({}) } as never, COLOUR),
+    ).toThrow(/nothing of that kind/);
+    expect(() =>
+      witnesses.held_coin({ privateState: undefined } as never, COLOUR),
+    ).toThrow(/nothing of that kind/);
+    expect(() =>
+      witnesses.held_coin({ privateState: storeState({}) } as never, new Uint8Array(4)),
+    ).toThrow(/nothing of that kind/);
   });
 });
 
