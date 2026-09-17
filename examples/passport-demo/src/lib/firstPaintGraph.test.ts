@@ -14,7 +14,7 @@
  * functions from `identity/midnames.ts`, which statically imports
  * `identity/contractRuntime.ts`, which statically imports the ledger. Measured
  * against a production build over loopback: 10.07 MB transferred before the
- * onboarding screen's "Continue with Passport" button existed. Cutting that one
+ * onboarding screen's "Continue with Passkey" button existed. Cutting that one
  * chain to a leaf (`identity/midnamesText.ts`) costs nothing and is invisible —
  * which is exactly why it needs a test rather than a comment.
  *

@@ -13,7 +13,7 @@
  * So the rule below decides, from the failure alone, which way out the screen
  * must put in front of them. It is a rule and not a message because the same
  * three states are reached from two different journeys — the targeted unlock
- * behind "Continue with Passport", and the discoverable assertion behind "Use
+ * behind "Continue with Passkey", and the discoverable assertion behind "Use
  * a different passkey" — and both must land on the same offer for the same
  * reason. Written as a function of the failure so it can be drilled directly,
  * rather than as four scattered `if`s inside two `catch` blocks.

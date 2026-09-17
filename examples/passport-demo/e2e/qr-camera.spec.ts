@@ -44,7 +44,7 @@ import { expect, test, type Page } from '@playwright/test';
 import { renderSVG } from 'uqr';
 
 import { installNetworkBoundary, PASSPORT_ACCOUNT_ADDRESS, RESOLVABLE_NAME } from './mocks.js';
-import { walkContextOptions } from './walkContext.js';
+import { SIGN_IN_BUTTON, walkContextOptions } from './walkContext.js';
 import { installVirtualAuthenticator } from './passkey.js';
 
 test.describe.configure({ mode: 'serial' });
@@ -180,7 +180,7 @@ test.beforeAll(async ({ browser }) => {
   /* A Passport that already exists — the state a scanner is opened from. The
      ceremony itself is drilled by `onboarding.spec.ts`. */
   await page.goto('/');
-  await page.getByRole('button', { name: /Continue with Passport/i }).click();
+  await page.getByRole('button', { name: SIGN_IN_BUTTON }).click();
   await expect(page.getByRole('heading', { name: /Welcome to Passport/i })).toBeVisible({
     timeout: 90_000,
   });
