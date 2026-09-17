@@ -71,6 +71,7 @@ import {
 } from '@playwright/test';
 
 import { installNetworkBoundary, PASSPORT_ACCOUNT_ADDRESS } from './mocks.js';
+import { SIGN_IN_BUTTON } from './walkContext.js';
 
 /*
  * CHROMIUM ONLY, and for a reason that is about the AUTHENTICATOR rather
@@ -252,7 +253,7 @@ async function noCeremonyHung(page: Page): Promise<void> {
 /** First-time enrolment through the landing button, as far as the name step. */
 async function enrol(page: Page): Promise<void> {
   await page.goto('/');
-  await page.getByRole('button', { name: /Continue with Passkey/i }).click();
+  await page.getByRole('button', { name: SIGN_IN_BUTTON }).click();
   await expect(page.getByRole('heading', { name: /Welcome to Passport/i })).toBeVisible({
     timeout: 120_000,
   });
@@ -328,7 +329,7 @@ async function seedClaimedPassport(page: Page, alias: string): Promise<string> {
  */
 async function signOutToLanding(page: Page): Promise<void> {
   const signOut = page.getByRole('button', { name: /Sign out of this Passport/i });
-  const landing = page.getByRole('button', { name: /Continue with Passkey/i });
+  const landing = page.getByRole('button', { name: SIGN_IN_BUTTON });
   const deadline = Date.now() + 90_000;
   for (;;) {
     if (await landing.isVisible().catch(() => false)) return;
@@ -427,7 +428,7 @@ for (const { label, shape, alias } of WALKABLE_SHAPES) {
        back in through the one button on the landing screen. */
     await signOutToLanding(h.page);
     await resetCeremonies(h.page);
-    await h.page.getByRole('button', { name: /Continue with Passkey/i }).click();
+    await h.page.getByRole('button', { name: SIGN_IN_BUTTON }).click();
     await onHome(h.page);
     expect(await ceremonies(h.page)).toEqual({ started: 1, done: 1 });
 
@@ -447,7 +448,7 @@ test('a passkey that cannot derive a key says so in plain words, and never loops
      offers to do about it. */
   const h = await harness(browser, { largeBlob: false, prf: false });
   await h.page.goto('/');
-  await h.page.getByRole('button', { name: /Continue with Passkey/i }).click();
+  await h.page.getByRole('button', { name: SIGN_IN_BUTTON }).click();
 
   /* WHAT IT USED TO SAY, AND THE POINT OF THE FIX. "Passport passkeys require
      a valid HTTPS origin or localhost relying-party domain." — on localhost,
@@ -480,7 +481,7 @@ test('a passkey that cannot derive a key says so in plain words, and never loops
   /* PRESSED AGAIN, because a person in a dead end presses the main button
      again. It must land in the same explained state rather than degrading into
      a raw platform message or a second, contradictory panel. */
-  await h.page.getByRole('button', { name: /Continue with Passkey/i }).click();
+  await h.page.getByRole('button', { name: SIGN_IN_BUTTON }).click();
   await expect(panel).toBeVisible({ timeout: 120_000 });
   await expect(panel).toHaveCount(1);
   expect(await h.page.locator('body').innerText()).not.toMatch(/HTTPS origin/i);
@@ -854,7 +855,7 @@ test('a passkey answered from another device is waited for, and asked for once',
 
   await signOutToLanding(h.page);
   await resetCeremonies(h.page);
-  await h.page.getByRole('button', { name: /Continue with Passkey/i }).click();
+  await h.page.getByRole('button', { name: SIGN_IN_BUTTON }).click();
 
   /* WHILE IT WAITS: the working stage, with the instruction that matches what
      the platform is showing, and no second ceremony raised on top of the sheet
