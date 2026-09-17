@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   awaitSponsorReadiness,
   balancingFailure,
+  contractProvingRoute,
   hexToBytes,
   resetSharedProviders,
   resolveTransactionHash,
@@ -942,5 +943,109 @@ describe('resolveTxHashOnce', () => {
        wrong one. */
     await expect(settled).resolves.toBe('ff00');
     expect(attempts).toBe(3);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* Which proof servers serve which module                                     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * TWO LISTS, BECAUSE THERE ARE TWO INTERMEDIATE REPRESENTATIONS, and the
+ * failure this prevents is a silent one.
+ *
+ * `account`, `account-v1`, and `midnames` are ZKIR v2 and prove where they
+ * always have: `VITE_MIDNIGHT_PROVING_URL`, the 1AM gateway included, and the
+ * in-tab worker when nothing is named. `account-custody` is ZKIR v3, which neither
+ * the worker (`@midnight-ntwrk/zkir-v2`) nor the gateway
+ * (`ledger9-zkir2-dispatch`) can prove — and the worker does not say so: it
+ * fails with a key-format error, which reads as a bad artefact rather than an
+ * unsupported IR. So the account custody
+ * module reads its own list, and an empty one is a refusal.
+ */
+describe('contractProvingRoute', () => {
+  const V2 = ['https://prover.example/prover', 'https://gateway.example'];
+  const V3 = ['https://prover.example/prover-v3'];
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('leaves every existing module on the list it has always used', () => {
+    const network = { provingServerUrls: V2, provingServerUrlsV3: V3 };
+    for (const module of ['account', 'account-v1', 'midnames'] as const) {
+      expect(contractProvingRoute(network, module)).toEqual({
+        urls: V2,
+        mayProveInTab: true,
+      });
+    }
+  });
+
+  it('still lets an unconfigured build prove the old modules in this tab', () => {
+    /* The stagenet default: no proof server at all. Unchanged. */
+    expect(
+      contractProvingRoute({ provingServerUrls: [], provingServerUrlsV3: [] }, 'account'),
+    ).toEqual({ urls: [], mayProveInTab: true });
+  });
+
+  it('sends the account custody module to the v3 list, and to nothing else', () => {
+    const route = contractProvingRoute(
+      { provingServerUrls: V2, provingServerUrlsV3: V3 },
+      'account-custody',
+    );
+    expect(route.urls).toEqual(V3);
+    /* Not one entry of the v2 list, however long it is: `failoverProvingProvider`
+       would try each in order and each would fail per request. */
+    for (const url of V2) expect(route.urls).not.toContain(url);
+  });
+
+  it('never lets the account custody module fall back to the in-tab prover', () => {
+    expect(
+      contractProvingRoute({ provingServerUrls: V2, provingServerUrlsV3: V3 }, 'account-custody')
+        .mayProveInTab,
+    ).toBe(false);
+  });
+
+  it('refuses in plain words when no v3 server is configured', () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(() =>
+      contractProvingRoute({ provingServerUrls: V2, provingServerUrlsV3: [] }, 'account-custody'),
+    ).toThrow('Passport cannot prepare this kind of account on this build.');
+  });
+
+  it('says nothing to the holder that a holder has no word for', () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const message = (() => {
+      try {
+        contractProvingRoute({ provingServerUrls: V2, provingServerUrlsV3: [] }, 'account-custody');
+        return '';
+      } catch (cause) {
+        return (cause as Error).message;
+      }
+    })();
+    /* Constraint (b): none of this vocabulary reaches a screen. */
+    for (const word of [
+      'wallet address',
+      'DUST',
+      'contract',
+      'registry',
+      'indexer',
+      'resolver',
+      'sponsor',
+      'SDK',
+    ]) {
+      expect(message.toLowerCase()).not.toContain(word.toLowerCase());
+    }
+  });
+
+  it('tells the OPERATOR which variable is unset, on the console rather than the screen', () => {
+    /* The other half of the same rule: the sentence a holder reads names
+       nothing, so the thing an operator has to fix is logged beside it. */
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(() =>
+      contractProvingRoute({ provingServerUrls: [], provingServerUrlsV3: [] }, 'account-custody'),
+    ).toThrow();
+    expect(warn).toHaveBeenCalledOnce();
+    expect(String(warn.mock.calls[0]?.[0])).toContain('VITE_MIDNIGHT_PROVING_URL_V3');
   });
 });
