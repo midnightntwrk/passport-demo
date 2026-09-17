@@ -615,7 +615,7 @@ export async function reconcileK1CoinFromChain(
  */
 export function k1PrivateStateId(account: K1Account): string {
   const target = requireAccount(account);
-  return `passport-account-k1-${target.network}-${target.address}`;
+  return `passport-account-custody-${target.network}-${target.address}`;
 }
 
 /**
