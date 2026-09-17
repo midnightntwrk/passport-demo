@@ -349,6 +349,19 @@ export function sealedShieldedDeposit(
 export const INBOX_SCAN_MAX = 64n;
 
 /**
+ * What a walk of the new inbox slots found, which is THREE answers and not two.
+ *
+ * `absent` and `unreadable` are both "our entry is not here", and they mean
+ * opposite things about what may be concluded from anything else. `absent` is a
+ * map this service walked and did not find itself in, which is a fact about
+ * this deposit: it has not landed yet. `unreadable` is a map it could not walk
+ * at all, which is a fact about this build's decode and about nothing else —
+ * the only case in which the deposit transaction's own inclusion is allowed to
+ * stand in for the entry.
+ */
+export type InboxScan = 'found' | 'absent' | 'unreadable';
+
+/**
  * Whether one of the inbox slots that appeared since `before` holds `entry`.
  *
  * The indices are SCANNED rather than assumed, because `inbox_count` is not
@@ -358,25 +371,30 @@ export const INBOX_SCAN_MAX = 64n;
  * and by {@link INBOX_SCAN_MAX}, so a burst of somebody else's traffic cannot
  * turn one confirmation into thousands of map lookups.
  *
- * `read` answers `null` for a slot it cannot read, which is the honest answer
- * for a build whose map this service cannot walk; the caller then falls back to
- * the deposit transaction's own inclusion — weaker, but still a fact about this
- * deposit rather than about the account.
+ * `read` answers `null` for a slot it cannot read. A walk in which no new slot
+ * could be read is `unreadable` — the map is one this build does not know, and
+ * it has said nothing either way — while a walk that read slots and found none
+ * of them ours is `absent`, which is the map saying our coin is not there yet.
+ * A build that sealed nothing has nothing to look for, and that too is `absent`
+ * rather than an invitation to confirm on weaker evidence.
  */
-export function inboxHoldsEntry(
+export function scanInboxForEntry(
   read: (index: bigint) => Uint8Array | null,
   before: bigint,
   observed: bigint,
   entry: Uint8Array | null,
-): boolean {
-  if (entry === null || observed <= before) return false;
+): InboxScan {
+  if (entry === null || observed <= before) return 'absent';
   const last = observed - 1n;
   const first = observed - before > INBOX_SCAN_MAX ? last - (INBOX_SCAN_MAX - 1n) : before;
+  let readAny = false;
   for (let index = first; index <= last; index += 1n) {
     const found = read(index);
-    if (found !== null && sameEntryBytes(found, entry)) return true;
+    if (found === null) continue;
+    readAny = true;
+    if (sameEntryBytes(found, entry)) return 'found';
   }
-  return false;
+  return readAny ? 'absent' : 'unreadable';
 }
 
 /** Byte for byte, length first. */
@@ -390,16 +408,21 @@ function sameEntryBytes(a: Uint8Array, b: Uint8Array): boolean {
  * What the chain says about a k1 deposit, as opposed to what it says about the
  * inbox.
  *
- * Both fields are about THIS deposit and neither is about the account's
- * activity. `entryFound` is the strong one: the 192 bytes this service sealed,
- * found in the account's public `inbox` map. `included` is the weaker one, for
- * a state read that could not be decoded far enough to walk the map — the
- * deposit transaction itself resolved to a block at the indexer, so it is on
- * chain rather than merely submitted.
+ * Every field is about THIS deposit and none is about the account's activity.
+ * `entryFound` is the strong one: the 192 bytes this service sealed, found in
+ * the account's public `inbox` map. `included` is the weaker one, and weaker
+ * than it looks — the indexer maps the deposit's identifier to a block, and a
+ * transaction that reached a block may still have been refused there. Nothing
+ * in that answer says the deposit SUCCEEDED, so paired with an inbox that grew
+ * it would confirm a failed deposit whenever anybody else wrote to the account
+ * in the same minutes. It stands only where `inboxUnreadable` says the entry
+ * could not be looked for at all, which is the fallback it was written to be.
  */
 export interface OwnDepositEvidence {
   /** The entry this service sealed is in the account's inbox. */
   readonly entryFound: boolean;
+  /** The inbox could not be walked, so the entry could not be looked for. */
+  readonly inboxUnreadable: boolean;
   /** The deposit transaction resolved to a block. */
   readonly included: boolean;
 }
@@ -419,9 +442,13 @@ export interface OwnDepositEvidence {
  * report a coin delivered that had in fact been refused. It is necessary —
  * nothing was written if the inbox did not move — and on its own it is nothing.
  *
- * What confirms is `evidence`: this service's OWN entry in the map, or failing
- * that its own transaction in a block. Called without evidence, a k1 deposit is
- * never confirmed, which is the honest answer when the caller has not looked.
+ * What confirms is `evidence`: this service's OWN entry in the map. Only where
+ * the map could not be walked at all does its own transaction reaching a block
+ * stand in for that, because a block is where a transaction was processed and
+ * not proof that it was accepted — on a map this service CAN walk, an entry it
+ * cannot find is an entry that is not there. Called without evidence, a k1
+ * deposit is never confirmed, which is the honest answer when the caller has
+ * not looked.
  */
 export function shieldedDepositConfirmed(
   module: AccountModuleName,
@@ -432,5 +459,6 @@ export function shieldedDepositConfirmed(
 ): boolean {
   if (accountDeposits(module).mirrorsShieldedBalance) return observed >= before + amount;
   if (observed <= before) return false;
-  return evidence?.entryFound === true || evidence?.included === true;
+  if (evidence?.entryFound === true) return true;
+  return evidence?.inboxUnreadable === true && evidence.included === true;
 }

@@ -75,7 +75,7 @@ import {
   proverForModule,
   type AccountModuleName,
   accountEncKey,
-  inboxHoldsEntry,
+  scanInboxForEntry,
   InboxEntryRequired,
   sealedShieldedDeposit,
   shieldedDepositConfirmed,
@@ -2004,9 +2004,13 @@ export async function createAccountFunder(
          found in the public `inbox` map at one of the indices that have
          appeared since. Nothing else can produce them. When the map cannot be
          walked at all — an older decode, a shape this build does not know —
-         the fallback is the deposit TRANSACTION resolving to a block at the
-         indexer, which is still a fact about this deposit and not about the
-         account's week. */
+         and ONLY then, the fallback is the deposit TRANSACTION resolving to a
+         block at the indexer, which is still a fact about this deposit and not
+         about the account's week. It is only a fallback because reaching a
+         block is not the same as being accepted in it: the indexer answers
+         where a transaction was processed and never whether it succeeded, so
+         beside an inbox somebody else grew it would report a refused deposit
+         as delivered. Where the map can be walked, the map decides. */
       let balanceAfter: bigint | null = null;
       let confirmed = false;
       let sawInbox: bigint | null = inboxBefore;
@@ -2018,19 +2022,29 @@ export async function createAccountFunder(
               ? after.shielded(colourBytes) ?? 0n
               : after.inboxCount() ?? inboxBefore;
           if (inboxBefore !== null) sawInbox = observed;
-          const evidence =
+          const scan =
             inboxBefore === null
+              ? null
+              : scanInboxForEntry(
+                  (index) => after.inboxEntry(index),
+                  inboxBefore,
+                  observed,
+                  sealedEntry,
+                );
+          const evidence =
+            inboxBefore === null || scan === null
               ? undefined
               : {
-                  entryFound: inboxHoldsEntry(
-                    (index) => after.inboxEntry(index),
-                    inboxBefore,
-                    observed,
-                    sealedEntry,
-                  ),
-                  /* Asked only once the inbox has moved, so the ordinary path
-                     costs no extra indexer round trip. */
+                  entryFound: scan === 'found',
+                  inboxUnreadable: scan === 'unreadable',
+                  /* Asked only where the map could not be walked at all, which
+                     is the one case this answer decides — so the ordinary path
+                     costs no extra indexer round trip, and a walked map that
+                     does not hold our entry is never talked out of itself by
+                     a block height that says nothing about whether the deposit
+                     was accepted in it. */
                   included:
+                    scan === 'unreadable' &&
                     observed > inboxBefore &&
                     (await resolveTransactionHash(config.indexerHttpUrls, depositTx)).block !==
                       null,

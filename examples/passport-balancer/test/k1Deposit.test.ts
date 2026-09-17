@@ -18,7 +18,7 @@ import {
   InboxEntryRequired,
   accountEncKey,
   accountDeposits,
-  inboxHoldsEntry,
+  scanInboxForEntry,
   INBOX_SCAN_MAX,
   sealedShieldedArgs,
   sealedShieldedDeposit,
@@ -148,23 +148,45 @@ test('a k1 deposit is NOT confirmed by the inbox merely growing', () => {
   assert.equal(shieldedDepositConfirmed('account-k1', 7n, 8n, 5_000_000n), false);
   assert.equal(shieldedDepositConfirmed('account-k1', 0n, 9n, 1n), false);
   /* Not even with evidence, if the inbox never moved: nothing was written. */
-  const both = { entryFound: true, included: true };
+  const both = { entryFound: true, inboxUnreadable: false, included: true };
   assert.equal(shieldedDepositConfirmed('account-k1', 7n, 7n, 5_000_000n, both), false);
 });
 
-test('a k1 deposit is confirmed by OUR entry, or failing that by OUR transaction', () => {
-  const grew = (evidence: { entryFound: boolean; included: boolean }): boolean =>
-    shieldedDepositConfirmed('account-k1', 7n, 8n, 5_000_000n, evidence);
-  assert.equal(grew({ entryFound: true, included: false }), true);
-  assert.equal(grew({ entryFound: false, included: true }), true);
-  assert.equal(grew({ entryFound: false, included: false }), false);
+test('a k1 deposit is confirmed by OUR entry, and by nothing weaker where the map can be read', () => {
+  const grew = (evidence: {
+    entryFound: boolean;
+    inboxUnreadable: boolean;
+    included: boolean;
+  }): boolean => shieldedDepositConfirmed('account-k1', 7n, 8n, 5_000_000n, evidence);
+  assert.equal(grew({ entryFound: true, inboxUnreadable: false, included: false }), true);
+  /* THE CORRECTION. A deposit that reached a block is not a deposit that was
+     accepted in it — the indexer resolves an identifier to a block and carries
+     no verdict — so on a map this service walked and did not find itself in,
+     inclusion decides nothing. Otherwise a refused deposit would be reported as
+     delivered on any account somebody else wrote to in the same minutes, which
+     is the busy Passport this whole confirmation exists to stop trusting. */
+  assert.equal(grew({ entryFound: false, inboxUnreadable: false, included: true }), false);
+  assert.equal(grew({ entryFound: false, inboxUnreadable: false, included: false }), false);
+});
+
+test('inclusion stands in for the entry only where the inbox could not be walked', () => {
+  const grew = (evidence: {
+    entryFound: boolean;
+    inboxUnreadable: boolean;
+    included: boolean;
+  }): boolean => shieldedDepositConfirmed('account-k1', 7n, 8n, 5_000_000n, evidence);
+  /* A map this build cannot decode has said nothing either way, and the
+     transaction's own block is then the only fact about this deposit there is. */
+  assert.equal(grew({ entryFound: false, inboxUnreadable: true, included: true }), true);
+  /* Unreadable and not even included is no evidence at all. */
+  assert.equal(grew({ entryFound: false, inboxUnreadable: true, included: false }), false);
 });
 
 test('the prototype builds are unchanged by any of it', () => {
   assert.equal(shieldedDepositConfirmed('account', 100n, 149n, 50n), false);
   assert.equal(shieldedDepositConfirmed('account', 100n, 150n, 50n), true);
   /* Evidence is a k1 notion; a mirrored build reads the credit and ignores it. */
-  const none = { entryFound: false, included: false };
+  const none = { entryFound: false, inboxUnreadable: false, included: false };
   assert.equal(shieldedDepositConfirmed('account', 100n, 150n, 50n, none), true);
 });
 
@@ -199,10 +221,11 @@ test('our entry is found wherever in the new slots it landed', () => {
   assert.ok(ours && theirs);
   /* Two entries appeared while we waited and ours is the SECOND: inbox_count is
      nobody's reservation, and another depositor can take the slot we built for. */
-  assert.equal(inboxHoldsEntry(inbox([theirs, ours]), 0n, 2n, ours), true);
-  assert.equal(inboxHoldsEntry(inbox([ours, theirs]), 0n, 2n, ours), true);
-  /* Somebody else's growth is not ours. */
-  assert.equal(inboxHoldsEntry(inbox([theirs]), 0n, 1n, ours), false);
+  assert.equal(scanInboxForEntry(inbox([theirs, ours]), 0n, 2n, ours), 'found');
+  assert.equal(scanInboxForEntry(inbox([ours, theirs]), 0n, 2n, ours), 'found');
+  /* Somebody else's growth is not ours — and the map was read, so this is the
+     map saying our coin is not there, not the map saying nothing. */
+  assert.equal(scanInboxForEntry(inbox([theirs]), 0n, 1n, ours), 'absent');
 });
 
 test('it never looks at slots that were already there', () => {
@@ -212,9 +235,9 @@ test('it never looks at slots that were already there', () => {
   const read = inbox([ours, ours]);
   /* Two entries before us and no growth: nothing of ours has been written,
      whatever the account happens to be holding from an earlier deposit. */
-  assert.equal(inboxHoldsEntry(read, 2n, 2n, ours), false);
+  assert.equal(scanInboxForEntry(read, 2n, 2n, ours), 'absent');
   const looked: bigint[] = [];
-  inboxHoldsEntry(
+  scanInboxForEntry(
     (index) => {
       looked.push(index);
       return null;
@@ -231,7 +254,7 @@ test('a burst of somebody else’s traffic does not turn one check into thousand
   const ours = sealedShieldedDeposit('account-k1', COIN, owner.publicKey).entry;
   assert.ok(ours);
   let reads = 0;
-  inboxHoldsEntry(
+  scanInboxForEntry(
     () => {
       reads += 1;
       return null;
@@ -246,10 +269,19 @@ test('a burst of somebody else’s traffic does not turn one check into thousand
 test('an inbox this service cannot walk is no evidence, not false evidence', () => {
   const owner = generateEncKeyPair();
   const ours = sealedShieldedDeposit('account-k1', COIN, owner.publicKey).entry;
-  assert.ok(ours);
-  /* Every slot unreadable: the answer is false, and `included` is what the
-     caller falls back to rather than a confirmation invented here. */
-  assert.equal(inboxHoldsEntry(() => null, 0n, 3n, ours), false);
-  /* And a build that sealed nothing has nothing to look for. */
-  assert.equal(inboxHoldsEntry(inbox([ours]), 0n, 1n, null), false);
+  const theirs = sealedShieldedDeposit('account-k1', COIN, owner.publicKey).entry;
+  assert.ok(ours && theirs);
+  /* Every slot unreadable: the walk says so in its own word, and `included` is
+     what the caller may then fall back to rather than a confirmation invented
+     here. This is the ONLY answer that lets it fall back at all. */
+  assert.equal(scanInboxForEntry(() => null, 0n, 3n, ours), 'unreadable');
+  /* One slot read is a map that was walked, however little of it came back. */
+  assert.equal(
+    scanInboxForEntry(inbox([theirs, null, null]), 0n, 3n, ours),
+    'absent',
+    'a map that answered at all has answered about us',
+  );
+  /* And a build that sealed nothing has nothing to look for, which is not the
+     same as a map that could not be read: it may not fall back either. */
+  assert.equal(scanInboxForEntry(inbox([ours]), 0n, 1n, null), 'absent');
 });
