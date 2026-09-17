@@ -187,6 +187,84 @@ Beside the store sits the inbox: 192-byte InboxEntry v1, X25519 → HKDF-SHA256 
 no equivalent. **This section is the largest piece of unbudgeted work in the plan**, and
 the shielded balance depends on all of it.
 
+### 3a. As built — the store wired in, 2026/09/17
+
+All three of the problems above are answered. What follows is what was actually built,
+including the two things the design did not anticipate.
+
+**One private-state id, computed from the address.** The store keys everything by network
+and address (`k1PrivateStateId`), and the deploy record made its own id from the Dynamic
+user because the account has no address until wave 1 lands. Those were two different
+strings, and a witness reading one while the store writes the other is a Passport that can
+be paid and can never spend. `custodyPrivateStateId(record)` is now the only answer: the
+record's id before there is an address, and the store's from the moment there is one. Wave
+1 writes the store's id into the record as it lands, so a reader of the record sees one id
+and not two, and a record written by an earlier build resolves to the same place because
+the id is computed from the address rather than read.
+
+**The store IS the private state.** `defaultCustodyDeps().providers` substitutes
+`k1PrivateStateProvider(account)` for the in-memory provider `createContractProviders`
+builds, and `custodyWitnesses().held_coin` reads `context.privateState.coins[colourHex]`
+and returns the private state unchanged. A missing coin throws one sentence.
+
+**midnight-js writes the private state back, and it is a write we do not make.**
+`submitCallTx` builds a call against the private state it read BEFORE the circuit ran,
+carries it through as `nextPrivateState` — `held_coin` is a read, so it is unchanged — and
+on success writes it back through the provider. That state still holds the coin the
+withdrawal has just consumed. The ordering happens to favour us today (the write lands
+before the call's promise resolves, so the caller's own write is later), and ordering is
+not something to depend on: it is midnight-js's, and `submitCallTxAsync` already hands the
+write back to the caller entirely. So `k1PrivateStateProvider.set` MERGES rather than
+overwrites — a row whose nonce the store has recorded as spent is dropped, a colour the
+store already holds keeps the stored coin, and the queue, the spent list, and the
+candidates are never taken from an incoming state. Drilled in both orders.
+
+**The candidate rule.** A withdrawal's transaction carries two shielded outputs — the
+payee's note and the account's change — so the indexer's commitment window gives two
+positions and nothing distinguishes them client-side. The candidates are stored in the
+order the window gives them (`mtIndexCandidates`, head = the current guess); the next
+spend tries the head; a failure naming the merkle path, a witness, or an unsatisfiable
+constraint retries with the next candidate; the one that proves is settled. An incorrect
+position cannot be proved, so nothing is submitted and nothing is spent (INV-5), which is
+what makes the retry free. **The actual output order is not yet established** — it needs a
+live stagenet run, and until then candidate 0 is tried first because it is the first, not
+because anything says it is the change. Nothing stores a guess as a fact.
+
+**A state the design did not name: described, held, unspendable.** The change coin arrives
+as the circuit's JS return value (`callResult.private.result`, extracted by that name and
+never the privacy-sensitive object around it) and carries no `mt_index`, because the
+position is allocated by the transaction being submitted at that moment. That description
+exists nowhere else in the world. So the store has an `awaiting` slot: the change is
+written there in the SAME write that records the spend, before anything is asked of the
+indexer, and `settleK1AwaitingCoin` files it into `coins` whenever the answer arrives — a
+second later, after a reload, or tomorrow. An awaiting coin is never handed to the witness
+and never counted as balance; it is arriving, which is what it is.
+
+**More than one coin per colour.** The contract holds any number and the witness names
+one, so the second and later coins of a colour are queued behind the held one. Balance
+shown is held + queued; what one payment can draw on is the held coin alone, and the
+refusal for the difference says that in a sentence rather than claiming the holder is
+poorer than they are.
+
+**Three legs, and where the value is.** `planCustodyShieldedSend` is leg 1
+`withdraw_shielded_with_k256` to this Passport's own coin public key for EXACTLY the
+amount (the change comes back described, so there is no whole-coin workaround and no third
+transaction putting the difference back — unlike the passkey path, which needs both
+because of node error 239); leg 2 the note identified by nonce; leg 3 `deposit_shielded`
+into the recipient — the note alone into a prototype account, the note and an entry sealed
+to a LIVE-read `enc_key` into another custody account, submitted through
+`custodyPermissionlessCallAt`, which opens the recipient's address with none of this
+Passport's own store served to it. A leg 3 that fails deposits the note back into the
+sender's own account, sealed to the sender's own key; if that fails too,
+`custodyShieldedSendOutcome` says the value is held at the sender's own receiving address
+rather than claiming it came back. The record that survives a closed tab
+(`CUSTODY_SHIELDED_SEND_KEY`) carries the colour, the amount, the recipient, and the note
+— one per account, because the app makes one payment at a time.
+
+**Proving.** The gated circuits (235 MB keys) go to the sponsor's own proving route; the
+deposits (0.4 MB and 11 MB) prove on the ordinary v3 route `createContractProviders`
+already builds, so a payment does not queue behind a 235 MB proof.
+
 ## 4. Migration, through `accountUpgrade.ts`
 
 Extend the machine, do not rewrite it. Drain → deploy → re-point → refund → switch, with

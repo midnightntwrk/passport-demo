@@ -1478,6 +1478,52 @@ export async function custodyPermissionlessCallAt(
   };
 }
 
+/**
+ * Leg three into another one of these accounts: the note, and a description of
+ * it the recipient can open.
+ *
+ * TWO ARGUMENTS AND BOTH ARE LOAD-BEARING. `deposit_shielded(coin, entry)`
+ * takes the note into the recipient's balance and 192 opaque bytes into its
+ * inbox, and the second is the only thing that will ever tell the recipient
+ * what it was sent: the chain carries the note, not its description, so a
+ * deposit made without a readable entry is a coin that has demonstrably
+ * arrived and that nobody can ever move again.
+ *
+ * THE KEY IS READ LIVE BY THE CALLER AND PASSED IN. An account rotates its
+ * encryption key, and an entry sealed to a key it has rotated away from is
+ * exactly the coin described above. Callers pass the value they have just
+ * read; they must not pass one they read yesterday.
+ *
+ * This is also the DEPOSIT-BACK: a leg three that failed puts the note into
+ * the SENDER's own account by calling this with the sender's own address and
+ * the sender's own key, which is one more permissionless deposit and no
+ * approval from anybody.
+ */
+export async function depositShieldedIntoCustody(
+  session: CustodyDynamicSession,
+  request: {
+    readonly targetAddress: string;
+    readonly recipientEncKeyHex: string;
+    readonly coin: { readonly colour: string; readonly nonce: string; readonly value: bigint };
+  },
+  onPhase?: (phase: CustodyPhase) => void,
+  overrides: Partial<CustodyDeps> = {},
+): Promise<CustodyStepResult> {
+  const { depositShieldedCustody } = await import('./custodyInbox.js');
+  const sealed = await depositShieldedCustody(request.recipientEncKeyHex, {
+    colour: request.coin.colour,
+    nonce: request.coin.nonce,
+    value: request.coin.value,
+  });
+  return custodyPermissionlessCallAt(
+    session,
+    request.targetAddress,
+    { operation: 'deposit_shielded', args: [sealed.coin, sealed.entry] },
+    onPhase,
+    overrides,
+  );
+}
+
 export async function appendInboxK1(
   session: CustodyDynamicSession,
   device: K256DeviceIdentity,

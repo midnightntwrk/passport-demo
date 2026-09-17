@@ -38,6 +38,7 @@ import {
   custodyPermissionlessCallAt,
   custodyPrivateStateId,
   custodyProofProvider,
+  depositShieldedIntoCustody,
   k1Call,
   k1UserKey,
   custodyWalletSeed,
@@ -1624,5 +1625,40 @@ describe('the shielded withdrawal', () => {
         test.deps,
       ),
     ).rejects.toThrow(/not finished being set up/);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+
+describe('leg three into another one of these accounts', () => {
+  it('seals a description the recipient can open and sends it with the note', async () => {
+    const test = harness();
+    const fake = deviceFake();
+    await deployCustodyAccount(fake.session, fake.device, undefined, test.deps);
+    await activateK1Device(fake.session, fake.device, undefined, test.deps);
+    const peer = 'cd'.repeat(32);
+
+    await depositShieldedIntoCustody(
+      fake.session,
+      {
+        targetAddress: peer,
+        recipientEncKeyHex: 'ab'.repeat(32),
+        coin: { colour: '1a'.repeat(32), nonce: '7f'.repeat(32), value: 40n },
+      },
+      undefined,
+      test.deps,
+    );
+
+    const call = test.calls.find((c) => c.circuit === 'deposit_shielded');
+    expect(call?.args).toHaveLength(2);
+    expect(call?.args[0]).toEqual({
+      nonce: hexToBytes('7f'.repeat(32)),
+      color: hexToBytes('1a'.repeat(32)),
+      value: 40n,
+    });
+    /* 192 bytes, whatever is in them — the container is a fixed size so an
+       observer counting bytes learns nothing about the coin. */
+    expect((call?.args[1] as Uint8Array).length).toBe(192);
+    expect(test.opened[test.opened.length - 1]).toBe(peer);
   });
 });
