@@ -1,0 +1,417 @@
+/**
+ * A PASSPORT HELD BY A SOCIAL SIGN-IN — the rules, and only the rules.
+ *
+ * WHAT THIS IS FOR
+ * ----------------
+ * Until this module existed there was exactly one way to be inside Passport: a
+ * passkey on this device, whose PRF output is the seed behind every key the app
+ * holds. `docs/demo/dynamic-build-out-plan.md` §6 sets a second one — sign in
+ * with Google, Discord, Microsoft, or X through Dynamic, and let the account
+ * contract's k256 arm accept the embedded key as its device. No passkey is made,
+ * none is asked for, and the two kinds of Passport coexist and can pay each
+ * other.
+ *
+ * Two ways to be signed in is a thing that can be got wrong quietly, so every
+ * decision that chooses between them is written here as a pure function and
+ * drilled to the branch. The wiring in `App.tsx` reads these answers; it does
+ * not compute any of them.
+ *
+ * THE RULE THAT PROTECTS EVERY EXISTING PASSPORT
+ * ----------------------------------------------
+ * A passkey profile ALWAYS wins. {@link choosePassportIdentity} returns
+ * `'passkey'` the moment one exists, whatever Dynamic says, so a build with no
+ * Dynamic session — which is every build shipped today — takes the same branch
+ * it has always taken, and a passkey holder who happens to sign in with Google
+ * to look at the identity row does not have their Passport swapped underneath
+ * them. The Dynamic path is reachable only from the state where the old path
+ * offers nothing at all: no passkey profile, and a signed-in Dynamic session
+ * with an embedded address.
+ *
+ * WHY THE DYNAMIC EVM ADDRESS IS THE USER KEY
+ * -------------------------------------------
+ * `accountK1Custody.ts` keys its record by the lower-cased embedded address
+ * (`k1UserKey`), because one Dynamic user has exactly one embedded key and that
+ * key is the same on every device after a social recovery. This module keys the
+ * name it has claimed the same way, for the same reason and so an operator
+ * clearing one finds the other beside it.
+ *
+ * NO NETWORK, NO STORAGE HANDLE, NO CLOCK, NO REACT. The storage this module
+ * touches is the same injected three-method `K1Storage` the custody layer takes,
+ * which is why it is in the coverage denominator: every way it can be wrong is a
+ * way of showing somebody the wrong Passport.
+ */
+
+import {
+  loadK1Record,
+  nextK1Step,
+  type K1AccountRecord,
+  type K1Storage,
+} from './accountK1Plan.js';
+import type { NameRecoveryOutcome, ResolvedName } from '../lib/nameRecovery.js';
+import type { PassportIdentityKind } from '../lib/dynamicSession.js';
+
+/* -------------------------------------------------------------------------- */
+/* Which Passport the app is showing                                          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The choice itself lives in `src/lib/dynamicSession.ts`, which imports
+ * nothing, and is re-exported here so a reader of this module finds it where
+ * they expect to. `App.tsx` asks the question on every render and must be able
+ * to import it without pulling this module's deploy record and storage format
+ * into the entry chunk — 29,701 bytes of it, measured 2026/09/16.
+ */
+export {
+  choosePassportIdentity,
+  dynamicUserKey,
+  type PassportIdentityInput,
+  type PassportIdentityKind,
+} from '../lib/dynamicSession.js';
+
+/* -------------------------------------------------------------------------- */
+/* Where a Dynamic Passport is in its own flow                                */
+/* -------------------------------------------------------------------------- */
+
+/** The screen a Dynamic-only holder should be looking at. */
+export type DynamicStage =
+  /** Not signed in, or signed in with no embedded key yet. */
+  | 'sign-in'
+  /** Signed in, nothing set up. "Create my Passport". */
+  | 'create'
+  /** A setup that started and has not finished. Resumable. */
+  | 'resume'
+  /** Set up and unnamed. The `.night` name step. */
+  | 'name'
+  /** Set up and named. Home. */
+  | 'home';
+
+/** Everything the stage is decided from. */
+export interface DynamicStageInput {
+  readonly identity: PassportIdentityKind;
+  /** The setup record for this user on this network, or null. */
+  readonly record: K1AccountRecord | null;
+  /** The `.night` name this Passport holds, or null. */
+  readonly name: string | null;
+}
+
+/**
+ * Which step a Dynamic Passport is on.
+ *
+ * `resume` and `create` are separate because the copy has to be: somebody
+ * returning to a half-finished setup is not being offered a Passport, they are
+ * being told the one they started is still being made. A single "Create my
+ * Passport" over a record with an address would read as an offer to make a
+ * second one.
+ *
+ * A name is NOT a precondition for Home once the account is usable — a holder
+ * who closes the tab on the name step comes back to a working Passport and is
+ * asked again from Home, rather than being held at a screen they already
+ * skipped. That differs from the passkey flow, where the account is set up
+ * THROUGH the claim; here the account is already there.
+ */
+export function dynamicStage(input: DynamicStageInput): DynamicStage {
+  if (input.identity !== 'dynamic') return 'sign-in';
+  if (input.record === null) return 'create';
+  if (nextK1Step(input.record) !== 'ready') {
+    return input.record.address === null ? 'create' : 'resume';
+  }
+  return input.name === null ? 'name' : 'home';
+}
+
+/* -------------------------------------------------------------------------- */
+/* What the setup says while it runs                                          */
+/* -------------------------------------------------------------------------- */
+
+/** The three things a person is told while a Passport is being made. */
+export type DynamicSetupPhase = 'create' | 'finish' | 'activate' | 'done';
+
+/** How many steps the copy counts. See {@link dynamicSetupPhase}. */
+export const DYNAMIC_SETUP_STEPS = 3;
+
+/**
+ * Which of the three visible steps a record is on.
+ *
+ * THREE STEPS, AND NOT FOUR, AND THE DIFFERENCE IS DELIBERATE. Making one of
+ * these Passports is four transactions — a deploy carrying the whole k256 arm,
+ * two maintenance updates carrying the other twenty verifier keys
+ * (`planK1Waves`), and the activation that opens the boot commitment. The
+ * middle two are one thing to the person waiting: the roster going in. Counting
+ * them separately would put a number on screen that changes meaning if the
+ * verifier-key budget ever repacks the waves, and "step 3 of 4" would then
+ * become "step 3 of 5" for a reason nobody outside this repository could
+ * possibly follow.
+ *
+ * So the count is of what a person is waiting FOR, and it is stable: set the
+ * Passport up, finish it, turn the sign-in on.
+ */
+export function dynamicSetupPhase(record: K1AccountRecord | null): DynamicSetupPhase {
+  if (record === null) return 'create';
+  const step = nextK1Step(record);
+  if (step === 'deploy') return 'create';
+  if (step === 'waves') return 'finish';
+  if (step === 'activate') return 'activate';
+  return 'done';
+}
+
+/** The step number a phase is, 1-based. `done` is past the last one. */
+export function dynamicSetupStep(phase: DynamicSetupPhase): number {
+  if (phase === 'create') return 1;
+  if (phase === 'finish') return 2;
+  if (phase === 'activate') return 3;
+  return DYNAMIC_SETUP_STEPS;
+}
+
+/**
+ * The sentence under the spinner.
+ *
+ * NONE OF THE FORBIDDEN WORDS. No contract, no wallet address, no sponsor, no
+ * registry, no fee token — the same rule `K1Milestone.tsx` keeps, and the
+ * reason is the same: these sentences are read by people who are not us.
+ */
+export function dynamicSetupCopy(phase: DynamicSetupPhase): string {
+  if (phase === 'done') return 'Your Passport is ready.';
+  return `Setting up your Passport, step ${dynamicSetupStep(phase)} of ${DYNAMIC_SETUP_STEPS}`;
+}
+
+/**
+ * What the control under it says.
+ *
+ * A setup that has not started is an OFFER and says so; one that has is a
+ * continuation, and the word "create" must not appear on it.
+ */
+export function dynamicSetupAction(record: K1AccountRecord | null): string {
+  if (record === null || record.address === null) return 'Create my Passport';
+  return 'Finish setting up my Passport';
+}
+
+/* -------------------------------------------------------------------------- */
+/* The `.night` name this Passport holds                                      */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * `passport-k1-name:v1` — the name a Dynamic Passport has claimed, per user and
+ * network.
+ *
+ * Its own key rather than a field on `K1AccountRecord` because that record
+ * belongs to `accountK1Custody.ts` and is written by the deploy; a name is
+ * claimed long after the last wave, by a different flow, and a reader merging
+ * into somebody else's record is how two writers lose each other's fields.
+ * Same versioned-key convention as `passport-contract:v1` and
+ * `passport-k1-account:v1`.
+ */
+export const K1_NAME_KEY = 'passport-k1-name:v1';
+
+/** The map key, matching `k1RecordKey`. */
+export function k1NameKey(user: string, network: string): string {
+  return `${user.toLowerCase()}|${network}`;
+}
+
+/**
+ * Every name held, or an empty map.
+ *
+ * A storage that throws — private browsing, a browser set to block site data —
+ * reads as empty, exactly as the record store does. The cost is being asked to
+ * choose a name again; the cost of throwing is a Passport that will not open.
+ */
+export function loadK1Names(storage: K1Storage): Record<string, string> {
+  let raw: string | null = null;
+  try {
+    raw = storage.getItem(K1_NAME_KEY);
+  } catch {
+    return {};
+  }
+  if (raw === null) return {};
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    const names: Record<string, string> = {};
+    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof value === 'string' && value.length > 0) names[key] = value;
+    }
+    return names;
+  } catch {
+    return {};
+  }
+}
+
+/** The name this user holds on this network, or null. */
+export function loadK1Name(storage: K1Storage, user: string, network: string): string | null {
+  return loadK1Names(storage)[k1NameKey(user, network)] ?? null;
+}
+
+/** Remember a claimed name, merged into whatever else is stored. */
+export function saveK1Name(
+  storage: K1Storage,
+  user: string,
+  network: string,
+  name: string,
+): void {
+  const names = loadK1Names(storage);
+  names[k1NameKey(user, network)] = name;
+  try {
+    storage.setItem(K1_NAME_KEY, JSON.stringify(names));
+  } catch (cause) {
+    console.warn('[k1] could not remember this name; it will be asked for again', cause);
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Reading a whole Dynamic session out of storage                             */
+/* -------------------------------------------------------------------------- */
+
+/** Everything the host needs to render a Dynamic-only Passport. */
+export interface DynamicPassportView {
+  readonly user: string;
+  readonly network: string;
+  readonly record: K1AccountRecord | null;
+  readonly name: string | null;
+  readonly address: string | null;
+  readonly stage: DynamicStage;
+}
+
+/**
+ * The whole view, from storage, in one read.
+ *
+ * One function so `App.tsx` cannot assemble half of it: the stage depends on
+ * both the record and the name, and a host that read one of them from a stale
+ * render would show the name step over a Passport that already has a name.
+ */
+export function readDynamicPassport(options: {
+  storage: K1Storage;
+  user: string;
+  network: string;
+}): DynamicPassportView {
+  const user = options.user.toLowerCase();
+  const record = loadK1Record(options.storage, user, options.network);
+  const name = loadK1Name(options.storage, user, options.network);
+  return {
+    user,
+    network: options.network,
+    record,
+    name,
+    address: record?.address ?? null,
+    stage: dynamicStage({ identity: 'dynamic', record, name }),
+  };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Coming back on a new device, by name                                       */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The circuit that says a deployed account is a k1 build.
+ *
+ * The same discriminator `accountModuleFor` uses, and for the same reason: the
+ * answer is the DEPLOYED CIRCUIT SET read off the chain, never a local record.
+ * Neither prototype build carries this name.
+ */
+export const K1_MARKER_CIRCUIT = 'withdraw_shielded_with_k256';
+
+/** What a recovery attempt has managed to find out. */
+export interface K1RecoveryProbe {
+  /**
+   * The circuit names the account really carries, or null when the read could
+   * not be completed. Null is UNREACHABLE and never "no".
+   */
+  readonly operations: readonly string[] | null;
+  /**
+   * Whether the account's device set contains the entry this Dynamic key
+   * derives, or null when the read could not be completed.
+   *
+   * A `boolean | null` rather than a `boolean` for the reason `nameRecovery.ts`
+   * gives at length: a question that could not be put must never arrive here
+   * dressed as a `false`, because `false` tells a person their Passport is not
+   * theirs.
+   */
+  readonly holdsDevice: boolean | null;
+}
+
+/**
+ * Whether a resolved name is a Passport this Dynamic sign-in can open.
+ *
+ * THREE WAYS TO SAY NO, AND THEY ARE NOT THE SAME THING.
+ *
+ *   - The name resolves to a PASSKEY Passport. That is `not-yours` — it is a
+ *     real Passport and a real name, and this sign-in is not part of it. There
+ *     is no migration in this version (§6 of the build-out plan), so there is
+ *     nothing to offer such a person here beyond the truth.
+ *   - The name resolves to a Dynamic Passport whose devices do not include this
+ *     key. Also `not-yours`, and deliberately the same answer: telling somebody
+ *     WHICH of the two it was would be telling them about an account that is
+ *     not theirs.
+ *   - A read did not complete. `unreachable`, always, carrying why.
+ */
+export function k1RecoveryOutcome(
+  resolved: ResolvedName,
+  probe: K1RecoveryProbe,
+): NameRecoveryOutcome {
+  if (probe.operations === null) {
+    return {
+      kind: 'unreachable',
+      detail: 'Midnight could not be reached to check that name. Try again in a moment.',
+    };
+  }
+  if (!probe.operations.includes(K1_MARKER_CIRCUIT)) return { kind: 'not-yours' };
+  if (probe.holdsDevice === null) {
+    return {
+      kind: 'unreachable',
+      detail: 'Midnight could not be reached to check that name. Try again in a moment.',
+    };
+  }
+  if (!probe.holdsDevice) return { kind: 'not-yours' };
+  return {
+    kind: 'found',
+    address: resolved.target.hex,
+    resolverAddress: resolved.resolverAddress,
+  };
+}
+
+/**
+ * The record a successful recovery writes, so the restored Passport is usable
+ * without being deployed again.
+ *
+ * `wavesDone` is set to `totalWaves` and `activated` to true because both are
+ * FACTS ABOUT THE CHAIN that the recovery just established: an account whose
+ * device set contains this key has been through every wave and been activated,
+ * or the entry could not be in it. Writing anything less would put a finished
+ * Passport back on the setup screen.
+ *
+ * The salt is deliberately empty. It opens the boot commitment, which only
+ * activation ever needs, and activation has already happened — inventing one
+ * would put a value in storage that is not true of this account.
+ */
+export function recoveredK1Record(options: {
+  user: string;
+  network: string;
+  address: string;
+  privateStateId: string;
+  pkXHex: string;
+  pkYHex: string;
+  totalWaves?: number;
+}): K1AccountRecord {
+  const totalWaves = options.totalWaves ?? 3;
+  return {
+    user: options.user.toLowerCase(),
+    network: options.network,
+    address: options.address,
+    privateStateId: options.privateStateId,
+    saltHex: '',
+    pkXHex: options.pkXHex,
+    pkYHex: options.pkYHex,
+    wavesDone: totalWaves,
+    totalWaves,
+    activated: true,
+    txHashes: [],
+  };
+}
+
+/**
+ * The private-state id a recovered account reads under.
+ *
+ * The same shape `deployK1Account` composes, so a Passport recovered on a
+ * second device and one set up on the first look at the same store rather than
+ * at two — which matters the moment the coin store (PR 4) is real.
+ */
+export function k1PrivateStateId(user: string): string {
+  return `passport-account-k1-${user.toLowerCase().slice(2, 10)}`;
+}

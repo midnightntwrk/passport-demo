@@ -271,6 +271,75 @@ export function describeDynamicSession(state: DynamicBridgeState): DynamicSessio
 }
 
 /* ------------------------------------------------------------------ *
+ * WHICH PASSPORT A RENDER BELONGS TO
+ * ------------------------------------------------------------------ */
+
+/**
+ * Which key a session is held by, or nothing yet.
+ *
+ * A second way to be inside Passport arrived on 2026/09/16 — a social sign-in
+ * whose embedded key is the account's own device, with no passkey anywhere in
+ * it (`docs/demo/dynamic-build-out-plan.md` §6). The choice between the two
+ * lives HERE, in the module that imports nothing, rather than beside the k1
+ * custody layer that consumes it: `App.tsx` asks the question on every render,
+ * and a question asked from the entry chunk must not drag a deploy planner and
+ * its storage format into the entry chunk to answer it. Measured 2026/09/16:
+ * importing it from `identity/accountK1Session.ts` cost 29,701 bytes there, in
+ * every build, including the ones with no sign-in at all.
+ */
+export type PassportIdentityKind =
+  /** The passkey on this device. Every Passport before 2026/09/16. */
+  | 'passkey'
+  /** A social sign-in, and its embedded key. */
+  | 'dynamic'
+  /** Neither. The welcome screen. */
+  | 'none'
+
+/** What the host knows when it has to choose. */
+export interface PassportIdentityInput {
+  /** Whether a passkey profile is open — `profile` in `App.tsx`. */
+  readonly hasPasskeyProfile: boolean
+  /** {@link DynamicSession.status}. */
+  readonly dynamicStatus: string
+  /** {@link DynamicSession.evmAddress}. */
+  readonly evmAddress: string | null
+}
+
+/**
+ * Which identity this render belongs to.
+ *
+ * THE ORDER IS THE WHOLE FUNCTION. The passkey question is asked first and
+ * answered absolutely: there is no input on which a passkey holder is routed
+ * into the social path. The alternative — preferring whichever signed in most
+ * recently, say — would mean a passkey Passport could be hidden behind a Google
+ * sign-in its holder made for an unrelated reason, and the Passport they cannot
+ * see is the one holding the money.
+ *
+ * An address of whitespace is an absence. Dynamic creates the embedded wallet
+ * AFTER the auth flow resolves, so a person is genuinely signed in for a beat
+ * with no address, and treating that beat as a social Passport would mean
+ * deriving a per-user key from an empty string.
+ */
+export function choosePassportIdentity(input: PassportIdentityInput): PassportIdentityKind {
+  if (input.hasPasskeyProfile) return 'passkey'
+  if (input.dynamicStatus !== 'signed-in') return 'none'
+  return dynamicUserKey(input.evmAddress) === null ? 'none' : 'dynamic'
+}
+
+/**
+ * The per-user key, or null when there is not one yet.
+ *
+ * Lower-cased, matching `k1UserKey` in the custody layer: an EVM address is
+ * case-insensitive and Dynamic returns it checksummed, so a key taken verbatim
+ * would give the same person two records on two visits.
+ */
+export function dynamicUserKey(evmAddress: string | null | undefined): string | null {
+  if (typeof evmAddress !== 'string') return null
+  const trimmed = evmAddress.trim()
+  return trimmed.length > 0 ? trimmed.toLowerCase() : null
+}
+
+/* ------------------------------------------------------------------ *
  * The store. Written by the bridge root, read by the app root.
  * ------------------------------------------------------------------ */
 

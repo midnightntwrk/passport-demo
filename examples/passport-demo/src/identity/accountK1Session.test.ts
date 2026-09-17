@@ -1,0 +1,370 @@
+/**
+ * The Dynamic-only session's rules, drilled to the branch.
+ *
+ * WHAT THESE TESTS ARE PROTECTING
+ * ------------------------------
+ * Two of them matter more than the rest and are worth naming here rather than
+ * leaving to be inferred from an `it` string:
+ *
+ *   - "a passkey profile always wins". If that ever stops being true, a passkey
+ *     holder who signs in with Google to look at the identity row is shown a
+ *     Dynamic Passport instead of their own — and the one they cannot see is
+ *     the one holding the money.
+ *   - "a read that did not complete is unreachable, never not-yours". The whole
+ *     of `nameRecovery.ts`'s header is about that distinction, and this module
+ *     adds two more reads that can fail. A `false` where a `null` belongs tells
+ *     somebody their Passport is not theirs because an indexer was slow.
+ */
+
+import { describe, expect, it, vi } from 'vitest';
+
+import {
+  DYNAMIC_SETUP_STEPS,
+  K1_MARKER_CIRCUIT,
+  K1_NAME_KEY,
+  choosePassportIdentity,
+  dynamicSetupAction,
+  dynamicSetupCopy,
+  dynamicSetupPhase,
+  dynamicSetupStep,
+  dynamicStage,
+  dynamicUserKey,
+  k1NameKey,
+  k1PrivateStateId,
+  k1RecoveryOutcome,
+  loadK1Name,
+  loadK1Names,
+  readDynamicPassport,
+  recoveredK1Record,
+  saveK1Name,
+} from './accountK1Session.js';
+import { K1_STORAGE_KEY, k1RecordKey, type K1AccountRecord, type K1Storage } from './accountK1Plan.js';
+import type { ResolvedName } from '../lib/nameRecovery.js';
+
+/** A storage a test owns outright. Three methods, exactly as the module takes. */
+function memoryStorage(seed: Record<string, string> = {}): K1Storage & { map: Map<string, string> } {
+  const map = new Map(Object.entries(seed));
+  return {
+    map,
+    getItem: (key) => map.get(key) ?? null,
+    setItem: (key, value) => {
+      map.set(key, value);
+    },
+    removeItem: (key) => {
+      map.delete(key);
+    },
+  };
+}
+
+/** A storage that refuses everything, the way a browser blocking site data does. */
+function refusingStorage(): K1Storage {
+  return {
+    getItem: () => {
+      throw new Error('denied');
+    },
+    setItem: () => {
+      throw new Error('denied');
+    },
+    removeItem: () => {
+      throw new Error('denied');
+    },
+  };
+}
+
+const RECORD: K1AccountRecord = {
+  user: '0xabcdef0123456789abcdef0123456789abcdef01',
+  network: 'stagenet',
+  address: 'aa'.repeat(32),
+  privateStateId: 'passport-account-k1-abcdef01',
+  saltHex: 'bb'.repeat(32),
+  pkXHex: '1',
+  pkYHex: '2',
+  wavesDone: 3,
+  totalWaves: 3,
+  activated: true,
+  txHashes: [],
+};
+
+const RESOLVED: ResolvedName = {
+  resolverAddress: 'cc'.repeat(32),
+  target: { kind: 'contract', hex: 'aa'.repeat(32) },
+};
+
+describe('choosePassportIdentity', () => {
+  it('answers passkey whenever a profile exists, whatever the sign-in says', () => {
+    expect(
+      choosePassportIdentity({
+        hasPasskeyProfile: true,
+        dynamicStatus: 'signed-in',
+        evmAddress: '0xAbC',
+      }),
+    ).toBe('passkey');
+  });
+
+  it('answers none when nothing is signed in', () => {
+    expect(
+      choosePassportIdentity({
+        hasPasskeyProfile: false,
+        dynamicStatus: 'disabled',
+        evmAddress: null,
+      }),
+    ).toBe('none');
+    expect(
+      choosePassportIdentity({
+        hasPasskeyProfile: false,
+        dynamicStatus: 'signed-out',
+        evmAddress: null,
+      }),
+    ).toBe('none');
+  });
+
+  it('answers none for the beat between signing in and having an address', () => {
+    expect(
+      choosePassportIdentity({
+        hasPasskeyProfile: false,
+        dynamicStatus: 'signed-in',
+        evmAddress: '   ',
+      }),
+    ).toBe('none');
+  });
+
+  it('answers dynamic for a signed-in session with an address and no passkey', () => {
+    expect(
+      choosePassportIdentity({
+        hasPasskeyProfile: false,
+        dynamicStatus: 'signed-in',
+        evmAddress: '0xAbC',
+      }),
+    ).toBe('dynamic');
+  });
+});
+
+describe('dynamicUserKey', () => {
+  it('lower-cases, so a checksummed address is one user and not two', () => {
+    expect(dynamicUserKey('0xAbCdEf')).toBe('0xabcdef');
+  });
+
+  it('reads a blank, a whitespace string, and a non-string as no user', () => {
+    expect(dynamicUserKey('')).toBeNull();
+    expect(dynamicUserKey('  ')).toBeNull();
+    expect(dynamicUserKey(null)).toBeNull();
+    expect(dynamicUserKey(undefined)).toBeNull();
+    expect(dynamicUserKey(7 as unknown as string)).toBeNull();
+  });
+});
+
+describe('dynamicStage', () => {
+  it('is sign-in for any identity that is not the Dynamic one', () => {
+    expect(dynamicStage({ identity: 'passkey', record: RECORD, name: 'alice' })).toBe('sign-in');
+    expect(dynamicStage({ identity: 'none', record: null, name: null })).toBe('sign-in');
+  });
+
+  it('offers to create when nothing is stored', () => {
+    expect(dynamicStage({ identity: 'dynamic', record: null, name: null })).toBe('create');
+  });
+
+  it('offers to create when a record exists with no address yet', () => {
+    expect(
+      dynamicStage({ identity: 'dynamic', record: { ...RECORD, address: null }, name: null }),
+    ).toBe('create');
+  });
+
+  it('resumes a setup that has an address and is unfinished', () => {
+    expect(
+      dynamicStage({ identity: 'dynamic', record: { ...RECORD, wavesDone: 1 }, name: null }),
+    ).toBe('resume');
+    expect(
+      dynamicStage({ identity: 'dynamic', record: { ...RECORD, activated: false }, name: null }),
+    ).toBe('resume');
+  });
+
+  it('asks for a name once the Passport is usable, then goes home', () => {
+    expect(dynamicStage({ identity: 'dynamic', record: RECORD, name: null })).toBe('name');
+    expect(dynamicStage({ identity: 'dynamic', record: RECORD, name: 'alice' })).toBe('home');
+  });
+});
+
+describe('the setup copy', () => {
+  it('counts three steps, whatever the wave plan does', () => {
+    expect(DYNAMIC_SETUP_STEPS).toBe(3);
+    expect(dynamicSetupCopy('create')).toBe('Setting up your Passport, step 1 of 3');
+    expect(dynamicSetupCopy('finish')).toBe('Setting up your Passport, step 2 of 3');
+    expect(dynamicSetupCopy('activate')).toBe('Setting up your Passport, step 3 of 3');
+    expect(dynamicSetupCopy('done')).toBe('Your Passport is ready.');
+  });
+
+  it('reads the phase off the record', () => {
+    expect(dynamicSetupPhase(null)).toBe('create');
+    expect(dynamicSetupPhase({ ...RECORD, address: null })).toBe('create');
+    expect(dynamicSetupPhase({ ...RECORD, wavesDone: 1 })).toBe('finish');
+    expect(dynamicSetupPhase({ ...RECORD, activated: false })).toBe('activate');
+    expect(dynamicSetupPhase(RECORD)).toBe('done');
+  });
+
+  it('numbers the phases, and puts done past the last one', () => {
+    expect(dynamicSetupStep('create')).toBe(1);
+    expect(dynamicSetupStep('finish')).toBe(2);
+    expect(dynamicSetupStep('activate')).toBe(3);
+    expect(dynamicSetupStep('done')).toBe(3);
+  });
+
+  it('never offers to CREATE over a setup that has already started', () => {
+    expect(dynamicSetupAction(null)).toBe('Create my Passport');
+    expect(dynamicSetupAction({ ...RECORD, address: null })).toBe('Create my Passport');
+    expect(dynamicSetupAction({ ...RECORD, wavesDone: 1 })).toBe(
+      'Finish setting up my Passport',
+    );
+  });
+});
+
+describe('the name store', () => {
+  it('keys the same way the record store does', () => {
+    expect(k1NameKey('0xABC', 'stagenet')).toBe('0xabc|stagenet');
+    expect(k1NameKey('0xabc', 'stagenet')).toBe(k1RecordKey('0xABC', 'stagenet'));
+  });
+
+  it('round-trips a name', () => {
+    const storage = memoryStorage();
+    saveK1Name(storage, '0xABC', 'stagenet', 'alice');
+    expect(loadK1Name(storage, '0xabc', 'stagenet')).toBe('alice');
+    expect(storage.map.has(K1_NAME_KEY)).toBe(true);
+  });
+
+  it('merges rather than replacing', () => {
+    const storage = memoryStorage();
+    saveK1Name(storage, '0xa', 'stagenet', 'alice');
+    saveK1Name(storage, '0xb', 'stagenet', 'bob');
+    expect(loadK1Names(storage)).toEqual({ '0xa|stagenet': 'alice', '0xb|stagenet': 'bob' });
+  });
+
+  it('reads nothing stored, a storage that throws, and rubbish as empty', () => {
+    expect(loadK1Names(memoryStorage())).toEqual({});
+    expect(loadK1Names(refusingStorage())).toEqual({});
+    expect(loadK1Names(memoryStorage({ [K1_NAME_KEY]: 'not json' }))).toEqual({});
+    expect(loadK1Names(memoryStorage({ [K1_NAME_KEY]: 'null' }))).toEqual({});
+    expect(loadK1Names(memoryStorage({ [K1_NAME_KEY]: '[]' }))).toEqual({});
+  });
+
+  it('drops entries that are not names, so a bad write cannot become a label', () => {
+    const stored = JSON.stringify({ 'a|stagenet': 3, 'b|stagenet': '', 'c|stagenet': 'carol' });
+    expect(loadK1Names(memoryStorage({ [K1_NAME_KEY]: stored }))).toEqual({
+      'c|stagenet': 'carol',
+    });
+  });
+
+  it('answers null for a user with no name', () => {
+    expect(loadK1Name(memoryStorage(), '0xa', 'stagenet')).toBeNull();
+  });
+
+  it('says so in the console rather than on screen when a write is refused', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    saveK1Name(refusingStorage(), '0xa', 'stagenet', 'alice');
+    expect(warn).toHaveBeenCalledOnce();
+    warn.mockRestore();
+  });
+});
+
+describe('readDynamicPassport', () => {
+  it('assembles the record, the name, and the stage in one read', () => {
+    const storage = memoryStorage({
+      [K1_STORAGE_KEY]: JSON.stringify({ [k1RecordKey(RECORD.user, 'stagenet')]: RECORD }),
+      [K1_NAME_KEY]: JSON.stringify({ [k1NameKey(RECORD.user, 'stagenet')]: 'alice' }),
+    });
+    expect(readDynamicPassport({ storage, user: RECORD.user.toUpperCase(), network: 'stagenet' })).toEqual({
+      user: RECORD.user,
+      network: 'stagenet',
+      record: RECORD,
+      name: 'alice',
+      address: RECORD.address,
+      stage: 'home',
+    });
+  });
+
+  it('answers a user who has nothing with the create stage and no address', () => {
+    const view = readDynamicPassport({ storage: memoryStorage(), user: '0xa', network: 'stagenet' });
+    expect(view.record).toBeNull();
+    expect(view.address).toBeNull();
+    expect(view.stage).toBe('create');
+  });
+});
+
+describe('k1RecoveryOutcome', () => {
+  it('is unreachable when the circuit list could not be read', () => {
+    expect(k1RecoveryOutcome(RESOLVED, { operations: null, holdsDevice: true })).toEqual({
+      kind: 'unreachable',
+      detail: 'Midnight could not be reached to check that name. Try again in a moment.',
+    });
+  });
+
+  it('is not-yours when the name belongs to a passkey Passport', () => {
+    expect(
+      k1RecoveryOutcome(RESOLVED, { operations: ['withdraw_night'], holdsDevice: true }),
+    ).toEqual({ kind: 'not-yours' });
+  });
+
+  it('is unreachable when the device set could not be read', () => {
+    expect(
+      k1RecoveryOutcome(RESOLVED, { operations: [K1_MARKER_CIRCUIT], holdsDevice: null }),
+    ).toEqual({
+      kind: 'unreachable',
+      detail: 'Midnight could not be reached to check that name. Try again in a moment.',
+    });
+  });
+
+  it('is not-yours when this sign-in is not one of the account devices', () => {
+    expect(
+      k1RecoveryOutcome(RESOLVED, { operations: [K1_MARKER_CIRCUIT], holdsDevice: false }),
+    ).toEqual({ kind: 'not-yours' });
+  });
+
+  it('is found, carrying the address and the leaf, when both reads say yes', () => {
+    expect(
+      k1RecoveryOutcome(RESOLVED, { operations: [K1_MARKER_CIRCUIT], holdsDevice: true }),
+    ).toEqual({
+      kind: 'found',
+      address: RESOLVED.target.hex,
+      resolverAddress: RESOLVED.resolverAddress,
+    });
+  });
+});
+
+describe('recoveredK1Record', () => {
+  it('writes a FINISHED record, because the chain has just said it is one', () => {
+    const record = recoveredK1Record({
+      user: '0xABCDEF0123456789',
+      network: 'stagenet',
+      address: RECORD.address as string,
+      privateStateId: 'passport-account-k1-abcdef01',
+      pkXHex: '1',
+      pkYHex: '2',
+    });
+    expect(record.user).toBe('0xabcdef0123456789');
+    expect(record.wavesDone).toBe(3);
+    expect(record.totalWaves).toBe(3);
+    expect(record.activated).toBe(true);
+    /* The salt opens the boot commitment, and activation has already happened.
+       Inventing one would put a value in storage that is not true here. */
+    expect(record.saltHex).toBe('');
+    expect(record.txHashes).toEqual([]);
+  });
+
+  it('takes a wave count when the caller knows a different one', () => {
+    const record = recoveredK1Record({
+      user: '0xa',
+      network: 'stagenet',
+      address: RECORD.address as string,
+      privateStateId: 'x',
+      pkXHex: '1',
+      pkYHex: '2',
+      totalWaves: 4,
+    });
+    expect(record.wavesDone).toBe(4);
+    expect(record.totalWaves).toBe(4);
+  });
+});
+
+describe('k1PrivateStateId', () => {
+  it('composes the id the deploy composes, so both devices read one store', () => {
+    expect(k1PrivateStateId('0xABCDEF0123456789')).toBe('passport-account-k1-abcdef01');
+  });
+});

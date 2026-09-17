@@ -49,10 +49,18 @@ export default function ContinueWithSocial() {
     return (
       <p className="mnob-social-note" role="status">
         <BadgeCheck size={13} aria-hidden="true" />
-        {/* Says what happened AND what is still required, in one sentence,
-            because the button above has not changed and needs to not look
-            like a mistake. */}
-        Signed in{via} as {who}. Finish with your passkey above.
+        {/* "Finish with your passkey above" until 2026/09/16, and it was true
+            then: a sign-in proved who somebody was and produced no key this
+            Passport could be held by, so the passkey button was still the way
+            forward and the sentence had to say so.
+            It is not true now. A signed-in person with no passkey profile is
+            taken to their own Passport by `App.tsx`'s first branch — the
+            account is set up for the sign-in and the signed-in key is what
+            approves for it. This component only renders at all when that
+            branch did NOT fire, which is exactly one case: a passkey profile
+            already exists on this device. So the sentence says the thing that
+            is true of that case, and points at nothing. */}
+        Signed in{via} as {who}.
       </p>
     )
   }

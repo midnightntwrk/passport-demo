@@ -118,3 +118,100 @@ The demo's deployed account contract is the prototype (hash-preimage device witn
 | `examples/passport-demo/src/screens/DynamicIdentity.tsx` | Home's identity row and the test-signature action. |
 | `examples/passport-demo/src/lib/dynamicSession.test.ts` | The gate and the mapping, drilled. |
 | `examples/passport-demo/src/lib/dynamicBundle.test.ts` | The import-graph gate that keeps the SDK out of the entry chunk. |
+
+---
+
+# Stage 2 — the Dynamic-only Passport, as built
+
+**Date:** 2026/09/16
+**Scope:** `docs/demo/dynamic-build-out-plan.md` §6, PR 5 of its sequence. Builds on the k1
+custody layer (`docs/demo/k1-custody-layer-design.md` §7a).
+
+Everything above this line describes stage 1 and is still true of it. What changes is the
+last sentence of §1: **a Dynamic session is now a way into a Passport**, on a build given
+an environment id, for somebody who has no passkey Passport on the device.
+
+## 7. What a person does, in order
+
+1. **Welcome.** The passkey button is unchanged and still first. Beneath it, "Continue
+   with Google, Microsoft, X, or Discord" opens Dynamic's overlay as it did.
+2. **Signed in.** The sentence "Signed in … Finish with your passkey above" is gone. A
+   signed-in person with no passkey profile is taken to their own screen: "Set up your
+   Passport", over their provider and handle.
+3. **Create.** One control. Behind it: the device point is recovered once from a
+   signature over `SHA-256("midnight-passport:k1-device-enrolment:v1")`, then
+   `deployK1Account` runs its three sponsored waves and `activateK1Device` opens the boot
+   commitment. The line under the button counts **three** steps — set up, finish, turn the
+   sign-in on — not the four transactions, because the two maintenance waves are one thing
+   to the person waiting and the wave count is a property of a verifier-key budget nobody
+   outside this repository could follow. Resumable: the record is read before every press
+   and the chain before every wave, so a reload continues rather than deploying again.
+4. **Name.** The same sponsored `POST /register-alias` the passkey path uses, carrying the
+   k1 account address as the name's target — the request shape is identical, because
+   `contractAddress` is what the service takes and a k1 account has one like any other.
+5. **Home.** The provider and handle; the account's own NIGHT, read from the k1 build's
+   `unshielded_balances` mirror; the name (or the account address) to be paid at; a Send
+   form; and one sentence saying a private token can be received here and not yet sent.
+6. **Send.** Two legs, as on every build: `withdraw_unshielded_with_k256(colour, amount,
+   this device's receiving address)` — the one thing the holder approves, through
+   `signRawMessage` — then the recipient's permissionless deposit, chosen by asking the
+   chain what the recipient's account is built from.
+7. **On a second device.** "I already have a Passport" → type the name → Passport resolves
+   it, checks the account carries `withdraw_shielded_with_k256`, derives this sign-in's
+   device entry exactly as activation did and asks the ledger whether the device set holds
+   it. Only then is the local record written.
+
+## 8. What is real and what is not
+
+| | |
+|---|---|
+| Real | The identity choice, the stage machine, the setup copy, the resumable deploy, the name claim, the balance read, the send plan, the recovery checks, and both legs' call shapes. |
+| Real | The approval. `signRawMessage` signs the contract's own challenge, and `k1Call` is the shipped gated-call path from the custody layer. |
+| **Not built** | **Sending a shielded balance.** `withdraw_shielded_with_k256` binds the qualified coin into the challenge (AUTH-10), and the coin comes from the `held_coin` witness — the coin store, `k1-custody-layer-design.md` §3. The row is shown with one sentence rather than a control that would fail. |
+| **Not built** | **Paying somebody who holds one of these Passports.** `deposit_unshielded` is permissionless but is not reachable through `k1Call`, which always appends `_with_k256` and an authorisation trailer. One sentence, not a call that fails three files away. |
+| **Not deployed** | `POST /prove-k1` on the balancer (probed 2026/09/16: `404`). Every k1 transaction goes through it, so a live run stops at the first one. `k1ProofProvider` refuses immediately with one sentence rather than waiting out a ten-minute proof timeout. |
+| Deliberately absent | Migration of an existing passkey Passport. §6 of the build-out plan puts it out of this version; the two kinds coexist and can pay each other. |
+
+**One consequence worth writing down.** The `.night` name's owner secret is derived from
+this device's own transaction key, because the sign-in holds nothing deterministic to
+derive one from — its signatures carry fresh randomness per signature (DKLs23). So the
+name can be claimed here and **cannot be re-pointed from a second device** in this
+version. Coming back to the Passport does not need it: recovery reads the registry and the
+account's device set, neither of which is the owner key.
+
+## 9. Files
+
+| File | What it is |
+|---|---|
+| `src/lib/dynamicSession.ts` | Gains `choosePassportIdentity` and `dynamicUserKey`. The choice lives in the module that imports nothing, because `App.tsx` asks it on every render. |
+| `src/identity/accountK1Session.ts` | The stage machine, the setup copy, the name store (`passport-k1-name:v1`), and the recovery checks. Pure; 100 % covered. |
+| `src/identity/accountK1Send.ts` | The send plan, the deposit-circuit choice, the approval and refusal copy, and the balance read off the mirror. Pure; 100 % covered. |
+| `src/screens/DynamicPassport.tsx` | The whole path, as one screen with its own state. Lazily loaded. |
+| `src/lib/dynamicWalk.ts` | A stand-in sign-in for the mocked walk, with a real secp256k1 signer. Deleted from any build that does not set `VITE_DYNAMIC_WALK`. |
+| `e2e/dynamic-only.spec.ts` | The mocked walk: the welcome path, the recovery offer, and the one-sentence refusal. |
+
+## 10. What it costs a build that has none of this
+
+Measured 2026/09/16, production build, flag unset, against `feat/k1-custody-module`:
+
+| | Entry chunk | Entry, gzipped | All JS | Chunks |
+|---|---|---|---|---|
+| Before | 879,691 B | 241,352 B | 3,496,631 B | 45 |
+| After, flag unset | 899,632 B | 246,205 B | 3,553,933 B | 46 |
+| **Delta** | **+19,941 B** | **+4,853 B** | **+57,302 B** | **+1** |
+
+The new chunk is `DynamicPassport` (37,130 B) and it is **never fetched** with the flag
+unset: `choosePassportIdentity` answers `'none'` for a `disabled` session, the branch is
+false, and React never asks for it. `src/lib/localWallet.ts` stays out of the entry chunk,
+which is the reason the screen is `lazy` rather than imported — `accountK1Custody.ts`
+imports the wallet statically, and a static import here would have put its WASM ledger and
+chain sync in front of every visitor of every build.
+
+## 11. Two more dashboard settings
+
+Beside the table in §4, a staging environment driving this path also needs:
+
+| Where | Setting | Value |
+|---|---|---|
+| Security → Account Security → CORS Origins | **Origins** | `http://localhost:5175` is the origin the dev server pins itself to, and it is the one a local flag-set build must be served on. A build at any other port never leaves `loading`. |
+| Embedded Wallets → Security | **Raw signing** | The path is `primaryWallet.connector.signRawMessage`, not `wallet.signMessage`. Only Dynamic's own embedded connector exposes it; an externally connected wallet is refused with a sentence. |
