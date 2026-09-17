@@ -30,6 +30,7 @@ import {
   choosePassportIdentity,
   dynamicSetupAction,
   dynamicSetupCopy,
+  dynamicSetupInterrupted,
   dynamicSetupPhase,
   dynamicUserKey,
   k1PrivateStateId,
@@ -130,7 +131,13 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
   const [balanceFailed, setBalanceFailed] = useState(false)
   const [receivingAddress, setReceivingAddress] = useState<string | null>(null)
   /* A setup whose remaining steps can never be signed. The offer below turns
-     into the one thing that can be done about it. */
+     into the one thing that can be done about it.
+
+     READ FROM THE RECORD, not learnt from a failure. It starts false only
+     because there is nothing read yet; `refresh` below settles it on the first
+     pass, so a reload onto an interrupted setup offers "Start again" straight
+     away rather than offering to create a Passport and throwing
+     `K1_SETUP_INTERRUPTED` at whoever pressed it. */
   const [interrupted, setInterrupted] = useState(false)
   const device = useRef<K256DeviceIdentity | null>(null)
 
@@ -139,6 +146,7 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
     if (user === null) return null
     const next = readDynamicPassport({ storage: window.localStorage, user, network })
     setView(next)
+    setInterrupted(dynamicSetupInterrupted(next.record))
     setScreen(next.stage === 'home' ? 'home' : next.stage === 'name' ? 'name' : 'create')
     return next
   }, [network, user])

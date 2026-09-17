@@ -25,6 +25,8 @@ import {
   choosePassportIdentity,
   dynamicSetupAction,
   dynamicSetupCopy,
+  dynamicSetupInterrupted,
+  dynamicSetupInterruptedAnywhere,
   dynamicSetupPhase,
   dynamicSetupStep,
   dynamicStage,
@@ -224,6 +226,47 @@ describe('the setup copy', () => {
     expect(dynamicSetupAction({ ...RECORD, wavesDone: 1, interrupted: true })).toBe(
       'Start again',
     );
+  });
+
+  /* THE ANSWER A SCREEN MUST NOT HAVE TO FAIL TO LEARN. Both setup screens kept
+     "this setup cannot be finished" in React state that began false on every
+     load, so a reload offered to create a Passport over an interrupted record
+     and the press under it threw `K1_SETUP_INTERRUPTED`. The record knew. */
+  it('reads an interrupted setup off the record, so a reload does not have to fail first', () => {
+    expect(dynamicSetupInterrupted(null)).toBe(false);
+    expect(dynamicSetupInterrupted(RECORD)).toBe(false);
+    expect(dynamicSetupInterrupted({ ...RECORD, wavesDone: 1 })).toBe(false);
+    expect(dynamicSetupInterrupted({ ...RECORD, wavesDone: 1, interrupted: true })).toBe(true);
+  });
+
+  it('answers for a sign-in whose network is not to hand, and for nobody else', () => {
+    const halted: K1AccountRecord = { ...RECORD, wavesDone: 1, interrupted: true };
+    const other = '0x00000000000000000000000000000000000000ff';
+    const storage = memoryStorage({
+      [K1_STORAGE_KEY]: JSON.stringify({
+        [k1RecordKey(RECORD.user, 'stagenet')]: RECORD,
+        [k1RecordKey(RECORD.user, 'undeployed')]: halted,
+        [k1RecordKey(other, 'stagenet')]: halted,
+      }),
+    });
+    /* One of this sign-in's records is halted, on a network the milestone
+       screen cannot name, and that is the whole reason every network is asked. */
+    expect(dynamicSetupInterruptedAnywhere(storage, RECORD.user)).toBe(true);
+    /* The case on the address is the record key's, not the caller's. */
+    expect(dynamicSetupInterruptedAnywhere(storage, RECORD.user.toUpperCase())).toBe(true);
+    /* SOMEBODY ELSE'S HALTED SETUP IS NOT OURS. A prefix that matched loosely
+       would put "Start again" in front of a person whose own Passport is fine. */
+    const onlyOurs = memoryStorage({
+      [K1_STORAGE_KEY]: JSON.stringify({ [k1RecordKey(other, 'stagenet')]: halted }),
+    });
+    expect(dynamicSetupInterruptedAnywhere(onlyOurs, RECORD.user)).toBe(false);
+    /* Nothing stored, and no sign-in yet: both are "no", and neither throws. */
+    expect(dynamicSetupInterruptedAnywhere(memoryStorage(), RECORD.user)).toBe(false);
+    expect(dynamicSetupInterruptedAnywhere(storage, null)).toBe(false);
+    expect(dynamicSetupInterruptedAnywhere(storage, '')).toBe(false);
+    /* A browser refusing site data answers "no" rather than throwing at a
+       screen that is only deciding what a button says. */
+    expect(dynamicSetupInterruptedAnywhere(refusingStorage(), RECORD.user)).toBe(false);
   });
 });
 

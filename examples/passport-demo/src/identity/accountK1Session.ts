@@ -42,7 +42,9 @@
  */
 
 import {
+  k1RecordKey,
   loadK1Record,
+  loadK1Records,
   nextK1Step,
   type K1AccountRecord,
   type K1Storage,
@@ -190,6 +192,47 @@ export function dynamicSetupAction(record: K1AccountRecord | null): string {
      was pressed. The honest offer is a fresh Passport. */
   if (record.interrupted === true) return 'Start again';
   return 'Finish setting up my Passport';
+}
+
+/**
+ * Whether the setup in a stored record can no longer be finished.
+ *
+ * A SCREEN MUST NOT LEARN THIS BY FAILING. Both screens that set a Dynamic
+ * Passport up kept the answer in a piece of React state that began life as
+ * `false` and was only ever set by a refusal thrown at them mid-press. That
+ * state does not survive a reload, and the record does: somebody who closed the
+ * tab on an interrupted setup came back to a button offering to create a
+ * Passport, pressed it, and got `K1_SETUP_INTERRUPTED` for their trouble —
+ * being told by a failure what the record had known all along. The screens read
+ * it from the record now, on load and on every refresh, so the only offer they
+ * make is the one that works.
+ */
+export function dynamicSetupInterrupted(record: K1AccountRecord | null): boolean {
+  return record !== null && nextK1Step(record) === 'interrupted';
+}
+
+/**
+ * The same question for a screen that has no network to hand.
+ *
+ * `K1Milestone.tsx` is the developer surface, and it talks to the custody layer
+ * without ever asking which network the wallet settled on — the record is keyed
+ * by user AND network, so it cannot name the one record it means. Every record
+ * this sign-in has, on whichever network, is asked instead: a milestone screen
+ * offering to start again where any of them was interrupted is right about the
+ * one it is pointed at, and a reader with two half-built Passports on two
+ * networks is being told something true about both.
+ */
+export function dynamicSetupInterruptedAnywhere(
+  storage: K1Storage,
+  user: string | null,
+): boolean {
+  if (user === null || user === '') return false;
+  /* `k1RecordKey(user, '')` is the user's own prefix, built by the one function
+     that knows the separator rather than by a template string here. */
+  const prefix = k1RecordKey(user, '');
+  return Object.entries(loadK1Records(storage)).some(
+    ([key, record]) => key.startsWith(prefix) && dynamicSetupInterrupted(record),
+  );
 }
 
 /* -------------------------------------------------------------------------- */
