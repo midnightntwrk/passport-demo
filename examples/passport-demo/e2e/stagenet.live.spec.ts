@@ -412,7 +412,11 @@ test.describe('@live the account model on stagenet', () => {
    * Tier 2 spec that gave up on that would be reporting the sponsor's schedule
    * as a broken send.
    */
-  async function sendStablecoinToAddress(colour: string | null): Promise<void> {
+  async function sendStablecoinToAddress(
+    colour: string | null,
+    /** What the account holds of this colour going in, in the sheet's own words. */
+    available: string,
+  ): Promise<void> {
     const attempts = 2;
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
       await page.getByRole('button', { name: /^Send$/ }).first().click();
@@ -440,11 +444,12 @@ test.describe('@live the account model on stagenet', () => {
          asset's own ticker, where this once read the fixed word "units" and
          named nothing on a sheet that can send several things. */
       await expect(page.locator('.mnhome-send-unit')).toHaveText(MUSD_SYMBOL);
-      /* The whole grant, quoted in the asset's own name: the account really
-         holds the hundred the poll above watched arrive, and this is the sheet
-         saying the same figure back before ten of them are spent. */
+      /* What the account holds, quoted in the asset's own name — the sheet
+         saying back the figure the caller has just watched settle, before ten
+         of them are spent. A PARAMETER since 2026/09/17, because this walk now
+         makes the same send twice and the second one starts from ninety. */
       await expect(
-        page.locator('.mnhome-send-form').getByText(`${GRANT_MUSD} ${MUSD_SYMBOL} available`),
+        page.locator('.mnhome-send-form').getByText(`${available} ${MUSD_SYMBOL} available`),
       ).toBeVisible();
 
       /* THEN the recipient, which is the order the sheet now asks in. The field
@@ -606,7 +611,7 @@ test.describe('@live the account model on stagenet', () => {
        first rather than instead. */
     const colour = await sponsorStablecoinColour();
 
-    await sendStablecoinToAddress(colour);
+    await sendStablecoinToAddress(colour, GRANT_MUSD);
 
     /* WITNESS ONE: the account holds ten fewer, on the surface the user reads. */
     await expect
@@ -680,7 +685,7 @@ test.describe('@live the account model on stagenet', () => {
 
     await waitForSponsor();
     const colour = await sponsorStablecoinColour();
-    await sendStablecoinToAddress(colour);
+    await sendStablecoinToAddress(colour, REMAINING_MUSD);
 
     /* WITNESS ONE: ten fewer again, on the surface the user reads. Against the
        old client this figure never moved — the withdrawal was refused before
