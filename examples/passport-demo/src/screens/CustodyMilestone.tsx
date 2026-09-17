@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { BadgeCheck, ExternalLink, LoaderCircle } from 'lucide-react'
 
 import { useDynamicSession } from '../lib/dynamic.js'
@@ -14,6 +14,7 @@ import {
   type CustodyPhase,
 } from '../identity/custodyContractClient.js'
 import { custodyFailureSentence, CUSTODY_SETUP_INTERRUPTED } from '../identity/custodyContractPlan.js'
+import { dynamicSetupInterruptedAnywhere } from '../identity/custodyContractSession.js'
 import './custody-milestone.css'
 
 /**
@@ -72,8 +73,23 @@ export default function CustodyMilestone() {
      a signature, so it is asked for once and reused by every row after it. */
   const [device, setDevice] = useState<K256DeviceIdentity | null>(null)
   /* A setup that cannot be finished. The row below turns into the one thing
-     that can be done about it, and the two rows after it stop pretending. */
+     that can be done about it, and the two rows after it stop pretending.
+
+     IT IS THE RECORD'S ANSWER AND NOT THIS SCREEN'S. Held here alone it began
+     `false` on every load, so a reload after an interrupted setup put "Create
+     my Dynamic Passport" back on the row, and the press under it failed with
+     `CUSTODY_SETUP_INTERRUPTED` — the screen learning from a refusal what was
+     written down before it mounted. It is read below as soon as there is a
+     sign-in to read it for. */
   const [interrupted, setInterrupted] = useState(false)
+
+  /* The sign-in arrives after the first render, so this is an effect rather
+     than an initialiser. It runs again if the signed-in address changes, which
+     is a different person's records and a different answer. */
+  useEffect(() => {
+    if (!session.evmAddress) return
+    setInterrupted(dynamicSetupInterruptedAnywhere(window.localStorage, session.evmAddress))
+  }, [session.evmAddress])
 
   const patch = useCallback((id: RowId, next: Partial<RowState>) => {
     setRows((current) => ({ ...current, [id]: { ...current[id], ...next } }))

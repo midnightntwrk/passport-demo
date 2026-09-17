@@ -503,6 +503,23 @@
  * no React, no DOM, no network and no contract module; its storage is an
  * injected three-method interface.
  *
+ * `src/identity/custodyContractSession.ts` and `src/identity/custodyContractSend.ts` went IN
+ * on 2026/09/16, the day they were written, on the same rule as the two modules
+ * above: they are the DECISIONS of the Dynamic-only path with none of its
+ * wiring. Which of the two identities a render belongs to, which step a setup is
+ * on and what it says, whether a resolved name is a Passport this sign-in can
+ * open, which deposit circuit a recipient's build takes, and whether a payment
+ * can be planned at all — all pure functions of their arguments, with an
+ * injected three-method storage where they touch storage at all.
+ *
+ * Every one of them is a way of telling somebody an untruth about their own
+ * Passport if it is wrong: showing a passkey holder somebody else's Passport,
+ * telling a person a name is not theirs because a read timed out, or planning a
+ * payment whose second leg names a circuit the recipient does not have. Their
+ * sockets — the wallet, the sponsor, the proof service, the screen — are
+ * `src/screens/DynamicPassport.tsx`, which stays out with the rest of the
+ * `.tsx`.
+ *
  * `src/identity/custodyContractClient.ts` is deliberately OUT, and it is the sibling
  * of the module above rather than an oversight. It is the half with the sockets
  * on the end of it: a wallet, a sponsor, an indexer, a proof service that does
@@ -690,6 +707,8 @@ export default mergeConfig(
           'src/lib/zkArtefactCache.ts',
           'src/identity/custodyContractSigning.ts',
           'src/identity/custodyContractPlan.ts',
+          'src/identity/custodyContractSend.ts',
+          'src/identity/custodyContractSession.ts',
           'src/identity/aliasStore.ts',
           'src/identity/backup.ts',
           'src/identity/claimWarmup.ts',

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ENROLMENT_PRF_MISSING_MESSAGE,
   EncryptedPassportPrivateStateStore,
@@ -159,6 +159,24 @@ import BackupScreen from './screens/Backup.js';
 import EcosystemScreen from './screens/Ecosystem.js';
 import AliasReclaimModal from './screens/AliasReclaimModal.js';
 import RecoverByNameScreen from './screens/RecoverByName.js';
+/**
+ * THE SECOND WAY TO BE INSIDE PASSPORT — a social sign-in rather than a passkey.
+ *
+ * LAZY, AND NOT MERELY FOR TIDINESS. `DynamicPassport` reaches
+ * `identity/custodyContractClient.ts`, which STATICALLY imports `lib/localWallet.ts`
+ * — the wallet facade, its WASM ledger, and its chain sync. This file reaches
+ * that module only through `import()` (line ~2102), deliberately, so none of it
+ * is in the entry chunk. A static import here would drag all of it in for every
+ * visitor of every build, flag or no flag. `lazy` keeps the screen in a chunk of
+ * its own, fetched only when somebody is actually signed in with a provider.
+ *
+ * See `identity/custodyContractSession.ts` for the rule that chooses between the two
+ * identities, and the screen's own header for why the whole path is one screen
+ * rather than a second set of branches through this file.
+ */
+const DynamicPassport = lazy(() => import('./screens/DynamicPassport.js'));
+import { choosePassportIdentity } from './lib/dynamicSession.js';
+import { useDynamicSession } from './lib/dynamic.js';
 /* The one-off account upgrade's SCREEN, statically — it is a stepper and a
    theme toggle and reaches nothing. The MACHINE behind it is imported inside
    the handler that runs it (`runUpgrade`), because `identity/accountUpgrade.js`
@@ -5977,6 +5995,25 @@ export default function PassportDemo() {
    */
   const localSessionActive = localWalletStatus === 'ready' && localSurfaces !== null;
   const sessionActive = localSessionActive;
+
+  /**
+   * WHICH PASSPORT THIS RENDER BELONGS TO.
+   *
+   * `choosePassportIdentity` answers `'passkey'` the moment a profile exists,
+   * whatever the sign-in says, so nothing below this line can be reached by
+   * somebody who already has a Passport on this device — including a passkey
+   * holder who signed in with Google to look at the identity row. And with no
+   * environment id the session is `disabled` for ever, which is every build
+   * shipped today: the answer is `'none'`, the branch in the ladder is false,
+   * and this file renders exactly what it rendered before the branch existed.
+   */
+  const dynamicSession = useDynamicSession();
+  const dynamicOnly =
+    choosePassportIdentity({
+      hasPasskeyProfile: profile !== null,
+      dynamicStatus: dynamicSession.status,
+      evmAddress: dynamicSession.evmAddress,
+    }) === 'dynamic';
   /* The two way-out panels hold the screen open in their own right. They have
      to: a failure that suppresses the error banner in favour of its panel
      would otherwise have nothing left keeping onboarding on screen. */
@@ -9460,7 +9497,15 @@ export default function PassportDemo() {
 
   return (
     <div className="passport-experience is-mobile">
-      {showOnboarding ? (
+      {/* The social sign-in's own Passport, FIRST in the ladder and gated on a
+          condition that is false in every build shipped today. It is placed
+          above `showOnboarding` because it replaces onboarding rather than
+          following it: this person is not going to be asked for a passkey. */}
+      {dynamicOnly ? (
+        <Suspense fallback={<div className="passport-experience-loading" role="status" />}>
+          <DynamicPassport network={localWalletNetworkId ?? configuredWalletNetwork ?? selectedNetwork} />
+        </Suspense>
+      ) : showOnboarding ? (
         <>
         {/* THE ONE QUESTION ONBOARDING IS ALLOWED TO ASK MID-FLIGHT
             (2026/09/05). A platform that evaluates no PRF at creation leaves a
