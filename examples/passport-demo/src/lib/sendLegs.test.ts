@@ -58,7 +58,11 @@ import {
   ACCOUNT_MOVE_REFUSED_TEXT,
   readPendingSends,
   nextAutomaticResume,
+  isNodeRefusal,
+  paysAnAddress,
   resumesWithoutPrompt,
+  stuckAssetText,
+  withdrawalIsPermanentlyRefused,
   retryDelayMs,
   SEND_LEG_ATTEMPTS,
   SETTLE_LOOK_AFTER_LANDING_MS,
@@ -1631,5 +1635,214 @@ describe('unfinishedSend, unfinishedSendTo, and the sentence', () => {
     expect(unfinishedSendLine(nightSend())).toBe(
       'You have a payment to alice.night that has not finished.',
     );
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* Paying an ADDRESS — the three-leg shape added 2026/09/17                    */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * THE DEFECT THESE DRILLS EXIST FOR.
+ *
+ * A shielded send to a raw `mn_shield-addr…` was one transaction: a PARTIAL
+ * `withdraw_shielded` out of the sender's account. That is the branch of the
+ * deployed contract that splits its coin and re-registers the remainder, and
+ * the network refuses every later withdrawal against what that leaves behind —
+ * so one such send cost the Passport every shielded send after it. Otrix
+ * reproduced it on several accounts.
+ *
+ * The record therefore has to be able to say "pay this ADDRESS" as well as "pay
+ * this Passport's account", and everything that reads a record back, writes one
+ * out, narrates one, or decides whether one may carry itself on has to handle
+ * both. That is what is drilled below.
+ */
+const SHIELD_ADDRESS =
+  'mn_shield-addr_stagenet1vgzgswr3hh63g4kjgymcupyugl9jy75j9w73kr4dr6m0crkrxgrv';
+
+function addressSend(overrides: Partial<PendingSend> = {}): PendingSend {
+  return shieldedSend({
+    id: 'send-addr',
+    recipient: { label: 'mn_shield...crkrxgrv', shieldedAddress: SHIELD_ADDRESS },
+    ...overrides,
+  });
+}
+
+describe('paysAnAddress', () => {
+  it('tells the two destinations apart, which is what every leg branches on', () => {
+    expect(paysAnAddress(addressSend().recipient)).toBe(true);
+    expect(paysAnAddress(nightSend().recipient)).toBe(false);
+  });
+});
+
+describe('a record that pays an address', () => {
+  it('round-trips whole, so a reload knows where the amount was going', () => {
+    const records = [addressSend()];
+    expect(readPendingSends(serialisePendingSends(records))).toEqual(records);
+  });
+
+  it('is refused when it names no destination at all', () => {
+    const stored = JSON.stringify([
+      { ...addressSend(), recipient: { label: 'somebody' } },
+    ]);
+    expect(readPendingSends(stored)).toEqual([]);
+  });
+
+  it('is refused when the recipient is not an object, or has no label', () => {
+    const noObject = JSON.stringify([{ ...addressSend(), recipient: 'mn_shield-addr…' }]);
+    expect(readPendingSends(noObject)).toEqual([]);
+    const noLabel = JSON.stringify([
+      { ...addressSend(), recipient: { shieldedAddress: SHIELD_ADDRESS } },
+    ]);
+    expect(readPendingSends(noLabel)).toEqual([]);
+    const emptyAddress = JSON.stringify([
+      { ...addressSend(), recipient: { label: 'x', shieldedAddress: '' } },
+    ]);
+    expect(readPendingSends(emptyAddress)).toEqual([]);
+  });
+
+  it('is refused as a ONE-TRANSACTION transfer, which can only pay an account', () => {
+    /* `transfer_shielded_to_account` hands the amount to a CONTRACT address and
+       lets the recipient's own deposit run inside the same call tree. There is
+       no account behind a raw address, so such a record is not one this app
+       ever wrote — and offering a Continue over it would be offering to send a
+       transaction that cannot be built. */
+    const stored = JSON.stringify([addressSend({ kind: 'transfer' })]);
+    expect(readPendingSends(stored)).toEqual([]);
+  });
+
+  it('carries itself on without a prompt once the first leg has spent', () => {
+    /* Leg two of an address send is a plain transfer out of the sender's own
+       wallet. It spends nothing of the ACCOUNT's, so it needs no assertion and
+       no passkey — exactly as the permissionless deposit it replaces did. */
+    expect(resumesWithoutPrompt(addressSend())).toBe(true);
+    expect(resumesWithoutPrompt(addressSend({ withdrawTxHash: undefined }))).toBe(false);
+  });
+});
+
+describe('what the lines say about an address', () => {
+  it('never claims the address has an account of ours behind it', () => {
+    /* "paying it into their account" is true of a Passport and false of an
+       address, which is somebody's own wallet. */
+    const said = sendStepLine({
+      step: 'depositing',
+      steps: 2,
+      recipient: 'mn_shield...crkrxgrv',
+      toAddress: true,
+    });
+    expect(said).toBe('Step 2 of 2 · Paying mn_shield...crkrxgrv.');
+    expect(said).not.toContain('account');
+  });
+
+  it('still says it of a Passport, where it is true', () => {
+    expect(sendStepLine({ step: 'depositing', steps: 2, recipient: 'alice.night' })).toContain(
+      'into alice.night’s account',
+    );
+  });
+
+  it('says the same thing on the card Home puts over a stopped address send', () => {
+    const said = pendingSendStepLine(addressSend({ withdrawAmount: undefined }));
+    expect(said).toBe('Step 1 done. Paying mn_shield...crkrxgrv has not finished.');
+    expect(said).not.toContain('account');
+  });
+});
+
+describe('nameLegStepCount, against a raw address', () => {
+  it('discards the host’s one-transaction answer, which is about paying an account', () => {
+    /* THE DEFECT THIS GUARDS. A Passport whose deployed account carries
+       `transfer_shielded_to_account` answers `1` once per session. That answer
+       is about handing an amount to a CONTRACT address; a raw address has no
+       contract behind it, so a sheet that obeyed it would promise one network
+       transaction over the three-leg send. */
+    expect(
+      nameLegStepCount({
+        asset: 'shielded',
+        hostSteps: 1,
+        held: 100n,
+        amount: 10n,
+        toAddress: true,
+      }),
+    ).toBe(3);
+    /* The whole coin, so two — and still not one. */
+    expect(
+      nameLegStepCount({
+        asset: 'shielded',
+        hostSteps: 1,
+        held: 10n,
+        amount: 10n,
+        toAddress: true,
+      }),
+    ).toBe(2);
+  });
+
+  it('still obeys it where it applies — a shielded payment to a Passport', () => {
+    expect(nameLegStepCount({ asset: 'shielded', hostSteps: 1, held: 100n, amount: 10n })).toBe(1);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* A Passport that can no longer move an asset at all                          */
+/* -------------------------------------------------------------------------- */
+
+/** The refusal the node makes, as it really arrives. */
+function nodeRefusal(): Error {
+  const inner = Object.assign(
+    new Error('1010: Invalid Transaction: Custom error: 239'),
+    { name: 'SubmissionError' },
+  );
+  return new Error('The account contract rejected withdraw_shielded.', { cause: inner });
+}
+
+describe('isNodeRefusal', () => {
+  it('knows the node’s own words, by name and by phrase', () => {
+    expect(isNodeRefusal(nodeRefusal())).toBe(true);
+    expect(isNodeRefusal(Object.assign(new Error('nope'), { name: 'CallTxFailedError' }))).toBe(
+      true,
+    );
+    expect(isNodeRefusal(new Error('Invalid transaction for this state'))).toBe(true);
+  });
+
+  it('does not mistake a proof, a sponsor, or a dropped socket for one', () => {
+    expect(isNodeRefusal(new Error('the proof server timed out'))).toBe(false);
+    expect(isNodeRefusal(null)).toBe(false);
+  });
+});
+
+describe('withdrawalIsPermanentlyRefused', () => {
+  it('gives the first refusal its rebuild, and calls the second what it is', () => {
+    /* A rebuild re-reads the account and proves against the state as it is now,
+       so a second refusal of a WHOLE-coin withdrawal is the network saying the
+       same thing about the same coin. */
+    expect(
+      withdrawalIsPermanentlyRefused({ kind: 'shielded', attempt: 0, error: nodeRefusal() }),
+    ).toBe(false);
+    expect(
+      withdrawalIsPermanentlyRefused({ kind: 'shielded', attempt: 1, error: nodeRefusal() }),
+    ).toBe(true);
+  });
+
+  it('is never said of a NIGHT run, whose withdrawal has no split branch', () => {
+    expect(
+      withdrawalIsPermanentlyRefused({ kind: 'night', attempt: 2, error: nodeRefusal() }),
+    ).toBe(false);
+  });
+
+  it('is never said of a failure the node did not make', () => {
+    expect(
+      withdrawalIsPermanentlyRefused({
+        kind: 'shielded',
+        attempt: 2,
+        error: new Error('the fee sponsor was busy'),
+      }),
+    ).toBe(false);
+  });
+});
+
+describe('stuckAssetText', () => {
+  it('names the asset, offers no retry, and carries no machinery', () => {
+    const said = stuckAssetText('mUSD');
+    expect(said).toContain('mUSD');
+    expect(said).toContain('a new Passport');
+    expect(said).not.toMatch(/try again\.|239|withdraw|contract|circuit|wallet|node/i);
   });
 });

@@ -124,6 +124,8 @@ test.describe('@live the account model on stagenet', () => {
   /** Ten units out, ninety left — a remainder the card can be read against. */
   const SEND_MUSD = '10';
   const REMAINING_MUSD = '90';
+  /** Ten out again, eighty left — what the SECOND send leaves behind. */
+  const REMAINING_MUSD_AFTER_TWO = '80';
 
   let page: Page;
   const alias = uniqueAlias('walk');
@@ -399,74 +401,18 @@ test.describe('@live the account model on stagenet', () => {
   });
 
   /**
-   * The shielded leg, and the one assertion the NIGHT send cannot make.
+   * ONE SHIELDED SEND OF {@link SEND_MUSD} TO {@link SHIELDED_RECIPIENT}.
    *
-   * `withdraw_night` and `withdraw_shielded` are different circuits over
-   * different maps — the contract keeps unshielded NIGHT and shielded colours
-   * apart, and midnight-js has to build the recipient's note ciphertext
-   * client-side from an encryption key only a full `mn_shield-addr…` carries.
-   * None of that is exercised by the NIGHT path, so a green NIGHT send says
-   * nothing about whether a shielded one works.
+   * Lifted out of the test below on 2026/09/17 so that the test after it can
+   * make the SAME send a second time — which is the whole of the defect this
+   * spec now guards, and the one thing a single send can never see.
    *
-   * It runs LAST rather than straight after activation, and deliberately: the
-   * stablecoin leg is a second deposit on the sponsor's own backoff schedule
-   * (`FUND_ACCOUNT_RETRY_DELAYS_MS`, ~ten minutes of patience), so it can land
-   * minutes after the NIGHT half the activation test already saw. Waiting for
-   * it here costs nothing the earlier tests were not already spending.
-   *
-   * Two witnesses, because either alone would be weak. The CARD says the
-   * account holds ten fewer — which is what a user can see — and the INDEXER
-   * says a `withdraw_shielded` action now exists on this contract, which is
-   * what makes the drop a withdrawal rather than a re-read.
+   * Unchanged in every other respect, including the two attempts: the fee
+   * sponsor can be holding its own change when the first one is built, and a
+   * Tier 2 spec that gave up on that would be reporting the sponsor's schedule
+   * as a broken send.
    */
-  test('a shielded withdrawal pays mUSD out of the account, and the chain records withdraw_shielded', async () => {
-    /* THE ADDRESS THE REST OF THIS TEST IS ABOUT.
-       Home only ever shows the account contract elided — nine characters and
-       seven — and the indexer query below needs all sixty-four. So the whole
-       address is read out of the record the deployment wrote, and then CHECKED
-       against what the receive row shows: querying an address the screen never
-       named would prove something about a different contract. */
-    const account = await storedAccountContract(page);
-    await page.getByRole('button', { name: /^Receive$/ }).click();
-    const shown = elidedAddress((await page.locator('.mnhome-address code').innerText()).trim());
-    expect(shown, 'the receive row showed no address').not.toBeNull();
-    expect(
-      account.startsWith(shown!.head) && account.endsWith(shown!.tail),
-      `the stored account ${account} is not the one the receive row shows`,
-    ).toBe(true);
-    await page.keyboard.press('Escape');
-    const rawAccount = account.trim().toLowerCase().replace(/^0x/, '').replace(/^0200/, '');
-    expect(rawAccount, 'the stored account is not a 64-hex contract address').toMatch(
-      /^[0-9a-f]{64}$/,
-    );
-    console.log(`[live] account contract ${rawAccount}`);
-
-    /* THE GRANT HAS TO HAVE LANDED FIRST — 100 mUSD, exactly, because that is
-       the figure the sponsor publishes as `assetGrant` and this send is quoted
-       against it. Refreshed while it waits: the card is re-read from the
-       contract on demand, which is why the control is on Home at all. */
-    await expect
-      .poll(async () => refreshedStablecoinValue(page), {
-        timeout: 12 * 60_000,
-        intervals: [10_000],
-        message:
-          'the mUSD activation grant never reached the account — check GET https://67-205-177-162.sslip.io/balancer/status for assetFunding and assetUnavailableReason',
-      })
-      .toBe(GRANT_MUSD);
-    console.log(`[live] activation stablecoin: ${GRANT_MUSD} mUSD in the account`);
-
-    /* The same wait the NIGHT send makes, for the same reason: one service
-       covers both the grant above and this send's fee, and it reserves its DUST
-       for a balanced transaction the moment it finalises one. */
-    await waitForSponsor();
-    /* The colour the sponsor named, so a Passport that happens to hold more
-       than one shielded token still sends the stablecoin rather than whichever
-       colour sorted first. `null` when the service cannot be read, and then
-       {@link chooseStablecoin} falls back to the option the picker names mUSD —
-       which is a weaker identification, and is why the colour is asked for
-       first rather than instead. */
-    const colour = await sponsorStablecoinColour();
-
+  async function sendStablecoinToAddress(colour: string | null): Promise<void> {
     const attempts = 2;
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
       await page.getByRole('button', { name: /^Send$/ }).first().click();
@@ -538,12 +484,15 @@ test.describe('@live the account model on stagenet', () => {
          would be racing its own dismissal. */
       const announced = page
         .locator('.mntoast-success .mntoast-title')
-        .filter({ hasText: /Shielded transfer accepted/i })
+        .filter({ hasText: /paid/i })
         .waitFor({ state: 'visible', timeout: 9 * 60_000 })
         .then(() => true)
         .catch(() => false);
 
-      /* One passkey ceremony, then `withdraw_shielded` proved and submitted. */
+      /* ONE passkey ceremony, and it covers the whole run. Leg one — the WHOLE
+         coin out of the account — is the only leg that spends from the account;
+         leg two pays the address out of this wallet and leg three puts the
+         change back, and neither needs an assertion from anybody. */
       await page.locator('.mnhome-send-actions button.mnhome-send-primary').click();
 
       const closed = sheet
@@ -565,7 +514,7 @@ test.describe('@live the account model on stagenet', () => {
           await announced,
           'the sheet closed but nothing reported a shielded transfer',
         ).toBe(true);
-        break;
+        return;
       }
 
       const said =
@@ -585,6 +534,79 @@ test.describe('@live the account model on stagenet', () => {
       await page.keyboard.press('Escape');
       await waitForSponsor();
     }
+    throw new Error('the shielded send did not submit on either attempt');
+  }
+
+  /**
+   * The shielded leg, and the one assertion the NIGHT send cannot make.
+   *
+   * `withdraw_night` and `withdraw_shielded` are different circuits over
+   * different maps — the contract keeps unshielded NIGHT and shielded colours
+   * apart, and midnight-js has to build the recipient's note ciphertext
+   * client-side from an encryption key only a full `mn_shield-addr…` carries.
+   * None of that is exercised by the NIGHT path, so a green NIGHT send says
+   * nothing about whether a shielded one works.
+   *
+   * It runs LAST rather than straight after activation, and deliberately: the
+   * stablecoin leg is a second deposit on the sponsor's own backoff schedule
+   * (`FUND_ACCOUNT_RETRY_DELAYS_MS`, ~ten minutes of patience), so it can land
+   * minutes after the NIGHT half the activation test already saw. Waiting for
+   * it here costs nothing the earlier tests were not already spending.
+   *
+   * Two witnesses, because either alone would be weak. The CARD says the
+   * account holds ten fewer — which is what a user can see — and the INDEXER
+   * says a `withdraw_shielded` action now exists on this contract, which is
+   * what makes the drop a withdrawal rather than a re-read.
+   */
+  test('a shielded withdrawal pays mUSD out of the account, and the chain records withdraw_shielded', async () => {
+    /* THE ADDRESS THE REST OF THIS TEST IS ABOUT.
+       Home only ever shows the account contract elided — nine characters and
+       seven — and the indexer query below needs all sixty-four. So the whole
+       address is read out of the record the deployment wrote, and then CHECKED
+       against what the receive row shows: querying an address the screen never
+       named would prove something about a different contract. */
+    const account = await storedAccountContract(page);
+    await page.getByRole('button', { name: /^Receive$/ }).click();
+    const shown = elidedAddress((await page.locator('.mnhome-address code').innerText()).trim());
+    expect(shown, 'the receive row showed no address').not.toBeNull();
+    expect(
+      account.startsWith(shown!.head) && account.endsWith(shown!.tail),
+      `the stored account ${account} is not the one the receive row shows`,
+    ).toBe(true);
+    await page.keyboard.press('Escape');
+    const rawAccount = account.trim().toLowerCase().replace(/^0x/, '').replace(/^0200/, '');
+    expect(rawAccount, 'the stored account is not a 64-hex contract address').toMatch(
+      /^[0-9a-f]{64}$/,
+    );
+    console.log(`[live] account contract ${rawAccount}`);
+
+    /* THE GRANT HAS TO HAVE LANDED FIRST — 100 mUSD, exactly, because that is
+       the figure the sponsor publishes as `assetGrant` and this send is quoted
+       against it. Refreshed while it waits: the card is re-read from the
+       contract on demand, which is why the control is on Home at all. */
+    await expect
+      .poll(async () => refreshedStablecoinValue(page), {
+        timeout: 12 * 60_000,
+        intervals: [10_000],
+        message:
+          'the mUSD activation grant never reached the account — check GET https://67-205-177-162.sslip.io/balancer/status for assetFunding and assetUnavailableReason',
+      })
+      .toBe(GRANT_MUSD);
+    console.log(`[live] activation stablecoin: ${GRANT_MUSD} mUSD in the account`);
+
+    /* The same wait the NIGHT send makes, for the same reason: one service
+       covers both the grant above and this send's fee, and it reserves its DUST
+       for a balanced transaction the moment it finalises one. */
+    await waitForSponsor();
+    /* The colour the sponsor named, so a Passport that happens to hold more
+       than one shielded token still sends the stablecoin rather than whichever
+       colour sorted first. `null` when the service cannot be read, and then
+       {@link chooseStablecoin} falls back to the option the picker names mUSD —
+       which is a weaker identification, and is why the colour is asked for
+       first rather than instead. */
+    const colour = await sponsorStablecoinColour();
+
+    await sendStablecoinToAddress(colour);
 
     /* WITNESS ONE: the account holds ten fewer, on the surface the user reads. */
     await expect
@@ -613,6 +635,81 @@ test.describe('@live the account model on stagenet', () => {
         withdrawal!.transaction.block.height
       }`,
     );
+  });
+
+  /**
+   * THE SECOND SEND — and the whole of the defect this spec could not see.
+   *
+   * WHAT HAPPENED (2026/09/17). A shielded send to a raw `mn_shield-addr…` was
+   * one transaction: a PARTIAL `withdraw_shielded` out of the sender's account.
+   * That is the branch of the deployed contract that splits its coin and
+   * re-registers the remainder — and the remainder is a coin the network
+   * refuses every later withdrawal against (`1010 Invalid Transaction: Custom
+   * error: 239`). So the FIRST send worked, and every send after it, for the
+   * life of that Passport, did not. Otrix reproduced it on several accounts:
+   * `alexey-otrix-6.night`'s first send landed in block 502554 and nothing left
+   * that Passport again.
+   *
+   * The test above sends once and passes either way, which is exactly why the
+   * defect reached production twice. This one sends a SECOND time from the same
+   * Passport — the fresh one this whole walk onboarded — and the assertion is
+   * simply that it lands. Against the old client it cannot: the first send left
+   * the account holding a coin no withdrawal can spend.
+   *
+   * Two witnesses again, and the same two: the CARD says the account holds ten
+   * fewer than it did after the first send, and the INDEXER says the contract
+   * now records TWO `withdraw_shielded` calls rather than the one the test
+   * above already saw.
+   */
+  test('a shielded send to an address works twice — the 239 that used to follow the first', async () => {
+    const account = await storedAccountContract(page);
+    const rawAccount = account.trim().toLowerCase().replace(/^0x/, '').replace(/^0200/, '');
+
+    /* THE CHANGE FROM THE FIRST SEND HAS TO BE BACK FIRST. Leg three puts the
+       sender's own remainder into the account after the payment is confirmed,
+       and it runs detached — so the ninety the card shows IS that leg having
+       landed, and waiting for it is waiting for a settled starting point rather
+       than for a screen to catch up. */
+    await expect
+      .poll(async () => refreshedStablecoinValue(page), {
+        timeout: 8 * 60_000,
+        intervals: [8_000],
+        message: 'the change from the first send never came back to the account',
+      })
+      .toBe(REMAINING_MUSD);
+
+    await waitForSponsor();
+    const colour = await sponsorStablecoinColour();
+    await sendStablecoinToAddress(colour);
+
+    /* WITNESS ONE: ten fewer again, on the surface the user reads. Against the
+       old client this figure never moved — the withdrawal was refused before
+       anything left the account. */
+    await expect
+      .poll(async () => refreshedStablecoinValue(page), {
+        timeout: 8 * 60_000,
+        intervals: [8_000],
+        message:
+          'the account mUSD balance did not fall after the SECOND shielded send — this is the 239',
+      })
+      .toBe(REMAINING_MUSD_AFTER_TWO);
+    console.log(
+      `[live] mUSD fell from ${REMAINING_MUSD} to ${REMAINING_MUSD_AFTER_TWO} on the second send`,
+    );
+
+    /* WITNESS TWO: the ledger records the second withdrawal as well as the
+       first. A balance that fell is a withdrawal only if the chain says so, and
+       one `withdraw_shielded` would be the first send's, already counted. */
+    const calls = await waitForContractCalls(rawAccount, 'withdraw_shielded', 2);
+    expect(
+      calls.length,
+      `the account's mUSD fell twice but the indexer records ${calls.length} withdraw_shielded on ${rawAccount}`,
+    ).toBeGreaterThanOrEqual(2);
+    for (const call of calls) {
+      console.log(
+        `[live] withdraw_shielded tx ${call.transaction.hash} in block ${call.transaction.block.height}`,
+      );
+    }
   });
 });
 
@@ -861,6 +958,49 @@ async function waitForContractCall(
   }
   console.log(`[live] the indexer never reported ${entryPoint}: ${last}`);
   return null;
+}
+
+/**
+ * Waits until the contract records at least `wanted` calls of one entry point.
+ *
+ * {@link waitForContractCall} answers with the FIRST match, which is the right
+ * answer to "did this ever happen" and the wrong one to "did it happen again".
+ * The second send's whole point is the again, so this counts.
+ */
+async function waitForContractCalls(
+  address: string,
+  entryPoint: string,
+  wanted: number,
+  timeoutMs = 6 * 60_000,
+): Promise<ContractCallAction[]> {
+  const query = `{ contract(address:"${address}") { actions { __typename ... on ContractCall { entryPoint } transaction { hash block { height } } } } }`;
+  const deadline = Date.now() + timeoutMs;
+  let found: ContractCallAction[] = [];
+  let last = 'the indexer was never asked';
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(INDEXER_URL, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ query }),
+      });
+      const body = (await response.json()) as {
+        data?: { contract?: { actions?: ContractCallAction[] } | null } | null;
+        errors?: unknown;
+      };
+      const actions = body.data?.contract?.actions ?? [];
+      found = actions.filter(
+        (action) => action.__typename === 'ContractCall' && action.entryPoint === entryPoint,
+      );
+      if (found.length >= wanted) return found;
+      last = `${found.length} ${entryPoint} call(s) on the contract, wanted ${wanted}`;
+    } catch (cause) {
+      last = cause instanceof Error ? cause.message : String(cause);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10_000));
+  }
+  console.log(`[live] the indexer never reported ${wanted} ${entryPoint} calls: ${last}`);
+  return found;
 }
 
 async function readNightBalance(page: Page): Promise<number> {
