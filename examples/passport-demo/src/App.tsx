@@ -114,12 +114,16 @@ import {
   /* The same table's other ending, for a balance moving INTO the account. */
   accountMoveRefusalText,
   nameSendKind,
+  paysAnAddress,
   serialisePendingSends,
+  stuckAssetText,
+  withdrawalIsPermanentlyRefused,
   watchForSettlement,
   type PendingSend,
   type PendingSendAsset,
   type SendLegTiming,
   type PendingSendKind,
+  type PendingSendRecipient,
 } from './lib/sendLegs.js';
 /* The bounded schedule that keeps asking whether this Passport's own account
    can pay in one transaction, for as long as the chain cannot say. A Passport
@@ -1303,7 +1307,7 @@ const PENDING_SEND_AUTO_RESUME_DELAY_MS = 3_000;
 /** A run, as it is written down before anything is submitted. */
 function newPendingSend(input: {
   kind: PendingSendKind;
-  recipient: { label: string; accountAddress: string };
+  recipient: PendingSendRecipient;
   amount: bigint;
   tokenType?: string;
   colourHex: string;
@@ -6890,6 +6894,11 @@ export default function PassportDemo() {
         withdrawShielded,
       } = await import('./identity/accountCustody.js');
       const { findArrivedNote, shieldedNoteIds } = await import('./lib/shieldedNote.js');
+      /* LEG TWO OF AN ADDRESS SEND, and the only leg in this run that reaches no
+         contract at all: a plain shielded transfer out of the sender's own
+         wallet to the address they typed. See `identity/walletTransfer.ts` for
+         why the address send has legs in the first place. */
+      const { transferShieldedFromWallet } = await import('./identity/walletTransfer.js');
       /* WHERE THE TIME WENT, per leg. The three spans inside one contract call
          — the local proving, the sponsor, the node — happen behind a single
          `submitting` phase and cannot be timed from out here, so
@@ -6902,6 +6911,22 @@ export default function PassportDemo() {
 
       const amount = BigInt(initial.amount);
       const amountText = pendingSendAmountLabel(initial, pendingSendAsset(initial));
+      /* WHERE THE MONEY ENDS UP, IN WORDS. A Passport has an account of ours to
+         pay into and every sentence below has always said so; a raw shielded
+         address is somebody's own wallet and has none, so each of those
+         sentences has a second form. Composed once, here, rather than branched
+         at four call sites that could drift apart. */
+      const toAddress = paysAnAddress(initial.recipient);
+      const recipientLabel = initial.recipient.label;
+      const nextLegLine = toAddress
+        ? `${amountText} left your account. Paying it to ${recipientLabel} next.`
+        : `${amountText} left your account. Paying it into ${recipientLabel}’s account next.`;
+      const arrivedLine = toAddress
+        ? `${amountText} has reached ${recipientLabel}.`
+        : `${amountText} is now in ${recipientLabel}’s account.`;
+      const arrivedWithChangeLine = toAddress
+        ? `${amountText} has reached ${recipientLabel}, and your change is back in your account.`
+        : `${amountText} is now in ${recipientLabel}’s account, and your change is back in yours.`;
       let record = initial;
       /* THE PLAN, re-read from the record after every save, because leg one is
          what settles it: a shielded run asks for the whole coin and only then
@@ -7026,9 +7051,15 @@ export default function PassportDemo() {
       let depositConnection: Promise<PreparedAccountCall | null> | null = null;
       const prepareDeposit = (): void => {
         if (depositConnection !== null) return;
+        /* NOTHING TO OPEN FOR AN ADDRESS. Leg two of an address send is a plain
+           wallet transfer — see `identity/walletTransfer.ts` — and there is no
+           contract at the other end of it to connect to, so the prewarm that
+           buys the name path its verifier-key read has nothing to buy here. */
+        if (paysAnAddress(record.recipient)) return;
+        const recipientAccount = record.recipient.accountAddress;
         depositConnection = prepareAccountDeposit(
           account.handle,
-          record.recipient.accountAddress,
+          recipientAccount,
         ).catch((cause) => {
           console.info('[send] leg two could not be opened ahead of time', cause);
           return null;
@@ -7081,7 +7112,10 @@ export default function PassportDemo() {
        * — because it is the same question: has the chain got this transaction?
        * There is simply nothing after the answer.
        */
-      const runTransfer = async (deviceSecret: Uint8Array): Promise<void> => {
+      const runTransfer = async (
+        deviceSecret: Uint8Array,
+        recipientAccount: string,
+      ): Promise<void> => {
         activityId = begin(false);
         openLeg();
         for (let attempt = record.attempts.withdraw; ; attempt += 1) {
@@ -7093,7 +7127,7 @@ export default function PassportDemo() {
               deviceSecret,
               {
                 contractAddress: account.address,
-                recipientContractAddress: record.recipient.accountAddress,
+                recipientContractAddress: recipientAccount,
                 colourHex: record.tokenType ?? record.colourHex,
                 amount,
               },
@@ -7282,13 +7316,32 @@ export default function PassportDemo() {
               lastError: undefined,
             });
             updateActivity(activityId, {
-              detail: `${amountText} left your account. Paying it into ${record.recipient.label}’s account next.`,
+              detail: nextLegLine,
               source: 'chain',
               txHash: out.txId,
             });
             return;
           } catch (cause) {
             const verdict = classifyLegError(cause);
+            /* A PASSPORT THAT CAN NO LONGER MOVE THIS ASSET AT ALL
+               (2026/09/17). Leg one asks for the WHOLE coin, which is the
+               branch of the contract that leaves the account withdrawable — so
+               a whole-coin withdrawal the network still refuses after a rebuild
+               is not a transient refusal. It is a Passport that took a partial
+               withdrawal before this fix, and nothing a client does will move
+               the asset out of it. Said once, honestly, and not attempted
+               again: the two attempts left would buy forty more seconds of
+               watching a sheet before saying the same thing.
+               See `withdrawalIsPermanentlyRefused` in `lib/sendLegs.ts`. */
+            if (withdrawalIsPermanentlyRefused({ kind: record.kind, attempt, error: cause })) {
+              const stuck = stuckAssetText(pendingSendAsset(record).symbol);
+              save({
+                attempts: { ...record.attempts, withdraw: attempt + 1 },
+                lastError: { message: stuck, retryable: false },
+              });
+              console.debug('[send] this account can no longer withdraw this colour', cause);
+              throw failure(cause, stuck, false);
+            }
             save({
               attempts: { ...record.attempts, withdraw: attempt + 1 },
               lastError: { message: verdict.message, retryable: verdict.retryable },
@@ -7453,12 +7506,29 @@ export default function PassportDemo() {
           setNameSendLeg('depositing');
           setNameSendAttempt(attempt + 1);
           try {
-            const paid =
-              record.kind === 'night'
+            const recipient = record.recipient;
+            const paid = paysAnAddress(recipient)
+              ? /* AN ADDRESS IS PAID BY THE WALLET, NOT BY A CONTRACT
+                   (2026/09/17). There is no account at the other end of a raw
+                   `mn_shield-addr…` and nothing of ours to deposit into, so
+                   this leg is a plain shielded transfer out of the note leg one
+                   paid in. The wallet's own balancing spends that note, funds
+                   the amount, and returns the difference — which is the same
+                   change note leg three already knew how to put back. */
+                await transferShieldedFromWallet(
+                  account.handle,
+                  {
+                    tokenType: record.tokenType ?? record.colourHex,
+                    amount: plan.pay,
+                    recipientShieldedAddress: recipient.shieldedAddress,
+                  },
+                  (progress) => setAccountPhase(progress.phase),
+                )
+              : record.kind === 'night'
                 ? await depositNight(
                     account.handle,
                     {
-                      contractAddress: record.recipient.accountAddress,
+                      contractAddress: recipient.accountAddress,
                       colourHex: record.colourHex,
                       amount,
                       prepared,
@@ -7468,7 +7538,7 @@ export default function PassportDemo() {
                 : await depositShielded(
                     account.handle,
                     {
-                      contractAddress: record.recipient.accountAddress,
+                      contractAddress: recipient.accountAddress,
                       /* THE WHOLE NOTE where the payment is the whole coin, and
                          a coin of exactly what is owed where it is not. The
                          second is a new coin rather than a note handed over
@@ -7504,7 +7574,7 @@ export default function PassportDemo() {
             updateActivity(activityId, {
               status: 'complete',
               label: `Sent to ${record.recipient.label}`,
-              detail: `${amountText} is now in ${record.recipient.label}’s account.`,
+              detail: arrivedLine,
               source: 'chain',
               txHash: paid.txId,
             });
@@ -7610,7 +7680,7 @@ export default function PassportDemo() {
             updateActivity(activityId, {
               status: 'complete',
               label: `Sent to ${record.recipient.label}`,
-              detail: `${amountText} is now in ${record.recipient.label}’s account, and your change is back in yours.`,
+              detail: arrivedWithChangeLine,
               source: 'chain',
               txHash: back.txId,
             });
@@ -7704,8 +7774,25 @@ export default function PassportDemo() {
            reload ago at least — so it is carried on by LOOKING, never by
            sending a second one. */
         if (record.kind === 'transfer') {
+          /* ONE TRANSACTION PAYS AN ACCOUNT, and only an account: the circuit
+             hands the amount to a CONTRACT address and lets the recipient's own
+             deposit run inside the same call tree. Nothing writes a `transfer`
+             record pointed at a raw address and `readPendingSends` refuses one,
+             so this is the narrowing — and it refuses rather than guessing,
+             because guessing here would be paying somewhere nobody chose. */
+          const recipient = record.recipient;
+          if (paysAnAddress(recipient)) {
+            throw failure(
+              new Error('a transfer record carried an address recipient'),
+              'That transfer could not be sent just now — nothing left your account. Try again.',
+              false,
+            );
+          }
+          const recipientAccount = recipient.accountAddress;
           if (!record.withdrawTxHash) {
-            await withAccountDeviceSecret((deviceSecret) => runTransfer(deviceSecret));
+            await withAccountDeviceSecret((deviceSecret) =>
+              runTransfer(deviceSecret, recipientAccount),
+            );
           } else {
             activityId = begin(options.resumed ?? false);
             /* The identifier the record kept, so the resumed wait asks the
@@ -8067,14 +8154,36 @@ export default function PassportDemo() {
    * The user's own shielded transfer — the Otrix totem case: a QR carrying a
    * `mn_shield-addr…` deposit address, paid out of this Passport's account.
    *
-   * The circuit is `withdraw_shielded`, and it takes the WHOLE recipient
-   * address rather than the coin key inside it: midnight-js builds the note's
-   * ciphertext client-side and needs the recipient's encryption key, which only
-   * the full bech32m address carries. See `WithdrawShieldedRequest`.
+   * THREE LEGS SINCE 2026/09/17, AND WHY THE ONE-TRANSACTION VERSION HAD TO GO
+   * -------------------------------------------------------------------------
+   * This used to be a single `withdraw_shielded` straight out of the account to
+   * the recipient, for PART of the account's coin. That is the branch of the
+   * deployed contract that splits the coin and re-registers the remainder — and
+   * the remainder is a coin the network refuses every later withdrawal against
+   * (`1010 Invalid Transaction: Custom error: 239`). The comment that stood
+   * here until this date argued that a 239 was uncommon and that two extra legs
+   * would be paying every send for a refusal most of them never see. Both
+   * halves were wrong: the 239 is not uncommon, it is GUARANTEED on every send
+   * after the first partial one, and the price was not two legs but every
+   * shielded send the Passport would ever make again. Otrix reproduced it on
+   * several accounts — `alexey-otrix-6.night`'s first send landed in block
+   * 502554 and every send after it was refused.
    *
-   * Deliberately the same shape as {@link executeOwnSend}: one ceremony, one
-   * activity row, refusals rethrown untouched, and a covered fee claimed only
-   * on the strength of what the sponsor really did.
+   * So this takes exactly the shape {@link executeShieldedSendToName} takes,
+   * through the same orchestrator, and the only thing that differs is who leg
+   * two pays:
+   *
+   *   1. `withdraw_shielded(whole: true)` — the WHOLE coin out to the sender's
+   *      own shielded address. The branch that leaves the account intact;
+   *   2. a plain shielded transfer, out of the sender's wallet, to the address
+   *      they typed — `identity/walletTransfer.ts`, the one leg in this app
+   *      that reaches no contract at all;
+   *   3. `deposit_shielded` — the sender's own change, back into their account,
+   *      detached, with nobody watching it.
+   *
+   * IT IS WRITTEN DOWN, so it survives the tab it started in: a reload between
+   * legs leaves a card on Home that carries the payment on, and leg two needs
+   * no ceremony to resume because it spends nothing of the account's.
    */
   const executeOwnShieldedSend = useCallback(
     async (params: {
@@ -8082,148 +8191,55 @@ export default function PassportDemo() {
       tokenType: string;
       amount: bigint;
     }): Promise<void> => {
-      /* The same one-at-a-time rule the name path keeps: the change from the
-         last transfer is a coin this withdrawal would have to be balanced
-         against, and it is not in the account yet. */
-      const blocked = sendBlockedByChangeReturn(pendingSendsRef.current);
-      if (blocked !== null) throw new Error(blocked);
-      const account = requireAccount();
-      try {
-        const { withdrawShielded } = await import('./identity/accountCustody.js');
-        await withAccountDeviceSecret(async (deviceSecret) => {
-          const entry = addActivity({
-            label: 'Sending a shielded token',
-            detail: `${params.amount} units to ${compactAddress(params.recipientAddress)}.`,
-            status: 'pending',
-            source: 'wallet',
-          });
-          try {
-            /* ONE REBUILD, AND ONLY ONE (2026/09/03). A node refusal means the
-               transaction was proved against a state that has moved, so the
-               same bytes earn the same answer and a fresh build is worth a try
-               — `withdrawShielded` re-reads the account from chain before it
-               builds anything, so the second attempt is against the state as it
-               is now. It costs no second passkey ceremony: the device secret is
-               already held by the block around this.
-
-               ONLY ONE, because a refusal that survives a rebuild has been
-               measured to survive every rebuild — three attempts, three
-               `Custom error: 239`s, live on stagenet — and the attempts after
-               the first buy a person forty more seconds of watching a sheet
-               before being told the same thing.
-
-               AND STILL A SPLIT WITHDRAWAL, reviewed again 2026/09/07 when the
-               name path's third leg was let go of. Passing `whole: true` here
-               would send the account's ENTIRE holding of this colour to a raw
-               address that is not the sender's, so paying part of a coin would
-               need the amount routed through the sender's own address and the
-               remainder returned — a second and a third transaction, on the one
-               path that is a single transaction today. The common case is a
-               transfer that succeeds first time, and adding two legs to make
-               the uncommon 239 cheaper would be paying every send for a refusal
-               most of them never see. So the split stays, and the rebuild's
-               cost is MEASURED rather than assumed: the line below is what says
-               how much a 239 is really worth. */
-            const withdrawOnce = () =>
-              withdrawShielded(
-                account.handle,
-                deviceSecret,
-                {
-                  contractAddress: account.address,
-                  colourHex: params.tokenType,
-                  amount: params.amount,
-                  recipientShieldedAddress: params.recipientAddress,
-                },
-                (progress) => setAccountPhase(progress.phase),
-              );
-            let result;
-            const startedAt = Date.now();
-            try {
-              result = await withdrawOnce();
-            } catch (firstAttempt) {
-              if (!classifyLegError(firstAttempt).rebuild) throw firstAttempt;
-              const refusedAfterMs = Date.now() - startedAt;
-              console.debug('[send] the shielded withdrawal is being built again', firstAttempt);
-              await new Promise((resolve) => setTimeout(resolve, retryDelayMs(0)));
-              const rebuiltFrom = Date.now();
-              result = await withdrawOnce();
-              /* WHAT THE REBUILD COSTS, in the same seconds the leg lines use.
-                 The first figure is the attempt that was thrown away; the
-                 second is the one that worked. Both together are what a reader
-                 asking "why did that transfer take a minute" needs. */
-              console.info(
-                `[send] shielded withdrawal rebuilt after a refusal: refused ${formatSendDuration(
-                  refusedAfterMs,
-                )} · rebuild ${formatSendDuration(Date.now() - rebuiltFrom)}`,
-              );
-            }
-            updateActivity(entry.id, {
-              status: 'complete',
-              label: 'Sent a shielded token',
-              detail: `${params.amount} units left your account for ${compactAddress(
-                params.recipientAddress,
-              )}.`,
-              source: 'chain',
-              txHash: result.txId,
-            });
-            pushToast({
-              tone: 'success',
-              /* Accepted, not yet included — the same claim the NIGHT path makes. */
-              title: 'Shielded transfer accepted by the network — confirming',
-              body: 'The fee sponsor covered the network fee.',
-              link: explorerTxLink(result.txId, result.network),
-            });
-            void refreshLocalBalances();
-          } catch (cause) {
-            /* THE PANEL GETS A SENTENCE, THE CONSOLE GETS THE CAUSE
-               (2026/09/03). A user's second mUSD send showed them "The account
-               contract rejected withdraw_shielded — SubmissionError: 1010:
-               Invalid Transaction: Custom error: 239": three machinery words, a
-               circuit name, and a number, none of it theirs to act on. The
-               chain is logged whole — as the error, not a string of it, so its
-               causes survive — and the row says what happened to the money.
-               See `sendRefusalText` in `lib/sendLegs.ts`. */
-            console.debug('[send] the shielded withdrawal was refused', cause);
-            updateActivity(entry.id, {
-              status: 'error',
-              detail: sendRefusalText(cause),
-              source: 'local',
-            });
-            throw cause;
-          }
-        });
-      } catch (cause) {
-        const code =
-          typeof cause === 'object' && cause !== null &&
-          typeof (cause as { code?: unknown }).code === 'string'
-            ? (cause as { code: string }).code
-            : null;
-        if (code === 'wallet-closed') {
-          pushToast({
-            tone: 'error',
-            title: 'Nothing was sent',
-            body: cause instanceof Error ? cause.message : String(cause),
-          });
-        }
-        /* A CODED refusal is this app's own and was written for a reader —
-           "Passport cannot see its own receiving address yet" is a thing to do
-           something about. Everything else is rethrown as the sentence rather
-           than as the machinery: the sheet renders whatever reaches it, and
-           what reached it was the SDK's. The original is on the console above,
-           and on the row. */
-        if (code !== null) throw cause;
-        throw Object.assign(new Error(sendRefusalText(cause)), { cause });
-      } finally {
-        setAccountPhase(null);
+      const ownShieldedAddress = localSurfaces?.shieldedAddress ?? null;
+      if (!ownShieldedAddress) {
+        throw Object.assign(
+          new Error(
+            'Passport cannot see its own receiving address yet, so it cannot route a payment there. Try again in a moment.',
+          ),
+          { code: 'wallet-closed' as const },
+        );
       }
+      /* WHAT THE ACCOUNT HOLDS OF THIS COLOUR, so the sheet can say "of 3" from
+         its first line rather than switching the count under somebody mid-send.
+         An estimate, and treated as one: leg one reads the figure again as it
+         builds and the record is corrected to whatever really came out. */
+      const account = requireAccount();
+      let held: bigint | undefined;
+      try {
+        const { readAccountState } = await import('./identity/accountCustody.js');
+        const state = await readAccountState(account.handle.network, account.address);
+        const wanted = normalisedColourHex(params.tokenType);
+        for (const [colour, amount] of state.shieldedCoins) {
+          if (normalisedColourHex(colour) === wanted) held = amount;
+        }
+      } catch (cause) {
+        console.info('[send] the account balance could not be read before the send', cause);
+      }
+      const plan = held === undefined ? null : planShieldedSend({ held, amount: params.amount });
+      await runNameSend(
+        newPendingSend({
+          /* NEVER `transfer`. The one-transaction circuit hands the amount to a
+             CONTRACT address and lets the recipient's own deposit run inside the
+             same call tree; a raw shielded address has no contract behind it, so
+             this route is the two-or-three-leg shielded send on every build. */
+          kind: 'shielded',
+          /* WHAT THE SCREEN CALLS THEM: the shortened address, which is what the
+             review sheet's Recipient row already shows and what the activity
+             trail has always printed for this path. */
+          recipient: {
+            label: compactAddress(params.recipientAddress),
+            shieldedAddress: params.recipientAddress,
+          },
+          amount: params.amount,
+          tokenType: params.tokenType,
+          colourHex: params.tokenType,
+          ownReceivingAddress: ownShieldedAddress,
+          ...(plan === null ? {} : { withdrawAmount: plan.withdraw }),
+        }),
+      );
     },
-    [
-      addActivity,
-      refreshLocalBalances,
-      requireAccount,
-      updateActivity,
-      withAccountDeviceSecret,
-    ],
+    [localSurfaces, requireAccount, runNameSend],
   );
 
   /**

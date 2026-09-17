@@ -680,9 +680,21 @@ export function walletProviderFor(wallet: LocalMidnightWallet) {
      the only thing `submitTx` can be submitting is the one just balanced. */
   let lastBalance: { txHash: string; servedBy: string } | null = null;
 
-  const balanceWithSponsor = async (
-    tx: unknown,
-    ttl: Date,
+  /**
+   * THE SPONSORED DANCE, FROM WHATEVER MADE THE RECIPE.
+   *
+   * Sign, prove, hand to the fee sponsor, and deserialise what it hands back —
+   * five steps that are the same whoever produced the recipe. It used to begin
+   * by balancing a contract call's unbound transaction, which was the only
+   * thing that ever reached it; since 2026/09/17 a plain wallet-level shielded
+   * transfer takes the identical path (see `identity/walletTransfer.ts`), so
+   * the ONE thing that differs — how the recipe is made — is a callback and
+   * everything after it is shared. The sponsor booking, the expiry check, the
+   * abandon-on-refusal rule, and the stage timings are therefore one
+   * implementation rather than two that can drift.
+   */
+  const balanceRecipeWithSponsor = async (
+    makeRecipe: () => Promise<unknown>,
   ): Promise<ledger.FinalizedTransaction> => {
     let recipe: unknown;
     /* The step being attempted, so the `catch` can say which one failed rather
@@ -690,10 +702,7 @@ export function walletProviderFor(wallet: LocalMidnightWallet) {
     let stage: BalancingStage = 'balance';
     const localWorkStartedAt = Date.now();
     try {
-      recipe = await facade.balanceUnboundTransaction(tx, wallet.keys, {
-        ttl,
-        tokenKindsToBalance: BALANCE_WITHOUT_DUST,
-      });
+      recipe = await makeRecipe();
       stage = 'sign';
       const signed = await facade.signRecipe(
         recipe,
@@ -763,6 +772,15 @@ export function walletProviderFor(wallet: LocalMidnightWallet) {
       throw balancingFailure(stage, cause);
     }
   };
+
+  /** The contract call's own recipe: its unbound transaction, balanced. */
+  const balanceWithSponsor = (tx: unknown, ttl: Date): Promise<ledger.FinalizedTransaction> =>
+    balanceRecipeWithSponsor(() =>
+      facade.balanceUnboundTransaction(tx, wallet.keys, {
+        ttl,
+        tokenKindsToBalance: BALANCE_WITHOUT_DUST,
+      }),
+    );
 
   /**
    * `WalletFacade.submitTransaction`, with the wait asked for at INCLUSION.
@@ -975,6 +993,24 @@ export function walletProviderFor(wallet: LocalMidnightWallet) {
          outage and what refusing on one cost. */
       await awaitSponsorReadiness();
       return balanceWithSponsor(tx, deadline);
+    },
+
+    /**
+     * The same gate and the same dance, for a recipe the WALLET built itself.
+     *
+     * Used by `identity/walletTransfer.ts` for the plain shielded transfer that
+     * pays a raw address — a transaction with no contract in it at all, which
+     * still must not be built, signed, or proved until the sponsor has said it
+     * can pay, and which the node may refuse in exactly the ways `submitTx`
+     * below already knows how to hand a booking back for.
+     */
+    async balanceRecipeTx(
+      makeRecipe: (ttl: Date) => Promise<unknown>,
+      ttl?: Date,
+    ): Promise<ledger.FinalizedTransaction> {
+      const deadline = ttl ?? new Date(Date.now() + DEFAULT_TTL_MS);
+      await awaitSponsorReadiness();
+      return balanceRecipeWithSponsor(() => makeRecipe(deadline));
     },
 
     /**
