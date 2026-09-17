@@ -27,6 +27,7 @@ import {
   type K1ProofJob,
   type K1Prover,
   type K1ProverOptions,
+  type ProveK1Outcome,
 } from '../src/proveK1.js';
 
 /* -------------------------------------------------------------------------- */
@@ -200,13 +201,18 @@ describe('a request this service refuses to read', () => {
 
 describe('a host with no k1 proving on it', () => {
   it('answers 503 prover-unavailable when no v3 proof server is configured', async () => {
+    /* The start-up explanation names a route and an environment variable. It
+       goes to the journal; the caller gets the code and the fixed sentence. */
+    const lines: string[] = [];
     const outcome = await proverWith({
       proverUrl: null,
       proverWhy: 'account-k1 is compiled --feature-zkir-v3, and neither route can prove it.',
+      log: (line) => lines.push(line),
     }).prove(request());
     assert.equal(outcome.status, 503);
     assert.equal(outcome.body.error, 'prover-unavailable');
-    assert.match(String(outcome.body.detail), /zkir-v3/);
+    assert.ok(!String(outcome.body.detail).includes('zkir-v3'), String(outcome.body.detail));
+    assert.match(lines.join('\n'), /zkir-v3/);
   });
 
   it('answers 503 prover-unavailable when the artefacts are not on the host', async () => {
@@ -217,10 +223,14 @@ describe('a host with no k1 proving on it', () => {
 
   it('answers 503 for a circuit whose key material was never rsynced', async () => {
     const staged = stageArtefacts(['activate_initial_device_with_k256']);
-    const outcome = await proverWith({ assetsPath: staged }).prove(request());
+    const lines: string[] = [];
+    const outcome = await proverWith({ assetsPath: staged, log: (line) => lines.push(line) }).prove(
+      request(),
+    );
     assert.equal(outcome.status, 503);
     assert.equal(outcome.body.error, 'prover-unavailable');
-    assert.match(String(outcome.body.detail), new RegExp(CIRCUIT));
+    /* Which circuit, and how much of it is missing, is the operator's line. */
+    assert.match(lines.join('\n'), new RegExp(CIRCUIT));
     rmSync(staged, { recursive: true, force: true });
   });
 
@@ -358,11 +368,12 @@ describe('proving one k1 circuit at a time', () => {
 describe('a proof that does not finish', () => {
   it('answers 504 proving-timeout rather than holding the socket', async () => {
     const held = heldProof();
-    const prover = proverWith({ engine: held.engine, timeoutMs: 20 });
+    const lines: string[] = [];
+    const prover = proverWith({ engine: held.engine, timeoutMs: 20, log: (line) => lines.push(line) });
     const outcome = await prover.prove(request());
     assert.equal(outcome.status, 504);
     assert.equal(outcome.body.error, 'proving-timeout');
-    assert.match(String(outcome.body.detail), new RegExp(CIRCUIT));
+    assert.match(lines.join('\n'), new RegExp(CIRCUIT));
     held.release();
   });
 
@@ -387,6 +398,304 @@ describe('a proof that does not finish', () => {
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal((await prover.prove(request())).status, 504);
     held.release();
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* What a refusal is allowed to say                                           */
+/* -------------------------------------------------------------------------- */
+
+describe('a refusal handed back to the caller', () => {
+  /** A tick, so a queued request has reached the queue. */
+  const tick = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+
+  /**
+   * Nothing about THIS BOX may cross the wire.
+   *
+   * `/prove-k1` answers unauthenticated callers, and the interesting refusals
+   * carry somebody else's prose: a proof server quoting the key it could not
+   * open, `NodeZkConfigProvider` quoting an absolute path under the artefacts
+   * directory, the start-up line naming `BALANCER_PROVER_URL_V3` and the URL it
+   * points at. A body that repeats any of that publishes the sponsor's
+   * filesystem and its internal endpoints to whoever posted the bad request.
+   */
+  const NAMES_THIS_HOST = [
+    ['a path under /opt', /\/opt/],
+    ['a URL', /http/i],
+    ['any absolute path', /(^|[\s'"`(])\/[\w.-]+\//],
+    ['an environment variable of ours', /BALANCER_/],
+  ] as const;
+
+  it('never names a path, a URL, or an environment variable — whatever went wrong', async () => {
+    const staged = stageArtefacts();
+    const half = stageArtefacts(['activate_initial_device_with_k256']);
+    /* Every failure this route can have, each with a cause that names the box. */
+    const leaky = `ENOENT: no such file or directory, open '${staged}/keys/${CIRCUIT}.prover' — proof server http://127.0.0.1:6300 unreachable, set BALANCER_PROVER_URL_V3`;
+    const held = heldProof();
+    const bodies: ProveK1Outcome[] = [];
+
+    const ordinary = proverWith({ assetsPath: staged });
+    bodies.push(await ordinary.prove('not json at all'));
+    bodies.push(await ordinary.prove(JSON.stringify({ network: 'stagenet', unprovenTx: 'aa' })));
+    bodies.push(await ordinary.prove(request({ unprovenTx: '0xdeadbeef' })));
+    bodies.push(await ordinary.prove(request({ network: 'undeployed' })));
+    bodies.push(await ordinary.prove(request({ circuit: NOT_A_CIRCUIT })));
+    bodies.push(await ordinary.prove(request({ unprovenTx: 'ab'.repeat(MAX_UNPROVEN_TX_BYTES + 1) })));
+    bodies.push(
+      await proverWith({ assetsPath: null, proverWhy: leaky }).prove(request()),
+    );
+    bodies.push(
+      await proverWith({ proverUrl: null, proverWhy: leaky }).prove(request()),
+    );
+    bodies.push(await proverWith({ assetsPath: half }).prove(request()));
+    bodies.push(
+      await proverWith({
+        assetsPath: staged,
+        circuits: () => Promise.reject(new Error(leaky)),
+      }).prove(request()),
+    );
+    bodies.push(
+      await proverWith({ assetsPath: staged, engine: () => Promise.reject(new Error(leaky)) }).prove(
+        request(),
+      ),
+    );
+    bodies.push(
+      await proverWith({ assetsPath: staged, engine: held.engine, timeoutMs: 20 }).prove(request()),
+    );
+    /* And the busy refusal, which is the one with a number in it. */
+    const busy = proverWith({ assetsPath: staged, engine: held.engine, maxWaiting: 0 });
+    const running = busy.prove(request());
+    await tick();
+    bodies.push(await busy.prove(request()));
+    held.release();
+    held.release();
+    await running;
+
+    assert.equal(bodies.length, 13);
+    for (const outcome of bodies) {
+      assert.ok(outcome.status >= 400, `${outcome.status}`);
+      const published = JSON.stringify(outcome.body);
+      assert.ok(!published.includes(staged), published);
+      assert.ok(!published.includes(half), published);
+      for (const [what, pattern] of NAMES_THIS_HOST) {
+        assert.ok(!pattern.test(published), `${what}: ${published}`);
+      }
+      assert.equal(typeof outcome.body.detail, 'string');
+      assert.ok((outcome.body.detail as string).length > 0);
+    }
+    rmSync(staged, { recursive: true, force: true });
+    rmSync(half, { recursive: true, force: true });
+  });
+
+  it('says the same sentence for the same code, whatever the cause was', async () => {
+    const one = await proverWith({
+      engine: () => Promise.reject(new Error('connect ECONNREFUSED 127.0.0.1:6300')),
+    }).prove(request());
+    const two = await proverWith({
+      engine: () => Promise.reject(new Error('414 Request-URI Too Large from the prover')),
+    }).prove(request());
+    assert.equal(one.body.error, 'proving-failed');
+    assert.equal(two.body.error, 'proving-failed');
+    assert.equal(one.body.detail, two.body.detail);
+  });
+
+  it('keeps the whole cause in the journal', async () => {
+    const lines: string[] = [];
+    await proverWith({
+      log: (line) => lines.push(line),
+      engine: () => Promise.reject(new Error('connect ECONNREFUSED 127.0.0.1:6300')),
+    }).prove(request());
+    assert.match(lines.join('\n'), /ECONNREFUSED 127\.0\.0\.1:6300/);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The caller who went away                                                   */
+/* -------------------------------------------------------------------------- */
+
+describe('a caller that closes its connection while queued', () => {
+  const tick = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+
+  it('leaves the waiting room, and is never proved for', async () => {
+    const held = heldProof();
+    const prover = proverWith({ engine: held.engine, maxWaiting: 1 });
+    const first = prover.prove(request());
+    await tick();
+    const gone = new AbortController();
+    const abandoned = prover.prove(request(), gone.signal);
+    await tick();
+    assert.equal(prover.snapshot().queueWaiting, 1);
+    /* One proving, one waiting, room of one: the next caller is turned away. */
+    assert.equal((await prover.prove(request())).status, 429);
+
+    gone.abort();
+    const outcome = await abandoned;
+    assert.equal(outcome.status, 499);
+    assert.equal(outcome.body.error, 'client-gone');
+    assert.equal(prover.snapshot().queueWaiting, 0);
+
+    /* The place it vacated is a place a live caller can now have. */
+    const live = prover.prove(request());
+    await tick();
+    assert.equal(prover.snapshot().queueWaiting, 1);
+    held.release();
+    assert.equal((await first).status, 200);
+    await tick();
+    assert.equal(held.started(), 2, 'the abandoned request must not have been proved');
+    held.release();
+    assert.equal((await live).status, 200);
+    assert.equal(prover.snapshot().queueDepth, 0);
+  });
+
+  it('does not count against the waiting room once it has gone', async () => {
+    const held = heldProof();
+    const prover = proverWith({ engine: held.engine, maxWaiting: 2 });
+    const first = prover.prove(request());
+    await tick();
+    const controllers = [new AbortController(), new AbortController()];
+    const abandoned = controllers.map((controller) => prover.prove(request(), controller.signal));
+    await tick();
+    assert.equal((await prover.prove(request())).status, 429);
+    for (const controller of controllers) controller.abort();
+    for (const outcome of await Promise.all(abandoned)) assert.equal(outcome.status, 499);
+    assert.equal(prover.snapshot().queueWaiting, 0);
+    const live = prover.prove(request());
+    await tick();
+    assert.equal(prover.snapshot().queueWaiting, 1);
+    held.release();
+    await first;
+    await tick();
+    held.release();
+    assert.equal((await live).status, 200);
+    assert.equal(held.started(), 2);
+  });
+
+  it('refuses a request whose connection had already gone, without a slot', async () => {
+    let proofs = 0;
+    const prover = proverWith({
+      maxWaiting: 4,
+      engine: () => {
+        proofs += 1;
+        return Promise.resolve(new Uint8Array([0x01]));
+      },
+    });
+    const held = heldProof();
+    const busy = proverWith({ engine: held.engine, maxWaiting: 4 });
+    const running = busy.prove(request());
+    await tick();
+    const gone = new AbortController();
+    gone.abort();
+    const outcome = await busy.prove(request(), gone.signal);
+    assert.equal(outcome.status, 499);
+    assert.equal(busy.snapshot().queueWaiting, 0);
+    held.release();
+    await running;
+    /* And the same on an idle prover: an abandoned request takes no slot. */
+    const idle = await prover.prove(request(), gone.signal);
+    assert.equal(idle.status, 499);
+    assert.equal(proofs, 0);
+    assert.equal(prover.snapshot().queueDepth, 0);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* One deadline, queue included                                               */
+/* -------------------------------------------------------------------------- */
+
+describe('the deadline a caller is promised', () => {
+  const tick = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+
+  it('covers the wait and the proof together, not each of them', async () => {
+    let clock = 0;
+    const held = heldProof();
+    const prover = proverWith({
+      now: () => clock,
+      engine: held.engine,
+      timeoutMs: 60_000,
+      graceMs: 60_000,
+      maxWaiting: 4,
+    });
+    const first = prover.prove(request());
+    await tick();
+    const second = prover.prove(request());
+    await tick();
+    assert.equal(prover.snapshot().queueWaiting, 1);
+
+    /* The first proof takes the whole of the deadline. The second caller has
+       been on the socket for all of it without a proof of its own starting. */
+    clock += 60_000;
+    held.release();
+    assert.equal((await first).status, 200);
+
+    const outcome = await second;
+    assert.equal(outcome.status, 504);
+    assert.equal(outcome.body.error, 'proving-timeout');
+    assert.equal(typeof outcome.retryAfterMs, 'number');
+    assert.equal(held.started(), 1, 'an expired request must not start a proof');
+    assert.equal(prover.snapshot().queueDepth, 0);
+    assert.equal(prover.snapshot().proofsServed, 1);
+  });
+
+  it('gives a proof only what the queue left of it', async () => {
+    let clock = 0;
+    const seen: number[] = [];
+    const held = heldProof();
+    const prover = proverWith({
+      now: () => clock,
+      timeoutMs: 60_000,
+      maxWaiting: 4,
+      engine: (job) => {
+        seen.push(job.timeoutMs);
+        return held.engine();
+      },
+    });
+    const first = prover.prove(request());
+    await tick();
+    const second = prover.prove(request());
+    await tick();
+    clock += 25_000;
+    held.release();
+    await first;
+    await tick();
+    held.release();
+    assert.equal((await second).status, 200);
+    /* The first had the whole minute; the second, what was left of it. */
+    assert.deepEqual(seen, [60_000, 35_000]);
+  });
+
+  it('quotes a wait built from the queue’s depth and its own last proof', async () => {
+    let clock = 0;
+    const held = heldProof();
+    let first = true;
+    const prover = proverWith({
+      now: () => clock,
+      maxWaiting: 2,
+      engine: () => {
+        if (first) {
+          first = false;
+          clock += 10_000;
+          return Promise.resolve(new Uint8Array([0x01]));
+        }
+        return held.engine();
+      },
+    });
+    /* One measured proof, so the estimate is this service's own experience. */
+    await prover.prove(request());
+    assert.equal(prover.snapshot().lastProofMs, 10_000);
+
+    const queued = [prover.prove(request()), prover.prove(request()), prover.prove(request())];
+    await tick();
+    const refused = await prover.prove(request());
+    assert.equal(refused.status, 429);
+    assert.equal(prover.snapshot().queueDepth, 3);
+    /* Three ahead of it, ten seconds each. */
+    assert.equal(refused.body.retryAfterMs, 30_000);
+    assert.equal(refused.retryAfterMs, 30_000);
+    for (let i = 0; i < 3; i += 1) {
+      held.release();
+      await tick();
+    }
+    for (const outcome of await Promise.all(queued)) assert.equal(outcome.status, 200);
   });
 });
 
@@ -475,7 +784,9 @@ describe('the engine that would talk to a proof server', () => {
     const outcome = await prover.prove(request());
     assert.equal(outcome.status, 502);
     assert.equal(outcome.body.error, 'proving-failed');
-    assert.match(String(outcome.body.detail), /ECONNREFUSED/);
+    /* The prover's own words are the journal's, not the caller's. */
+    assert.ok(!String(outcome.body.detail).includes('ECONNREFUSED'), String(outcome.body.detail));
+    assert.equal(prover.snapshot().lastError?.code, 'proving-failed');
   });
 });
 

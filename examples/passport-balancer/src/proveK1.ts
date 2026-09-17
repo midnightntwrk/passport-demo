@@ -30,11 +30,21 @@
  * both slow and a sponsor that has stopped answering. So:
  *
  *   - ONE k1 proof runs at a time ({@link K1Queue}), with a short bounded
- *     queue behind it and `429 PROVING_BUSY` past that. A caller told to come
- *     back in twenty seconds is better served than a caller enrolled in a wait
- *     nobody can honour — the lesson `SpendAdmission` already writes down.
- *   - A proof has a DEADLINE. The client gets `504 proving-timeout` rather
- *     than a socket held open for ten minutes.
+ *     queue behind it and `429 PROVING_BUSY` past that, quoting a wait built
+ *     from the queue's depth and this service's own last proof. A caller told
+ *     to come back in twenty seconds is better served than a caller enrolled in
+ *     a wait nobody can honour — the lesson `SpendAdmission` already writes
+ *     down. A caller that closes its connection LEAVES the queue rather than
+ *     being woken later to prove for a browser that has gone.
+ *   - A REQUEST has a deadline, not a proof: it starts when the request is
+ *     queued and covers the wait and the proving together, so the answer comes
+ *     inside {@link PROVE_K1_TIMEOUT_MS} however busy the box is. The client
+ *     gets `504 proving-timeout` rather than a socket held open for ten
+ *     minutes.
+ *   - A REFUSAL SAYS ONE FIXED SENTENCE ({@link REFUSAL_DETAIL}). The cause —
+ *     a prover's own words, a path, the reason this host has no artefacts —
+ *     goes to the journal, because `/prove-k1` answers unauthenticated callers
+ *     and a refusal is not the place to publish the box's filesystem.
  *   - The ZK CONFIG IS BUILT PER REQUEST and dropped when the proof ends.
  *     `NodeZkConfigProvider` reads the prover key off disk when it is asked
  *     and caches only the integrity manifest, so the hundred-odd megabytes is
@@ -88,10 +98,26 @@ export const PROVE_K1_PREFIX = 'prove-k1';
  */
 export const MAX_UNPROVEN_TX_BYTES = 2 * 1024 * 1024;
 
-/** How long one proof may take before the caller is told it did not. */
+/**
+ * How long ONE REQUEST may take, queue included, before the caller is told it
+ * did not.
+ *
+ * Measured from the moment the request joins the queue, not from the moment it
+ * reaches the prover: the two are the same for the first caller and three
+ * minutes apart for the fifth, and it is the caller's socket that pays either
+ * way. A proof that starts with ninety seconds of the budget left is given
+ * ninety seconds, and the queue's share is named in the refusal so the journal
+ * says which of the two ran out.
+ */
 export const PROVE_K1_TIMEOUT_MS = 180_000;
 
-/** How many callers may wait for the running proof before the rest are refused. */
+/**
+ * How many callers may wait for the running proof before the rest are refused.
+ *
+ * Four, and four LIVE ones: a waiter whose request closes is evicted
+ * ({@link K1Queue.acquire}), so this bounds the people actually waiting rather
+ * than the requests that have ever arrived.
+ */
 export const PROVE_K1_MAX_WAITING = 4;
 
 /**
@@ -139,15 +165,79 @@ function refuse(
   };
 }
 
+/**
+ * WHAT A REFUSED CALLER IS TOLD — one fixed sentence per code, and nothing else.
+ *
+ * The reason this is a table rather than a string built at the point of the
+ * refusal is that the interesting refusals are the ones whose cause is a
+ * sentence somebody else wrote: a proof server quoting the key it could not
+ * open, `NodeZkConfigProvider` quoting `<assets>/keys/<circuit>.prover`, the
+ * start-up explanation of why this host has no prover, which names an
+ * environment variable and a URL. Interpolating any of those into the body
+ * publishes this box's filesystem and its internal endpoints to anybody who can
+ * post a malformed transaction — and `/prove-k1` is a route an unauthenticated
+ * browser calls.
+ *
+ * The caller loses nothing it can act on. It knows the circuit and the network
+ * it asked for, and `code` is what its `describeProveK1Failure` switches on;
+ * the sentence is there to be read by a human, not parsed. The cause — all of
+ * it, unredacted — goes to the journal, where the operator who can act on it
+ * already is. `/status` carries the same cause with this host's geography taken
+ * out, because that page is on the internet and the journal is not.
+ *
+ * Every code this route can answer with is here. A code added without a
+ * sentence would fall through to the last line, which says nothing useful, so
+ * add both together.
+ */
+const REFUSAL_DETAIL: Readonly<Record<string, string>> = {
+  'invalid-request':
+    'The request body must be JSON of the form {"circuit": "…", "unprovenTx": "<hex>", "network": "…"}, with the transaction as an even number of hex digits and no 0x prefix.',
+  'unsupported-network': 'This service cannot prove a transaction for that network.',
+  'transaction-too-large': `An unproven transaction may be at most ${MAX_UNPROVEN_TX_BYTES} bytes.`,
+  'unknown-circuit': 'That is not a circuit of the account-k1 build.',
+  'prover-unavailable':
+    'This service cannot prove account-k1 circuits at the moment. It is the sponsor that needs attention, not the request.',
+  PROVING_BUSY:
+    'This service proves one k1 circuit at a time and its waiting room is full. Try again shortly.',
+  'proving-timeout': 'The proof did not finish inside this service’s deadline.',
+  'proving-failed': 'The proof server could not prove this transaction.',
+  'client-gone': 'The request was abandoned before its proof started.',
+};
+
+/** The sentence for a code, and a serviceable one for a code nobody wrote. */
+function clientDetail(code: string): string {
+  return REFUSAL_DETAIL[code] ?? 'This service refused the request.';
+}
+
 /* -------------------------------------------------------------------------- */
 /* One at a time, and not many waiting                                        */
 /* -------------------------------------------------------------------------- */
 
 /** Thrown by {@link K1Queue.acquire} when the queue is full. */
 export class ProvingBusy extends Error {
-  constructor(readonly waiting: number) {
+  constructor(
+    readonly waiting: number,
+    /** Waiting plus the one proving — what the wait actually costs. */
+    readonly depth: number,
+  ) {
     super(`${waiting} callers are already waiting for a k1 proof.`);
     this.name = 'ProvingBusy';
+  }
+}
+
+/**
+ * Thrown by {@link K1Queue.acquire} when the caller went away while queued.
+ *
+ * Not an error of this service's: a browser that navigated, reloaded, or was
+ * closed halfway through onboarding is the ordinary case. What matters is that
+ * it stops occupying a place in a four-deep room and stops the proof it asked
+ * for from ever starting — a proof nobody is waiting for is a minute of the
+ * sponsor's CPU spent on a socket that is already shut.
+ */
+export class ProvingAbandoned extends Error {
+  constructor() {
+    super('The caller closed the connection while waiting for a k1 proof.');
+    this.name = 'ProvingAbandoned';
   }
 }
 
@@ -160,7 +250,7 @@ export class ProvingBusy extends Error {
  */
 export class K1Queue {
   private running = false;
-  private readonly waiters: Array<() => void> = [];
+  private readonly waiters: Array<{ readonly wake: () => void }> = [];
 
   constructor(private readonly maxWaiting: number) {}
 
@@ -174,20 +264,56 @@ export class K1Queue {
     return this.waiters.length + (this.running ? 1 : 0);
   }
 
-  /** Claims the slot, or throws {@link ProvingBusy}. Every claim needs a release. */
-  async acquire(): Promise<void> {
+  /**
+   * Claims the slot, or throws.
+   *
+   * {@link ProvingBusy} when the waiting room is full, {@link ProvingAbandoned}
+   * when `signal` fires before the slot comes free. Every claim that RETURNS
+   * needs a release; neither throw holds anything.
+   *
+   * The signal is the difference between a queue that bounds waiting and a
+   * queue that bounds arrivals. Four places, each held by a browser that may
+   * already be gone, is a room that fills up once and stays full: the abandoned
+   * callers are woken in turn, prove for a minute each, and every live caller
+   * behind them is told `PROVING_BUSY` for four minutes. A waiter that leaves
+   * when its request does keeps the room's depth equal to the number of people
+   * actually in it.
+   */
+  async acquire(signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted === true) throw new ProvingAbandoned();
     if (!this.running) {
       this.running = true;
       return;
     }
-    if (this.waiters.length >= this.maxWaiting) throw new ProvingBusy(this.waiters.length);
-    await new Promise<void>((resolve) => this.waiters.push(resolve));
+    if (this.waiters.length >= this.maxWaiting)
+      throw new ProvingBusy(this.waiters.length, this.depth);
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const waiter = {
+        wake: () => {
+          if (settled) return;
+          settled = true;
+          signal?.removeEventListener('abort', onAbort);
+          resolve();
+        },
+      };
+      const onAbort = (): void => {
+        if (settled) return;
+        settled = true;
+        const at = this.waiters.indexOf(waiter);
+        if (at >= 0) this.waiters.splice(at, 1);
+        signal?.removeEventListener('abort', onAbort);
+        reject(new ProvingAbandoned());
+      };
+      signal?.addEventListener('abort', onAbort, { once: true });
+      this.waiters.push(waiter);
+    });
   }
 
   /** Hands the slot to the next waiter, or puts it back. */
   release(): void {
     const next = this.waiters.shift();
-    if (next) next();
+    if (next) next.wake();
     else this.running = false;
   }
 }
@@ -404,8 +530,15 @@ export interface K1ProverOptions {
 }
 
 export interface K1Prover {
-  /** Answers one request. `body` is the raw request body. */
-  prove(body: Buffer | string): Promise<ProveK1Outcome>;
+  /**
+   * Answers one request. `body` is the raw request body.
+   *
+   * `signal` is the caller's connection: fire it when the socket closes and a
+   * request still in the queue leaves it instead of being woken to prove for a
+   * browser that is no longer there. Omitted, the request behaves as it always
+   * did, which is what every drill that does not care about disconnection wants.
+   */
+  prove(body: Buffer | string, signal?: AbortSignal): Promise<ProveK1Outcome>;
   snapshot(): K1ProvingSnapshot;
 }
 
@@ -490,13 +623,13 @@ export function createK1Prover(options: K1ProverOptions): K1Prover {
   const refused = (
     status: number,
     code: string,
-    detail: string,
+    /** The whole cause, for the journal. NEVER what the caller is handed. */
+    because: string,
     retryAfterMs?: number,
   ): ProveK1Outcome => {
-    const published = redact(detail);
-    lastError = { code, detail: published, at: new Date(now()).toISOString() };
-    log(`[${PROVE_K1_PREFIX}] refused: ${code} — ${published}`, 'warn');
-    return refuse(status, code, detail, retryAfterMs);
+    lastError = { code, detail: redact(because), at: new Date(now()).toISOString() };
+    log(`[${PROVE_K1_PREFIX}] refused: ${code} — ${because}`, 'warn');
+    return refuse(status, code, clientDetail(code), retryAfterMs);
   };
 
   /** What to tell a refused caller to wait: this service's own measured pace. */
@@ -505,7 +638,10 @@ export function createK1Prover(options: K1ProverOptions): K1Prover {
     return Math.min(60_000, Math.max(5_000, measured));
   };
 
-  const prove = async (rawBody: Buffer | string): Promise<ProveK1Outcome> => {
+  const prove = async (
+    rawBody: Buffer | string,
+    signal?: AbortSignal,
+  ): Promise<ProveK1Outcome> => {
     /* PARSED AND CHECKED BEFORE THE QUEUE IS TOUCHED. A malformed body is the
        caller's mistake and must not cost anybody else a slot — the rule
        `/balance-only` already follows, for the same reason. */
@@ -617,27 +753,63 @@ export function createK1Prover(options: K1ProverOptions): K1Prover {
       );
     }
 
+    /* THE DEADLINE STARTS HERE, not when the slot comes free. What the caller
+       is promised is an answer inside `timeoutMs` — a socket held open for the
+       queue and then again for the proof is two deadlines, and four of those in
+       a row is twelve minutes of a browser waiting on a route documented as
+       answering in three. Queueing and proving spend the same budget. */
+    const enqueuedAt = now();
+    const deadlineAt = enqueuedAt + timeoutMs;
+
     try {
-      await queue.acquire();
+      await queue.acquire(signal);
     } catch (cause) {
       if (cause instanceof ProvingBusy) {
+        /* An HONEST wait: everybody ahead of this caller has to prove before it
+           does, at the pace this service last managed. `depth` counts the one
+           proving as well as the ones waiting, which is why it is the queue's
+           number rather than `waiting + 1` — a full room whose proof has just
+           finished is one shorter than a full room whose proof has just
+           started, and the caller should be told the difference. */
         return refused(
           429,
           'PROVING_BUSY',
-          `This service proves one k1 circuit at a time and ${cause.waiting} callers are already waiting. Try again shortly.`,
-          (cause.waiting + 1) * estimateMs(),
+          `This service proves one k1 circuit at a time and ${cause.waiting} callers are already waiting (queue depth ${cause.depth}).`,
+          Math.max(1, cause.depth) * estimateMs(),
         );
+      }
+      if (cause instanceof ProvingAbandoned) {
+        /* Nobody is listening. Answered rather than thrown so the route's
+           bookkeeping stays in one place; the write goes to a closed socket and
+           Node drops it. */
+        log(`[${PROVE_K1_PREFIX}] a caller waiting for ${circuit} closed its connection`, 'info');
+        return refuse(499, 'client-gone', clientDetail('client-gone'));
       }
       throw cause;
     }
 
     const startedAt = now();
+    /* What is LEFT of the deadline after the queue took its share. Zero or less
+       means the caller has already been waiting the whole of it, and starting a
+       proof now would only tie up the box on a socket about to be answered
+       504 anyway. */
+    const remainingMs = deadlineAt - startedAt;
+    if (remainingMs <= 0) {
+      queue.release();
+      return refused(
+        504,
+        'proving-timeout',
+        `A caller waited ${startedAt - enqueuedAt} ms in the queue for ${circuit}, which is the whole of the ${timeoutMs} ms deadline; its proof was never started.`,
+        estimateMs(),
+      );
+    }
+
     const job: K1ProofJob = {
       circuit,
       unprovenTx: bytesFromHex(hex),
       assetsPath: options.assetsPath,
       proverUrl: options.proverUrl,
-      timeoutMs,
+      timeoutMs: remainingMs,
     };
     log(`[${PROVE_K1_PREFIX}] proving ${circuit} (${hex.length / 2} bytes in)`, 'info');
 
@@ -671,8 +843,8 @@ export function createK1Prover(options: K1ProverOptions): K1Prover {
             releaseWhenDone();
           }, graceMs);
           if (typeof grace.unref === 'function') grace.unref();
-          reject(new ProvingTimeout(timeoutMs));
-        }, timeoutMs);
+          reject(new ProvingTimeout(remainingMs));
+        }, remainingMs);
         if (typeof timer.unref === 'function') timer.unref();
         running.then(resolve, reject);
       });
@@ -690,7 +862,7 @@ export function createK1Prover(options: K1ProverOptions): K1Prover {
         return refused(
           504,
           'proving-timeout',
-          `The proof of ${circuit} did not finish inside ${Math.round(timeoutMs / 1_000)} seconds.`,
+          `The proof of ${circuit} did not finish inside the ${Math.round(timeoutMs / 1_000)} seconds the caller was promised (${Math.round((startedAt - enqueuedAt) / 1_000)} of them spent queueing).`,
           estimateMs(),
         );
       }

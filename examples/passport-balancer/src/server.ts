@@ -3181,7 +3181,20 @@ async function main(): Promise<void> {
           });
           return;
         }
-        const outcome = await k1Prover.prove(body);
+        /* THE CALLER'S CONNECTION, handed to the queue. A k1 proof is a minute
+           of a two-CPU box, and the waiting room in front of it is four deep;
+           a browser that navigated away halfway through onboarding would
+           otherwise keep its place, be woken, and spend that minute proving for
+           a socket that shut long ago, while live callers behind it are told
+           `PROVING_BUSY`. Watched on the RESPONSE rather than the request:
+           `request` emits `close` as soon as its body has been read, which is
+           every request, whereas `response` emits it when the connection goes —
+           and `writableFinished` separates that from our own answer landing. */
+        const connection = new AbortController();
+        response.on('close', () => {
+          if (!response.writableFinished) connection.abort();
+        });
+        const outcome = await k1Prover.prove(body, connection.signal);
         respond(
           request,
           response,
