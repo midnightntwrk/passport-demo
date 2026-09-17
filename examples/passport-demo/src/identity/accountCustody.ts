@@ -17,6 +17,19 @@
  * path that reports a transfer that was not submitted, and no path that reports
  * a balance that was not decoded from ledger state served by the indexer.
  *
+ * IT PAYS THREE BUILDS AND SPENDS FROM ONE (2026/09/17)
+ * -----------------------------------------------------
+ * Every WITHDRAWAL here is against the Passport this device holds, which is one
+ * of the two prototype builds. Every DEPOSIT is against somebody else's
+ * account, and that may now be the account custody contract — Nicolas's,
+ * consumed unchanged at a pinned commit — whose deposits are the same
+ * permissionless calls under different names, with a sealed delivery beside the
+ * shielded one. So the deposits ask the chain which build they are paying and
+ * call what it carries ({@link depositNight}, {@link depositShielded}), and
+ * {@link payCustodyAccount} is the one entry point a surface needs for any of
+ * them. Nothing here spends from one of those accounts: that is a signature the
+ * Dynamic sign-in makes, and it lives in `./custodyContractClient.ts`.
+ *
  * IT IS A SIBLING OF `./passportContract.ts` AND `./midnames.ts`
  * -------------------------------------------------------------
  * Those two are the proven shapes in this repository for "a browser talks to a
