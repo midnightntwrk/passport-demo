@@ -6911,6 +6911,22 @@ export default function PassportDemo() {
 
       const amount = BigInt(initial.amount);
       const amountText = pendingSendAmountLabel(initial, pendingSendAsset(initial));
+      /* WHERE THE MONEY ENDS UP, IN WORDS. A Passport has an account of ours to
+         pay into and every sentence below has always said so; a raw shielded
+         address is somebody's own wallet and has none, so each of those
+         sentences has a second form. Composed once, here, rather than branched
+         at four call sites that could drift apart. */
+      const toAddress = paysAnAddress(initial.recipient);
+      const recipientLabel = initial.recipient.label;
+      const nextLegLine = toAddress
+        ? `${amountText} left your account. Paying it to ${recipientLabel} next.`
+        : `${amountText} left your account. Paying it into ${recipientLabel}’s account next.`;
+      const arrivedLine = toAddress
+        ? `${amountText} has reached ${recipientLabel}.`
+        : `${amountText} is now in ${recipientLabel}’s account.`;
+      const arrivedWithChangeLine = toAddress
+        ? `${amountText} has reached ${recipientLabel}, and your change is back in your account.`
+        : `${amountText} is now in ${recipientLabel}’s account, and your change is back in yours.`;
       let record = initial;
       /* THE PLAN, re-read from the record after every save, because leg one is
          what settles it: a shielded run asks for the whole coin and only then
@@ -7300,7 +7316,7 @@ export default function PassportDemo() {
               lastError: undefined,
             });
             updateActivity(activityId, {
-              detail: `${amountText} left your account. Paying it into ${record.recipient.label}’s account next.`,
+              detail: nextLegLine,
               source: 'chain',
               txHash: out.txId,
             });
@@ -7558,7 +7574,7 @@ export default function PassportDemo() {
             updateActivity(activityId, {
               status: 'complete',
               label: `Sent to ${record.recipient.label}`,
-              detail: `${amountText} is now in ${record.recipient.label}’s account.`,
+              detail: arrivedLine,
               source: 'chain',
               txHash: paid.txId,
             });
@@ -7664,7 +7680,7 @@ export default function PassportDemo() {
             updateActivity(activityId, {
               status: 'complete',
               label: `Sent to ${record.recipient.label}`,
-              detail: `${amountText} is now in ${record.recipient.label}’s account, and your change is back in yours.`,
+              detail: arrivedWithChangeLine,
               source: 'chain',
               txHash: back.txId,
             });
