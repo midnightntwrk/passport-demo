@@ -126,6 +126,8 @@ import {
   resolveTransactionHash,
   transactionId,
 } from './contractRuntime.js';
+import { rememberK1EncSecretKey } from './k1CoinStore.js';
+import { custodyEncKeyPair } from './custodyInbox.js';
 import { createLocalMidnightWallet, type LocalMidnightWallet } from '../lib/localWallet.js';
 import { sponsorConfig } from '../lib/sponsor.js';
 
@@ -723,11 +725,27 @@ async function runWaveOne(
   const { deps, ledgerApi, providers, storage, module, contracts, wave } = context;
   const salt = hexToBytes(context.record.saltHex);
   const boot = bootCommitment(module.pureCircuits, context.device, salt);
-  /* The account's X25519 viewing key. The inbox is sealed to it, and the
-     secret half belongs in the private coin store — which is PR 4. For this
-     milestone the public half is generated and advertised so the constructor's
-     shape is the real one; nothing this flow does reads the inbox back. */
-  const encryptionKey = deps.randomBytes(32);
+  /* The account's X25519 viewing key, which the constructor advertises as
+     `enc_key` and every depositor seals inbox entries to.
+
+     IT IS REMEMBERED NOW, AND IT USED NOT TO BE. The previous milestone put
+     `deps.randomBytes(32)` here and threw the secret half away, which made the
+     constructor the right SHAPE and the account permanently unable to read its
+     own inbox: an entry is opened with the secret half or by nobody, and every
+     coin ever deposited into this account is described in one. `custodyEncKeyPair`
+     makes the pair once per Dynamic user and hands back the same one for ever
+     after — the same rule, and the same storage discipline, as the per-device
+     wallet seed beside it. */
+  const encKeys = custodyEncKeyPair(
+    storage,
+    context.record.user,
+    /* Per ACCOUNT and per NETWORK. The salt is what names this account before
+       it has an address, and it is in the record, so a resumed deploy asks for
+       and receives the same key rather than advertising a second one. */
+    { network: context.record.network, accountId: context.record.saltHex },
+    { randomBytes: (length) => deps.randomBytes(length), subtle: () => globalThis.crypto.subtle },
+  );
+  const encryptionKey = hexToBytes(encKeys.publicKeyHex);
 
   const deployData = await contracts.createUnprovenDeployTx(providers, {
     compiledContract: providers.compiledContract,
@@ -765,6 +783,20 @@ async function runWaveOne(
   await priv.setSigningKey(address, signingKey);
   await priv.set(context.record.privateStateId, deployData.private.initialPrivateState);
   rememberSigningKey(storage, address, signingKey);
+
+  /* The coin store keeps the viewing secret beside the coins it will decrypt,
+     because that is the shape the `held_coin` witness's private state has and
+     because a walk needs both in the same place. It is written only once the
+     address exists, since the store is keyed by it.
+
+     A store that will not take it is not a reason to abandon a deploy that has
+     already landed: the key is still in `CUSTODY_ENC_KEY_KEY`, where the walk reads
+     it from, and this write is the convenience copy. */
+  try {
+    rememberK1EncSecretKey({ network: context.record.network, address }, encKeys.secretKeyHex);
+  } catch (cause) {
+    console.warn('[account-custody] could not file this Passport’s viewing key beside its coins', cause);
+  }
 
   const next: CustodyAccountRecord = {
     ...context.record,
