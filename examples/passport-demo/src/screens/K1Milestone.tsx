@@ -10,8 +10,10 @@ import {
   appendInboxK1,
   deployK1Account,
   recoverK1DevicePoint,
+  startK1AccountAgain,
   type K1Phase,
 } from '../identity/accountK1Custody.js'
+import { k1FailureSentence, K1_SETUP_INTERRUPTED } from '../identity/accountK1Plan.js'
 import './k1-milestone.css'
 
 /**
@@ -69,6 +71,9 @@ export default function K1Milestone() {
   /* The recovered point, cached for the life of the screen. Recovering it costs
      a signature, so it is asked for once and reused by every row after it. */
   const [device, setDevice] = useState<K256DeviceIdentity | null>(null)
+  /* A setup that cannot be finished. The row below turns into the one thing
+     that can be done about it, and the two rows after it stop pretending. */
+  const [interrupted, setInterrupted] = useState(false)
 
   const patch = useCallback((id: RowId, next: Partial<RowState>) => {
     setRows((current) => ({ ...current, [id]: { ...current[id], ...next } }))
@@ -111,11 +116,11 @@ export default function K1Milestone() {
           detail: null,
         })
       } catch (cause) {
-        patch(id, {
-          busy: false,
-          detail: null,
-          error: cause instanceof Error ? cause.message : String(cause),
-        })
+        console.warn('[k1] the milestone step did not finish', cause)
+        if (cause instanceof Error && cause.message === K1_SETUP_INTERRUPTED) {
+          setInterrupted(true)
+        }
+        patch(id, { busy: false, detail: null, error: k1FailureSentence(cause) })
       }
     },
     [ensureDevice, patch],
@@ -165,16 +170,25 @@ export default function K1Milestone() {
         <p className="mnk1-addr">Setting up your Ethereum address</p>
       )}
 
+      {/* ONE ROW, TWO MEANINGS, AND THE SECOND ONE IS THE HONEST OFFER. While
+          the setup can still be finished this creates or resumes it. Once it
+          cannot — the key that signs the remaining steps is gone — pressing it
+          again would fail every time, so it throws the half-built one away
+          first and starts a fresh one. */}
       <Row
         id="create"
-        label="Create my Dynamic Passport"
-        busyLabel="Creating"
+        label={interrupted ? 'Start again' : 'Create my Dynamic Passport'}
+        busyLabel={interrupted ? 'Starting again' : 'Creating'}
         state={rows.create}
         disabled={!ready}
         onRun={() =>
-          void run('create', async (identity) =>
-            deployK1Account(k1Session(), identity, onPhase('create')),
-          )
+          void run('create', async (identity) => {
+            if (interrupted) {
+              await startK1AccountAgain(k1Session())
+              setInterrupted(false)
+            }
+            return deployK1Account(k1Session(), identity, onPhase('create'))
+          })
         }
       />
 
@@ -183,7 +197,7 @@ export default function K1Milestone() {
         label="Activate my Dynamic key"
         busyLabel="Activating"
         state={rows.activate}
-        disabled={!ready}
+        disabled={!ready || interrupted}
         onRun={() =>
           void run('activate', async (identity) =>
             activateK1Device(k1Session(), identity, onPhase('activate')),
@@ -196,7 +210,7 @@ export default function K1Milestone() {
         label="Sign a test call"
         busyLabel="Signing"
         state={rows.call}
-        disabled={!ready}
+        disabled={!ready || interrupted}
         onRun={() =>
           void run('call', async (identity) =>
             /* 192 bytes of nothing. `append_inbox` releases no value and reads

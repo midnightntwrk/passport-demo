@@ -164,6 +164,16 @@ export function planK1Waves(
   for (const circuit of remaining) {
     const size = sizes.get(circuit);
     if (size === undefined) throw new Error(`no verifier key size for '${circuit}'`);
+    /* A KEY LARGER THAN THE WHOLE BUDGET IS A PLAN THAT CANNOT LAND, and the
+       reference refuses it here rather than packing it into a wave of its own.
+       That is the right place to stop: a single-key wave over the budget is
+       refused by the NODE, at submission, after a sponsored fee has been
+       booked for it, and the rejection (`1010: Invalid Transaction`) names
+       neither the circuit nor the size. Refusing while the plan is still a
+       plan costs nothing and says which key. */
+    if (size > K1_VERIFIER_BYTE_BUDGET) {
+      throw new Error(`verifier key for '${circuit}' (${size} bytes) exceeds the per-update budget`);
+    }
     if (batch.length > 0 && used + size > K1_VERIFIER_BYTE_BUDGET) {
       waves.push({ index: waves.length + 1, circuits: batch, retiresAuthority: false });
       batch = [];
@@ -196,6 +206,24 @@ export function planK1Waves(
 export const K1_AUTHORITY_WARNING =
   'the maintenance authority can replace any verifier key, so it is retired by the last wave';
 
+/**
+ * Whether the chain already carries everything a wave would insert.
+ *
+ * THIS IS THE RESUME RULE, AND IT IS A QUESTION ABOUT THE CHAIN. A progress
+ * record says where we THINK the deploy got to, and it is wrong in both
+ * directions: a tab closed between the submission and the write leaves a wave
+ * that landed unrecorded, and a submission that was dropped leaves a wave
+ * recorded that never landed. Replaying a landed wave costs a sponsored fee for
+ * a rejection; skipping a dropped one leaves an account missing ten circuits
+ * that nothing later will ever add, because the authority is retired.
+ *
+ * The operations a contract carries are readable off its state, so the record
+ * is demoted to a hint and this is what decides.
+ */
+export function k1WaveIsOnChain(wave: K1Wave, present: ReadonlySet<string>): boolean {
+  return wave.circuits.every((circuit) => present.has(circuit));
+}
+
 /* -------------------------------------------------------------------------- */
 /* Where a k1 circuit gets proved                                             */
 /* -------------------------------------------------------------------------- */
@@ -210,6 +238,22 @@ export const K1_PROVER_UNCONFIGURED =
 /** The refusal when the endpoint is configured but is not answering. */
 export const K1_PROVER_UNAVAILABLE =
   'The service that finishes this step is not answering right now. Try again in a moment.';
+
+/**
+ * How long a single `POST /prove-k1` is given before the browser abandons it.
+ *
+ * ABOVE THE SERVICE'S OWN DEADLINE, DELIBERATELY. The proving service holds a
+ * 180-second deadline of its own and answers with a status when it passes; a
+ * client that gave up first would turn every slow proof into "not answering"
+ * and lose the service's own reason for it. Four minutes leaves the service a
+ * full minute past its deadline to say so.
+ *
+ * It exists at all because `fetch` has no timeout. A TCP connection to a box
+ * that has stopped answering but not closed the socket hangs until the
+ * operating system gives up, which on a phone is minutes with nothing on
+ * screen — and this module's whole claim is that it does not hang.
+ */
+export const K1_PROOF_TIMEOUT_MS = 240_000;
 
 /**
  * The path, on whichever origin serves it.
@@ -333,8 +377,16 @@ export function hexToBytes(value: string): Uint8Array {
 /* The resumable deploy record                                                */
 /* -------------------------------------------------------------------------- */
 
-/** Where a Dynamic Passport's setup has got to. */
-export type K1DeployStep = 'deploy' | 'waves' | 'activate' | 'ready';
+/**
+ * Where a Dynamic Passport's setup has got to.
+ *
+ * `interrupted` is TERMINAL and it is not a stage of the sequence. It means the
+ * maintenance key that finishes the remaining waves is gone, so the account on
+ * chain can never be completed and nothing is served by offering the next step
+ * again. The only move from here is to start again, which is why it is a step
+ * of its own rather than a flag the screens are free to ignore.
+ */
+export type K1DeployStep = 'interrupted' | 'deploy' | 'waves' | 'activate' | 'ready';
 
 /**
  * Everything a reload needs to carry on, and nothing it does not.
@@ -366,10 +418,17 @@ export interface K1AccountRecord {
   readonly activated: boolean;
   /** Chain hashes, newest last, for the milestone screen to link. */
   readonly txHashes: readonly string[];
+  /**
+   * Set when the maintenance key for {@link K1AccountRecord.address} is gone
+   * and the remaining waves can therefore never be signed. Optional so records
+   * written before this field existed still parse.
+   */
+  readonly interrupted?: boolean;
 }
 
 /** The step a record is waiting on. */
 export function nextK1Step(record: K1AccountRecord): K1DeployStep {
+  if (record.interrupted === true) return 'interrupted';
   if (record.address === null) return 'deploy';
   if (record.wavesDone < record.totalWaves) return 'waves';
   if (!record.activated) return 'activate';
@@ -413,9 +472,14 @@ export interface K1Storage {
  * Passport that will not open because a quota was exceeded once.
  */
 export function loadK1Records(storage: K1Storage): Record<string, K1AccountRecord> {
+  return readK1Map(storage, K1_STORAGE_KEY) as Record<string, K1AccountRecord>;
+}
+
+/** One stored JSON map, or an empty one. Shared by both stores below. */
+function readK1Map(storage: K1Storage, key: string): Record<string, unknown> {
   let raw: string | null = null;
   try {
-    raw = storage.getItem(K1_STORAGE_KEY);
+    raw = storage.getItem(key);
   } catch {
     return {};
   }
@@ -423,9 +487,18 @@ export function loadK1Records(storage: K1Storage): Record<string, K1AccountRecor
   try {
     const parsed: unknown = JSON.parse(raw);
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
-    return parsed as Record<string, K1AccountRecord>;
+    return parsed as Record<string, unknown>;
   } catch {
     return {};
+  }
+}
+
+/** Write one stored JSON map, saying so in the console if the browser refuses. */
+function writeK1Map(storage: K1Storage, key: string, map: Record<string, unknown>): void {
+  try {
+    storage.setItem(key, JSON.stringify(map));
+  } catch (cause) {
+    console.warn('[k1] could not remember the setup progress; a reload will start again', cause);
   }
 }
 
@@ -448,11 +521,79 @@ export function loadK1Record(
 export function saveK1Record(storage: K1Storage, record: K1AccountRecord): void {
   const records = loadK1Records(storage);
   records[k1RecordKey(record.user, record.network)] = record;
-  try {
-    storage.setItem(K1_STORAGE_KEY, JSON.stringify(records));
-  } catch (cause) {
-    console.warn('[k1] could not remember the setup progress; a reload will start again', cause);
-  }
+  writeK1Map(storage, K1_STORAGE_KEY, records);
+}
+
+/**
+ * Throw a record away, so the next attempt deploys a fresh account.
+ *
+ * The only caller is "start again" after an interrupted setup. It does NOT
+ * touch the chain: the half-built account stays where it is, dormant, holding
+ * nothing, with a retired-or-unusable authority. Abandoning it is the whole
+ * point — it can never be finished, and the alternative offered to the person
+ * in front of the screen is a button that will fail every time they press it.
+ */
+export function removeK1Record(storage: K1Storage, user: string, network: string): void {
+  const records = loadK1Records(storage);
+  delete records[k1RecordKey(user, network)];
+  writeK1Map(storage, K1_STORAGE_KEY, records);
+}
+
+/* -------------------------------------------------------------------------- */
+/* The maintenance signing key                                                */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * `passport-k1-authority:v1`, the maintenance signing key each deploy mints,
+ * keyed by contract address.
+ *
+ * IT IS IN `localStorage` AND IT IS NOT ENCRYPTED AT REST. That is a decision
+ * with a cost, and here is the cost and why it is paid. A deploy mints a
+ * maintenance authority; waves 2 and 3 are signed with it; and while it lives,
+ * whoever holds it can replace any verifier key on the account, which is full
+ * custody. Holding it only in a module variable — which is what this did — made
+ * a RELOAD between wave 1 and wave 3 terminal: the account exists, the
+ * authority on it is live, the key that drives it is gone, and the screen
+ * cheerfully offers the step again for ever.
+ *
+ * A Passport that cannot be finished is worse than a key in `localStorage` for
+ * a demo, so the key is persisted, and the exposure is bounded three ways: it
+ * is per contract address and belongs to an account holding nothing until it is
+ * activated; the last wave RETIRES the authority, after which the key
+ * authorises nothing at all; and {@link forgetK1AuthorityKey} deletes it the
+ * moment that retirement lands, so a finished Passport leaves nothing behind.
+ * A production Passport would keep it in a private-state provider backed by
+ * IndexedDB and wrapped by a key the device holds; this is a demo and says so.
+ */
+export const K1_AUTHORITY_STORAGE_KEY = 'passport-k1-authority:v1';
+
+/**
+ * The stored key for an address, or null.
+ *
+ * `unknown` rather than a type: the ledger calls it `{ tag, value }` today and
+ * this module has no business knowing that. What it must know is that whatever
+ * comes back survived `JSON.stringify`, so a string or an object is returned
+ * and anything else reads as absent.
+ */
+export function loadK1AuthorityKey(storage: K1Storage, address: string): unknown {
+  const held = readK1Map(storage, K1_AUTHORITY_STORAGE_KEY)[address.toLowerCase()];
+  if (typeof held === 'string') return held;
+  if (held !== null && typeof held === 'object') return held;
+  return null;
+}
+
+/** Remember the key for an address. */
+export function saveK1AuthorityKey(storage: K1Storage, address: string, key: unknown): void {
+  const keys = readK1Map(storage, K1_AUTHORITY_STORAGE_KEY);
+  keys[address.toLowerCase()] = key;
+  writeK1Map(storage, K1_AUTHORITY_STORAGE_KEY, keys);
+}
+
+/** Delete the key for an address: the retirement landed, or the record is gone. */
+export function forgetK1AuthorityKey(storage: K1Storage, address: string): void {
+  const keys = readK1Map(storage, K1_AUTHORITY_STORAGE_KEY);
+  delete keys[address.toLowerCase()];
+  writeK1Map(storage, K1_AUTHORITY_STORAGE_KEY, keys);
 }
 
 /** A fresh record for a user who has never had one. */
@@ -513,6 +654,103 @@ export function resolveK1UseCounter(probe: K1CounterProbe, known?: bigint): bigi
   throw new Error(
     'This key is not one of the keys that can approve for this Passport yet.',
   );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Enrolling a signed-in key                                                  */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The refusal when the point recovered from a sign-in cannot be shown to be
+ * that sign-in's own key. One plain sentence, no vocabulary from the list.
+ */
+export const K1_ENROLMENT_UNCONFIRMED =
+  'We could not confirm this sign-in can approve for a Passport. Try again.';
+
+/** The sentence a half-built Passport shows when its setup cannot be finished. */
+export const K1_SETUP_INTERRUPTED =
+  'Setting up this Passport was interrupted. Start again to finish it.';
+
+/**
+ * The two distinct messages enrolment asks a signed-in key to sign.
+ *
+ * TWO, BECAUSE ONE PROVES NOTHING. Recovery is arithmetic on `(digest, r, s,
+ * v)` and it always succeeds: every `v` yields SOME point, and the wrong one
+ * yields the wrong point without complaint. A high-S signature paired with a
+ * recovery byte that was not flipped to match it — a shape real EVM signers
+ * emit — therefore enrols a point the signer cannot sign for, and the failure
+ * arrives much later as a contract call that verifies against nothing.
+ *
+ * So the key is asked for a signature over a SECOND, different message, the
+ * point is recovered from that one too, and the two must be the same point. A
+ * wrong recovery byte, a tampered scalar, or a signer answering for a different
+ * key all make the second recovery land somewhere else.
+ *
+ * WHAT DYNAMIC ACTUALLY EMITS IS NOT YET OBSERVED LIVE. Whether
+ * `signRawMessage` returns low-S or high-S, and whether its `v` is 0/1 or
+ * 27/28, has not been measured against the live vendor — only against the
+ * in-suite stand-in. `parseEvmSignature` accepts all four `v` dialects and
+ * normalises them, the contract accepts both S forms, and this check is what
+ * makes the question safe to leave open.
+ */
+export function k1EnrolmentChallenges(message: string): [string, string] {
+  return [message, `${message}:confirm`];
+}
+
+/* -------------------------------------------------------------------------- */
+/* What a screen is allowed to paint                                          */
+/* -------------------------------------------------------------------------- */
+
+/** The one sentence a screen shows for a failure nobody wrote a sentence for. */
+export const K1_UNEXPECTED = 'Something went wrong. Try that again.';
+
+/**
+ * The words this demo never puts on a screen, including a developer-shaped one.
+ *
+ * `wallet address` and `sdk` are on the list because the vocabulary audit added
+ * them and the e2e walk asserts them; they are checked here as well because an
+ * error thrown from four layers down is the one path that reaches a screen
+ * without anybody having written the words.
+ */
+const K1_FORBIDDEN_WORDS: readonly string[] = [
+  'contract',
+  'registry',
+  'indexer',
+  'resolver',
+  'sponsor',
+  'dust',
+  'wallet address',
+  'sdk',
+  'zswap',
+  'utxo',
+];
+
+/**
+ * The sentence a screen paints for a failure.
+ *
+ * A CAUSE IS NOT COPY. Every refusal this layer throws on purpose is one plain
+ * sentence written for the person reading it, and painting `cause.message`
+ * verbatim works right up until the cause comes from a vendor, a WASM
+ * deserialiser, or a node — at which point the screen shows a stack-shaped
+ * string full of exactly the words the demo has spent months keeping off it.
+ * So a message is painted only if it still reads like something we wrote: short,
+ * and free of the vocabulary. Everything else becomes {@link K1_UNEXPECTED},
+ * and the real cause goes to the console, where it is of use to somebody.
+ */
+export function k1FailureSentence(cause: unknown): string {
+  const message = cause instanceof Error ? cause.message.trim() : '';
+  if (message.length === 0 || message.length > 160) return K1_UNEXPECTED;
+  const lower = message.toLowerCase();
+  if (K1_FORBIDDEN_WORDS.some((word) => lower.includes(word))) return K1_UNEXPECTED;
+  return message;
+}
+
+/** Whether two recovered points are the same point. */
+export function k1SamePoint(
+  a: { readonly x: bigint; readonly y: bigint },
+  b: { readonly x: bigint; readonly y: bigint },
+): boolean {
+  return a.x === b.x && a.y === b.y;
 }
 
 /* -------------------------------------------------------------------------- */
