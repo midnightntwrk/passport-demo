@@ -250,6 +250,9 @@ describe('the store', () => {
     const actions = {
       openAuthFlow: vi.fn(),
       signMessage: vi.fn(() => Promise.resolve('0xsig')),
+      /* The raw path the custody account contract verifies — a 64-hex digest in,
+         `0x` + r‖s‖v out, with nothing added to it on the way. */
+      signRaw: vi.fn(() => Promise.resolve('0xrawsig')),
       signOut: vi.fn(() => Promise.resolve()),
     }
     publishDynamicActions(actions)

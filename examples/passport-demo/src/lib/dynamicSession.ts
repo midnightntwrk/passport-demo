@@ -66,6 +66,25 @@ export interface DynamicActions {
   openAuthFlow: () => void
   /** Signs `text` with the embedded Ethereum key. Rejects when nothing can sign. */
   signMessage: (text: string) => Promise<string>
+  /**
+   * Signs 32 BYTES, given as 64 lower-case hex characters with no `0x`, and
+   * adds NOTHING to them — no keccak, no EIP-191 `\x19Ethereum Signed Message`
+   * preamble. Returns `0x` + `r‖s‖v`.
+   *
+   * WHY THIS IS A SECOND SIGNING ACTION AND NOT A USE OF THE FIRST.
+   * `signMessage` is `personal_sign`: it wraps its argument in the EIP-191
+   * preamble and hashes with keccak-256. The custody account contract verifies
+   * `secp256k1EcdsaVerify(SHA-256(challenge), sig, pk)` in-circuit, and nothing
+   * on the k256 arm can express a keccak of a prefixed string — which is the
+   * whole finding of the 2026/09/10 audit. So the raw path is the only one that
+   * reaches the contract at all, and it is a different vendor call
+   * (`primaryWallet.connector.signRawMessage`) rather than a flag on this one.
+   *
+   * Rejects when the connector cannot sign raw, which an externally connected
+   * wallet (MetaMask, a hardware key) cannot — only Dynamic's own embedded
+   * wallet exposes it.
+   */
+  signRaw: (digestHex: string) => Promise<string>
   /** Ends the Dynamic session. The Passport passkey is untouched. */
   signOut: () => Promise<void>
 }

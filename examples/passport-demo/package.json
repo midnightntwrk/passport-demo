@@ -47,6 +47,7 @@
     "@midnight-ntwrk/wallet-sdk": "2.0.0-beta.2",
     "@midnight-ntwrk/zkir-v2": "2.1.0",
     "@midnightntwrk/ledger-v9": "1.0.0-rc.3",
+    "@noble/curves": "2.4.0",
     "bip39": "^3.1.0",
     "buffer": "^6.0.3",
     "jsqr": "^1.4.0",
