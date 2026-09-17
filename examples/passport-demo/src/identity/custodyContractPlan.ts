@@ -726,6 +726,19 @@ const CUSTODY_FORBIDDEN_WORDS: readonly string[] = [
 ];
 
 /**
+ * The built-in error classes a library throws when it meets something it did
+ * not expect. None of them is ever raised on purpose by this layer.
+ */
+const RUNTIME_ERROR_NAMES: ReadonlySet<string> = new Set([
+  'TypeError',
+  'RangeError',
+  'ReferenceError',
+  'SyntaxError',
+  'EvalError',
+  'URIError',
+]);
+
+/**
  * The sentence a screen paints for a failure.
  *
  * A CAUSE IS NOT COPY. Every refusal this layer throws on purpose is one plain
@@ -740,6 +753,13 @@ const CUSTODY_FORBIDDEN_WORDS: readonly string[] = [
 export function custodyFailureSentence(cause: unknown): string {
   const message = cause instanceof Error ? cause.message.trim() : '';
   if (message.length === 0 || message.length > 160) return CUSTODY_UNEXPECTED;
+  /* A RUNTIME ERROR IS NEVER ONE OF OURS. Every refusal this layer writes is a
+     plain `Error`; a `TypeError` or a `RangeError` comes from a library reading
+     something this build did not give it, and its message is machine-shaped
+     even when it is short and carries none of the vocabulary above — "Cannot
+     use 'in' operator to search for 'deploy' in undefined" reached a screen on
+     2026/09/17 by passing both of those checks. */
+  if (cause instanceof Error && RUNTIME_ERROR_NAMES.has(cause.name)) return CUSTODY_UNEXPECTED;
   const lower = message.toLowerCase();
   if (CUSTODY_FORBIDDEN_WORDS.some((word) => lower.includes(word))) return CUSTODY_UNEXPECTED;
   return message;

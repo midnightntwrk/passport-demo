@@ -494,6 +494,23 @@ describe('what a screen is allowed to paint', () => {
     expect(custodyFailureSentence(new Error('no wallet address for this session'))).toBe(CUSTODY_UNEXPECTED);
   });
 
+  /* A RUNTIME ERROR IS NEVER ONE OF OURS, however short and however clean.
+     This exact string reached a screen on 2026/09/17: sixty-six characters,
+     none of the vocabulary above, and unmistakably not a sentence. */
+  it('refuses a runtime error thrown by a library reading something odd', () => {
+    expect(
+      custodyFailureSentence(
+        new TypeError("Cannot use 'in' operator to search for 'deploy' in undefined"),
+      ),
+    ).toBe(CUSTODY_UNEXPECTED);
+    expect(custodyFailureSentence(new RangeError('Invalid array length'))).toBe(CUSTODY_UNEXPECTED);
+    expect(custodyFailureSentence(new ReferenceError('x is not defined'))).toBe(CUSTODY_UNEXPECTED);
+    /* And our own refusals are untouched. */
+    expect(custodyFailureSentence(new Error('Type the name you want to pay.'))).toBe(
+      'Type the name you want to pay.',
+    );
+  });
+
   it('refuses an empty message, a stack-shaped one, and a thrown non-error', () => {
     expect(custodyFailureSentence(new Error('   '))).toBe(CUSTODY_UNEXPECTED);
     expect(custodyFailureSentence(new Error('x'.repeat(161)))).toBe(CUSTODY_UNEXPECTED);
