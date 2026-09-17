@@ -147,6 +147,10 @@ export const DYNAMIC_SETUP_STEPS = 3;
 export function dynamicSetupPhase(record: K1AccountRecord | null): DynamicSetupPhase {
   if (record === null) return 'create';
   const step = nextK1Step(record);
+  /* A setup that cannot be finished is back at the beginning, because the only
+     thing that can be done about it is to start a fresh one. It is emphatically
+     not `done`, which is what it would fall through to. */
+  if (step === 'interrupted') return 'create';
   if (step === 'deploy') return 'create';
   if (step === 'waves') return 'finish';
   if (step === 'activate') return 'activate';
@@ -181,6 +185,10 @@ export function dynamicSetupCopy(phase: DynamicSetupPhase): string {
  */
 export function dynamicSetupAction(record: K1AccountRecord | null): string {
   if (record === null || record.address === null) return 'Create my Passport';
+  /* A setup that cannot be finished must not offer to finish it: the key that
+     signs the remaining steps is gone, so that button would fail every time it
+     was pressed. The honest offer is a fresh Passport. */
+  if (record.interrupted === true) return 'Start again';
   return 'Finish setting up my Passport';
 }
 

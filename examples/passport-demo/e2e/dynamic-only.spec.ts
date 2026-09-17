@@ -81,7 +81,21 @@ test.describe('a Passport held by a social sign-in', () => {
        everywhere, asserted rather than trusted, because a developer-shaped
        path is where it slips first. */
     const body = (await page.locator('body').innerText()).toLowerCase();
-    for (const forbidden of ['contract', 'registry', 'indexer', 'resolver', 'sponsor', 'dust']) {
+    /* `wallet address` and `sdk` are on the list because the vocabulary audit
+       put them there and this screen's own header promises them. They are
+       asserted as the two-word phrase and the acronym respectively: "wallet"
+       alone is allowed — a Passport IS one — and it is the ADDRESS a reader
+       has no use for. */
+    for (const forbidden of [
+      'contract',
+      'registry',
+      'indexer',
+      'resolver',
+      'sponsor',
+      'dust',
+      'wallet address',
+      'sdk',
+    ]) {
       expect(body, `"${forbidden}" is on screen`).not.toContain(forbidden);
     }
 

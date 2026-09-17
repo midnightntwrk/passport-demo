@@ -13,13 +13,17 @@ import {
   deployK1Account,
   k1Call,
   recoverK1DevicePoint,
+  startK1AccountAgain,
   type K1DynamicSession,
   type K1Phase,
 } from '../identity/accountK1Custody.js'
 import {
   hexToBytes,
+  k1FailureSentence,
   nextK1Step,
+  resolveK1UseCounter,
   saveK1Record,
+  K1_SETUP_INTERRUPTED,
   type K1AccountRecord,
 } from '../identity/accountK1Plan.js'
 import {
@@ -125,6 +129,9 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
   const [balance, setBalance] = useState<bigint | null>(null)
   const [balanceFailed, setBalanceFailed] = useState(false)
   const [receivingAddress, setReceivingAddress] = useState<string | null>(null)
+  /* A setup whose remaining steps can never be signed. The offer below turns
+     into the one thing that can be done about it. */
+  const [interrupted, setInterrupted] = useState(false)
   const device = useRef<K256DeviceIdentity | null>(null)
 
   /** Re-reads what is stored and moves the screen to match it. */
@@ -164,7 +171,18 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
     return identity
   }, [session])
 
-  /** Runs one piece of work with the single busy line and the single sentence. */
+  /**
+   * Runs one piece of work with the single busy line and the single sentence.
+   *
+   * THE SENTENCE IS NOT THE CAUSE. Every refusal this path throws on purpose is
+   * one plain sentence written for the person reading it, and painting
+   * `cause.message` verbatim works right up to the first cause that comes from
+   * a vendor, a WASM deserialiser, or a node — at which point this screen shows
+   * a stack-shaped string carrying exactly the words the demo keeps off it.
+   * {@link k1FailureSentence} paints a message only while it still reads like
+   * something we wrote; the cause itself goes to the console, where it is of
+   * use to somebody.
+   */
   const run = useCallback(
     async (label: string, work: () => Promise<void>): Promise<void> => {
       setBusy(label)
@@ -172,7 +190,11 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
       try {
         await work()
       } catch (cause) {
-        setError(cause instanceof Error ? cause.message : String(cause))
+        console.warn('[k1] that step did not finish', cause)
+        if (cause instanceof Error && cause.message === K1_SETUP_INTERRUPTED) {
+          setInterrupted(true)
+        }
+        setError(k1FailureSentence(cause))
       } finally {
         setBusy(null)
       }
@@ -189,6 +211,14 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
        that is. Putting the counted sentence on both would be the same words
        twice, which reads as a stutter rather than as progress. */
     void run(PHASE_LABELS.deploy, async () => {
+      /* An interrupted setup is thrown away first, so this press deploys a
+         fresh Passport rather than pressing the same broken step again. The
+         account already on chain is left where it is: it is dormant, it holds
+         nothing, and there is no transaction that would tidy it away. */
+      if (interrupted) {
+        await startK1AccountAgain(k1Session(session))
+        setInterrupted(false)
+      }
       const identity = await ensureDevice()
       const onPhase = (phase: K1Phase) => {
         setBusy(phase.detail ? `${PHASE_LABELS[phase.step]}` : PHASE_LABELS[phase.step])
@@ -202,7 +232,7 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
       }
       refresh()
     })
-  }, [ensureDevice, refresh, run, session])
+  }, [ensureDevice, interrupted, refresh, run, session])
 
   /* ---------------------------------------------------------------------- */
   /* The name                                                               */
@@ -429,18 +459,32 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
           if (state) {
             const ledger = contractModule.ledger(state.data)
             const { deviceEntry } = await import('../identity/accountK1.js')
-            /* The SAME derivation activation used, at counter 0 and the
-               account's current epoch: the entry is what the device set holds,
-               and deriving it any other way would ask a question about a device
-               this account has never had. */
-            const entry = deviceEntry(
-              contractModule.pureCircuits,
-              identity,
-              hexToBytes(address),
-              ledger.device_epoch,
-              0n,
-            )
-            holdsDevice = ledger.devices.member(entry)
+            /* THE SAME SCAN A CALL DOES, and for the same reason. The ledger
+               stores no counter — it stores opaque entries — and a device's
+               entry ROLLS FORWARD every time it approves something: the entry
+               is consumed and the next one inserted. Asking only about counter
+               0 therefore recognises a Passport that has never been used and
+               fails to recognise one that has, which is every Passport a
+               person would actually be coming back to. `resolveK1UseCounter`
+               probes the series the way `k1Call` does and refuses at the same
+               rescan limit; the refusal is caught below and reads as "this
+               name is not yours", which is what it means here. */
+            try {
+              resolveK1UseCounter({
+                entryAt: (counter) =>
+                  deviceEntry(
+                    contractModule.pureCircuits,
+                    identity,
+                    hexToBytes(address),
+                    ledger.device_epoch,
+                    counter,
+                  ),
+                isMember: (entry) => ledger.devices.member(entry),
+              })
+              holdsDevice = true
+            } catch {
+              holdsDevice = false
+            }
           }
         }
       } catch (cause) {

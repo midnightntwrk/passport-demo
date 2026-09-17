@@ -199,6 +199,11 @@ describe('the setup copy', () => {
     expect(dynamicSetupPhase({ ...RECORD, wavesDone: 1 })).toBe('finish');
     expect(dynamicSetupPhase({ ...RECORD, activated: false })).toBe('activate');
     expect(dynamicSetupPhase(RECORD)).toBe('done');
+    /* A setup that cannot be finished is back at the beginning, not `done`,
+       which is what it would otherwise fall through to — and "Your Passport is
+       ready" over a Passport that can never work is the worst sentence on the
+       screen. */
+    expect(dynamicSetupPhase({ ...RECORD, interrupted: true })).toBe('create');
   });
 
   it('numbers the phases, and puts done past the last one', () => {
@@ -213,6 +218,11 @@ describe('the setup copy', () => {
     expect(dynamicSetupAction({ ...RECORD, address: null })).toBe('Create my Passport');
     expect(dynamicSetupAction({ ...RECORD, wavesDone: 1 })).toBe(
       'Finish setting up my Passport',
+    );
+    /* And never offers to FINISH one that cannot be finished: the key that
+       signs the remaining steps is gone, so that button fails every press. */
+    expect(dynamicSetupAction({ ...RECORD, wavesDone: 1, interrupted: true })).toBe(
+      'Start again',
     );
   });
 });
