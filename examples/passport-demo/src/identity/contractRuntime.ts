@@ -60,7 +60,7 @@ import {
 } from '../lib/chainWait.js';
 import { buildIdFetch } from '../lib/buildId.js';
 import { describeEndpointRefusals, firstEndpointThatServes } from '../lib/endpoints.js';
-import type { LocalMidnightWallet } from '../lib/localWallet.js';
+import type { LocalMidnightWallet, LocalWalletNetworkConfig } from '../lib/localWallet.js';
 /* One fetch per ZK artefact instead of three. Pure, drilled, and the reason a
    shielded leg's artefacts are no longer downloaded once per library layer —
    see `../lib/zkArtefactCache.ts`. */
@@ -200,8 +200,20 @@ export function transactionId(result: unknown): string {
  * account's own artefact manifest lists a superset of them — so the v1 module
  * is served from `/zk/account` and the PWA ships no second copy. See
  * {@link contractAssetBase}.
+ *
+ * `account-k1` IS a third contract, and that is the difference. It is the
+ * k1-arm reference account build — `contracts-stagenet/src/account_k1.compact`,
+ * thirty provable circuits, ZKIR v3 — which can carry a secp256k1 device
+ * beside a JubJub one. Nothing in this app asks for it yet: no flow names it,
+ * `accountModuleFor` only returns it for an account that is already deployed
+ * from that build, and a build that never asks loads nothing extra. It is here
+ * so the pieces that have to be in place before anything can — the module, the
+ * artefact tree, and a proof server that speaks v3 — are in place and drilled.
+ *
+ * It does NOT share the account's artefacts. Different contract, different
+ * circuits, different keys; see {@link ASSET_CONTRACT}.
  */
-export type PassportContractName = 'account' | 'account-v1' | 'midnames';
+export type PassportContractName = 'account' | 'account-v1' | 'account-k1' | 'midnames';
 
 /**
  * Whose ZK artefacts a module fetches: the contract whose `/zk/<name>` tree
@@ -211,15 +223,27 @@ export type PassportContractName = 'account' | 'account-v1' | 'midnames';
  * to ship a second module: the files are the same files. A build that staged
  * its own would double ~20 MB of artefacts to serve the identical bytes, and
  * would give the integrity manifest two places to drift from.
+ *
+ * `account-k1` borrows NOTHING. It is a different contract compiled by a
+ * different feature flag: thirty circuits against twelve, names the account
+ * build does not have (`withdraw_shielded_with_k256` and the rest of the k256
+ * arm), and ZKIR v3 where the account build is v2. Not one file is shared, so
+ * it gets `/zk/account-k1` and the label `passport-account-k1`. Pointing it at
+ * `/zk/account` would fetch a manifest that has never heard of its circuits
+ * and fail at the first prove.
  */
-const ASSET_CONTRACT: Record<PassportContractName, 'account' | 'midnames'> = {
+const ASSET_CONTRACT: Record<PassportContractName, ContractAssetTree> = {
   account: 'account',
   'account-v1': 'account',
+  'account-k1': 'account-k1',
   midnames: 'midnames',
 };
 
+/** The artefact trees this app serves, one directory each under `/zk`. */
+export type ContractAssetTree = 'account' | 'account-k1' | 'midnames';
+
 /** The contract whose artefact tree serves `name`. */
-export function contractAssetContract(name: PassportContractName): 'account' | 'midnames' {
+export function contractAssetContract(name: PassportContractName): ContractAssetTree {
   return ASSET_CONTRACT[name];
 }
 
@@ -251,7 +275,9 @@ export function loadContractModule(name: PassportContractName): Promise<Record<s
       ? import('../../contracts/stagenet/account/contract/index.js')
       : name === 'account-v1'
         ? import('../../contracts/stagenet/account-v1/contract/index.js')
-        : import('../../contracts/stagenet/midnames/contract/index.js')) as unknown as Promise<
+        : name === 'account-k1'
+          ? import('../../contracts/stagenet/account-k1/contract/index.js')
+          : import('../../contracts/stagenet/midnames/contract/index.js')) as unknown as Promise<
       Record<string, unknown>
     >;
     contractModules.set(name, loaded);
@@ -1057,7 +1083,7 @@ export interface ContractProvidersOptions {
  * provider and one memoised set of artefacts. They are fetching the same files
  * from the same tree; two providers would fetch each of them twice.
  */
-const zkConfigProviders = new Map<'account' | 'midnames', unknown>();
+const zkConfigProviders = new Map<ContractAssetTree, unknown>();
 
 /**
  * The indexer's public-data provider for a query URL, built once for the tab.
@@ -1145,7 +1171,11 @@ export async function createContractProviders(
     zkConfigProviders.set(assetContract, zkConfigProvider);
   }
 
-  const proofProvider = await createContractProofProvider(wallet, zkConfigProvider);
+  const proofProvider = await createContractProofProvider(
+    wallet,
+    zkConfigProvider,
+    options.contract,
+  );
 
   const walletProvider = walletProviderFor(wallet);
 
@@ -1165,6 +1195,67 @@ export async function createContractProviders(
 }
 
 /**
+ * The sentence a holder may be shown when this build has nowhere to prove an
+ * `account-k1` circuit.
+ *
+ * It names no host and no machinery, for the same reason
+ * {@link PROVE_FAILURE_MESSAGE} does not: the honest content is "this build
+ * cannot do that", which needs no vocabulary a holder has never met. The
+ * operator's half — which variable is unset, and why the usual fallbacks are
+ * not fallbacks here — goes to the console beside it.
+ */
+const K1_NO_PROVER_MESSAGE =
+  'Passport cannot prepare this kind of account on this build.';
+
+/** Where a module's circuits may be proved, and whether this tab may stand in. */
+export interface ContractProvingRoute {
+  /** The proof servers to try, in the operator's own order. */
+  urls: string[];
+  /** Whether an empty list may fall through to the in-tab prover. */
+  mayProveInTab: boolean;
+}
+
+/**
+ * Which proof servers serve a module, and whether the in-tab prover may.
+ *
+ * TWO LISTS, BECAUSE THERE ARE TWO INTERMEDIATE REPRESENTATIONS. `account`,
+ * `account-v1`, and `midnames` are ZKIR v2 and go to
+ * `VITE_MIDNIGHT_PROVING_URL` exactly as they always have — including the
+ * 1AM gateway, and including the in-tab worker when no server is named.
+ *
+ * `account-k1` is ZKIR v3, and NEITHER of those can prove it. The in-tab
+ * prover is `@midnight-ntwrk/zkir-v2`; the 1AM gateway is
+ * `ledger9-zkir2-dispatch`. Both are in the default list, and both would fail
+ * — the worker with a key-format error rather than "this IR is unsupported",
+ * which is the silent-wrong-answer shape that costs an afternoon. So k1
+ * traffic reads its OWN list, `VITE_MIDNIGHT_PROVING_URL_V3`, and when that
+ * list is empty this refuses by name instead of falling back to something
+ * that cannot work.
+ *
+ * Every build ships with the v3 list unset unless an operator sets it, and no
+ * flow asks for `account-k1` yet, so today this function is only ever reached
+ * on the unchanged branch.
+ */
+export function contractProvingRoute(
+  network: Pick<LocalWalletNetworkConfig, 'provingServerUrls' | 'provingServerUrlsV3'>,
+  contract: PassportContractName,
+): ContractProvingRoute {
+  if (contract !== 'account-k1') {
+    return { urls: network.provingServerUrls, mayProveInTab: true };
+  }
+  if (network.provingServerUrlsV3.length === 0) {
+    console.warn(
+      '[contract] account-k1 needs a ZKIR v3 proof server and VITE_MIDNIGHT_PROVING_URL_V3 is unset. ' +
+        'The in-tab prover is zkir-v2 and the 1AM gateway is ledger9-zkir2-dispatch, so neither of the ' +
+        'usual fallbacks can prove these circuits; refusing rather than failing at the first prove. ' +
+        'Point it at a proof server on an image that speaks v3 — https://67-205-177-162.sslip.io/prover-v3.',
+    );
+    throw new Error(K1_NO_PROVER_MESSAGE);
+  }
+  return { urls: network.provingServerUrlsV3, mayProveInTab: false };
+}
+
+/**
  * Where a CONTRACT circuit gets proved. Separate from the wallet's own proving
  * mode because they are separate questions: the wallet's balancing circuits are
  * four fixed system circuits whose keys come from a public bucket, while a
@@ -1174,12 +1265,19 @@ export async function createContractProviders(
  * SEVERAL — `VITE_MIDNIGHT_PROVING_URL` carrying a comma-separated list — are
  * tried in the operator's order, per REQUEST, by
  * {@link failoverProvingProvider}.
+ *
+ * WHICH list, and whether the in-tab prover may stand in for it, is
+ * {@link contractProvingRoute}'s answer rather than this function's, so the
+ * choice can be drilled without a wallet. Everything below is unchanged for
+ * `account`, `account-v1`, and `midnames`.
  */
 async function createContractProofProvider(
   wallet: LocalMidnightWallet,
   zkConfigProvider: unknown,
+  contract: PassportContractName,
 ): Promise<unknown> {
-  const provers = wallet.network.provingServerUrls;
+  const route = contractProvingRoute(wallet.network, contract);
+  const provers = route.urls;
   if (provers.length === 1) {
     const { httpClientProofProvider } = await import(
       '@midnight-ntwrk/midnight-js-http-client-proof-provider'
@@ -1207,6 +1305,11 @@ async function createContractProofProvider(
       ) as never,
     );
   }
+
+  /* Unreachable today — `contractProvingRoute` has already refused the one
+     module whose circuits the worker cannot prove — and kept as the second
+     lock on it, because the failure it prevents is silent. */
+  if (!route.mayProveInTab) throw new Error(K1_NO_PROVER_MESSAGE);
 
   if (typeof Worker === 'undefined') {
     throw new Error(
@@ -1349,6 +1452,75 @@ export async function resolveTxHashOnce(
        treats a `null` from here as a fact about the transaction. */
     return null;
   }
+}
+
+/**
+ * WHERE a transaction's shielded outputs landed in the Zswap commitment tree —
+ * `startIndex` inclusive, `endIndex` exclusive — or `null` when the indexer has
+ * no answer yet (or could not be asked).
+ *
+ * This is the only thing the chain will ever tell a client about a held coin's
+ * `mt_index`, and a k1 account cannot spend without it: the reference contract
+ * takes the qualified coin description from the `held_coin` witness, which
+ * carries a position the client has to have learned here (MIP-0012 §6.5, and
+ * `contract/src/wallet/capture.ts` on the reference, which this is the demo's
+ * copy of). `../identity/k1CoinStore.ts` is what stores the answer; it is
+ * handed this function rather than importing it, so the store stays free of the
+ * network and stays in the coverage denominator.
+ *
+ * TWO SPELLINGS, because the reference's own indexer client uses both: the
+ * `transactions` query answers `startIndex`/`endIndex`, and the transaction
+ * hanging off a `contractAction` answers `zswapStartIndex`/`zswapEndIndex`.
+ * Which one THIS indexer serves is unverified — a GraphQL field that does not
+ * exist fails the whole query rather than coming back absent, so the second
+ * spelling is asked for only after the first has been refused, and a deployment
+ * that serves either gets an answer. Both attempts carry the same ten-second
+ * ceiling {@link resolveTxHashOnce} carries, for the same reason.
+ */
+export async function resolveTxCommitmentWindowOnce(
+  indexerHttpUrl: string,
+  identifier: string,
+): Promise<{ startIndex: number; endIndex: number } | null> {
+  const ask = async (
+    startField: string,
+    endField: string,
+  ): Promise<{ startIndex: number; endIndex: number } | null | 'refused'> => {
+    const query =
+      `{ transactions(offset: { identifier: "${identifier}" }) ` +
+      `{ ... on RegularTransaction { ${startField} ${endField} } } }`;
+    try {
+      const response = await fetch(indexerHttpUrl, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ query }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      const body = (await response.json()) as {
+        data?: { transactions?: Array<Record<string, unknown>> };
+        errors?: unknown[];
+      };
+      /* A schema that does not know these fields is the ONE failure worth
+         asking again about, under the other spelling. Everything else is the
+         chain not having answered. */
+      if (body.errors && body.errors.length > 0) return 'refused';
+      const transaction = body.data?.transactions?.[0];
+      if (!transaction) return null;
+      const startIndex = Number(transaction[startField]);
+      const endIndex = Number(transaction[endField]);
+      if (!Number.isSafeInteger(startIndex) || !Number.isSafeInteger(endIndex)) return null;
+      return { startIndex, endIndex };
+    } catch {
+      /* Same reading as {@link resolveTxHashOnce}: a timeout, a dropped socket,
+         and a body that is not JSON all mean "the chain could not be asked",
+         never "that transaction produced no outputs". The store reads `null`
+         as exactly that and asks again. */
+      return null;
+    }
+  };
+  const first = await ask('startIndex', 'endIndex');
+  if (first !== 'refused') return first;
+  const second = await ask('zswapStartIndex', 'zswapEndIndex');
+  return second === 'refused' ? null : second;
 }
 
 /**

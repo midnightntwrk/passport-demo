@@ -46,6 +46,7 @@
 import { expect, test, type BrowserContext, type CDPSession, type Page } from '@playwright/test';
 
 import { installNetworkBoundary, RESOLVABLE_NAME } from './mocks.js';
+import { SIGN_IN_BUTTON } from './walkContext.js';
 
 /*
  * CHROMIUM ONLY, and for a reason that is about the AUTHENTICATOR rather
@@ -171,7 +172,7 @@ async function records(h: Harness): Promise<HeldRecords> {
 /** First-time enrolment through the landing button, as far as the name step. */
 async function enrol(h: Harness): Promise<string> {
   await h.page.goto('/');
-  await h.page.getByRole('button', { name: /Continue with Passport/i }).click();
+  await h.page.getByRole('button', { name: SIGN_IN_BUTTON }).click();
   await expect(h.page.getByRole('heading', { name: /Welcome to Passport/i })).toBeVisible({
     timeout: 120_000,
   });
@@ -242,7 +243,7 @@ async function seedClaim(h: Harness, credentialId: string): Promise<void> {
 async function backToLanding(h: Harness): Promise<void> {
   await h.page.goto('/');
   const signOut = h.page.getByRole('button', { name: /Sign out of this Passport/i });
-  const landing = h.page.getByRole('button', { name: /Continue with Passport/i });
+  const landing = h.page.getByRole('button', { name: SIGN_IN_BUTTON });
   /* Wait for the persisted session that this journey deliberately created.
      The landing screen is rendered while IndexedDB is still being read, so it
      is visible for a moment before a real session returns to Home. Treating
@@ -322,7 +323,7 @@ test('a NEW passkey starts clean, and does not inherit the old name', async ({ b
   });
 
   await backToLanding(h);
-  await h.page.getByRole('button', { name: /Continue with Passport/i }).click();
+  await h.page.getByRole('button', { name: SIGN_IN_BUTTON }).click();
 
   /* The targeted assertion cannot produce the credential, so the keyless panel
      comes up. It carries the control that makes a new passkey. */
@@ -369,7 +370,7 @@ test('"Set up a new Passport on this device" forgets this device\'s records and 
   });
 
   await backToLanding(h);
-  await h.page.getByRole('button', { name: /Continue with Passport/i }).click();
+  await h.page.getByRole('button', { name: SIGN_IN_BUTTON }).click();
 
   /* THE CONTROL THAT DID NOT EXIST. Every other control on this screen reopens
      what the browser already holds; when what it holds is wrong, all of them
