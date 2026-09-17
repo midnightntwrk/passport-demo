@@ -137,6 +137,7 @@ import {
   loadK1CoinStore,
   rememberK1ChangeCoin,
   rememberK1EncSecretKey,
+  renameK1AwaitingTx,
   settleK1AwaitingCoin,
   settleK1Coin,
   type K1Account,
@@ -1134,6 +1135,23 @@ export interface CustodyCallRequest {
     context: K1CallContext,
     pk: CurvePoint,
   ) => Uint8Array;
+  /**
+   * The circuit's own return value, handed over the INSTANT the call resolves.
+   *
+   * WHY IT IS NOT JUST THE RETURN OF THIS FUNCTION. Between the call resolving
+   * and this function returning there is `resolveHash`, which asks the indexer
+   * for the chain's hash and polls for it. That is up to ten seconds of a
+   * screen reading "Confirming" — and for a shielded withdrawal the circuit's
+   * return value is the ONLY description of the change coin that exists
+   * anywhere in the world. A tab closed in that window left the spent coin
+   * still held, the change gone for ever, and the send record claiming nothing
+   * had been sent while the note sat in the wallet.
+   *
+   * So the caller writes what it must write here, before anything is asked of
+   * anybody. `identifier` is midnight-js's own transaction id, which is what
+   * there is to name the transaction by until the hash resolves.
+   */
+  readonly onSubmitted?: (result: unknown, identifier: string | null) => void;
 }
 
 /**
@@ -1205,6 +1223,9 @@ export async function k1Call(
   const call = callTx[circuit];
   if (!call) throw new Error('This Passport cannot do that yet.');
   const result = await call(...request.args, ...authArgs(auth));
+
+  /* BEFORE THE HASH IS ASKED FOR. See `onSubmitted`. */
+  request.onSubmitted?.(circuitResultOf(result), identifierOf(result));
 
   onPhase?.({ step: 'confirm' });
   const txHash = await resolveHash(providers, result);
@@ -1352,6 +1373,13 @@ export async function withdrawShieldedK1(
       value: held.value,
       mt_index: held.mtIndex,
     };
+    /* WHAT THE SPEND WROTE, BEFORE ANYTHING WAS ASKED OF THE CHAIN. See
+       `CustodyCallRequest.onSubmitted`: the change coin's description is the
+       circuit's return value and exists nowhere else, so it is written the
+       instant the call resolves rather than after `resolveHash` has polled the
+       indexer for the chain's own hash. What is recorded here is what the run
+       stands on if the tab is closed a moment later. */
+    let written: ShieldedChangeWrite | null = null;
     try {
       const step = await k1Call(
         session,
@@ -1369,14 +1397,17 @@ export async function withdrawShieldedK1(
               request.amount,
               coin,
             ),
+          onSubmitted: (result, identifier) => {
+            /* It proved against this position, which is the only evidence there
+               is that the position is the right one. */
+            settleK1Coin(account, colour);
+            written = writeShieldedChange(account, colour, result, identifier);
+          },
         },
         onPhase,
         overrides,
       );
-      /* It proved against this position, which is the only evidence there is
-         that the position is the right one. */
-      settleK1Coin(account, colour);
-      return await recordShieldedChange(deps, wallet, account, colour, step);
+      return await settleShieldedChange(deps, wallet, account, colour, step, written);
     } catch (cause) {
       const message = messageOf(cause);
       if (!spendPositionMayBeWrong(message)) throw cause;
@@ -1390,48 +1421,87 @@ export async function withdrawShieldedK1(
   }
 }
 
+/** What the spend wrote down at submission time, for the settle that follows. */
+interface ShieldedChangeWrite {
+  readonly change: CustodyChangeCoin;
+  /** The name the coin was filed under, until the chain's hash is known. */
+  readonly txId: string;
+}
+
 /**
- * File the change coin the withdrawal returned, and learn where it landed.
+ * File what the withdrawal returned, in ONE write, asking nothing of anybody.
  *
- * The write comes FIRST and the question second. A description that is not
- * written down is lost by a closed tab; a position that is not learned yet is
- * learned on the next attempt, which is the whole reason the store has a place
- * for a coin that has one and not the other.
+ * Called from `onSubmitted`, which is to say before `resolveHash` — so this
+ * runs while the only thing that has happened is that the call resolved.
  */
-async function recordShieldedChange(
+function writeShieldedChange(
+  account: K1Account,
+  colour: string,
+  result: unknown,
+  identifier: string | null,
+): ShieldedChangeWrite {
+  const change = changeCoinFromResult(result);
+  if (change.outcome === 'unreadable') {
+    /* THE VALUE HAS MOVED and this build could not read the description of what
+       came back. The coin is not dropped: a dropped coin is a colour this
+       Passport silently stops showing. It is recorded as spent with the
+       transaction that spent it, so the row can say a payment left and its
+       change could not be described, and a later run has the hash to go and
+       look. */
+    console.warn('[account-custody] the withdrawal succeeded and its change could not be read');
+    rememberK1ChangeCoin(account, colour, null, identifier ?? 'unknown');
+    return { change, txId: identifier ?? 'unknown' };
+  }
+  if (change.outcome === 'none') {
+    rememberK1ChangeCoin(account, colour, null, identifier ?? 'unknown');
+    return { change, txId: identifier ?? 'unknown' };
+  }
+  rememberK1ChangeCoin(
+    account,
+    colour,
+    { colour: change.colour, nonce: change.nonce, value: change.value },
+    identifier ?? 'unknown',
+  );
+  return { change, txId: identifier ?? 'unknown' };
+}
+
+/**
+ * Learn where the change landed, now that there is a hash to ask about.
+ *
+ * The write already happened ({@link writeShieldedChange}); this only asks the
+ * question. A position that is not learned yet is learned on a later pass,
+ * which is the whole reason the store has a place for a coin that has a
+ * description and not a position.
+ */
+async function settleShieldedChange(
   deps: CustodyDeps,
   wallet: LocalMidnightWallet,
   account: K1Account,
   colour: string,
   step: CustodyStepResult,
+  written: ShieldedChangeWrite | null,
 ): Promise<CustodyShieldedWithdrawResult> {
-  const change = changeCoinFromResult(step.result);
-  if (change.outcome === 'unreadable') {
-    /* The value has MOVED — this is a successful call whose return value this
-       build could not read. Dropping the coin says so honestly: the account no
-       longer holds it, and nothing here can pretend to describe what is left. */
-    console.warn('[account-custody] the withdrawal succeeded and its change could not be read');
-    dropK1Coin(account, colour);
-    return { ...step, change, changePosition: 'none' };
-  }
-  if (change.outcome === 'none') {
-    rememberK1ChangeCoin(account, colour, null, step.txHash ?? '');
-    return { ...step, change, changePosition: 'none' };
-  }
+  const change = written?.change ?? changeCoinFromResult(step.result);
+  if (change.outcome !== 'change') return { ...step, change, changePosition: 'none' };
   if (step.txHash === null) {
-    /* No transaction to ask about. The description is still written down — as
-       a held coin would be — but nothing can settle its position until a later
-       run re-reads the account's own history. */
     console.warn('[account-custody] the change coin has no transaction to look its position up by');
-    rememberK1ChangeCoin(account, colour, change, 'unknown');
     return { ...step, change, changePosition: 'awaiting' };
   }
-  rememberK1ChangeCoin(account, colour, change, step.txHash);
+  /* THE HASH REPLACES THE IDENTIFIER the coin was filed under. The indexer
+     answers commitment windows by the chain's hash, and a sponsored
+     transaction is superseded, so the id midnight-js returned is not a key it
+     can answer — which is exactly how a change coin used to stay "arriving"
+     for ever. */
+  if (written !== null && written.txId !== step.txHash) {
+    renameK1AwaitingTx(account, change.colour, step.txHash);
+  }
   const settled = await settleK1AwaitingCoin(account, change.colour, (txId) =>
     deps.commitmentWindow(wallet.network.indexerHttpUrl, txId),
   );
   if (settled.outcome === 'learned') return { ...step, change, changePosition: 'settled' };
-  if (settled.outcome === 'ambiguous') return { ...step, change, changePosition: 'candidates' };
+  if (settled.outcome === 'ambiguous') {
+    return { ...step, change, changePosition: settled.stored ? 'candidates' : 'awaiting' };
+  }
   return { ...step, change, changePosition: 'awaiting' };
 }
 
@@ -1790,6 +1860,15 @@ async function queryStateData(
  * is the supported way to land on the real one; a failure to resolve is not a
  * failed transaction, so it reads as "no link yet" rather than as an error.
  */
+/** midnight-js's own transaction id, or null when the result carries none. */
+function identifierOf(result: unknown): string | null {
+  try {
+    return transactionId(result);
+  } catch {
+    return null;
+  }
+}
+
 async function resolveHash(
   providers: Record<string, unknown>,
   result: unknown,
