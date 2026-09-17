@@ -1466,6 +1466,75 @@ export async function resolveTxHashOnce(
 }
 
 /**
+ * WHERE a transaction's shielded outputs landed in the Zswap commitment tree —
+ * `startIndex` inclusive, `endIndex` exclusive — or `null` when the indexer has
+ * no answer yet (or could not be asked).
+ *
+ * This is the only thing the chain will ever tell a client about a held coin's
+ * `mt_index`, and a k1 account cannot spend without it: the reference contract
+ * takes the qualified coin description from the `held_coin` witness, which
+ * carries a position the client has to have learned here (MIP-0012 §6.5, and
+ * `contract/src/wallet/capture.ts` on the reference, which this is the demo's
+ * copy of). `../identity/k1CoinStore.ts` is what stores the answer; it is
+ * handed this function rather than importing it, so the store stays free of the
+ * network and stays in the coverage denominator.
+ *
+ * TWO SPELLINGS, because the reference's own indexer client uses both: the
+ * `transactions` query answers `startIndex`/`endIndex`, and the transaction
+ * hanging off a `contractAction` answers `zswapStartIndex`/`zswapEndIndex`.
+ * Which one THIS indexer serves is unverified — a GraphQL field that does not
+ * exist fails the whole query rather than coming back absent, so the second
+ * spelling is asked for only after the first has been refused, and a deployment
+ * that serves either gets an answer. Both attempts carry the same ten-second
+ * ceiling {@link resolveTxHashOnce} carries, for the same reason.
+ */
+export async function resolveTxCommitmentWindowOnce(
+  indexerHttpUrl: string,
+  identifier: string,
+): Promise<{ startIndex: number; endIndex: number } | null> {
+  const ask = async (
+    startField: string,
+    endField: string,
+  ): Promise<{ startIndex: number; endIndex: number } | null | 'refused'> => {
+    const query =
+      `{ transactions(offset: { identifier: "${identifier}" }) ` +
+      `{ ... on RegularTransaction { ${startField} ${endField} } } }`;
+    try {
+      const response = await fetch(indexerHttpUrl, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ query }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      const body = (await response.json()) as {
+        data?: { transactions?: Array<Record<string, unknown>> };
+        errors?: unknown[];
+      };
+      /* A schema that does not know these fields is the ONE failure worth
+         asking again about, under the other spelling. Everything else is the
+         chain not having answered. */
+      if (body.errors && body.errors.length > 0) return 'refused';
+      const transaction = body.data?.transactions?.[0];
+      if (!transaction) return null;
+      const startIndex = Number(transaction[startField]);
+      const endIndex = Number(transaction[endField]);
+      if (!Number.isSafeInteger(startIndex) || !Number.isSafeInteger(endIndex)) return null;
+      return { startIndex, endIndex };
+    } catch {
+      /* Same reading as {@link resolveTxHashOnce}: a timeout, a dropped socket,
+         and a body that is not JSON all mean "the chain could not be asked",
+         never "that transaction produced no outputs". The store reads `null`
+         as exactly that and asks again. */
+      return null;
+    }
+  };
+  const first = await ask('startIndex', 'endIndex');
+  if (first !== 'refused') return first;
+  const second = await ask('zswapStartIndex', 'zswapEndIndex');
+  return second === 'refused' ? null : second;
+}
+
+/**
  * The ids midnight-js reports are transaction IDENTIFIERS (33 bytes, 66 hex
  * characters), not the 32-byte block-level hashes explorers resolve — a link
  * built from an identifier dies with "not found". The indexer maps one to the
