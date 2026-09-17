@@ -25,6 +25,25 @@
 
 import { test, type BrowserContextOptions } from '@playwright/test';
 
+/**
+ * THE BUTTON EVERY WALK STARTS BY PRESSING, matched under either of its names.
+ *
+ * It said "Continue with Passport" until 2026/09/16 and says "Continue with
+ * Passkey" now. The rename is harmless for the mocked tiers, which serve the
+ * page they then press — but the live walk presses a button on a DEPLOYED
+ * build, and the deployed build is whatever staging or production is serving.
+ * A walk pinned to the new label fails against production today, and fails
+ * again the moment a rollback puts the old build back: it would report a broken
+ * deployment when the only thing that had changed was a word.
+ *
+ * So the locator accepts both, and ONE constant does it everywhere — a name
+ * spelled out in nineteen files is a name that gets half-renamed. There is one
+ * such button on the page, so accepting the retired label costs no precision
+ * and buys a live gate that goes on working across a deploy in either
+ * direction.
+ */
+export const SIGN_IN_BUTTON = /Continue with Pass(?:port|key)/i;
+
 /** The context options that describe a DEVICE rather than a behaviour. */
 const EMULATION = [
   'viewport',
