@@ -99,6 +99,135 @@ and refuses a custody grant with `503 prover-unavailable` without building or
 spending anything. Neither variable changes anything for `account` or `account-v1`,
 whose proof route is untouched.
 
+### Turning on `POST /prove-account-custody` (2026/09/16)
+
+`/prove-account-custody` is the server half of proving for a Dynamic-only Passport. The
+account custody build's prover keys are 112 MB for `append_inbox_with_k256`, 224 MB for the
+largest of them, and 3.2 GB for the set. `httpClientProofProvider` — the client
+every other part of this demo proves through — uploads the prover key with every
+request, so a browser cannot carry this traffic to a proof server at all,
+however healthy that server is. The client therefore posts the serialised
+unproven transaction and the circuit's name to this service, which holds the
+keys on disk, and gets the proven transaction back.
+
+**The route is always there.** With no artefacts or no `BALANCER_PROVER_URL_V3`
+it answers `503 prover-unavailable` with a sentence naming what is missing. It
+is deliberately not made to disappear when unconfigured: a missing route answers
+`404`, which is also what Caddy answers for a path it does not know, and the
+client would have no way to tell "this droplet has not been set up" from "this
+URL is wrong".
+
+It takes **the same two settings as the custody grant above and nothing else** —
+there is no third variable, and a droplet already set up for `account-custody`
+deposits is already set up for this.
+
+#### The steps
+
+1. **Stage the artefacts.** They are already on the droplet at
+   `/opt/passport-account-custody-artefacts/managed/account-custody`. To put them there from a
+   machine that has built them:
+
+   ```sh
+   rsync -a --info=progress2 \
+     contracts-stagenet/managed/account-custody/ \
+     root@<droplet>:/opt/passport-account-custody-artefacts/managed/account-custody/
+   ```
+
+   `keys/`, `zkir/`, `contract/`, and `compiler/` — all four. `compiler/` is not
+   optional: `NodeZkConfigProvider` checks every artefact it reads against
+   `compactc`'s integrity manifest, which is the one thing that tells a
+   half-finished rsync from a working one before a proof starts. Check the free
+   space first (`df -h /opt`); this is 3.2 GB.
+
+   The unit runs with `ProtectSystem=strict`, so `/opt` is mounted read-only for
+   the service. That is correct and needs no `ReadWritePaths` entry — the route
+   only ever reads these files.
+
+2. **Set the two variables.** Either in `/etc/passport-balancer.env` or as
+   `Environment=` lines in the unit; the unit is the better place, because it is
+   in this repository and the env file is not:
+
+   ```ini
+   Environment=BALANCER_ACCOUNT_CUSTODY_ASSETS=/opt/passport-account-custody-artefacts/managed/account-custody
+   Environment=BALANCER_PROVER_URL_V3=http://127.0.0.1:6300
+   ```
+
+   `BALANCER_PROVER_URL` is **not** one of them and must not be changed: it puts
+   the 1AM gateway first, the gateway is `ledger9-zkir2-dispatch`, and these
+   circuits are ZKIR v3.
+
+3. **Deploy the way every other change to this service is deployed** — back up
+   first, then restart:
+
+   ```sh
+   rsync -a src/ dist/ package.json root@<droplet>:/opt/passport-balancer/
+   rsync -a deploy/ root@<droplet>:/opt/passport-balancer/deploy/
+   ssh root@<droplet> '
+     cp -a /opt/passport-balancer/dist /opt/passport-balancer/dist.bak.$(date +%Y%m%d-%H%M%S)
+     install -m 644 /opt/passport-balancer/deploy/passport-balancer.service \
+       /etc/systemd/system/
+     systemctl daemon-reload && systemctl restart passport-balancer'
+   ```
+
+   The service saves its sync snapshot on `SIGTERM`, so the restart resumes in
+   under a second rather than walking the chain again. Nothing about
+   `/balance-only`, `/register-alias`, `/fund-account`, `/swap`, or `/gift-nft`
+   changes; if the restart goes wrong, `dist.bak.*` is the thing to put back.
+
+4. **Check it from outside**, which is where the client is:
+
+   ```sh
+   curl -s https://67-205-177-162.sslip.io/balancer/status \
+     | python3 -c 'import json,sys; print(json.load(sys.stdin)["accountCustodyProving"])'
+   ```
+
+   `configured` true is the whole answer. The same block carries `queueDepth`,
+   `proofsServed`, `lastProofMs`, and `lastError` — the last of these with this
+   host's paths and prover URL replaced by `<custody-assets>` and `<custody-prover>`,
+   because `/status` is on the internet. A refusal that names a circuit reads
+   the same way in the journal, under `[prove-account-custody]`.
+
+#### The limits it runs under, and why
+
+| | |
+| --- | --- |
+| **One at a time** | A k256 proof is seconds to tens of seconds on two vCPUs that are also proving every name claim and every activation grant. Four callers may wait; the fifth is answered `429 PROVING_BUSY` with a `retryAfterMs` built from this service's own last measured proof. |
+| **180 s per proof** | Past that the caller gets `504 proving-timeout`. The slot stays claimed until the abandoned proof actually ends, so nothing starts beside it. |
+| **3/min per client** | `BALANCER_PROVE_ACCOUNT_CUSTODY_MAX_PER_MIN` and `BALANCER_PROVE_ACCOUNT_CUSTODY_BURST`, the same defaults as the spend routes. Its own bucket, not the grant bucket: a caller that has spent its grant allowance must still be able to finish proving the Passport that allowance opened. |
+| **2 MB per transaction** | And the 4 MiB body ceiling the whole service already reads through. |
+| **No spend slot** | `/prove-account-custody` holds no `SpendAdmission` slot and is not refused by a DUST repair, because it spends nothing. |
+| **Key material per request** | The ZK config provider is built for one proof and dropped: reading `append_inbox_with_k256.prover` off the staged artefacts measured 459 ms and 266 MB RSS on 2026/09/16. Kept between requests it would hold every prover key it had ever served — 3.2 GB on a box with 8 GB that is also holding the sponsor's wallet. |
+
+#### Recommended: a second proof server for account custody (not done here)
+
+Today `BALANCER_PROVER_URL_V3` is `http://127.0.0.1:6300`, which is the **same**
+proof server that Caddy's `/prover-v3` and the local fallback for `/prover` both
+reach. So a 224 MB account custody circuit and a sponsor's own `deposit_night` queue against
+each other inside one twelve-slot server on two vCPUs, and a name claim can end
+up waiting behind somebody's Dynamic onboarding.
+
+The fix is a second container on its own port, used by this variable alone:
+
+```sh
+docker run -d --name passport-proof-server-account-custody \
+  --restart unless-stopped \
+  -p 127.0.0.1:6301:6300 \
+  --memory 4g --cpus 1.5 \
+  midnightnetwork/proof-server:9.0.0-rc.6 \
+  midnight-proof-server --network testnet
+```
+
+then `Environment=BALANCER_PROVER_URL_V3=http://127.0.0.1:6301` and a restart.
+The supervisor's probe table would gain a row for it
+(`GET http://127.0.0.1:6301/health`, and `docker inspect
+passport-proof-server-account-custody`), restarted like the first one.
+
+**This is a recommendation and it has not been done.** It is two containers'
+worth of memory on an 8 GB box, so it wants measuring under a real walk before
+anybody commits to it — and the sponsor's own proving is the traffic that must
+not regress, which is an argument for doing it and also a reason not to do it
+blind on a droplet that is serving production.
+
 ---
 
 ## The supervisor
