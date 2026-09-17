@@ -29,6 +29,16 @@ If something is broken in production, the fix still enters at step 1. The only t
 
 **The old working repository (`midnightntwrk/passport`) is retired for pushes.** Its push URL is set to `DISABLED` and a `pre-push` hook refuses it, along with any direct push to `main`. Do not undo either. No release, tag, branch, or commit goes there.
 
+## The account custody contract (2026/09/17, non-negotiable)
+
+**The account custody contract is never modified, copied, forked, renamed, or versioned in this repository.** It is Nicolas's, it lives at `contract/contracts/account.compact` on `midnightntwrk/passport` `main`, and it is consumed here exactly as provided. A verbatim copy under another filename is a fork; so is a local edit, however small; so is keeping "our version" of it beside theirs.
+
+It is consumed at a **pinned commit, through the sync script**. `scripts/account-custody-contract.lock.json` pins the repository, the commit, the path, the sha256, and the compiler invocation; `node scripts/sync-account-custody-contract.mjs` downloads that revision into a gitignored directory, refuses on a hash mismatch, and compiles it into `examples/passport-balancer/contracts-stagenet/managed/account-custody`. Only the compiler output of that unchanged source is tracked — `contract/` and `compiler/`, as for every other build here, with `keys/` and `zkir/` gitignored. `.github/workflows/verify-demo.yml` fetches the pinned source on every run and fails if the lock, the digest, and the provenance recorded beside the build disagree.
+
+Moving to a newer upstream revision is an edit to the lock and a re-run of the script. **Any blocker — a circuit that is missing, a signature that will not verify, a change the demo needs — goes to Nicolas.** It is never worked around with a local change to the contract.
+
+See [`docs/demo/account-custody-contract.md`](../docs/demo/account-custody-contract.md).
+
 ## The two environments
 
 Two environments, one direction of travel:
