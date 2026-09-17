@@ -125,6 +125,8 @@ export function accountModuleForState(state: unknown): AccountModuleName {
  * checking it is the only thing standing between a malformed deposit and a
  * coin nobody can ever spend.
  */
+import { sealInboxEntry } from './k1Inbox.js';
+
 export const INBOX_ENTRY_BYTES = 192;
 
 /** A shielded coin as a deposit circuit takes it. */
@@ -167,21 +169,25 @@ export interface AccountDeposits {
 }
 
 /**
- * Why a shielded deposit into the reference contract cannot be made here yet.
+ * The last check before a shielded deposit into the reference contract is
+ * submitted: there is an entry, and it is the right length.
  *
  * `deposit_shielded(coin, entry)` takes the protocol coin claim AND the
  * 192-byte inbox entry the owner's client will decrypt to learn the coin's
- * description. The entry is encrypted to the account's `enc_key` by a scheme
- * this repository does not yet implement anywhere — not in the sponsor, not in
- * the demo. A deposit made with a placeholder entry would still LAND: the coin
- * would move into the contract's Zswap balance and be gone, because the
- * owner's `held_coin` witness walks the inbox and would never find it. Refusing
- * is the only answer that does not destroy the value it is trying to deliver.
+ * description. `./k1Inbox.ts` builds one now, so this is no longer "nothing
+ * here can do that" — it is the guard on a caller that reached this point
+ * without one, most often because the account's `enc_key` could not be read.
+ *
+ * It is still a THROW rather than a fallback, and for the original reason: a
+ * deposit made with a placeholder entry still LANDS. The coin moves into the
+ * contract's Zswap balance and is gone, because the owner's `held_coin` witness
+ * walks the inbox and would never find it. Refusing is the only answer that
+ * does not destroy the value it is trying to deliver.
  */
 export class InboxEntryRequired extends Error {
   constructor() {
     super(
-      'deposit_shielded on the k1-arm account takes a 192-byte InboxEntry v1 alongside the coin, and this service cannot build one: the entry is encrypted to the account enc_key by client-side cryptography that does not exist in this repository yet. A deposit with a placeholder entry would land and the coin would be unspendable for ever, so nothing is submitted.',
+      'deposit_shielded on the k1-arm account takes a 192-byte InboxEntry v1 alongside the coin, and none was supplied — usually because the account advertised no readable enc_key to seal one to. A deposit with a placeholder entry would land and the coin would be unspendable for ever, so nothing is submitted.',
     );
     this.name = 'InboxEntryRequired';
   }
@@ -273,4 +279,67 @@ export function proverForModule(
     kind: 'refused',
     why: `account-k1 is compiled --feature-zkir-v3, and neither BALANCER_PROVER_URL (the 1AM gateway route, ledger9-zkir2-dispatch) nor this process's own prover (@midnight-ntwrk/zkir-v2) can prove those circuits. Set ${V3_PROVER_ENV} to a proof server that can — on the droplet that is ${DROPLET_V3_PROVER_URL}, reached from outside as /prover-v3.`,
   };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Reading the key, and sealing to it                                         */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The account's advertised `enc_key`, read off decoded ledger state, or null.
+ *
+ * NULL IS A REFUSAL AND NOT A DEFAULT. A build with no such cell (the two
+ * prototype accounts), a cell that decoded as something other than 32 bytes, or
+ * state that is not an account at all all arrive here as null, and every caller
+ * treats null as "do not deposit" rather than "seal to zeros". Sealing to a key
+ * that is not the account's produces an entry the owner cannot open and a coin
+ * nobody can ever name.
+ */
+export function accountEncKey(ledgerState: unknown): Uint8Array | null {
+  const key = (ledgerState as { enc_key?: unknown } | null | undefined)?.enc_key;
+  return key instanceof Uint8Array && key.length === 32 ? key : null;
+}
+
+/**
+ * The arguments a shielded deposit takes on this build, with the entry sealed
+ * here rather than passed in.
+ *
+ * ONE PLACE SEALS, and that is the point: the entry has to be built from a key
+ * read in the same breath as the deposit, and a caller holding an entry it
+ * built earlier is a caller that can seal to a key the account has since
+ * rotated away from. The prototype builds ignore `encKey` entirely — they take
+ * the coin alone — so passing one is harmless and omitting one on a k1 account
+ * is the refusal {@link InboxEntryRequired} describes.
+ */
+export function sealedShieldedArgs(
+  module: AccountModuleName,
+  coin: ShieldedCoin,
+  encKey: Uint8Array | null,
+): readonly unknown[] {
+  const deposits = accountDeposits(module);
+  if (deposits.mirrorsShieldedBalance) return deposits.shieldedArgs(coin);
+  if (encKey === null) throw new InboxEntryRequired();
+  return deposits.shieldedArgs(coin, sealInboxEntry(encKey, coin));
+}
+
+/**
+ * Whether a shielded deposit has been seen on chain yet.
+ *
+ * TWO BUILDS, TWO DIFFERENT QUESTIONS. A prototype account mirrors what it
+ * holds, so the credit itself is read back and `>=` the target is the answer. A
+ * k1 account mirrors nothing (MIP-0012 §6.1) — the coin's description never
+ * reaches public state — so the only thing the chain will ever say about the
+ * deposit is that the inbox grew by one, and that is what is waited on. The
+ * alternative, reporting a balance nobody can read as though it had been
+ * checked, is a confirmation that confirms nothing.
+ */
+export function shieldedDepositConfirmed(
+  module: AccountModuleName,
+  before: bigint,
+  observed: bigint,
+  amount: bigint,
+): boolean {
+  return accountDeposits(module).mirrorsShieldedBalance
+    ? observed >= before + amount
+    : observed > before;
 }
