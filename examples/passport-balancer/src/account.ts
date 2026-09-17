@@ -916,14 +916,6 @@ export async function createAccountFunder(
   const accountV1 = (await import(
     '../contracts-stagenet/managed/account-v1/contract/index.js'
   )) as unknown as AccountModule;
-  /* The k1-arm reference contract: a DIFFERENT CONTRACT, not a later revision.
-     Thirty circuits against twelve, its own vocabulary for the same deposits,
-     its own ledger shape, and ZKIR v3 where both prototypes are v2 — so it gets
-     its own artefact directory, its own key material, and its own proof route.
-     See `./accountModule.ts`. */
-  const accountK1 = (await import(
-    '../contracts-stagenet/managed/account-k1/contract/index.js'
-  )) as unknown as K1AccountModule;
   const { CompiledContract } = await import('@midnight-ntwrk/compact-js');
   const { NodeZkConfigProvider } = await import(
     '@midnight-ntwrk/midnight-js-node-zk-config-provider'
@@ -1116,18 +1108,69 @@ export async function createAccountFunder(
     } as never),
     CompiledContract.withCompiledFileAssets(managedPath),
   );
-  const compiledContractK1 = k1ManagedPath
-    ? CompiledContract.make('passport-account-k1', accountK1.Contract as never).pipe(
-        CompiledContract.withWitnesses({
-          /* ONE witness, and one refusal. The reference contract's shielded
-             custody takes the coin it is spending from `held_coin`, so a caller
-             that could answer it could move an account's money. This service
-             only ever puts money IN, and cannot answer it. */
-          held_coin: refusingWitness('held coin'),
-        } as never),
-        CompiledContract.withCompiledFileAssets(k1ManagedPath),
-      )
-    : null;
+  /** Built once, on the first k1 account, out of the module loaded for it. */
+  let compiledContractK1: unknown = null;
+  const compiledContractK1Once = async (): Promise<unknown> => {
+    const assets = k1ManagedPath;
+    if (!assets) {
+      throw new AccountFundingError(
+        'not-an-account',
+        `The contract is a k1-arm account and the compiled account-k1 build is not on this host, so it cannot be opened. ${k1Unavailable ?? ''}`.trim(),
+      );
+    }
+    compiledContractK1 ??= CompiledContract.make(
+      'passport-account-k1',
+      (await accountK1Once()).Contract as never,
+    ).pipe(
+      CompiledContract.withWitnesses({
+        /* ONE witness, and one refusal. The reference contract's shielded
+           custody takes the coin it is spending from `held_coin`, so a caller
+           that could answer it could move an account's money. This service only
+           ever puts money IN, and cannot answer it. */
+        held_coin: refusingWitness('held coin'),
+      } as never),
+      CompiledContract.withCompiledFileAssets(assets),
+    );
+    return compiledContractK1;
+  };
+
+  /**
+   * The k1-arm reference contract's module, loaded ON FIRST USE.
+   *
+   * A DIFFERENT CONTRACT, not a later revision: thirty circuits against twelve,
+   * its own vocabulary for the same deposits, its own ledger shape, and ZKIR v3
+   * where both prototypes are v2 — so it has its own artefact directory, its
+   * own key material, and its own proof route. See `./accountModule.ts`.
+   *
+   * It is loaded here rather than beside the other two because the process must
+   * not depend on it. Every activation, every gift, and every name claim this
+   * service has ever paid for is a prototype account; a host whose
+   * `contracts-stagenet` tree predates the k1 build, or carries it half-copied,
+   * would have failed at start-up on a build none of those Passports is. The
+   * load now happens when a k1 account is actually opened, and its failure is
+   * the same refusal an unconfigured v3 prover gets: this account cannot be
+   * served here, and every other account still can.
+   */
+  let accountK1: Promise<K1AccountModule> | null = null;
+  const accountK1Once = async (): Promise<K1AccountModule> => {
+    /* A LITERAL specifier, for the reason the three imports above give: a
+       computed path into `contracts-stagenet` resolves a second compact
+       runtime, and decoding a state then dies on `expected instance of
+       ChargedState`. */
+    accountK1 ??= import('../contracts-stagenet/managed/account-k1/contract/index.js') as unknown as Promise<K1AccountModule>;
+    try {
+      return await accountK1;
+    } catch (cause) {
+      /* Not remembered, so a host that has the build rsynced under it while it
+         runs picks it up on the next request rather than at the next restart. */
+      accountK1 = null;
+      throw new AccountFundingError(
+        'prover-unavailable',
+        'The compiled account-k1 build is not readable on this host, so a k1-arm Passport cannot be served here.',
+        cause instanceof Error ? cause.message : String(cause),
+      );
+    }
+  };
 
   /**
    * The k1 proof route, built ON FIRST USE rather than at start-up.
@@ -1174,15 +1217,9 @@ export async function createAccountFunder(
   const openingFor = async (module: AccountModuleName): Promise<AccountOpening> => {
     const deposits = accountDeposits(module);
     if (module === 'account-k1') {
-      if (!compiledContractK1) {
-        throw new AccountFundingError(
-          'not-an-account',
-          `The contract is a k1-arm account and the compiled account-k1 build is not on this host, so it cannot be opened. ${k1Unavailable ?? ''}`.trim(),
-        );
-      }
       return {
         module,
-        compiledContract: compiledContractK1,
+        compiledContract: await compiledContractK1Once(),
         zkConfigProvider: k1ZkConfigProvider,
         proofProvider: await k1ProofProviderOnce(),
         deposits,
@@ -1283,9 +1320,14 @@ export async function createAccountFunder(
     const module = accountModuleForState(state);
     const data = (state as { data: unknown }).data;
     if (module === 'account-k1') {
+      /* OUTSIDE the try below, deliberately. That try exists to turn a state
+         that does not decode into `not-an-account`, and a host that cannot load
+         the build at all has said nothing about this account — swallowing its
+         refusal there would tell a caller its Passport is not a Passport. */
+      const k1 = await accountK1Once();
       let decoded: K1AccountLedger | null = null;
       try {
-        const candidate = accountK1.ledger(data);
+        const candidate = k1.ledger(data);
         if (candidate.booted && candidate.device_count >= 1n) decoded = candidate;
       } catch {
         decoded = null;
