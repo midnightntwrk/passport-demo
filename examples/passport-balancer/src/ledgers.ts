@@ -47,8 +47,14 @@ export interface AccountAssetEntry {
   amount: string;
   mintTx: string;
   depositTx: string;
-  /** The account's own `coins[colour].value` once the credit was seen. */
-  balanceAfter: string;
+  /**
+   * The account's own `coins[colour].value` once the credit was seen.
+   *
+   * ABSENT on a custody account, which mirrors no shielded holding at all
+   * (MIP-0012 §6.1). There is no number to record, and an entry that carried
+   * one would be recording arithmetic as though it were a reading.
+   */
+  balanceAfter?: string;
   at: string;
 }
 

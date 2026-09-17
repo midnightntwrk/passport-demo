@@ -128,6 +128,8 @@ export function accountModuleForState(state: unknown): AccountModuleName {
  * checking it is the only thing standing between a malformed deposit and a
  * coin nobody can ever spend.
  */
+import { sealInboxEntry } from './custodyInbox.js';
+
 export const INBOX_ENTRY_BYTES = 192;
 
 /** A shielded coin as a deposit circuit takes it. */
@@ -171,21 +173,25 @@ export interface AccountDeposits {
 }
 
 /**
- * Why a shielded deposit into the account custody contract cannot be made here yet.
+ * The last check before a shielded deposit into the account custody contract is
+ * submitted: there is an entry, and it is the right length.
  *
  * `deposit_shielded(coin, entry)` takes the protocol coin claim AND the
  * 192-byte inbox entry the owner's client will decrypt to learn the coin's
- * description. The entry is encrypted to the account's `enc_key` by a scheme
- * this repository does not yet implement anywhere — not in the sponsor, not in
- * the demo. A deposit made with a placeholder entry would still LAND: the coin
- * would move into the contract's Zswap balance and be gone, because the
- * owner's `held_coin` witness walks the inbox and would never find it. Refusing
- * is the only answer that does not destroy the value it is trying to deliver.
+ * description. `./custodyInbox.ts` builds one now, so this is no longer "nothing
+ * here can do that" — it is the guard on a caller that reached this point
+ * without one, most often because the account's `enc_key` could not be read.
+ *
+ * It is still a THROW rather than a fallback, and for the original reason: a
+ * deposit made with a placeholder entry still LANDS. The coin moves into the
+ * contract's Zswap balance and is gone, because the owner's `held_coin` witness
+ * walks the inbox and would never find it. Refusing is the only answer that
+ * does not destroy the value it is trying to deliver.
  */
 export class InboxEntryRequired extends Error {
   constructor() {
     super(
-      'deposit_shielded on the custody account takes a 192-byte InboxEntry v1 alongside the coin, and this service cannot build one: the entry is encrypted to the account enc_key by client-side cryptography that does not exist in this repository yet. A deposit with a placeholder entry would land and the coin would be unspendable for ever, so nothing is submitted.',
+      'deposit_shielded on the custody account takes a 192-byte InboxEntry v1 alongside the coin, and none was supplied — usually because the account advertised no readable enc_key to seal one to. A deposit with a placeholder entry would land and the coin would be unspendable for ever, so nothing is submitted.',
     );
     this.name = 'InboxEntryRequired';
   }
@@ -277,4 +283,186 @@ export function proverForModule(
     kind: 'refused',
     why: `account-custody is compiled --feature-zkir-v3, and neither BALANCER_PROVER_URL (the 1AM gateway route, ledger9-zkir2-dispatch) nor this process's own prover (@midnight-ntwrk/zkir-v2) can prove those circuits. Set ${V3_PROVER_ENV} to a proof server that can — on the droplet that is ${DROPLET_V3_PROVER_URL}, reached from outside as /prover-v3.`,
   };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Reading the key, and sealing to it                                         */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The account's advertised `enc_key`, read off decoded ledger state, or null.
+ *
+ * NULL IS A REFUSAL AND NOT A DEFAULT. A build with no such cell (the two
+ * prototype accounts), a cell that decoded as something other than 32 bytes, or
+ * state that is not an account at all all arrive here as null, and every caller
+ * treats null as "do not deposit" rather than "seal to zeros". Sealing to a key
+ * that is not the account's produces an entry the owner cannot open and a coin
+ * nobody can ever name.
+ */
+export function accountEncKey(ledgerState: unknown): Uint8Array | null {
+  const key = (ledgerState as { enc_key?: unknown } | null | undefined)?.enc_key;
+  return key instanceof Uint8Array && key.length === 32 ? key : null;
+}
+
+/**
+ * The arguments a shielded deposit takes on this build, with the entry sealed
+ * here rather than passed in.
+ *
+ * ONE PLACE SEALS, and that is the point: the entry has to be built from a key
+ * read in the same breath as the deposit, and a caller holding an entry it
+ * built earlier is a caller that can seal to a key the account has since
+ * rotated away from. The prototype builds ignore `encKey` entirely — they take
+ * the coin alone — so passing one is harmless and omitting one on a custody account
+ * is the refusal {@link InboxEntryRequired} describes.
+ */
+export function sealedShieldedArgs(
+  module: AccountModuleName,
+  coin: ShieldedCoin,
+  encKey: Uint8Array | null,
+): readonly unknown[] {
+  return sealedShieldedDeposit(module, coin, encKey).args;
+}
+
+/**
+ * The same seal, with the ENTRY KEPT — which is what makes the deposit
+ * confirmable afterwards.
+ *
+ * `sealInboxEntry` throws its ephemeral secret away, so this service can never
+ * read back what it deposited. It can still RECOGNISE it: the 192 bytes it
+ * handed the circuit are the 192 bytes `do_append_inbox` writes into
+ * `inbox[inbox_count]`, and that map is public. Holding on to them turns the
+ * only public trace of a custody deposit from "the inbox is one longer than it was",
+ * which any other depositor's entry satisfies, into "OUR entry is in the
+ * inbox", which nothing else does.
+ *
+ * `entry` is `null` on the prototype builds, which take the coin alone.
+ */
+export function sealedShieldedDeposit(
+  module: AccountModuleName,
+  coin: ShieldedCoin,
+  encKey: Uint8Array | null,
+): { readonly args: readonly unknown[]; readonly entry: Uint8Array | null } {
+  const deposits = accountDeposits(module);
+  if (deposits.mirrorsShieldedBalance) return { args: deposits.shieldedArgs(coin), entry: null };
+  if (encKey === null) throw new InboxEntryRequired();
+  const entry = sealInboxEntry(encKey, coin);
+  return { args: deposits.shieldedArgs(coin, entry), entry };
+}
+
+/** How far back through new inbox entries one confirmation will look. */
+export const INBOX_SCAN_MAX = 64n;
+
+/**
+ * What a walk of the new inbox slots found, which is THREE answers and not two.
+ *
+ * `absent` and `unreadable` are both "our entry is not here", and they mean
+ * opposite things about what may be concluded from anything else. `absent` is a
+ * map this service walked and did not find itself in, which is a fact about
+ * this deposit: it has not landed yet. `unreadable` is a map it could not walk
+ * at all, which is a fact about this build's decode and about nothing else —
+ * the only case in which the deposit transaction's own inclusion is allowed to
+ * stand in for the entry.
+ */
+export type InboxScan = 'found' | 'absent' | 'unreadable';
+
+/**
+ * Whether one of the inbox slots that appeared since `before` holds `entry`.
+ *
+ * The indices are SCANNED rather than assumed, because `inbox_count` is not
+ * ours to reserve: another depositor's entry can land in the slot this one was
+ * built for, and our deposit is still perfectly good one index further along.
+ * Bounded by the growth, so a long-lived account is never walked end to end,
+ * and by {@link INBOX_SCAN_MAX}, so a burst of somebody else's traffic cannot
+ * turn one confirmation into thousands of map lookups.
+ *
+ * `read` answers `null` for a slot it cannot read. A walk in which no new slot
+ * could be read is `unreadable` — the map is one this build does not know, and
+ * it has said nothing either way — while a walk that read slots and found none
+ * of them ours is `absent`, which is the map saying our coin is not there yet.
+ * A build that sealed nothing has nothing to look for, and that too is `absent`
+ * rather than an invitation to confirm on weaker evidence.
+ */
+export function scanInboxForEntry(
+  read: (index: bigint) => Uint8Array | null,
+  before: bigint,
+  observed: bigint,
+  entry: Uint8Array | null,
+): InboxScan {
+  if (entry === null || observed <= before) return 'absent';
+  const last = observed - 1n;
+  const first = observed - before > INBOX_SCAN_MAX ? last - (INBOX_SCAN_MAX - 1n) : before;
+  let readAny = false;
+  for (let index = first; index <= last; index += 1n) {
+    const found = read(index);
+    if (found === null) continue;
+    readAny = true;
+    if (sameEntryBytes(found, entry)) return 'found';
+  }
+  return readAny ? 'absent' : 'unreadable';
+}
+
+/** Byte for byte, length first. */
+function sameEntryBytes(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+/**
+ * What the chain says about a custody deposit, as opposed to what it says about the
+ * inbox.
+ *
+ * Every field is about THIS deposit and none is about the account's activity.
+ * `entryFound` is the strong one: the 192 bytes this service sealed, found in
+ * the account's public `inbox` map. `included` is the weaker one, and weaker
+ * than it looks — the indexer maps the deposit's identifier to a block, and a
+ * transaction that reached a block may still have been refused there. Nothing
+ * in that answer says the deposit SUCCEEDED, so paired with an inbox that grew
+ * it would confirm a failed deposit whenever anybody else wrote to the account
+ * in the same minutes. It stands only where `inboxUnreadable` says the entry
+ * could not be looked for at all, which is the fallback it was written to be.
+ */
+export interface OwnDepositEvidence {
+  /** The entry this service sealed is in the account's inbox. */
+  readonly entryFound: boolean;
+  /** The inbox could not be walked, so the entry could not be looked for. */
+  readonly inboxUnreadable: boolean;
+  /** The deposit transaction resolved to a block. */
+  readonly included: boolean;
+}
+
+/**
+ * Whether a shielded deposit has been seen on chain yet.
+ *
+ * TWO BUILDS, TWO DIFFERENT QUESTIONS. A prototype account mirrors what it
+ * holds, so the credit itself is read back and `>=` the target is the answer.
+ *
+ * A custody account mirrors nothing (MIP-0012 §6.1) — the coin's description never
+ * reaches public state — so the confirmation has to be built out of the inbox.
+ * The inbox GROWING is not that confirmation, and this is the correction: the
+ * inbox grows for every deposit any sponsor makes, for the change entry of
+ * every send the owner does, and for every `append_inbox` backfill, so a wait
+ * on `observed > before` is satisfied by somebody else's transaction and would
+ * report a coin delivered that had in fact been refused. It is necessary —
+ * nothing was written if the inbox did not move — and on its own it is nothing.
+ *
+ * What confirms is `evidence`: this service's OWN entry in the map. Only where
+ * the map could not be walked at all does its own transaction reaching a block
+ * stand in for that, because a block is where a transaction was processed and
+ * not proof that it was accepted — on a map this service CAN walk, an entry it
+ * cannot find is an entry that is not there. Called without evidence, a custody
+ * deposit is never confirmed, which is the honest answer when the caller has
+ * not looked.
+ */
+export function shieldedDepositConfirmed(
+  module: AccountModuleName,
+  before: bigint,
+  observed: bigint,
+  amount: bigint,
+  evidence?: OwnDepositEvidence,
+): boolean {
+  if (accountDeposits(module).mirrorsShieldedBalance) return observed >= before + amount;
+  if (observed <= before) return false;
+  if (evidence?.entryFound === true) return true;
+  return evidence?.inboxUnreadable === true && evidence.included === true;
 }

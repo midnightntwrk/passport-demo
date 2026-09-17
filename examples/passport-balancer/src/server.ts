@@ -2138,14 +2138,16 @@ async function main(): Promise<void> {
             amount: grant.amount.toString(),
             mintTx: grant.mintTxHash,
             depositTx: grant.depositTxHash,
-            balanceAfter: grant.balanceAfter.toString(),
+            ...(grant.balanceAfter === undefined
+              ? {}
+              : { balanceAfter: grant.balanceAfter.toString() }),
             at: grant.fundedAt,
           };
           /* Re-read at write time rather than merged from `nightEntry`: the
              NIGHT leg may have confirmed while this one was proving. */
           await recordLeg({ asset: assetEntry });
           console.log(
-            `[asset] ${grant.amount} ${funder.assetSymbol} → ${contractAddress} (mint ${grant.mintTxHash}, deposit ${grant.depositTxHash}${grant.depositBlock ? `, block ${grant.depositBlock}` : ''}, holds ${grant.balanceAfter})`,
+            `[asset] ${grant.amount} ${funder.assetSymbol} → ${contractAddress} (mint ${grant.mintTxHash}, deposit ${grant.depositTxHash}${grant.depositBlock ? `, block ${grant.depositBlock}` : ''}, ${grant.balanceAfter === undefined ? 'its holding is not public on this build' : `holds ${grant.balanceAfter}`})`,
           );
         } catch (cause) {
           const detail =
@@ -2194,7 +2196,11 @@ async function main(): Promise<void> {
           assetBlock,
           assetColourHex: funder.assetColourHex,
           assetAmount: assetEntry?.amount ?? (assetSupported ? funder.assetGrant.toString() : '0'),
-          assetBalanceAfter: assetEntry?.balanceAfter ?? held.asset.toString(),
+          /* NULL rather than the balance read BEFORE the deposit. A custody account
+             publishes no shielded holding, so the honest answer to "what does
+             it hold now" is that nobody can say — and the pre-deposit reading
+             is the one number guaranteed to be wrong. */
+          assetBalanceAfter: assetEntry ? assetEntry.balanceAfter ?? null : held.asset.toString(),
           ...(assetError ? { assetError } : {}),
         },
       };

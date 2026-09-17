@@ -502,21 +502,26 @@ export function createColourPayer(deps: {
     const module = accountModuleForState(
       await built.reader.queryContractState(address).catch(() => null),
     );
-    /* A GIFT INTO A CUSTODY ACCOUNT IS REFUSED, before a coin is minted.
-       Every gift is shielded, and `deposit_shielded` on the account custody contract
-       takes a 192-byte InboxEntry v1 alongside the coin — encrypted to the
-       account's own `enc_key` by client-side cryptography this repository does
-       not implement anywhere yet. A deposit with a placeholder entry would
-       land and the coin would be unspendable for ever: the owner's `held_coin`
-       witness walks the inbox and would never find it. There is nothing to
-       confirm against either, because shielded custody there is stateless by
-       design and the account keeps no readable balance of it. Refusing costs a
-       gift; guessing costs the gift AND the coin. */
+    /* A GIFT INTO A CUSTODY ACCOUNT IS STILL REFUSED, before a coin is minted,
+       and the reason has MOVED. It used to be the inbox entry: every gift is
+       shielded, `deposit_shielded` on the account custody contract pairs the coin
+       with a 192-byte InboxEntry v1 encrypted to the account's `enc_key`, and
+       nothing here could build one. `./custodyInbox.ts` now can, and `./account.ts`
+       uses it for the opening balance.
+
+       What this desk is short of is the BUILD. It prepares three compiled
+       contracts — the faucet and the two prototype account builds — and none of
+       them is `account-custody`, whose thirty circuits, verifier keys, and remote
+       proving are wired in `./account.ts` and nowhere else. Depositing through a
+       module the account does not carry is not a smaller version of this
+       working; it is a transaction the node refuses after the coin has been
+       minted. So the refusal stays, and it names what it is actually waiting
+       for. Refusing costs a gift; guessing costs the gift AND the coin. */
     if (!accountDeposits(module).mirrorsShieldedBalance) {
       throw new ColourPayFailure(
         501,
-        'custody-inbox-entry-required',
-        `${name} cannot be paid into ${address}: it is a custody account, and deposit_shielded there takes a 192-byte InboxEntry v1 alongside the coin that this service cannot build. Nothing was minted and nothing was spent.`,
+        'account-custody-build-required',
+        `${name} cannot be paid into ${address}: it is a custody account, and this desk does not carry that build. The entry it needs can now be sealed, but the deposit cannot be proved from here. Nothing was minted and nothing was spent.`,
       );
     }
     const before = await held();
