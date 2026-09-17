@@ -1,0 +1,85 @@
+/*
+ * The Dynamic-only Passport's own rules.
+ *
+ * It borrows the onboarding sheet (`onboarding.css`) for the shell, the title,
+ * the input, and the two buttons, so this file holds only what that sheet has
+ * no equivalent of: the balance line, the pay-me line, and the two icon
+ * buttons beside them. Reusing the sheet rather than copying it is what keeps
+ * this path looking like the rest of Passport when the tokens move.
+ *
+ * Every colour here is a token from `tokens.css`. Nothing in this file names a
+ * hex value, so the screen follows the theme in both directions.
+ */
+
+.mndyn .mnob-kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.mndyn-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 24px;
+}
+
+.mndyn-balance {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 18px 0 6px;
+}
+
+.mndyn-balance-figure {
+  font-family: var(--mn-font-display, inherit);
+  font-size: 34px;
+  font-weight: 700;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  color: var(--mn-text-strong, inherit);
+}
+
+.mndyn-balance-unit {
+  font-size: 13px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--mn-text-muted, inherit);
+}
+
+.mndyn-receive {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 14px 0 6px;
+}
+
+.mndyn-code {
+  font-family: var(--mn-font-mono, monospace);
+  font-size: 13px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  background: var(--mn-surface-sunken, rgba(127, 127, 127, 0.12));
+  color: var(--mn-text-strong, inherit);
+  /* A 32-byte address is longer than a phone is wide. It wraps rather than
+     pushing the page sideways — the one rule every screen in this app keeps. */
+  overflow-wrap: anywhere;
+}
+
+.mndyn-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--mn-border, rgba(127, 127, 127, 0.3));
+  border-radius: 8px;
+  background: transparent;
+  color: var(--mn-text-muted, inherit);
+  cursor: pointer;
+}
+
+.mndyn-icon:hover {
+  color: var(--mn-text-strong, inherit);
+}

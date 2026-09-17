@@ -65,6 +65,23 @@ if (!import.meta.env.DEV || window.location.origin === requiredDevelopmentOrigin
      rejection is swallowed. The Passport is already on screen before any of
      this is attempted, so a vendor that will not load costs a secondary
      button and never a boot. */
+  /* THE STAND-IN SIGN-IN, for the mocked walk and for nothing else.
+
+     It sits OUTSIDE the environment-id branch below, and deliberately: the
+     whole point of it is to drive the Dynamic-only path in a build that has no
+     Dynamic in it at all, so the SDK's 7 MB stay out and the run depends on no
+     third party. The condition is written out rather than called for the reason
+     the one below is — Vite substitutes the variable with a literal, so a build
+     without it deletes this branch, the `import()`, and the module behind it.
+     `VITE_DYNAMIC_WALK` is set for `playwright.config.ts`'s preview build and
+     for no deployment. Even there nothing happens until a URL carries
+     `?dynamicwalk=…`. See `src/lib/dynamicWalk.ts`. */
+  if (import.meta.env.VITE_DYNAMIC_WALK === '1') {
+    void import('./lib/dynamicWalk.js')
+      .then((module) => module.seedDynamicWalk(window.location.search))
+      .catch(() => {});
+  }
+
   if (import.meta.env.VITE_DYNAMIC_ENVIRONMENT_ID) {
     void import('./lib/dynamic.js').then((module) => module.mountDynamic()).catch(() => {});
 

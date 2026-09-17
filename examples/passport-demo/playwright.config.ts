@@ -106,6 +106,13 @@ const previewEnv = {
   VITE_FUNDER_URL: 'https://67-205-177-162.sslip.io/balancer',
   VITE_MIDNIGHT_PROVING_URL: 'https://67-205-177-162.sslip.io/prover,https://api-stagenet.1am.xyz',
   VITE_INDEXER_URL: 'https://indexer.stagenet.shielded.tools/api/v4/graphql',
+  /* The stand-in sign-in, so `e2e/dynamic-only.spec.ts` can walk the
+     Dynamic-only path. It does NOT set `VITE_DYNAMIC_ENVIRONMENT_ID`, so the
+     SDK is still absent from this build and every other spec sees the seam
+     `disabled`, exactly as it does today; and the stand-in itself does nothing
+     until a URL carries `?dynamicwalk=…`, which no other spec writes. See
+     `src/lib/dynamicWalk.ts`. */
+  VITE_DYNAMIC_WALK: '1',
 };
 
 export default defineConfig({
