@@ -920,7 +920,7 @@ export async function readCustodyAccountView(
        complaint and fails on the first field read — as a `TypeError` about a
        property nobody has heard of, at whichever call site happened to look
        first. Touching one here is what turns that into the sentence below. */
-      void decoded.inbox_count;
+    void decoded.inbox_count;
   } catch (cause) {
     throw new AccountCustodyError(
       'contract-not-found',
