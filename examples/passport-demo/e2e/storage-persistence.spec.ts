@@ -38,7 +38,7 @@ import { expect, test } from '@playwright/test';
 
 import { installNetworkBoundary } from './mocks.js';
 import { installVirtualAuthenticator } from './passkey.js';
-import { walkContextOptions } from './walkContext.js';
+import { SIGN_IN_BUTTON, walkContextOptions } from './walkContext.js';
 
 test('onboarding finishes even when the browser never answers about persistent storage', async ({
   browser,
@@ -62,7 +62,7 @@ test('onboarding finishes even when the browser never answers about persistent s
   });
 
   await page.goto('/');
-  await page.getByRole('button', { name: /Continue with Passport/i }).click();
+  await page.getByRole('button', { name: SIGN_IN_BUTTON }).click();
 
   /* The Passport is made either way. What must not happen is the walk stopping
      on a busy label with a nicety it does not need. */

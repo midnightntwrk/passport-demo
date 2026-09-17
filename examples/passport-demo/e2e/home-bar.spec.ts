@@ -23,7 +23,7 @@
 import { expect, test, type Page } from '@playwright/test';
 
 import { installNetworkBoundary, PASSPORT_ACCOUNT_ADDRESS } from './mocks.js';
-import { walkContextOptions } from './walkContext.js';
+import { SIGN_IN_BUTTON, walkContextOptions } from './walkContext.js';
 import { installVirtualAuthenticator } from './passkey.js';
 
 test.describe.configure({ mode: 'serial' });
@@ -42,7 +42,7 @@ test.beforeAll(async ({ browser }) => {
   /* The returning Passport, seeded exactly as `assets.spec.ts` seeds it: the
      ceremony is drilled elsewhere, and what is read here is the bar. */
   await page.goto('/');
-  await page.getByRole('button', { name: /Continue with Passport/i }).click();
+  await page.getByRole('button', { name: SIGN_IN_BUTTON }).click();
   await expect(page.getByRole('heading', { name: /Welcome to Passport/i })).toBeVisible({
     timeout: 90_000,
   });

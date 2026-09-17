@@ -41,7 +41,7 @@
  * sUSD.
  */
 
-import { accountModuleFor, carriesOneTxTransferIn } from './accountModule.js';
+import { accountDeposits, accountModuleForState } from './accountModule.js';
 import { randomBytes } from 'node:crypto';
 
 import * as ledger from '@midnightntwrk/ledger-v9';
@@ -498,14 +498,30 @@ export function createColourPayer(deps: {
       const decoded = built.account.ledger((state as { data: unknown }).data);
       return decoded.coins.member(colourBytes) ? decoded.coins.lookup(colourBytes).value : 0n;
     };
-    const before = await held();
     /* Which build this account is: read off its own state, not assumed. */
+    const module = accountModuleForState(
+      await built.reader.queryContractState(address).catch(() => null),
+    );
+    /* A GIFT INTO A CUSTODY ACCOUNT IS REFUSED, before a coin is minted.
+       Every gift is shielded, and `deposit_shielded` on the account custody contract
+       takes a 192-byte InboxEntry v1 alongside the coin — encrypted to the
+       account's own `enc_key` by client-side cryptography this repository does
+       not implement anywhere yet. A deposit with a placeholder entry would
+       land and the coin would be unspendable for ever: the owner's `held_coin`
+       witness walks the inbox and would never find it. There is nothing to
+       confirm against either, because shielded custody there is stateless by
+       design and the account keeps no readable balance of it. Refusing costs a
+       gift; guessing costs the gift AND the coin. */
+    if (!accountDeposits(module).mirrorsShieldedBalance) {
+      throw new ColourPayFailure(
+        501,
+        'custody-inbox-entry-required',
+        `${name} cannot be paid into ${address}: it is a custody account, and deposit_shielded there takes a 192-byte InboxEntry v1 alongside the coin that this service cannot build. Nothing was minted and nothing was spent.`,
+      );
+    }
+    const before = await held();
     const compiledForAccount =
-      accountModuleFor(
-        carriesOneTxTransferIn(await built.reader.queryContractState(address).catch(() => null)),
-      ) === 'account-v1'
-        ? built.compiledAccountV1
-        : built.compiledAccount;
+      module === 'account-v1' ? built.compiledAccountV1 : built.compiledAccount;
 
     /* 1 and 2. mint_shielded to this wallet, and the wait for it to be
        spendable here. See {@link mintToSelf}. */

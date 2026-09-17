@@ -201,6 +201,27 @@ export interface LocalWalletNetworkConfig {
    * is consequently no longer given to the facade at all in `http` mode.
    */
   provingServerUrls: string[];
+  /**
+   * Every proof server that can prove ZKIR **v3**, in the operator's order.
+   *
+   * A SECOND LIST RATHER THAN A LONGER ONE, because the two are not
+   * interchangeable in either direction. `VITE_MIDNIGHT_PROVING_URL` is a
+   * failover list whose entries are all assumed able to prove anything asked
+   * of them, and since 2026/09/16 that is no longer true of every circuit this
+   * app may compile: the `account-custody` build is ZKIR v3, the in-tab prover is
+   * `@midnight-ntwrk/zkir-v2`, and the 1AM gateway — the second entry in every
+   * deployed list — is `ledger9-zkir2-dispatch`. Putting a v3 server into the
+   * existing list would not help, because `failoverProvingProvider` tries the
+   * list in order and the v2 entries would be tried first and fail; and it
+   * would make every ordinary circuit's failover depend on an image chosen for
+   * a build nothing asks for yet.
+   *
+   * `VITE_MIDNIGHT_PROVING_URL_V3`, comma-separated and read exactly as the
+   * other list is. Empty by default, on every network. Which list a module
+   * reads is `contractProvingRoute` in `../identity/contractRuntime.ts`, and an
+   * empty list there is a refusal rather than a fallback.
+   */
+  provingServerUrlsV3: string[];
 }
 
 /**
@@ -313,6 +334,10 @@ function warnOnLoopbackEndpoints(config: LocalWalletNetworkConfig): void {
  *                               server. See {@link DEFAULT_PROVING_SERVER_URL}.
  *                               Takes one URL or SEVERAL, comma-separated and
  *                               tried in the order written.
+ *   VITE_MIDNIGHT_PROVING_URL_V3  default NONE. The ZKIR v3 proof servers, on
+ *                               the same comma-separated format. A SEPARATE
+ *                               list, not an extension of the one above — see
+ *                               {@link LocalWalletNetworkConfig.provingServerUrlsV3}.
  */
 export function localWalletNetworkConfig(
   overrides: Partial<LocalWalletNetworkConfig> = {},
@@ -340,6 +365,11 @@ export function localWalletNetworkConfig(
     parseEndpointList(
       overrides.provingServerUrl ?? env.VITE_MIDNIGHT_PROVING_URL ?? DEFAULT_PROVING_SERVER_URL,
     );
+  /* The v3 list, read the same way and defaulting to EMPTY on every network.
+     Nothing falls back to it and it falls back to nothing: see
+     `provingServerUrlsV3`. */
+  const provingServerUrlsV3 =
+    overrides.provingServerUrlsV3 ?? parseEndpointList(env.VITE_MIDNIGHT_PROVING_URL_V3);
   const config: LocalWalletNetworkConfig = {
     networkId: overrides.networkId ?? env.VITE_MIDNIGHT_NETWORK_ID ?? DEFAULT_NETWORK_ID,
     indexers,
@@ -347,6 +377,7 @@ export function localWalletNetworkConfig(
     indexerWsUrl: indexers[0]?.wsUrl ?? indexerWsFrom(indexerHttpUrl),
     relayUrl: overrides.relayUrl ?? env.VITE_MIDNIGHT_RELAY_URL ?? relayFrom(nodeUrl),
     provingServerUrls,
+    provingServerUrlsV3,
     provingServerUrl: provingServerUrls[0] ?? DEFAULT_PROVING_SERVER_URL,
   };
   warnOnLoopbackEndpoints(config);

@@ -135,6 +135,14 @@ env:
   # encodes the address in the name, so there is no record left to go stale.
   VITE_MIDNIGHT_NETWORK_ID: stagenet
   VITE_MIDNIGHT_PROVING_URL: https://67-205-177-162.sslip.io/prover,https://api-stagenet.1am.xyz
+  # The ZKIR v3 proof servers, a SEPARATE list from the one above and not a
+  # failover for it. `/prover` is Caddy to the 1AM gateway first, and the
+  # gateway is ledger9-zkir2-dispatch; `/prover-v3` is the droplet's own
+  # proof server, which is the only thing either environment can prove a v3
+  # circuit on. Staging and production share the droplet, so they share this.
+  # Only the `account-custody` module reads it, and nothing asks for that module
+  # yet. See examples/passport-demo/src/lib/localWallet.ts.
+  VITE_MIDNIGHT_PROVING_URL_V3: https://67-205-177-162.sslip.io/prover-v3
   VITE_SPONSOR_URL: https://67-205-177-162.sslip.io/balancer,https://api-stagenet.1am.xyz
   VITE_FUNDER_URL: https://67-205-177-162.sslip.io/balancer
   VITE_RAFFLE_URL: https://raffle.midnightpassport.com
