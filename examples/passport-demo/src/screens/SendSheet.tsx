@@ -1891,7 +1891,15 @@ export default function SendSheet(props: SendSheetProps) {
                         : nameLegSteps === 1
                           ? 'The amount goes straight from your account into theirs, in one network transaction. Your balance keeps the rest.'
                           : nameLegSteps === 3
-                            ? 'The whole of what your account holds of this comes out, then they are paid. Both are network transactions, so this takes longer than sending to an address. Your change comes back to you on its own afterwards — you do not have to wait for it.'
+                            ? /* NO LONGER "LONGER THAN SENDING TO AN ADDRESS"
+                                 (2026/09/17). That clause was true while a
+                                 shielded send to an address was one
+                                 transaction; it is the same three this is now,
+                                 so the comparison would be with nothing. The
+                                 NIGHT branch below keeps it, where a NIGHT send
+                                 to an address really is the one transaction it
+                                 has always been. */
+                              'The whole of what your account holds of this comes out, then they are paid. Both are network transactions. Your change comes back to you on its own afterwards — you do not have to wait for it.'
                             : 'The amount leaves your account, then it is paid into theirs. Both are network transactions, so this takes longer than sending to an address.'}
                     </small>
                   </dd>
