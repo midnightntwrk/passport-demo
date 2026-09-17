@@ -22,6 +22,16 @@ import {
   type CustodyStorage,
 } from './custodyContractPlan.js';
 import {
+  awaitingK1Coins,
+  dropK1Coin,
+  enqueueK1Coin,
+  heldK1Coin,
+  isK1NonceSpent,
+  k1CoinCandidates,
+  putK1Coin,
+  putK1CoinCandidates,
+} from './k1CoinStore.js';
+import {
   activateK1Device,
   appendInboxK1,
   deployCustodyAccount,
@@ -35,6 +45,7 @@ import {
   recoverK1DevicePoint,
   resetCustodySessionState,
   startCustodyAccountAgain,
+  withdrawShieldedK1,
   type CustodyContractModule,
   type CustodyDeps,
   type CustodyDynamicSession,
@@ -150,6 +161,10 @@ interface FakeChain {
   operations: Set<string>;
   /** What the circuit returns — the change coin, for the shielded withdrawal. */
   circuitResult?: unknown;
+  /** Where the indexer says a transaction's shielded outputs landed. */
+  window?: { startIndex: number; endIndex: number } | null;
+  /** How many more spends fail the way a wrong coin POSITION fails. */
+  spendFailures?: number;
 }
 
 function moduleFake(chain: FakeChain): CustodyContractModule {
@@ -364,6 +379,13 @@ function harness(
               0n,
             )));
           } else {
+            if (circuit.startsWith('withdraw_shielded') && (chain.spendFailures ?? 0) > 0) {
+              /* The failure a wrong position gives: no transaction is
+                 submitted, nothing is spent, and the words name the merkle
+                 path the runtime could not build. */
+              chain.spendFailures = (chain.spendFailures ?? 0) - 1;
+              return Promise.reject(new Error('could not build the merkle path for this coin'));
+            }
             chain.authNonce += 1n;
           }
           /* The shape midnight-js hands back: a `public` half and a `private`
@@ -436,6 +458,7 @@ function harness(
       return state.clock;
     },
     sleep: () => Promise.resolve(undefined),
+    commitmentWindow: () => Promise.resolve(chain.window ?? null),
   };
 
   return {
@@ -521,6 +544,20 @@ function uncompressed(point: CurvePoint): Uint8Array {
 
 beforeEach(() => {
   resetCustodySessionState();
+  /* The coin store reads `window.localStorage` directly — it is the private
+     state, and a private state that did not survive a reload would not be one.
+     A fresh map per test is a fresh browser. */
+  const coins = new Map<string, string>();
+  Object.defineProperty(globalThis, 'window', {
+    configurable: true,
+    value: {
+      localStorage: {
+        getItem: (key: string) => coins.get(key) ?? null,
+        setItem: (key: string, value: string) => void coins.set(key, value),
+        removeItem: (key: string) => void coins.delete(key),
+      },
+    },
+  });
 });
 
 /* -------------------------------------------------------------------------- */
@@ -1358,5 +1395,234 @@ describe('the proving deadline', () => {
     );
     expect(warn.mock.calls[0]?.[0]).toContain('/prove-account-custody');
     warn.mockRestore();
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Leg one of a shielded payment, and what it leaves behind.
+ *
+ * THE COIN IS READ ONCE AND USED TWICE — the challenge the device signs binds
+ * it, and the witness hands the same one to the proof. The drills below hold
+ * that, and hold the more expensive rule: the change coin's description exists
+ * nowhere but in the value the call returned, so it is written down before
+ * anything else happens and it is never written with a position nobody has
+ * asked about.
+ */
+describe('the shielded withdrawal', () => {
+  const COLOUR = '1a'.repeat(32);
+  const NONCE = '7f'.repeat(32);
+  const CHANGE_NONCE = 'a1'.repeat(32);
+
+  function changeResult(value: bigint) {
+    return {
+      is_some: true,
+      value: {
+        nonce: hexToBytes(CHANGE_NONCE),
+        color: hexToBytes(COLOUR),
+        value,
+      },
+    };
+  }
+
+  async function readyPassport(chain: Partial<FakeChain> = {}) {
+    const test = harness({ chain });
+    const fake = deviceFake();
+    await deployCustodyAccount(fake.session, fake.device, undefined, test.deps);
+    await activateK1Device(fake.session, fake.device, undefined, test.deps);
+    const account = { network: 'stagenet', address: ADDRESS };
+    putK1Coin(account, { colour: COLOUR, nonce: NONCE, value: 100n, mtIndex: 5n });
+    return { test, account, ...fake };
+  }
+
+  it('signs over the coin the store holds, and pays the key it was given', async () => {
+    const { test, session, device } = await readyPassport({
+      circuitResult: changeResult(60n),
+      window: { startIndex: 8, endIndex: 9 },
+    });
+    const ownKey = new Uint8Array(32).fill(0x11);
+
+    await withdrawShieldedK1(
+      session,
+      device,
+      { recipientCoinPublicKey: ownKey, colourHex: COLOUR, amount: 40n },
+      undefined,
+      test.deps,
+    );
+
+    const call = test.calls.find((c) => c.circuit === 'withdraw_shielded_with_k256');
+    /* (recipient, colour, amount) then the four authorisation arguments. */
+    expect(call?.args).toHaveLength(7);
+    expect(call?.args[0]).toEqual({ bytes: ownKey });
+    expect(call?.args[1]).toEqual(hexToBytes(COLOUR));
+    expect(call?.args[2]).toBe(40n);
+  });
+
+  it('records the change coin and its position when the chain gives one answer', async () => {
+    const { test, account, session, device } = await readyPassport({
+      circuitResult: changeResult(60n),
+      window: { startIndex: 8, endIndex: 9 },
+    });
+
+    const result = await withdrawShieldedK1(
+      session,
+      device,
+      { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 40n },
+      undefined,
+      test.deps,
+    );
+
+    expect(result.change).toEqual({
+      outcome: 'change',
+      nonce: CHANGE_NONCE,
+      colour: COLOUR,
+      value: 60n,
+    });
+    expect(result.changePosition).toBe('settled');
+    expect(heldK1Coin(account, COLOUR)).toEqual({
+      colour: COLOUR,
+      nonce: CHANGE_NONCE,
+      value: 60n,
+      mtIndex: 8n,
+    });
+    /* The coin that was spent cannot come back, by any route. */
+    expect(isK1NonceSpent(account, NONCE)).toBe(true);
+  });
+
+  it('keeps both candidates when the withdrawal had two outputs', async () => {
+    const { test, account, session, device } = await readyPassport({
+      circuitResult: changeResult(60n),
+      window: { startIndex: 8, endIndex: 10 },
+    });
+
+    const result = await withdrawShieldedK1(
+      session,
+      device,
+      { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 40n },
+      undefined,
+      test.deps,
+    );
+
+    expect(result.changePosition).toBe('candidates');
+    expect(k1CoinCandidates(account, COLOUR)).toEqual([8n, 9n]);
+    expect(heldK1Coin(account, COLOUR)?.mtIndex).toBe(8n);
+  });
+
+  it('holds the change as arriving when the chain has not answered yet', async () => {
+    const { test, account, session, device } = await readyPassport({
+      circuitResult: changeResult(60n),
+      window: null,
+    });
+
+    const result = await withdrawShieldedK1(
+      session,
+      device,
+      { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 40n },
+      undefined,
+      test.deps,
+    );
+
+    expect(result.changePosition).toBe('awaiting');
+    expect(heldK1Coin(account, COLOUR)).toBeNull();
+    expect(awaitingK1Coins(account)).toEqual([
+      { colour: COLOUR, nonce: CHANGE_NONCE, value: 60n, txId: 'id-2' },
+    ]);
+  });
+
+  it('promotes the next payment when the spend consumed the coin exactly', async () => {
+    const { test, account, session, device } = await readyPassport({
+      circuitResult: { is_some: false, value: { nonce: hexToBytes(NONCE), color: hexToBytes(COLOUR), value: 0n } },
+    });
+    enqueueK1Coin(account, { colour: COLOUR, nonce: CHANGE_NONCE, value: 250n, mtIndex: 9n });
+
+    const result = await withdrawShieldedK1(
+      session,
+      device,
+      { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 100n },
+      undefined,
+      test.deps,
+    );
+
+    expect(result.change).toEqual({ outcome: 'none' });
+    expect(result.changePosition).toBe('none');
+    expect(heldK1Coin(account, COLOUR)?.value).toBe(250n);
+  });
+
+  it('retries the next candidate position, and settles the one that proves', async () => {
+    const { test, account, session, device } = await readyPassport({
+      circuitResult: changeResult(60n),
+      window: { startIndex: 20, endIndex: 21 },
+      /* The first attempt fails the way a wrong position fails. */
+      spendFailures: 1,
+    });
+    putK1CoinCandidates(account, { colour: COLOUR, nonce: NONCE, value: 100n }, [5n, 6n]);
+
+    const result = await withdrawShieldedK1(
+      session,
+      device,
+      { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 40n },
+      undefined,
+      test.deps,
+    );
+
+    /* Two attempts, the second against the second candidate, and the position
+       that proved is a fact from then on. */
+    expect(test.calls.filter((c) => c.circuit === 'withdraw_shielded_with_k256')).toHaveLength(2);
+    expect(result.changePosition).toBe('settled');
+    expect(k1CoinCandidates(account, COLOUR)).toEqual([]);
+  });
+
+  it('gives up rather than looping when the candidates run out', async () => {
+    const { test, account, session, device } = await readyPassport({ spendFailures: 5 });
+    putK1CoinCandidates(account, { colour: COLOUR, nonce: NONCE, value: 100n }, [5n, 6n]);
+
+    await expect(
+      withdrawShieldedK1(
+        session,
+        device,
+        { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 40n },
+        undefined,
+        test.deps,
+      ),
+    ).rejects.toThrow(/merkle/);
+    expect(test.calls.filter((c) => c.circuit === 'withdraw_shielded_with_k256')).toHaveLength(2);
+  });
+
+  it('refuses before anything is signed when there is nothing to send', async () => {
+    const { test, account, session, device } = await readyPassport();
+    dropK1Coin(account, COLOUR);
+    await expect(
+      withdrawShieldedK1(
+        session,
+        device,
+        { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 40n },
+        undefined,
+        test.deps,
+      ),
+    ).rejects.toThrow(/nothing of that kind/);
+    await expect(
+      withdrawShieldedK1(
+        session,
+        device,
+        { recipientCoinPublicKey: new Uint8Array(32), colourHex: 'not-a-colour', amount: 40n },
+        undefined,
+        test.deps,
+      ),
+    ).rejects.toThrow(/not something this Passport can send/);
+  });
+
+  it('refuses before the Passport is finished being set up', async () => {
+    const test = harness();
+    const { session, device } = deviceFake();
+    await expect(
+      withdrawShieldedK1(
+        session,
+        device,
+        { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 40n },
+        undefined,
+        test.deps,
+      ),
+    ).rejects.toThrow(/not finished being set up/);
   });
 });

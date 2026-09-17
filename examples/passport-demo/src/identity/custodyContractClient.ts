@@ -124,18 +124,30 @@ import {
   loadContractModule,
   messageOf,
   resolveTransactionHash,
+  resolveTxCommitmentWindowOnce,
   transactionId,
 } from './contractRuntime.js';
 import {
+  advanceK1CoinCandidate,
+  dropK1Coin,
   emptyK1CoinStoreState,
+  heldK1Coin,
   k1PrivateStateId,
   k1PrivateStateProvider,
   loadK1CoinStore,
+  rememberK1ChangeCoin,
   rememberK1EncSecretKey,
+  settleK1AwaitingCoin,
+  settleK1Coin,
   type K1Account,
   type K1CoinStoreState,
 } from './k1CoinStore.js';
 import { normalisedColourHex } from '../lib/colour.js';
+import {
+  changeCoinFromResult,
+  spendPositionMayBeWrong,
+  type CustodyChangeCoin,
+} from './custodyContractSend.js';
 import { custodyEncKeyPair } from './custodyInbox.js';
 import { createLocalMidnightWallet, type LocalMidnightWallet } from '../lib/localWallet.js';
 import { sponsorConfig } from '../lib/sponsor.js';
@@ -201,6 +213,18 @@ export interface CustodyDeps {
   contracts(): Promise<CustodyContractsApi>;
   now(): number;
   sleep(milliseconds: number): Promise<void>;
+  /**
+   * Where a transaction's shielded outputs landed in the commitment tree.
+   *
+   * The only thing the chain will ever say about a held coin's position, and
+   * therefore the only way a change coin becomes spendable. Injected so a
+   * drill needs no indexer — `./contractRuntime.ts` holds the query and its
+   * ten-second ceiling.
+   */
+  commitmentWindow(
+    indexerHttpUrl: string,
+    txId: string,
+  ): Promise<{ startIndex: number; endIndex: number } | null>;
 }
 
 /** The parts of the compiled build this module uses. */
@@ -1219,6 +1243,172 @@ export async function custodyPermissionlessCall(
   return { record: next, txHash, explorerUrl: txHash ? custodyExplorerLink(txHash, network) : null };
 }
 
+/* -------------------------------------------------------------------------- */
+/* Leg one of a shielded payment                                              */
+/* -------------------------------------------------------------------------- */
+
+/** What the gated shielded withdrawal needs beyond the session. */
+export interface CustodyShieldedWithdrawRequest {
+  /**
+   * Where the note is paid: 32 bytes of coin public key.
+   *
+   * THIS WALLET'S OWN, on the send path. The circuit pays a user key by type
+   * and the person being paid holds an account, so the only key this leg can
+   * name that leads anywhere is the sender's, and leg three carries it the
+   * rest of the way — the same shape, and the same reason, as the NIGHT
+   * withdrawal in `./custodyContractSend.ts`.
+   */
+  readonly recipientCoinPublicKey: Uint8Array;
+  readonly colourHex: string;
+  readonly amount: bigint;
+}
+
+/** What a shielded withdrawal did, including what it left behind. */
+export interface CustodyShieldedWithdrawResult extends CustodyStepResult {
+  /** The change coin, read out of the circuit's own result. */
+  readonly change: CustodyChangeCoin;
+  /** Whether the change's position is settled, still being asked about, or absent. */
+  readonly changePosition: 'settled' | 'candidates' | 'awaiting' | 'none';
+}
+
+/**
+ * Leg one: move a shielded amount out of this Passport to a coin public key.
+ *
+ * THE COIN IS READ ONCE AND USED TWICE, which is the thing this function
+ * exists to guarantee. The challenge the device signs BINDS the qualified coin
+ * (AUTH-10), and the proof is built from whatever the `held_coin` witness
+ * returns; if those two were read at different moments from different places
+ * the signature would be over a coin the proof does not spend, and the call
+ * would fail in a way that names none of that. Both come from the store, and
+ * the witness reads the same store this reads.
+ *
+ * THE POSITION MAY BE A GUESS, AND A WRONG GUESS IS CHEAP. A change coin from
+ * an earlier spend is stored with the candidate positions the chain's
+ * two-output window allowed. An incorrect one cannot be proved, so nothing is
+ * submitted and nothing is spent (MIP-0012 INV-5) — so this retries with the
+ * next candidate rather than refusing, and the candidate that proves is
+ * settled as the coin's position from then on. Only the failures a different
+ * position could fix are retried ({@link spendPositionMayBeWrong}); everything
+ * else is somebody's proving service or somebody's node, and a retry would ask
+ * the person to approve again for nothing.
+ *
+ * THE CHANGE IS RECORDED BEFORE ANYTHING ELSE HAPPENS. See
+ * {@link rememberK1ChangeCoin}: its description exists nowhere but in the
+ * value this call returned.
+ */
+export async function withdrawShieldedK1(
+  session: CustodyDynamicSession,
+  device: K256DeviceIdentity,
+  request: CustodyShieldedWithdrawRequest,
+  onPhase?: (phase: CustodyPhase) => void,
+  overrides: Partial<CustodyDeps> = {},
+): Promise<CustodyShieldedWithdrawResult> {
+  const deps = withDefaults(overrides);
+  const wallet = await deps.wallet(k1UserKey(session));
+  const record = loadCustodyRecord(deps.storage(), k1UserKey(session), wallet.network.networkId);
+  if (!record || record.address === null) {
+    throw new Error('This Passport is not finished being set up yet.');
+  }
+  const account: K1Account = { network: record.network, address: record.address };
+  const colour = normalisedColourHex(request.colourHex);
+  if (colour === null) throw new Error('That is not something this Passport can send.');
+  const colourBytes = hexToBytes(colour);
+
+  let attempt = 0;
+  for (;;) {
+    const held = heldK1Coin(account, colour);
+    if (held === null) {
+      throw new Error('There is nothing of that kind in this Passport to send.');
+    }
+    const coin = {
+      nonce: hexToBytes(held.nonce),
+      color: hexToBytes(held.colour),
+      value: held.value,
+      mt_index: held.mtIndex,
+    };
+    try {
+      const step = await k1Call(
+        session,
+        device,
+        {
+          operation: 'withdraw_shielded',
+          args: [{ bytes: request.recipientCoinPublicKey }, colourBytes, request.amount],
+          challenge: (pure, context, pk) =>
+            k256Challenges.withdrawShielded(
+              pure,
+              context,
+              pk,
+              request.recipientCoinPublicKey,
+              colourBytes,
+              request.amount,
+              coin,
+            ),
+        },
+        onPhase,
+        overrides,
+      );
+      /* It proved against this position, which is the only evidence there is
+         that the position is the right one. */
+      settleK1Coin(account, colour);
+      return await recordShieldedChange(deps, wallet, account, colour, step);
+    } catch (cause) {
+      const message = messageOf(cause);
+      if (!spendPositionMayBeWrong(message)) throw cause;
+      const next = advanceK1CoinCandidate(account, colour);
+      if (next === null) throw cause;
+      attempt += 1;
+      console.info(
+        `[account-custody] retrying the spend against candidate position ${attempt} of this coin`,
+      );
+    }
+  }
+}
+
+/**
+ * File the change coin the withdrawal returned, and learn where it landed.
+ *
+ * The write comes FIRST and the question second. A description that is not
+ * written down is lost by a closed tab; a position that is not learned yet is
+ * learned on the next attempt, which is the whole reason the store has a place
+ * for a coin that has one and not the other.
+ */
+async function recordShieldedChange(
+  deps: CustodyDeps,
+  wallet: LocalMidnightWallet,
+  account: K1Account,
+  colour: string,
+  step: CustodyStepResult,
+): Promise<CustodyShieldedWithdrawResult> {
+  const change = changeCoinFromResult(step.result);
+  if (change.outcome === 'unreadable') {
+    /* The value has MOVED — this is a successful call whose return value this
+       build could not read. Dropping the coin says so honestly: the account no
+       longer holds it, and nothing here can pretend to describe what is left. */
+    console.warn('[account-custody] the withdrawal succeeded and its change could not be read');
+    dropK1Coin(account, colour);
+    return { ...step, change, changePosition: 'none' };
+  }
+  if (change.outcome === 'none') {
+    rememberK1ChangeCoin(account, colour, null, step.txHash ?? '');
+    return { ...step, change, changePosition: 'none' };
+  }
+  if (step.txHash === null) {
+    /* No transaction to ask about. The description is still written down — as
+       a held coin would be — but nothing can settle its position until a later
+       run re-reads the account's own history. */
+    console.warn('[account-custody] the change coin has no transaction to look its position up by');
+    rememberK1ChangeCoin(account, colour, change, 'unknown');
+    return { ...step, change, changePosition: 'awaiting' };
+  }
+  rememberK1ChangeCoin(account, colour, change, step.txHash);
+  const settled = await settleK1AwaitingCoin(account, change.colour, (txId) =>
+    deps.commitmentWindow(wallet.network.indexerHttpUrl, txId),
+  );
+  if (settled.outcome === 'learned') return { ...step, change, changePosition: 'settled' };
+  if (settled.outcome === 'ambiguous') return { ...step, change, changePosition: 'candidates' };
+  return { ...step, change, changePosition: 'awaiting' };
+}
+
 /**
  * A permissionless call on SOMEBODY ELSE's custody account — paying one.
  *
@@ -1693,6 +1883,8 @@ export function defaultCustodyDeps(): CustodyDeps {
     },
     contracts: async () =>
       (await import('@midnight-ntwrk/midnight-js-contracts')) as unknown as CustodyContractsApi,
+    commitmentWindow: (indexerHttpUrl, txId) =>
+      resolveTxCommitmentWindowOnce(indexerHttpUrl, txId),
     now: () => Date.now(),
     sleep: (milliseconds) =>
       new Promise((resolve) => {
