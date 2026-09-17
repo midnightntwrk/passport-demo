@@ -76,6 +76,29 @@ It is the quickest way to tell which of the two answered a request: the gateway
 returns `500` with a JSON body and Cloudflare headers, ours returns `400` with
 `text/plain`.
 
+### The account custody build on the droplet (2026/09/16)
+
+The sponsor can now pay an opening balance into a third build, `account-custody`
+— the compiler output of the account custody contract, which is not ours and is
+consumed unchanged at the revision `scripts/account-custody-contract.lock.json`
+pins — and two things have to be on the droplet before it can. **The artefacts**: only the module
+(`contract/`, `compiler/`) travels in git, exactly as for `account` and
+`account-v1`; `contracts-stagenet/managed/account-custody/{keys,zkir}` is in no
+release bundle and has to be rsynced onto the host beside the other builds, or
+put somewhere else and named with `BALANCER_ACCOUNT_CUSTODY_ASSETS`. Measure
+before you rsync: that `keys/` is **3.2 GB** against the 110 MB of the whole bundle.
+**The prover**: those circuits are ZKIR v3, and neither route the sponsor
+already has can prove them — `BALANCER_PROVER_URL` puts the 1AM gateway first
+and the gateway is `ledger9-zkir2-dispatch`, and the in-process fallback is
+`@midnight-ntwrk/zkir-v2`. Set `BALANCER_PROVER_URL_V3=http://127.0.0.1:6300`
+in the service's env file, which is the droplet's own proof server
+(`proof-server:9.0.0-rc.6`, the process behind `/prover-v3`). There is no
+default and nothing is guessed: with the variable unset the sponsor starts
+normally, logs `[account] account-custody artefacts …, but NO PROVER: …` once,
+and refuses a custody grant with `503 prover-unavailable` without building or
+spending anything. Neither variable changes anything for `account` or `account-v1`,
+whose proof route is untouched.
+
 ---
 
 ## The supervisor
