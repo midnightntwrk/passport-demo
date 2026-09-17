@@ -105,6 +105,15 @@ const previewEnv = {
   VITE_SPONSOR_URL: 'https://67-205-177-162.sslip.io/balancer,https://api-stagenet.1am.xyz',
   VITE_FUNDER_URL: 'https://67-205-177-162.sslip.io/balancer',
   VITE_MIDNIGHT_PROVING_URL: 'https://67-205-177-162.sslip.io/prover,https://api-stagenet.1am.xyz',
+  /* The ZKIR v3 proof server, set here because the DEPLOYED build sets it
+     (`.github/workflows/deploy-demo.yml`, and the env block every hand build
+     carries). Without it `contractProvingRoute` refuses every account custody
+     circuit by name before anything is proved — so a preview build that left it
+     unset would walk a configuration this project does not ship, and would
+     report that refusal in place of whatever the path really does. The host is
+     the balancer's, which `mocks.ts` already intercepts in full, so nothing
+     leaves the box. */
+  VITE_MIDNIGHT_PROVING_URL_V3: 'https://67-205-177-162.sslip.io/prover-v3',
   VITE_INDEXER_URL: 'https://indexer.stagenet.shielded.tools/api/v4/graphql',
   /* The stand-in sign-in, so `e2e/dynamic-only.spec.ts` can walk the
      Dynamic-only path. It does NOT set `VITE_DYNAMIC_ENVIRONMENT_ID`, so the

@@ -32,6 +32,28 @@
  * until a ten-minute proof timeout. That is the defect this assertion exists to
  * catch, and it is a defect a live run would meet today.
  *
+ * WHAT A SEEDED PASSPORT ADDS, AND WHERE ITS WALKS STOP
+ * -----------------------------------------------------
+ * The three walks at the foot of this file drive a Passport that already
+ * exists: a finished setup, a name, and a coin store, written into
+ * `localStorage` in exactly the shape the app's own modules persist them, and a
+ * REAL account read back through recordings of the stagenet account deployed on
+ * 2026/09/16. They cover the mUSD row, a mUSD payment, and a NIGHT payment to a
+ * Passport of the same kind — the one that was refused as "not built yet" until
+ * 2026/09/17.
+ *
+ * Neither payment can complete in a box, and the honest statement of why is
+ * worth making: the account being driven is somebody else's, so its device set
+ * holds the key the gate run enrolled rather than this walk's stand-in signer,
+ * and the call is refused before it is proved. Two other walls stand behind
+ * that one — `POST /prove-account-custody` is not deployed, and no release
+ * bundle carries this build's ZK artefacts yet. So what these walks assert is
+ * the property that holds whichever wall is met first: the payment is planned
+ * in full, the refusal is ONE plain sentence, the control comes back, and the
+ * Passport says where the money is. A completed payment is a live run's to
+ * prove, and the live sequence is written down in
+ * `docs/demo/account-custody-layer-design.md`.
+ *
  * WHAT IT DOES NOT TOUCH
  * ----------------------
  * No other spec passes `?dynamicwalk=`, so every other spec in this suite runs
@@ -39,10 +61,16 @@
  * reported before this file existed, and what every deployed build reports.
  */
 
-import { expect, test } from '@playwright/test';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-import { installNetworkBoundary } from './mocks.js';
+import { expect, test, type Page } from '@playwright/test';
+
+import { PASSPORT_ACCOUNT_ADDRESS, RESOLVABLE_NAME, installNetworkBoundary } from './mocks.js';
 import { walkContextOptions } from './walkContext.js';
+
+const here = path.dirname(fileURLToPath(import.meta.url));
 
 /** The URL that hands the app a stand-in sign-in. See `src/lib/dynamicWalk.ts`. */
 const WALK = '/?dynamicwalk=1';
@@ -156,6 +184,289 @@ test.describe('a Passport held by a social sign-in', () => {
     const sentence = (await alert.innerText()).trim();
     expect(sentence.split('\n').filter((line) => line.trim().length > 0)).toHaveLength(1);
     await expect(page.getByRole('button', { name: /my Passport/ })).toBeEnabled();
+
+    await context.close();
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* A Passport that already exists, and already holds something                */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The stand-in sign-in's own address, and the Passport seeded under it.
+ *
+ * Both halves are written EXACTLY as the app's own modules persist them —
+ * `custodyRecordKey` and `custodyNameKey` in `src/identity/`, and
+ * `k1AccountKey` in `src/identity/k1CoinStore.ts` — because that is the point
+ * of seeding here rather than adding a back door to the build: what the walk
+ * puts in storage is what a real run would have put there, and a change to
+ * either format fails this spec rather than quietly rendering an empty
+ * Passport.
+ */
+const WALK_USER = '0x00a329c0648769a73afac7f9381e08fb43dbea72';
+const WALK_NETWORK = 'stagenet';
+
+/** The demo stablecoin's colour, as `src/lib/colour.ts` knows it. */
+const MUSD_COLOUR = '1a2917fbed8b5ce44d12ebc7d337689045f6c96a6bbd39cf3d8691ab310ef6a6';
+
+/**
+ * A recording of a REAL account on the account custody build — the one deployed
+ * to stagenet on 2026/09/16 (`cbd6b1c1…`), read back through the indexer.
+ *
+ * It is served for the seeded Passport's own account AND for the account the
+ * `.night` name resolves to, which makes both halves of these walks honest: the
+ * screen decodes a genuine `enc_key` and a genuine list of deliveries with the
+ * shipped module, and the recipient is genuinely a Passport of the same kind —
+ * the case that used to be refused as "not built yet".
+ */
+const ACCOUNT_CUSTODY_STATE = fs.readFileSync(
+  path.join(here, 'fixtures', 'stagenet-account-custody.json'),
+  'utf8',
+);
+
+/**
+ * The same account's deploy transaction and the state that deploy left.
+ *
+ * midnight-js asks for both before it will open a connection to a deployed
+ * contract — it checks the verifier keys the chain holds against the ones this
+ * build carries — so a walk that stops at "the service is not deployed" has to
+ * get past them first. Recorded, like everything else here.
+ */
+const ACCOUNT_CUSTODY_DEPLOY_TX = fs.readFileSync(
+  path.join(here, 'fixtures', 'stagenet-account-custody-deploy-tx.json'),
+  'utf8',
+);
+const ACCOUNT_CUSTODY_DEPLOY_STATE = fs.readFileSync(
+  path.join(here, 'fixtures', 'stagenet-account-custody-deploy-state.json'),
+  'utf8',
+);
+
+/**
+ * The account those three recordings are OF — a real one, deployed to stagenet
+ * on 2026/09/16 with the account custody contract.
+ *
+ * The seeded Passport is that account, rather than a hand-made address, because
+ * the deploy recording names it: midnight-js correlates the address it was
+ * asked about against the addresses inside the transaction, and an invented
+ * address would mean forging a recording to match. This way every byte the walk
+ * feeds the client is a byte the chain produced.
+ */
+const ACCOUNT_CUSTODY_ADDRESS =
+  'cbd6b1c14a99c1751caa80a5665f01cb8067a9758183bda5da581e4ef745d215';
+
+/** Answers the account custody recordings for one address, ahead of the boundary. */
+async function serveAccountCustodyState(page: Page, addresses: readonly string[]): Promise<void> {
+  const wanted = new Set(addresses.map((address) => address.toLowerCase()));
+  await page.route('**/indexer.stagenet.shielded.tools/**', async (route) => {
+    const body = route.request().postData() ?? '';
+    const asked = (/"address":"([0-9a-fA-F]+)"/.exec(body)?.[1] ?? '').toLowerCase();
+    if (!wanted.has(asked)) return route.fallback();
+    if (body.includes('DEPLOY_CONTRACT_STATE_TX_QUERY')) {
+      return route.fulfill({ contentType: 'application/json', body: ACCOUNT_CUSTODY_DEPLOY_STATE });
+    }
+    if (body.includes('DEPLOY_TX_QUERY')) {
+      return route.fulfill({ contentType: 'application/json', body: ACCOUNT_CUSTODY_DEPLOY_TX });
+    }
+    if (body.includes('CONTRACT_STATE_QUERY')) {
+      return route.fulfill({ contentType: 'application/json', body: ACCOUNT_CUSTODY_STATE });
+    }
+    /* Everything else is the boundary's, unchanged. */
+    return route.fallback();
+  });
+}
+
+/**
+ * Seeds a finished Passport, its name, and its coin store, before the app runs.
+ *
+ * `addInitScript` rather than an `evaluate` after `goto`: the screen reads all
+ * three on its first render, and a Passport seeded afterwards would be a
+ * Passport the walk had to reload to see.
+ */
+async function seedDynamicPassport(
+  page: Page,
+  options: { name: string; accountAddress: string; musd: string },
+): Promise<void> {
+  const key = `${WALK_USER}|${WALK_NETWORK}`;
+  const record = {
+    user: WALK_USER,
+    network: WALK_NETWORK,
+    address: options.accountAddress,
+    privateStateId: `passport-account-custody-${WALK_USER.slice(2, 10)}`,
+    saltHex: '',
+    pkXHex: null,
+    pkYHex: null,
+    wavesDone: 3,
+    totalWaves: 3,
+    activated: true,
+    txHashes: [],
+  };
+  const store = {
+    [`${WALK_NETWORK}::${options.accountAddress}`]: {
+      /* A viewing secret this Passport holds and the recorded account's own
+         deliveries were NOT sealed to, which is the honest state of a seeded
+         walk: the list is walked, nothing in it opens, and the store's own coin
+         is what the row is drawn from. */
+      encSecretKeyHex: 'ab'.repeat(32),
+      coins: {
+        [MUSD_COLOUR]: {
+          nonceHex: 'cd'.repeat(32),
+          colorHex: MUSD_COLOUR,
+          value: options.musd,
+          mtIndex: '12',
+        },
+      },
+      queued: {},
+      spentNonces: [],
+      mtIndexCandidates: {},
+      awaiting: {},
+    },
+  };
+  await page.addInitScript(
+    ([recordKey, seededRecord, seededName, seededStore]) => {
+      window.localStorage.setItem(
+        'passport-account-custody:v1',
+        JSON.stringify({ [recordKey as string]: seededRecord }),
+      );
+      window.localStorage.setItem(
+        'passport-account-custody-name:v1',
+        JSON.stringify({ [recordKey as string]: seededName }),
+      );
+      window.localStorage.setItem('passport-k1-coins:v1', JSON.stringify(seededStore));
+    },
+    [key, record, options.name, store] as const,
+  );
+}
+
+test.describe('a Passport that has been paid', () => {
+  test('shows what it holds in mUSD as well as in NIGHT', async ({ browser }) => {
+    const context = await browser.newContext(
+      walkContextOptions({ viewport: { width: 420, height: 900 } }),
+    );
+    const page = await context.newPage();
+    await installNetworkBoundary(page);
+    await serveAccountCustodyState(page, [ACCOUNT_CUSTODY_ADDRESS, PASSPORT_ACCOUNT_ADDRESS]);
+    await seedDynamicPassport(page, {
+      name: 'walker',
+      accountAddress: ACCOUNT_CUSTODY_ADDRESS,
+      musd: '40',
+    });
+    await page.goto(WALK);
+
+    await expect(page.getByRole('heading', { name: 'walker.night' })).toBeVisible();
+
+    /* THE ROW THIS WHOLE PR IS ABOUT. Forty of them, named, beside the NIGHT
+       figure — and read out of the store, which is where a delivery's
+       description lands. */
+    const holding = page.locator('.mndyn-holding');
+    await expect(holding).toHaveCount(1);
+    await expect(holding.locator('.mndyn-holding-figure')).toHaveText('40');
+    await expect(holding.locator('.mndyn-holding-unit')).toHaveText('mUSD');
+
+    /* And the sentence that stood where the row is now. */
+    const body = (await page.locator('body').innerText()).toLowerCase();
+    expect(body).not.toContain('not built yet');
+
+    /* The copy rule, on the screen that shows money. */
+    for (const forbidden of [
+      'contract',
+      'registry',
+      'indexer',
+      'resolver',
+      'sponsor',
+      'dust',
+      'wallet address',
+      'sdk',
+      'dynamic',
+    ]) {
+      expect(body, `"${forbidden}" is on screen`).not.toContain(forbidden);
+    }
+
+    await context.close();
+  });
+
+  test('sends mUSD to a Passport of the same kind, and stops where every payment stops', async ({
+    browser,
+  }) => {
+    const context = await browser.newContext(
+      walkContextOptions({ viewport: { width: 420, height: 900 } }),
+    );
+    const page = await context.newPage();
+    await installNetworkBoundary(page);
+    await serveAccountCustodyState(page, [ACCOUNT_CUSTODY_ADDRESS, PASSPORT_ACCOUNT_ADDRESS]);
+    await seedDynamicPassport(page, {
+      name: 'walker',
+      accountAddress: ACCOUNT_CUSTODY_ADDRESS,
+      musd: '40',
+    });
+    await page.goto(WALK);
+
+    await page.getByLabel('Send to').fill(RESOLVABLE_NAME);
+    await page.getByLabel('What to send').selectOption({ label: 'mUSD' });
+    await page.getByLabel('Amount').fill('10');
+    await page.getByRole('button', { name: /^Send/ }).click();
+
+    /* ONE SENTENCE, AND THE CONTROL BACK. Where this run stops is worth being
+       exact about: the account it is driving is a REAL one, and its device set
+       holds the key the gate run enrolled rather than this walk's stand-in, so
+       the refusal is the account's own — "this key is not one of the keys that
+       can approve for this Passport". That is a refusal a person can genuinely
+       meet, and it lands after the payment has been planned in full: the coin
+       chosen out of the store, the recipient read off the chain as one of these
+       accounts, the amount checked against what one payment can draw on. What
+       is asserted here is the property that holds whatever the refusal is —
+       one plain sentence, the control back, and the money accounted for. */
+    const alert = page.getByRole('alert');
+    await expect(alert).toBeVisible({ timeout: 60_000 });
+    const sentence = (await alert.innerText()).trim();
+    expect(sentence.split('\n').filter((line) => line.trim().length > 0)).toHaveLength(2);
+    expect(sentence).not.toContain('not built yet');
+    await expect(page.getByRole('button', { name: /^Send/ })).toBeEnabled();
+
+    /* AND THE PASSPORT SAYS WHERE THE MONEY IS. The payment was written down
+       before anything went out, and a run that stopped before the withdrawal
+       reports exactly that — the sentence comes from the record, through
+       storage, which is what makes a closed tab survivable. */
+    await expect(
+      page.getByText('Nothing was sent, and it is all still in your Passport.'),
+    ).toBeVisible();
+    await expect(page.locator('.mndyn-holding-figure')).toHaveText('40');
+
+    await context.close();
+  });
+
+  test('offers a NIGHT payment to a Passport of the same kind, which used to be refused', async ({
+    browser,
+  }) => {
+    const context = await browser.newContext(
+      walkContextOptions({ viewport: { width: 420, height: 900 } }),
+    );
+    const page = await context.newPage();
+    await installNetworkBoundary(page);
+    await serveAccountCustodyState(page, [ACCOUNT_CUSTODY_ADDRESS, PASSPORT_ACCOUNT_ADDRESS]);
+    await seedDynamicPassport(page, {
+      name: 'walker',
+      accountAddress: ACCOUNT_CUSTODY_ADDRESS,
+      musd: '40',
+    });
+    await page.goto(WALK);
+
+    await page.getByLabel('Send to').fill(RESOLVABLE_NAME);
+    await page.getByLabel('What to send').selectOption({ label: 'NIGHT' });
+    await page.getByLabel('Amount').fill('0.5');
+    await page.getByRole('button', { name: /^Send/ }).click();
+
+    const alert = page.getByRole('alert');
+    await expect(alert).toBeVisible({ timeout: 60_000 });
+    const sentence = (await alert.innerText()).trim();
+
+    /* THE SENTENCE THAT IS GONE. Until 2026/09/17 a Passport of this kind
+       paying another one was told "paying one of those is not built yet" —
+       after the withdrawal had already gone out of the account. The payment now
+       runs the same course as every other one, and stops where this box stops
+       every account custody call (see the walk above). */
+    expect(sentence).not.toContain('not built yet');
+    await expect(page.getByRole('button', { name: /^Send/ })).toBeEnabled();
 
     await context.close();
   });
