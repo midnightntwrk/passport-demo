@@ -16,6 +16,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   advanceK1CoinCandidate,
+  awaitingK1Coins,
   enqueueK1Coin,
   forgetK1Account,
   heldK1Coin,
@@ -35,7 +36,9 @@ import {
   refuseK1Account,
   refuseK1Coin,
   rememberK1EncSecretKey,
+  rememberK1ChangeCoin,
   replaceK1Coin,
+  settleK1AwaitingCoin,
   settleK1Coin,
   type K1Account,
   type K1CommitmentWindow,
@@ -61,6 +64,7 @@ const EMPTY_STORE = {
   queued: {},
   spentNonces: [],
   mtIndexCandidates: {},
+  awaiting: {},
 };
 
 function coin(patch: Partial<K1HeldCoin> = {}): K1HeldCoin {
@@ -130,6 +134,7 @@ describe('a coin survives the thing that loses it today', () => {
       queued: {},
       spentNonces: [],
       mtIndexCandidates: {},
+      awaiting: {},
     });
     expect(heldK1Coin(ALICE, NIGHT)?.value).toBe(2n ** 70n);
     expect(heldK1Coin(ALICE, NIGHT)?.mtIndex).toBe(9007199254740993n);
@@ -890,5 +895,133 @@ describe('the new fields, read out of a blob somebody else wrote', () => {
     expect(state.spentNonces).toEqual([OTHER_NONCE, NONCE]);
     expect(k1CoinCandidates(ALICE, NIGHT)).toEqual([10n, 11n]);
     expect(Object.keys(state.mtIndexCandidates)).toEqual([NIGHT]);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The change a spend left, before the chain has said where it is.
+ *
+ * The description arrives as the circuit's return value and exists nowhere
+ * else in the world. A reload between recording the spend and recording the
+ * change is a coin that has demonstrably arrived and that nobody can ever move
+ * again — so it is one write, and the position is filled in afterwards, for as
+ * many attempts as it takes.
+ */
+describe('a change coin waiting for its position', () => {
+  const CHANGE = { colour: NIGHT, nonce: OTHER_NONCE, value: 60n };
+
+  it('is written in the same breath as the spend, and is not spendable yet', () => {
+    putK1Coin(ALICE, coin());
+    rememberK1ChangeCoin(ALICE, NIGHT, CHANGE, 'tx-withdraw');
+    /* The consumed coin is gone and recorded as spent... */
+    expect(isK1NonceSpent(ALICE, NONCE)).toBe(true);
+    /* ...the change is remembered whole... */
+    expect(awaitingK1Coins(ALICE)).toEqual([
+      { colour: NIGHT, nonce: OTHER_NONCE, value: 60n, txId: 'tx-withdraw' },
+    ]);
+    /* ...and the witness cannot reach it, because nothing yet knows where it
+       is and a position nobody has asked about is not a position. */
+    expect(heldK1Coin(ALICE, NIGHT)).toBeNull();
+    expect(k1ColourBalance(ALICE, NIGHT)).toBe(0n);
+  });
+
+  it('files itself the moment the chain answers, and is spendable then', async () => {
+    putK1Coin(ALICE, coin());
+    rememberK1ChangeCoin(ALICE, NIGHT, CHANGE, 'tx-withdraw');
+    const reader = vi.fn<K1CommitmentWindowReader>().mockResolvedValue({
+      startIndex: 8,
+      endIndex: 9,
+    });
+    expect(await settleK1AwaitingCoin(ALICE, NIGHT, reader)).toEqual({
+      outcome: 'learned',
+      coin: { colour: NIGHT, nonce: OTHER_NONCE, value: 60n, mtIndex: 8n },
+    });
+    expect(reader).toHaveBeenCalledWith('tx-withdraw');
+    expect(heldK1Coin(ALICE, NIGHT)?.mtIndex).toBe(8n);
+    expect(awaitingK1Coins(ALICE)).toEqual([]);
+  });
+
+  it('keeps the two-output window as candidates, because a withdrawal has two', async () => {
+    rememberK1ChangeCoin(ALICE, NIGHT, CHANGE, 'tx-withdraw');
+    const reader = vi.fn<K1CommitmentWindowReader>().mockResolvedValue({
+      startIndex: 8,
+      endIndex: 10,
+    });
+    expect(await settleK1AwaitingCoin(ALICE, NIGHT, reader)).toEqual({
+      outcome: 'ambiguous',
+      candidates: [8n, 9n],
+    });
+    expect(heldK1Coin(ALICE, NIGHT)?.mtIndex).toBe(8n);
+    expect(k1CoinCandidates(ALICE, NIGHT)).toEqual([8n, 9n]);
+    expect(awaitingK1Coins(ALICE)).toEqual([]);
+  });
+
+  it('waits rather than forgetting when the chain cannot be asked', async () => {
+    rememberK1ChangeCoin(ALICE, NIGHT, CHANGE, 'tx-withdraw');
+    const silent = vi.fn<K1CommitmentWindowReader>().mockResolvedValue(null);
+    expect((await settleK1AwaitingCoin(ALICE, NIGHT, silent)).outcome).toBe('unavailable');
+    /* Still there, with the transaction to ask about again — after a reload,
+       or tomorrow. */
+    expect(awaitingK1Coins(ALICE)).toHaveLength(1);
+    const answered = vi.fn<K1CommitmentWindowReader>().mockResolvedValue({
+      startIndex: 3,
+      endIndex: 4,
+    });
+    expect((await settleK1AwaitingCoin(ALICE, NIGHT, answered)).outcome).toBe('learned');
+    expect(heldK1Coin(ALICE, NIGHT)?.mtIndex).toBe(3n);
+  });
+
+  it('says so when asked about a colour with nothing waiting', async () => {
+    const reader = vi.fn<K1CommitmentWindowReader>();
+    const outcome = await settleK1AwaitingCoin(ALICE, MUSD, reader);
+    expect(outcome.outcome).toBe('refused');
+    expect(outcome).toHaveProperty('reason');
+    expect(reader).not.toHaveBeenCalled();
+  });
+
+  it('promotes the queue only when the spend left no change at all', () => {
+    enqueueK1Coin(ALICE, coin({ value: 100n }));
+    enqueueK1Coin(ALICE, coin({ value: 250n, nonce: 'a1'.repeat(32), mtIndex: 43n }));
+    /* With change: the queued coin stays queued, so the change does not land
+       behind it and the balance does not jump about. */
+    rememberK1ChangeCoin(ALICE, NIGHT, CHANGE, 'tx-withdraw');
+    expect(heldK1Coin(ALICE, NIGHT)).toBeNull();
+    expect(queuedK1Coins(ALICE, NIGHT)).toHaveLength(1);
+
+    forgetK1Account(ALICE);
+    enqueueK1Coin(ALICE, coin({ value: 100n }));
+    enqueueK1Coin(ALICE, coin({ value: 250n, nonce: 'a1'.repeat(32), mtIndex: 43n }));
+    rememberK1ChangeCoin(ALICE, NIGHT, null, 'tx-withdraw');
+    expect(heldK1Coin(ALICE, NIGHT)?.value).toBe(250n);
+    expect(awaitingK1Coins(ALICE)).toEqual([]);
+  });
+
+  it('refuses a change coin it could never look up, and a colour it cannot read', () => {
+    expect(() => rememberK1ChangeCoin(ALICE, NIGHT, CHANGE, '  ')).toThrow(/transaction/);
+    expect(() => rememberK1ChangeCoin(ALICE, NIGHT, { ...CHANGE, nonce: 'short' }, 'tx')).toThrow(
+      /64-hex/,
+    );
+    expect(() => rememberK1ChangeCoin(ALICE, 'nope', null, 'tx')).toThrow(/Not a colour/);
+    expect(awaitingK1Coins(ALICE)).toEqual([]);
+  });
+
+  it('drops an awaiting row a blob left behind that cannot be looked up', () => {
+    seed({
+      [k1AccountKey(ALICE)]: {
+        coins: {},
+        awaiting: {
+          [NIGHT]: { nonceHex: NONCE, colorHex: NIGHT, value: '60', txId: 'tx-1' },
+          [MUSD]: { nonceHex: NONCE, colorHex: MUSD, value: '60' },
+          ['ee'.repeat(32)]: { nonceHex: NONCE, colorHex: 'ff'.repeat(32), value: '1', txId: 'x' },
+          bad_colour_key: { nonceHex: NONCE, colorHex: NIGHT, value: '1', txId: 'x' },
+          ['dd'.repeat(32)]: 'not an object',
+        },
+      },
+    });
+    expect(awaitingK1Coins(ALICE)).toEqual([
+      { colour: NIGHT, nonce: NONCE, value: 60n, txId: 'tx-1' },
+    ]);
   });
 });

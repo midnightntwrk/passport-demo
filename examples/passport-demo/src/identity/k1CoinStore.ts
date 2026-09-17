@@ -82,7 +82,7 @@
  * The store is now WIRED IN: `./custodyContractClient.ts` serves it to
  * midnight-js as the custody connection's private-state provider, so
  * `held_coin` reads `context.privateState.coins[colourHex]` and a shielded
- * spend is a read of this file. Three things follow, and all three are here
+ * spend is a read of this file. Four things follow, and all four are here
  * rather than in the flow that needed them, because they are facts about what
  * an account holds and not steps in a send.
  *
@@ -101,7 +101,13 @@
  *      ({@link k1ColourBalance}); what it can send in one payment is the held
  *      coin alone, which is a real limit and is said in a sentence rather than
  *      hidden (`./custodyContractSend.ts`).
- *   3. CANDIDATE POSITIONS. A withdrawal's transaction carries TWO shielded
+ *   3. AWAITING POSITIONS. Between a spend returning its change coin and the
+ *      indexer saying where that coin landed there is a state with no name in
+ *      the reference: described, held, unspendable. {@link rememberK1ChangeCoin}
+ *      writes it in the same write that records the spend, and
+ *      {@link settleK1AwaitingCoin} files it when the chain answers — which
+ *      may be after a reload, and is still not too late.
+ *   4. CANDIDATE POSITIONS. A withdrawal's transaction carries TWO shielded
  *      outputs — the recipient's note and the contract's change — so the
  *      commitment window it lands in gives two positions and no way to tell
  *      them apart from here. {@link putK1CoinCandidates} keeps both, in order,
@@ -196,6 +202,44 @@ export interface K1CoinStoreState {
    * one output, or a spend proved against it.
    */
   readonly mtIndexCandidates: Record<string, readonly string[]>;
+  /**
+   * Colour → a coin this account demonstrably holds and has no position for
+   * yet, with the transaction that produced it.
+   *
+   * THE GAP BETWEEN A SPEND AND THE CHAIN ANSWERING, and the only place in
+   * this store where a coin sits that the witness cannot use. A withdrawal
+   * returns its change coin as the circuit's value — nonce, colour, and value,
+   * and no `mt_index`, because the position is allocated by the transaction
+   * that is at that moment still being submitted. That description exists
+   * nowhere else: not on the chain, not in an inbox entry, nowhere. So it is
+   * written down in the SAME write that records the spend, before anything is
+   * asked of the indexer, and the position is filled in afterwards by
+   * {@link settleK1AwaitingCoin} — which may take a second, or a reload, or a
+   * day of the indexer being unreachable, and none of those lose the coin.
+   *
+   * It is NOT in `coins`, deliberately. A coin in `coins` is one the witness
+   * will hand to a proof, and a position of "we have not asked yet" written as
+   * a number is exactly the confident wrong answer this module refuses to
+   * hold. A holder sees it as arriving rather than as balance.
+   */
+  readonly awaiting: Record<string, AwaitingK1CoinRow>;
+}
+
+/** An awaiting coin as it is STORED. Strings, for the module header's reason. */
+export interface AwaitingK1CoinRow {
+  readonly nonceHex: string;
+  readonly colorHex: string;
+  readonly value: string;
+  /** The transaction that produced it — what a later position lookup asks about. */
+  readonly txId: string;
+}
+
+/** A coin whose description is known and whose position is not, in app terms. */
+export interface K1AwaitingCoin {
+  readonly colour: string;
+  readonly nonce: string;
+  readonly value: bigint;
+  readonly txId: string;
 }
 
 /**
@@ -314,6 +358,24 @@ function nonceListFrom(value: unknown): string[] {
   return kept;
 }
 
+/**
+ * A stored awaiting row, or null when it is not one.
+ *
+ * The transaction id is checked as well as the coin, because a row without one
+ * is a coin whose position can never be looked up — which is the same as a row
+ * that cannot be read, and is dropped the same way.
+ */
+function awaitingRowFrom(row: unknown): AwaitingK1CoinRow | null {
+  if (!row || typeof row !== 'object') return null;
+  const candidate = row as Partial<AwaitingK1CoinRow>;
+  const colour = normalisedColourHex(candidate.colorHex);
+  const nonce = normalisedColourHex(candidate.nonceHex);
+  const value = normalisedDecimal(candidate.value);
+  const txId = typeof candidate.txId === 'string' ? candidate.txId.trim() : '';
+  if (colour === null || nonce === null || value === null || txId === '') return null;
+  return { nonceHex: nonce, colorHex: colour, value, txId };
+}
+
 /** A stored candidate list: decimal positions, in the order they are tried. */
 function candidateListFrom(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
@@ -370,12 +432,21 @@ function readAll(): Record<string, K1CoinStoreState> {
           if (colour !== null && kept.length > 0) mtIndexCandidates[colour] = kept;
         }
       }
+      const awaiting = emptyMap<AwaitingK1CoinRow>();
+      if (entry.awaiting && typeof entry.awaiting === 'object') {
+        for (const [colourKey, row] of Object.entries(entry.awaiting as Record<string, unknown>)) {
+          const parsedRow = awaitingRowFrom(row);
+          if (parsedRow === null || parsedRow.colorHex !== normalisedColourHex(colourKey)) continue;
+          awaiting[parsedRow.colorHex] = parsedRow;
+        }
+      }
       accounts[key] = {
         encSecretKeyHex: typeof entry.encSecretKeyHex === 'string' ? entry.encSecretKeyHex : null,
         coins,
         queued,
         spentNonces: nonceListFrom(entry.spentNonces),
         mtIndexCandidates,
+        awaiting,
       };
     }
     return accounts;
@@ -448,6 +519,7 @@ export function emptyK1CoinStoreState(): K1CoinStoreState {
     queued: emptyMap(),
     spentNonces: [],
     mtIndexCandidates: emptyMap(),
+    awaiting: emptyMap(),
   };
 }
 
@@ -484,6 +556,7 @@ interface K1StoreDraft {
   queued: Record<string, StoredK1Coin[]>;
   spentNonces: string[];
   mtIndexCandidates: Record<string, string[]>;
+  awaiting: Record<string, AwaitingK1CoinRow>;
 }
 
 function draftOf(state: K1CoinStoreState): K1StoreDraft {
@@ -495,12 +568,15 @@ function draftOf(state: K1CoinStoreState): K1StoreDraft {
   for (const [colour, list] of Object.entries(state.mtIndexCandidates)) {
     mtIndexCandidates[colour] = [...list];
   }
+  const awaiting = emptyMap<AwaitingK1CoinRow>();
+  Object.assign(awaiting, state.awaiting);
   return {
     encSecretKeyHex: state.encSecretKeyHex,
     coins,
     queued,
     spentNonces: [...state.spentNonces],
     mtIndexCandidates,
+    awaiting,
   };
 }
 
@@ -549,6 +625,7 @@ function saveDraft(account: K1Account, draft: K1StoreDraft): void {
     queued: draft.queued,
     spentNonces: draft.spentNonces,
     mtIndexCandidates: draft.mtIndexCandidates,
+    awaiting: draft.awaiting,
   });
 }
 
@@ -736,6 +813,107 @@ export function enqueueK1Coin(
     draft.queued[normalised.colour] = existing;
   });
   return held === null ? 'held' : 'queued';
+}
+
+/* -------------------------------------------------------------------------- */
+/* The change a spend left, before the chain has said where it is             */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The whole bookkeeping of a spend, in ONE write: the coin that was consumed
+ * goes, its nonce is remembered as spent, and the change coin — described but
+ * not yet positioned — is put where a later lookup can find it.
+ *
+ * ONE WRITE, for the reason {@link replaceK1Coin} gives and more sharply. The
+ * change coin's description arrives as the circuit's return value and exists
+ * nowhere else in the world: not on the chain, not in an inbox entry, not in
+ * the transaction. A reload between two writes here is a coin that has
+ * demonstrably arrived and that nobody — not the owner, not this repository,
+ * not anybody — can ever move again.
+ *
+ * `change` of null is the spend that consumed the coin exactly. It promotes
+ * whatever was queued behind it, exactly as {@link replaceK1Coin} does.
+ */
+export function rememberK1ChangeCoin(
+  account: K1Account,
+  spentColour: string,
+  change: { colour: string; nonce: string; value: bigint } | null,
+  txId: string,
+): void {
+  const target = requireAccount(account);
+  const spent = requireColour(spentColour);
+  const row =
+    change === null
+      ? null
+      : awaitingRowFrom({
+          nonceHex: change.nonce,
+          colorHex: change.colour,
+          value: change.value.toString(),
+          txId,
+        });
+  if (change !== null && row === null) {
+    throw new Error('A change coin needs a 64-hex nonce, a 64-hex colour, a value, and the transaction that produced it.');
+  }
+  editStore(target, (draft) => {
+    if (Object.hasOwn(draft.coins, spent)) rememberSpentNonce(draft, draft.coins[spent].nonceHex);
+    delete draft.coins[spent];
+    delete draft.mtIndexCandidates[spent];
+    if (row !== null) draft.awaiting[row.colorHex] = row;
+    /* Only when there is no change. A colour whose change coin is awaiting a
+       position must NOT promote a queued coin into the held slot, or the
+       change would land behind it and the account would spend them out of
+       order — which is legal but makes the balance jump about for no reason a
+       holder could follow. */
+    if (row === null) promoteQueued(draft, spent);
+  });
+}
+
+/** Every coin this account holds that has no position yet, colour order. */
+export function awaitingK1Coins(account: K1Account): K1AwaitingCoin[] {
+  const state = loadK1CoinStore(account);
+  return Object.values(state.awaiting)
+    .map((row) => ({
+      colour: row.colorHex,
+      nonce: row.nonceHex,
+      value: BigInt(row.value),
+      txId: row.txId,
+    }))
+    .sort((a, b) => (a.colour < b.colour ? -1 : 1));
+}
+
+/**
+ * Ask the chain where an awaiting coin landed, and file it once it answers.
+ *
+ * `'unavailable'` LEAVES THE ROW WHERE IT IS, which is the whole reason the
+ * awaiting slot exists: an indexer that has not caught up yet is a question to
+ * ask again in a moment, or after a reload, or tomorrow, and none of those
+ * cost the coin. `'learned'` and `'ambiguous'` both move it into `coins` —
+ * settled, or with its candidates beside it — and `'refused'` drops it,
+ * because a row this store will not hold will not start being holdable.
+ */
+export async function settleK1AwaitingCoin(
+  account: K1Account,
+  colour: string,
+  reader: K1CommitmentWindowReader,
+): Promise<K1Reconciliation> {
+  const target = requireAccount(account);
+  const wanted = requireColour(colour);
+  const state = loadK1CoinStore(target);
+  if (!Object.hasOwn(state.awaiting, wanted)) {
+    return { outcome: 'refused', reason: `Nothing of colour ${wanted} is waiting for a position.` };
+  }
+  const row = state.awaiting[wanted];
+  const outcome = await reconcileK1CoinFromChain(
+    target,
+    { colour: row.colorHex, nonce: row.nonceHex, value: BigInt(row.value), txId: row.txId },
+    reader,
+    { candidates: 'store' },
+  );
+  if (outcome.outcome === 'unavailable') return outcome;
+  editStore(target, (draft) => {
+    delete draft.awaiting[wanted];
+  });
+  return outcome;
 }
 
 /* -------------------------------------------------------------------------- */
