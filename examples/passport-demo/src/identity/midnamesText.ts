@@ -13,7 +13,7 @@
  * `screens/AliasClaim.tsx` and `screens/AliasReclaimModal.tsx`, each for the
  * same handful of string functions. Measured on 2026/09/01 against a production
  * build over loopback: 10.07 MB transferred before the onboarding screen's
- * "Continue with Passport" button existed, 9.84 MB of it the ledger. Nobody
+ * "Continue with Passkey" button existed, 9.84 MB of it the ledger. Nobody
  * claiming a name needs the ledger at the moment the welcome screen paints;
  * they need it minutes later, at the claim itself, which is where
  * `App.tsx` has always dynamically imported it from.

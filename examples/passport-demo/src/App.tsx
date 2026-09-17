@@ -2669,7 +2669,7 @@ export default function PassportDemo() {
    *
    * Every sign-in journey funnels its ceremony failure through here, and it is
    * one function rather than a `catch` apiece so the targeted unlock behind
-   * "Continue with Passport" and the discoverable assertion behind "Use a
+   * "Continue with Passkey" and the discoverable assertion behind "Use a
    * different passkey" cannot drift into offering different things for the
    * same fact. `passkeySignInRecovery` holds the rule and the reasoning; this
    * is only the wiring between it, the two panel states, and the error the
@@ -2764,7 +2764,7 @@ export default function PassportDemo() {
          user would loop. Both controls the screen already carries do lead
          somewhere from here, and the sentence names them. */
       throw new Error(
-        'You already have a Passport on this device. Choose "Use a different passkey" to pick it, or "Continue with Passport" to try again.',
+        'You already have a Passport on this device. Choose "Use a different passkey" to pick it, or "Continue with Passkey" to try again.',
       );
     }
     try {
@@ -2990,7 +2990,7 @@ export default function PassportDemo() {
          action. So the chain from here reaches a working Passport in every
          case, rather than terminating in advice. */
       throw new Error(
-        'This browser already holds a Passport passkey. Choose "Continue with Passport" to reopen it.',
+        'This browser already holds a Passport passkey. Choose "Continue with Passkey" to reopen it.',
       );
     }
     const knownCredentialIds = await knownLocalCredentialIds();
@@ -3049,7 +3049,7 @@ export default function PassportDemo() {
          offer more than the button that just failed.
 
          The first version of this branch threw a plain sentence naming
-         "Continue with Passport", which recreated the Android orphan loop
+         "Continue with Passkey", which recreated the Android orphan loop
          exactly: this browser holds records, so `discoverFirst` is true, so
          Continue runs the same discovery, and a passkey deleted from Google
          Password Manager still produces an empty sheet the user dismisses
@@ -3137,7 +3137,7 @@ export default function PassportDemo() {
          control for the same reason: "Create passkey" has not been on this
          screen since 2026/08/05. */
       throw new Error(
-        'No Passport passkey is enrolled in this browser yet. Choose "Continue with Passport" to make one.',
+        'No Passport passkey is enrolled in this browser yet. Choose "Continue with Passkey" to make one.',
       );
     }
     setOnboardingBusyLabel('Unlocking your Passport with this device');
