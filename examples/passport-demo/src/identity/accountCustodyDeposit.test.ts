@@ -34,10 +34,7 @@ import * as Rx from 'rxjs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { LocalMidnightWallet } from '../lib/localWallet.js';
-import {
-  ACCOUNT_CUSTODY_LABEL,
-  custodyWitnesses,
-} from './custodyContractClient.js';
+import { ACCOUNT_CUSTODY_LABEL } from './custodyContractClient.js';
 import {
   CUSTODY_INBOX_ENTRY_BYTES,
   generateCustodyEncKeyPair,
@@ -283,9 +280,9 @@ describe('depositNight, against the build the recipient really holds', () => {
     expect(openings[0]?.initialPrivateState).toEqual({ coins: {} });
     /* And the only witness that build declares, refusing, because no payment
        INTO an account spends what that account holds. */
-    expect(Object.keys(compiled[0]?.witnesses as object)).toEqual(
-      Object.keys(custodyWitnesses()),
-    );
+    /* `held_coin` and nothing else — the whole of `Witnesses<PS>` in the
+       compiled build's `index.d.ts`. */
+    expect(Object.keys(compiled[0]?.witnesses as object)).toEqual(['held_coin']);
     expect(() => (compiled[0]?.witnesses as { held_coin(): never }).held_coin()).toThrow(
       /cannot spend/,
     );
