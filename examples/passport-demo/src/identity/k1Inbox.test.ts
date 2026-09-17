@@ -27,6 +27,7 @@ import {
   encodeK1InboxPlaintext,
   generateK1EncKeyPair,
   k1EncKeyPair,
+  k1EncKeySlot,
   k1EncPublicKey,
   openK1InboxEntry,
   packK1InboxEntry,
@@ -329,50 +330,80 @@ describe('sealing and opening', () => {
 /* -------------------------------------------------------------------------- */
 
 describe('the viewing key this Passport keeps', () => {
+  /** One account of one user on one network. */
+  const ACCOUNT = { network: 'stagenet', accountId: 'aa'.repeat(32) };
+  const OTHER_ACCOUNT = { network: 'stagenet', accountId: 'bb'.repeat(32) };
+  const OTHER_NETWORK = { network: 'devnet', accountId: 'aa'.repeat(32) };
+
   it('makes one key and then keeps handing back the same one', () => {
     const { storage: store } = fakeStorage();
-    const first = k1EncKeyPair(store, 'user-a');
-    const second = k1EncKeyPair(store, 'user-a');
+    const first = k1EncKeyPair(store, 'user-a', ACCOUNT);
+    const second = k1EncKeyPair(store, 'user-a', ACCOUNT);
     expect(second).toEqual(first);
     expect(k1EncPublicKey(first.secretKeyHex)).toBe(first.publicKeyHex);
   });
 
   it('keeps two Dynamic users apart', () => {
     const { storage: store } = fakeStorage();
-    expect(k1EncKeyPair(store, 'user-a').secretKeyHex).not.toBe(
-      k1EncKeyPair(store, 'user-b').secretKeyHex,
+    expect(k1EncKeyPair(store, 'user-a', ACCOUNT).secretKeyHex).not.toBe(
+      k1EncKeyPair(store, 'user-b', ACCOUNT).secretKeyHex,
     );
+  });
+
+  /* PER ACCOUNT AND PER NETWORK. One secret across all of a user's accounts
+     made a stagenet account and a devnet account advertise the same public
+     half — visibly one person to anybody who sends to both — and made one
+     leaked secret open every inbox instead of one. */
+  it('keeps two accounts of the same user apart', () => {
+    const { storage: store } = fakeStorage();
+    expect(k1EncKeyPair(store, 'user-a', ACCOUNT).secretKeyHex).not.toBe(
+      k1EncKeyPair(store, 'user-a', OTHER_ACCOUNT).secretKeyHex,
+    );
+  });
+
+  it('keeps one account’s two networks apart', () => {
+    const { storage: store } = fakeStorage();
+    expect(k1EncKeyPair(store, 'user-a', ACCOUNT).secretKeyHex).not.toBe(
+      k1EncKeyPair(store, 'user-a', OTHER_NETWORK).secretKeyHex,
+    );
+  });
+
+  it('does not make a second key out of a different spelling', () => {
+    const { storage: store } = fakeStorage();
+    const made = k1EncKeyPair(store, 'USER-A', ACCOUNT);
+    expect(k1EncKeyPair(store, 'user-a', { ...ACCOUNT, accountId: 'AA'.repeat(32) })).toEqual(made);
+    expect(k1EncKeySlot('User-A', ACCOUNT)).toBe(`user-a|stagenet|${'aa'.repeat(32)}`);
   });
 
   it('survives a reload — the same storage, a new call', () => {
     const { storage: store, map } = fakeStorage();
-    const made = k1EncKeyPair(store, 'user-a');
+    const made = k1EncKeyPair(store, 'user-a', ACCOUNT);
     const reloaded: K1InboxStorage = {
       getItem: (key) => map.get(key) ?? null,
       setItem: (key, value) => void map.set(key, value),
     };
-    expect(k1EncKeyPair(reloaded, 'user-a')).toEqual(made);
+    expect(k1EncKeyPair(reloaded, 'user-a', ACCOUNT)).toEqual(made);
   });
 
   it('replaces a stored blob it cannot read, rather than trusting it', () => {
     const { storage: store, map } = fakeStorage();
     map.set(K1_ENC_KEY_KEY, 'not json');
-    expect(k1EncKeyPair(store, 'user-a').secretKeyHex).toHaveLength(64);
+    expect(k1EncKeyPair(store, 'user-a', ACCOUNT).secretKeyHex).toHaveLength(64);
 
     map.set(K1_ENC_KEY_KEY, '["an array"]');
-    expect(k1EncKeyPair(store, 'user-a').secretKeyHex).toHaveLength(64);
+    expect(k1EncKeyPair(store, 'user-a', ACCOUNT).secretKeyHex).toHaveLength(64);
 
     map.set(K1_ENC_KEY_KEY, 'null');
-    expect(k1EncKeyPair(store, 'user-a').secretKeyHex).toHaveLength(64);
+    expect(k1EncKeyPair(store, 'user-a', ACCOUNT).secretKeyHex).toHaveLength(64);
 
-    map.set(K1_ENC_KEY_KEY, JSON.stringify({ 'user-a': 'too short' }));
-    expect(k1EncKeyPair(store, 'user-a').secretKeyHex).toHaveLength(64);
+    map.set(K1_ENC_KEY_KEY, JSON.stringify({ [k1EncKeySlot('user-a', ACCOUNT)]: 'too short' }));
+    expect(k1EncKeyPair(store, 'user-a', ACCOUNT).secretKeyHex).toHaveLength(64);
   });
 
   it('still serves this session when the write is denied', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const { storage: store } = fakeStorage({ denyWrites: true });
-    const made = k1EncKeyPair(store, 'user-a');
+    const made = k1EncKeyPair(store, 'user-a', ACCOUNT);
     expect(made.secretKeyHex).toHaveLength(64);
     expect(warn).toHaveBeenCalled();
   });
@@ -383,7 +414,7 @@ describe('the viewing key this Passport keeps', () => {
       subtle: () => globalThis.crypto.subtle,
     };
     const { storage: store } = fakeStorage();
-    expect(k1EncKeyPair(store, 'user-a', fixed).secretKeyHex).toBe('07'.repeat(32));
+    expect(k1EncKeyPair(store, 'user-a', ACCOUNT, fixed).secretKeyHex).toBe('07'.repeat(32));
     expect(generateK1EncKeyPair(fixed).secretKeyHex).toBe('07'.repeat(32));
   });
 });

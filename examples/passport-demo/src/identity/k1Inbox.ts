@@ -339,6 +339,18 @@ export function k1EncPublicKey(secretKeyHex: string): string {
   return bytesToHex(x25519.getPublicKey(hexToBytes(secret)));
 }
 
+/**
+ * The slot one account's viewing secret is stored in.
+ *
+ * Lower-cased on the user and the salt, because both arrive as hex from places
+ * that disagree about case, and two spellings of one account must not become
+ * two keys — which would be the same "advertised a key nobody held" defect in
+ * a different disguise.
+ */
+export function k1EncKeySlot(user: string, scope: K1EncAccountScope): string {
+  return `${user.toLowerCase()}|${scope.network}|${scope.accountId.toLowerCase()}`;
+}
+
 /** The storage this module reads and writes. `./accountK1Custody.ts`'s shape. */
 export interface K1InboxStorage {
   getItem(key: string): string | null;
@@ -346,9 +358,25 @@ export interface K1InboxStorage {
 }
 
 /**
- * The encryption keypair this Dynamic user's account advertises, made once and
- * remembered — the same shape, and the same reasoning, as
- * `k1WalletSeed(deps, user)` next door.
+ * Which account's viewing key is being asked for.
+ *
+ * THE ACCOUNT IS NAMED BY ITS SALT, NOT ITS ADDRESS, and it has to be: the key
+ * is a CONSTRUCTOR ARGUMENT, so it is chosen before the contract has an address
+ * at all. The boot salt is the one thing that exists at that moment, is unique
+ * to this account, and survives a reload — it is in the progress record, which
+ * is what makes resuming a half-built deploy hand back the same key.
+ */
+export interface K1EncAccountScope {
+  /** `stagenet`, `devnet`. A key from one network is not a key on another. */
+  readonly network: string;
+  /** The account's boot salt, as hex. Its identity before it has an address. */
+  readonly accountId: string;
+}
+
+/**
+ * The encryption keypair one account advertises, made once and remembered —
+ * the same shape, and the same storage discipline, as `k1WalletSeed(deps,
+ * user)` next door.
  *
  * IT IS REMEMBERED AND THE WALLET SEED IS NOT INTERCHANGEABLE WITH IT. The
  * wallet seed may be lost at the cost of a resync, because this wallet only
@@ -359,15 +387,19 @@ export interface K1InboxStorage {
  * key nobody, including its owner, held — which is precisely the defect this
  * replaces.
  *
- * Per USER and not per account contract, because the key is chosen before the
- * contract has an address: the constructor takes it as an argument. A user with
- * two accounts on two networks advertises the same key on both, which is the
- * reference's behaviour too — the entries are still separated by which
- * contract's inbox they sit in.
+ * PER ACCOUNT AND PER NETWORK, NOT PER USER. Keying it by the Dynamic user
+ * alone made one secret the viewing key of every account that user ever
+ * deployed, on every network: a stagenet account and a devnet account
+ * advertising the same public half, and a second account made after starting
+ * again sharing a secret with the abandoned first. That is a linkability the
+ * whole inbox exists to avoid — a depositor seals to a key, and two accounts
+ * advertising one key are visibly one person — and it is also a blast radius,
+ * because one leaked secret opens every inbox rather than one.
  */
 export function k1EncKeyPair(
   storage: K1InboxStorage,
   user: string,
+  scope: K1EncAccountScope,
   deps: K1InboxDeps = defaultK1InboxDeps(),
 ): K1EncKeyPair {
   let secrets: Record<string, string> = {};
@@ -383,13 +415,14 @@ export function k1EncKeyPair(
     secrets = {};
   }
 
-  const existing = normalised32(secrets[user]);
+  const slot = k1EncKeySlot(user, scope);
+  const existing = normalised32(secrets[slot]);
   if (existing !== null) {
     return { secretKeyHex: existing, publicKeyHex: k1EncPublicKey(existing) };
   }
 
   const fresh = generateK1EncKeyPair(deps);
-  secrets[user] = fresh.secretKeyHex;
+  secrets[slot] = fresh.secretKeyHex;
   try {
     storage.setItem(K1_ENC_KEY_KEY, JSON.stringify(secrets));
   } catch (cause) {

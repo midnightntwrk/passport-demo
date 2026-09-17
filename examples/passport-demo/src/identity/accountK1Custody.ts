@@ -736,10 +736,15 @@ async function runWaveOne(
      makes the pair once per Dynamic user and hands back the same one for ever
      after — the same rule, and the same storage discipline, as the per-device
      wallet seed beside it. */
-  const encKeys = k1EncKeyPair(storage, context.record.user, {
-    randomBytes: deps.randomBytes,
-    subtle: () => globalThis.crypto.subtle,
-  });
+  const encKeys = k1EncKeyPair(
+    storage,
+    context.record.user,
+    /* Per ACCOUNT and per NETWORK. The salt is what names this account before
+       it has an address, and it is in the record, so a resumed deploy asks for
+       and receives the same key rather than advertising a second one. */
+    { network: context.record.network, accountId: context.record.saltHex },
+    { randomBytes: (length) => deps.randomBytes(length), subtle: () => globalThis.crypto.subtle },
+  );
   const encryptionKey = hexToBytes(encKeys.publicKeyHex);
 
   const deployData = await contracts.createUnprovenDeployTx(providers, {
