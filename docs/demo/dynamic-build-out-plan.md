@@ -66,6 +66,32 @@ Whatever the route: PRs on passport-demo, review, `main`, a release, staging, He
 
 **PR sequence:** (1) the account custody build, module loader, HTTP-only proving route; (2) a private coin store that survives reloads; (3) the account custody client module — deploy in waves, activate with the Dynamic key, deposit, withdraw; (4) the sponsor recognises the third build for the opening balance and gifts; (5) Welcome and Home: the Dynamic path end to end, and recovery by name; (6) live walks on staging with a Dynamic login, then the release. Design and skeleton for (3): PR #55.
 
+**What the screen does, as built (2026/09/17).** The Dynamic-only screen now
+covers the whole of the money half:
+
+- **Sets a Passport up** in three sponsored steps, resumes one it did not
+  finish, and claims a `.night` name for it.
+- **Shows what it holds** — the account's NIGHT off its own mirror, and every
+  token it has been paid, read out of the coin store after the account's own
+  list of deliveries has been walked (on opening and on every refresh). A coin
+  whose position in the commitment tree cannot be established is shown as
+  arriving, never as balance.
+- **Sends NIGHT**, in two legs, to a Passport on any of the three builds — a
+  prototype account or another Dynamic Passport, the deposit chosen by reading
+  what the recipient's account is built from.
+- **Sends mUSD**, in three legs: withdrawn for exactly the amount to the
+  Passport's own receiving address, identified there by its nonce, then
+  deposited into the recipient with a description sealed to their key where they
+  hold one of these accounts. A payment that stops between legs is written down
+  and offered again on the next open; one that cannot be delivered goes back
+  where it came from, and the screen says where the money is.
+- **Comes back by name** on a second device, checking the account's device set
+  before anything is restored.
+
+What is still not deployed, and says so in one sentence rather than failing
+late: `POST /prove-account-custody` on the balancer, which every account custody
+transaction goes through.
+
 **The contract is consumed, never copied (2026/09/17).** Everything above reads
 against the account custody contract as Nicolas provides it. It is not modified,
 copied, forked, renamed, or versioned here: `scripts/account-custody-contract.lock.json`

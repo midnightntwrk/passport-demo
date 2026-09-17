@@ -150,12 +150,27 @@ an environment id, for somebody who has no passkey Passport on the device.
    custody account address as the name's target — the request shape is identical, because
    `contractAddress` is what the service takes and a custody account has one like any other.
 5. **Home.** The provider and handle; the account's own NIGHT, read from the account custody build's
-   `unshielded_balances` mirror; the name (or the account address) to be paid at; a Send
-   form; and one sentence saying a private token can be received here and not yet sent.
-6. **Send.** Two legs, as on every build: `withdraw_unshielded_with_k256(colour, amount,
-   this device's receiving address)` — the one thing the holder approves, through
+   `unshielded_balances` mirror; every token the account has been paid, read out of the
+   coin store once the account's own inbox has been walked (on opening and on every
+   refresh — `custodyInboxIndex.ts` maps an inbox index to the transaction that wrote it,
+   and a coin whose position cannot be settled is shown as arriving rather than as
+   balance); the name (or the account address) to be paid at; and a Send form that takes
+   either asset.
+6. **Send, NIGHT.** Two legs, as on every build: `withdraw_unshielded_with_k256(colour,
+   amount, this device's receiving address)` — the one thing the holder approves, through
    `signRawMessage` — then the recipient's permissionless deposit, chosen by asking the
-   chain what the recipient's account is built from.
+   chain what the recipient's account is built from. That covers a prototype account and
+   another Dynamic Passport alike (`deposit_night` and `deposit_unshielded`), through
+   `payCustodyAccount`.
+6b. **Send, a token.** Three legs: `withdraw_shielded_with_k256` for exactly the amount,
+   out to this Passport's own shielded address, with the change coin coming back as the
+   circuit's own return value and going straight into the store; the note identified in
+   the wallet by nonce; then `deposit_shielded` into the recipient — the note alone into a
+   prototype account, the note AND a description sealed to the recipient's `enc_key` into
+   another of these, because a coin that arrives undescribed can never be moved again. A
+   payment that stops between legs is written down before leg one goes out and offered
+   again on the next open; one that cannot be delivered is deposited back into the
+   sender's own account.
 7. **On a second device.** "I already have a Passport" → type the name → Passport resolves
    it, checks the account carries `withdraw_shielded_with_k256`, derives this sign-in's
    device entry exactly as activation did and asks the ledger whether the device set holds
@@ -165,10 +180,10 @@ an environment id, for somebody who has no passkey Passport on the device.
 
 | | |
 |---|---|
-| Real | The identity choice, the stage machine, the setup copy, the resumable deploy, the name claim, the balance read, the send plan, the recovery checks, and both legs' call shapes. |
+| Real | The identity choice, the stage machine, the setup copy, the resumable deploy, the name claim, the balance reads, both send plans, the recovery checks, and every leg's call shape. |
 | Real | The approval. `signRawMessage` signs the contract's own challenge, and `k1Call` is the shipped gated-call path from the custody layer. |
-| **Not built** | **Sending a shielded balance.** `withdraw_shielded_with_k256` binds the qualified coin into the challenge (AUTH-10), and the coin comes from the `held_coin` witness — the coin store, `account-custody-layer-design.md` §3. The row is shown with one sentence rather than a control that would fail. |
-| **Not built** | **Paying somebody who holds one of these Passports.** `deposit_unshielded` is permissionless but is not reachable through `k1Call`, which always appends `_with_k256` and an authorisation trailer. One sentence, not a call that fails three files away. |
+| Real | **Sending a shielded balance**, as built 2026/09/17: the qualified coin is bound into the challenge (AUTH-10) and answered by the `held_coin` witness out of the coin store, which IS the connection's private state. |
+| Real | **Paying somebody who holds one of these Passports** — `deposit_unshielded` and `deposit_shielded(coin, entry)` through `payCustodyAccount`, permissionless, on a connection addressed at the recipient's own account. |
 | **Not deployed** | `POST /prove-account-custody` on the balancer (probed 2026/09/16: `404`). Every account custody transaction goes through it, so a live run stops at the first one. `custodyProofProvider` refuses immediately with one sentence rather than waiting out a ten-minute proof timeout. |
 | Deliberately absent | Migration of an existing passkey Passport. §6 of the build-out plan puts it out of this version; the two kinds coexist and can pay each other. |
 
@@ -185,10 +200,12 @@ account's device set, neither of which is the owner key.
 |---|---|
 | `src/lib/dynamicSession.ts` | Gains `choosePassportIdentity` and `dynamicUserKey`. The choice lives in the module that imports nothing, because `App.tsx` asks it on every render. |
 | `src/identity/custodyContractSession.ts` | The stage machine, the setup copy, the name store (`passport-account-custody-name:v1`), and the recovery checks. Pure; 100 % covered. |
-| `src/identity/custodyContractSend.ts` | The send plan, the deposit-circuit choice, the approval and refusal copy, and the balance read off the mirror. Pure; 100 % covered. |
+| `src/identity/custodyContractSend.ts` | Both send plans, the deposit-circuit choice, the approval and refusal copy, the balance read off the mirror, and the record for a payment that stopped between legs. Pure; 100 % covered. |
+| `src/identity/custodyInboxIndex.ts` | Which transaction wrote inbox entry *k*, counted off the account's action history. Pure; 100 % covered. |
+| `src/lib/custodyAssets.ts` | The rows Home and Send read money through, and what a typed amount means in each asset's own units. Pure; 100 % covered. |
 | `src/screens/DynamicPassport.tsx` | The whole path, as one screen with its own state. Lazily loaded. |
 | `src/lib/dynamicWalk.ts` | A stand-in sign-in for the mocked walk, with a real secp256k1 signer. Deleted from any build that does not set `VITE_DYNAMIC_WALK`. |
-| `e2e/dynamic-only.spec.ts` | The mocked walk: the welcome path, the recovery offer, and the one-sentence refusal. |
+| `e2e/dynamic-only.spec.ts` | The mocked walk: the welcome path, the recovery offer, the one-sentence refusal, and — from a seeded Passport against recordings of the real stagenet account — the mUSD row, a mUSD payment, and a NIGHT payment to a Passport of the same kind. |
 
 ## 10. What it costs a build that has none of this
 
