@@ -498,6 +498,7 @@ describe('the inbox walk', () => {
     expect(result.outcomes[0].reconciliation).toEqual({
       outcome: 'ambiguous',
       candidates: [4n, 5n, 6n],
+      stored: false,
     });
     expect(heldK1Coin(ALICE, COLOUR)).toBeNull();
   });

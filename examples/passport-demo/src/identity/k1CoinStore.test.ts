@@ -31,6 +31,7 @@ import {
   putK1Coin,
   putK1CoinCandidates,
   queuedK1Coins,
+  renameK1AwaitingTx,
   dropK1Coin,
   reconcileK1CoinFromChain,
   refuseK1Account,
@@ -396,6 +397,7 @@ describe('learning a position from the chain', () => {
     expect(result).toEqual({
       outcome: 'learned',
       coin: { colour: NIGHT, nonce: NONCE, value: 100n, mtIndex: 17n },
+      placed: 'held',
     });
     expect(heldK1Coin(ALICE, NIGHT)?.mtIndex).toBe(17n);
   });
@@ -409,8 +411,93 @@ describe('learning a position from the chain', () => {
     );
     expect(result).toEqual({
       outcome: 'learned',
+      /* QUEUED, not held: the colour already holds a coin, and the enqueue
+         rule never displaces one (2026/09/17). */
       coin: { colour: NIGHT, nonce: OTHER_NONCE, value: 100n, mtIndex: 51n },
+      placed: 'queued',
     });
+  });
+
+  /* THE DEFECT THIS CATCHES would have emptied a Passport's change on the next
+     Home open. The inbox walk re-reconciles every entry it can read, on every
+     open and after every payment, so the entry that delivered the coin a spend
+     has since consumed came round again and wrote that SPENT coin back over the
+     change — taking the change's candidate positions with it. */
+  it('a second walk after a spend keeps the change coin', async () => {
+    /* Paid 100 (inbox entry 0), spent it, 60 of change now held. */
+    putK1Coin(ALICE, coin({ value: 100n, mtIndex: 3n }));
+    rememberK1ChangeCoin(ALICE, NIGHT, { colour: NIGHT, nonce: OTHER_NONCE, value: 60n }, TX);
+    await settleK1AwaitingCoin(
+      ALICE,
+      NIGHT,
+      vi.fn<K1CommitmentWindowReader>().mockResolvedValue({ startIndex: 8, endIndex: 9 }),
+    );
+    expect(heldK1Coin(ALICE, NIGHT)).toEqual({
+      colour: NIGHT,
+      nonce: OTHER_NONCE,
+      value: 60n,
+      mtIndex: 8n,
+    });
+
+    /* Home re-opens and the walk offers entry 0 again — the hundred. */
+    const again = await reconcileK1CoinFromChain(
+      ALICE,
+      { colour: NIGHT, nonce: NONCE, value: 100n, txId: TX },
+      vi.fn<K1CommitmentWindowReader>().mockResolvedValue({ startIndex: 3, endIndex: 4 }),
+    );
+
+    expect(again).toEqual({ outcome: 'spent', nonce: NONCE });
+    /* The change is untouched, and worth what it was. */
+    expect(heldK1Coin(ALICE, NIGHT)).toEqual({
+      colour: NIGHT,
+      nonce: OTHER_NONCE,
+      value: 60n,
+      mtIndex: 8n,
+    });
+    expect(k1ColourBalance(ALICE, NIGHT)).toBe(60n);
+  });
+
+  /* And an entry for a coin the store already holds is not news either — it is
+     not written twice, and the indexer is not asked about it. */
+  it('says nothing happened for a coin it already holds', async () => {
+    putK1Coin(ALICE, coin({ value: 100n, mtIndex: 3n }));
+    const ask = vi.fn<K1CommitmentWindowReader>();
+    const result = await reconcileK1CoinFromChain(
+      ALICE,
+      { colour: NIGHT, nonce: NONCE, value: 100n, txId: TX },
+      ask,
+    );
+    expect(result).toEqual({ outcome: 'known', nonce: NONCE });
+    expect(ask).not.toHaveBeenCalled();
+  });
+
+  /* A second coin of a colour QUEUES; it never displaces the held one. */
+  it('queues a second delivery of a colour behind the coin already held', async () => {
+    putK1Coin(ALICE, coin({ value: 100n, mtIndex: 3n }));
+    const result = await reconcileK1CoinFromChain(
+      ALICE,
+      { colour: NIGHT, nonce: OTHER_NONCE, value: 25n, txId: TX },
+      vi.fn<K1CommitmentWindowReader>().mockResolvedValue({ startIndex: 9, endIndex: 10 }),
+    );
+    expect(result.outcome).toBe('learned');
+    expect(heldK1Coin(ALICE, NIGHT)?.nonce).toBe(NONCE);
+    expect(queuedK1Coins(ALICE, NIGHT).map((row) => row.nonce)).toEqual([OTHER_NONCE]);
+    expect(k1ColourBalance(ALICE, NIGHT)).toBe(125n);
+  });
+
+  /* Candidates go in the held slot or nowhere: a two-output delivery into a
+     colour that already holds something is reported, never written over it. */
+  it('does not write candidates over a colour that already holds a coin', async () => {
+    putK1Coin(ALICE, coin({ value: 100n, mtIndex: 3n }));
+    const result = await reconcileK1CoinFromChain(
+      ALICE,
+      { colour: NIGHT, nonce: OTHER_NONCE, value: 25n, txId: TX },
+      vi.fn<K1CommitmentWindowReader>().mockResolvedValue({ startIndex: 9, endIndex: 11 }),
+      { candidates: 'store' },
+    );
+    expect(result).toEqual({ outcome: 'ambiguous', candidates: [9n, 10n], stored: false });
+    expect(heldK1Coin(ALICE, NIGHT)?.nonce).toBe(NONCE);
+    expect(heldK1Coin(ALICE, NIGHT)?.value).toBe(100n);
   });
 
   it('stores NOTHING when the transaction had several outputs, and hands back every candidate', async () => {
@@ -419,7 +506,7 @@ describe('learning a position from the chain', () => {
       { colour: NIGHT, nonce: NONCE, value: 100n, txId: TX },
       reader({ startIndex: 4, endIndex: 7 }),
     );
-    expect(result).toEqual({ outcome: 'ambiguous', candidates: [4n, 5n, 6n] });
+    expect(result).toEqual({ outcome: 'ambiguous', candidates: [4n, 5n, 6n], stored: false });
     expect(heldK1Coin(ALICE, NIGHT)).toBeNull();
   });
 
@@ -775,7 +862,7 @@ describe('a coin whose position the chain gave two answers for', () => {
       { colour: NIGHT, nonce: NONCE, value: 60n, txId: 'tx-1' },
       reader,
     );
-    expect(reported).toEqual({ outcome: 'ambiguous', candidates: [10n, 11n] });
+    expect(reported).toEqual({ outcome: 'ambiguous', candidates: [10n, 11n], stored: false });
     expect(heldK1Coin(ALICE, NIGHT)).toBeNull();
 
     const stored = await reconcileK1CoinFromChain(
@@ -784,7 +871,7 @@ describe('a coin whose position the chain gave two answers for', () => {
       reader,
       { candidates: 'store' },
     );
-    expect(stored).toEqual({ outcome: 'ambiguous', candidates: [10n, 11n] });
+    expect(stored).toEqual({ outcome: 'ambiguous', candidates: [10n, 11n], stored: true });
     expect(heldK1Coin(ALICE, NIGHT)?.mtIndex).toBe(10n);
     expect(k1CoinCandidates(ALICE, NIGHT)).toEqual([10n, 11n]);
   });
@@ -927,6 +1014,31 @@ describe('a change coin waiting for its position', () => {
     expect(k1ColourBalance(ALICE, NIGHT)).toBe(0n);
   });
 
+  /* THE DEFECT THIS CATCHES left a change coin "arriving" for ever. A spend
+     files its change the instant the circuit returns, when the only name for
+     the transaction is midnight-js's identifier — and a sponsored transaction
+     is superseded, so the indexer cannot answer a commitment window for that
+     id. Renaming the row to the chain's hash is what lets it ever settle. */
+  it('settles a change coin once the row is renamed to the chain hash', async () => {
+    const TX = 'ab'.repeat(33);
+    putK1Coin(ALICE, coin());
+    rememberK1ChangeCoin(ALICE, NIGHT, CHANGE, 'midnight-js-identifier');
+    const reader = vi
+      .fn<K1CommitmentWindowReader>()
+      .mockImplementation((txId) =>
+        Promise.resolve(txId === TX ? { startIndex: 8, endIndex: 9 } : null),
+      );
+
+    /* Under the identifier the chain has never heard of, it stays where it is. */
+    expect((await settleK1AwaitingCoin(ALICE, NIGHT, reader)).outcome).toBe('unavailable');
+    expect(awaitingK1Coins(ALICE)).toHaveLength(1);
+
+    renameK1AwaitingTx(ALICE, NIGHT, TX);
+    expect((await settleK1AwaitingCoin(ALICE, NIGHT, reader)).outcome).toBe('learned');
+    expect(heldK1Coin(ALICE, NIGHT)?.mtIndex).toBe(8n);
+    expect(awaitingK1Coins(ALICE)).toEqual([]);
+  });
+
   it('files itself the moment the chain answers, and is spendable then', async () => {
     putK1Coin(ALICE, coin());
     rememberK1ChangeCoin(ALICE, NIGHT, CHANGE, 'tx-withdraw');
@@ -937,6 +1049,7 @@ describe('a change coin waiting for its position', () => {
     expect(await settleK1AwaitingCoin(ALICE, NIGHT, reader)).toEqual({
       outcome: 'learned',
       coin: { colour: NIGHT, nonce: OTHER_NONCE, value: 60n, mtIndex: 8n },
+      placed: 'held',
     });
     expect(reader).toHaveBeenCalledWith('tx-withdraw');
     expect(heldK1Coin(ALICE, NIGHT)?.mtIndex).toBe(8n);
@@ -952,6 +1065,7 @@ describe('a change coin waiting for its position', () => {
     expect(await settleK1AwaitingCoin(ALICE, NIGHT, reader)).toEqual({
       outcome: 'ambiguous',
       candidates: [8n, 9n],
+      stored: true,
     });
     expect(heldK1Coin(ALICE, NIGHT)?.mtIndex).toBe(8n);
     expect(k1CoinCandidates(ALICE, NIGHT)).toEqual([8n, 9n]);

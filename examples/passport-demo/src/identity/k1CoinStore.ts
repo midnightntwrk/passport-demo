@@ -916,6 +916,28 @@ export async function settleK1AwaitingCoin(
   return outcome;
 }
 
+/**
+ * Re-file an awaiting coin under the transaction the CHAIN knows it by.
+ *
+ * A spend writes its change down the instant the circuit returns, and at that
+ * moment the only name for the transaction is midnight-js's own identifier. A
+ * sponsored transaction is superseded by the balanced one, so that identifier
+ * is a key the indexer cannot answer commitment windows for — a change coin
+ * filed under it stays "arriving" for ever however often it is asked about.
+ * Once `resolveHash` has the chain's hash, the row is renamed to it.
+ *
+ * Silent when there is nothing waiting in that colour.
+ */
+export function renameK1AwaitingTx(account: K1Account, colour: string, txId: string): void {
+  const target = requireAccount(account);
+  const wanted = requireColour(colour);
+  if (typeof txId !== 'string' || txId.trim() === '') return;
+  editStore(target, (draft) => {
+    if (!Object.hasOwn(draft.awaiting, wanted)) return;
+    draft.awaiting[wanted] = { ...draft.awaiting[wanted], txId };
+  });
+}
+
 /* -------------------------------------------------------------------------- */
 /* A position that is a guess, and how it stops being one                     */
 /* -------------------------------------------------------------------------- */
@@ -1143,8 +1165,17 @@ export interface K1PendingCoin {
  * store that confidently holds the wrong answer.
  */
 export type K1Reconciliation =
-  | { readonly outcome: 'learned'; readonly coin: K1HeldCoin }
-  | { readonly outcome: 'ambiguous'; readonly candidates: readonly bigint[] }
+  | { readonly outcome: 'learned'; readonly coin: K1HeldCoin; readonly placed: 'held' | 'queued' }
+  | {
+      readonly outcome: 'ambiguous';
+      readonly candidates: readonly bigint[];
+      /** Whether the candidates were written down, or only reported. */
+      readonly stored: boolean;
+    }
+  /** The nonce is one this account has already spent. Nothing was written. */
+  | { readonly outcome: 'spent'; readonly nonce: string }
+  /** The coin is already held or already queued, at whatever position it has. */
+  | { readonly outcome: 'known'; readonly nonce: string }
   | { readonly outcome: 'unavailable'; readonly reason: string }
   | { readonly outcome: 'refused'; readonly reason: string };
 
@@ -1208,6 +1239,22 @@ export async function reconcileK1CoinFromChain(
     return { outcome: 'refused', reason: 'A reconciliation needs the transaction that produced the coin.' };
   }
 
+  /* WHAT THE STORE ALREADY KNOWS, ASKED BEFORE THE CHAIN IS.
+     This function used to end in `putK1Coin`, which writes the held slot of a
+     colour whatever was in it. The inbox walk runs on every Home open and after
+     every payment, so a Passport paid 100, having spent 40, re-walked its own
+     inbox and wrote the SPENT hundred back over the sixty of change — deleting
+     the change's candidate positions with it. An entry whose nonce this account
+     has spent is history; one it already holds or has queued is not news; and
+     neither is worth a question to the indexer. */
+  const state = loadK1CoinStore(target);
+  if (state.spentNonces.includes(nonce)) return { outcome: 'spent', nonce };
+  const heldRow = Object.hasOwn(state.coins, colour) ? state.coins[colour] : null;
+  const queue = Object.hasOwn(state.queued, colour) ? state.queued[colour] : [];
+  if (heldRow?.nonceHex === nonce || queue.some((row) => row.nonceHex === nonce)) {
+    return { outcome: 'known', nonce };
+  }
+
   let window: K1CommitmentWindow | null;
   try {
     window = await reader(pending.txId);
@@ -1231,14 +1278,23 @@ export async function reconcileK1CoinFromChain(
   if (end - start > 1) {
     const candidates: bigint[] = [];
     for (let index = start; index < end; index += 1) candidates.push(BigInt(index));
-    if (options.candidates === 'store') {
-      putK1CoinCandidates(target, { colour, nonce, value }, candidates);
-    }
-    return { outcome: 'ambiguous', candidates };
+    /* CANDIDATES GO IN THE HELD SLOT OR NOWHERE. `putK1CoinCandidates` writes
+       that slot, so storing them over a coin of the same colour would be the
+       overwrite this function was just taught not to make. A colour that is
+       already holding something keeps it and this one is reported — the
+       difference is `stored`, so the caller can say "arriving" rather than
+       claiming a position nothing wrote. */
+    const stored = options.candidates === 'store' && heldRow === null;
+    if (stored) putK1CoinCandidates(target, { colour, nonce, value }, candidates);
+    return { outcome: 'ambiguous', candidates, stored };
   }
   const coin: K1HeldCoin = { colour, nonce, value, mtIndex: BigInt(start) };
-  putK1Coin(target, coin);
-  return { outcome: 'learned', coin };
+  /* THE ENQUEUE RULE, not a write of the held slot: first coin of a colour is
+     held, every later one queues behind it. */
+  const placement = enqueueK1Coin(target, coin);
+  if (placement === 'spent') return { outcome: 'spent', nonce };
+  if (placement === 'known') return { outcome: 'known', nonce };
+  return { outcome: 'learned', coin, placed: placement };
 }
 
 /* -------------------------------------------------------------------------- */
