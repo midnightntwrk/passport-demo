@@ -120,6 +120,16 @@ jobs:
       - name: Install
         run: npm ci
 
+      # THE ONE CLAIM NOTHING ELSE CAN CHECK. `managed/account-custody` is the
+      # compiler output of a contract that is NOT ours and has no copy in this
+      # repository — `contract/contracts/account.compact` on
+      # midnightntwrk/passport, consumed unchanged at a pinned commit. The
+      # artefact manifest hashes the OUTPUT, so it cannot say which source
+      # produced it. This fetches that source and requires the lock, the
+      # digest, and the provenance beside the build to agree.
+      - name: Verify the account custody contract is the pinned upstream one
+        run: node .github/workflows/scripts/verify-account-custody-source.mjs
+
       # `vite build` stages these through `prepare-zk-assets.mjs`, which also
       # wants the prover keys and refuses to run without them. The typecheck and
       # the unit tests need only the contract MODULE, and those four files are
@@ -131,7 +141,12 @@ jobs:
           set -euo pipefail
           # account-v1 is the eleven-circuit build every Passport set up before
           # 2026/09/10 carries; the app opens those with it (accountModuleFor).
-          for contract in account account-v1 midnames; do
+          # account-custody is the build of the upstream account custody
+          # contract, checked against its pinned source in the step above. Its
+          # MODULE is tracked like the others and the unit tests load it; its
+          # ZK artefacts are in no release bundle yet and nothing here wants
+          # them.
+          for contract in account account-v1 account-custody midnames; do
             # Under `contract/`, not one level flatter: since 2026/09/10 the account
             # module names its own peer as `../../account/contract/index.js`, a path
             # compactc writes literally, and this is the layout that resolves it

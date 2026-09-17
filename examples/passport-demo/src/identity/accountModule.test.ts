@@ -37,7 +37,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { contractAssetBase, contractAssetContract } from './contractRuntime.js';
+import { contractAssetBase, contractAssetContract, loadContractModule } from './contractRuntime.js';
 
 const here = resolve(fileURLToPath(import.meta.url), '..');
 const managed = resolve(here, '..', '..', '..', 'passport-balancer', 'contracts-stagenet', 'managed');
@@ -176,5 +176,125 @@ describe('contractAssetBase', () => {
 
   it('leaves midnames where it was', () => {
     expect(contractAssetBase('midnames')).toBe('https://passport.example/zk/midnames');
+  });
+
+  it('gives account-custody a tree of its own, because it shares not one file', () => {
+    /* The opposite of the v1 rule above, and for the opposite reason: this is
+       a different contract compiled with a different feature flag, so every
+       key, every ZKIR file, and the manifest that vouches for them are its
+       own. Pointing it at `/zk/account` would fetch a manifest that has never
+       heard of a `_with_k256` circuit. */
+    expect(contractAssetContract('account-custody')).toBe('account-custody');
+    expect(contractAssetBase('account-custody')).toBe('https://passport.example/zk/account-custody');
+    expect(contractAssetBase('account-custody')).not.toBe(contractAssetBase('account'));
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The account custody module, and whether its build hangs together                    */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * THE THIRD MODULE LOADS, AND ITS ARTEFACT MANIFEST COVERS IT.
+ *
+ * `account-custody` is the account custody build — the contract that can carry a
+ * secp256k1 device beside a JubJub one — and nothing in the app asks for it
+ * yet. What is drilled here is the pair of facts that have to be true before
+ * anything can: that `loadContractModule('account-custody')` reaches a module this
+ * app's `@midnight-ntwrk/compact-runtime` accepts, and that the manifest
+ * committed beside it accounts for every circuit that module declares.
+ *
+ * The second is what caught nothing yet and would catch a half-copied build:
+ * a module staged from one compile beside a manifest from another is a PWA
+ * that fails at its first prove, and the ZK artefacts themselves are not in
+ * git to compare against.
+ *
+ * THIRTY, not the sixty-nine `contract-info.json` counts. The information file
+ * lists every exported circuit, pure ones included; only the thirty IMPURE
+ * ones are entry points, and only those have keys.
+ */
+describe('the account-custody module', () => {
+  /* the account custody build declares ONE witness, where the prototype declares three.
+     Nothing is called; the constructor only wants the field to exist. */
+  const CUSTODY_WITNESSES = { held_coin: () => undefined };
+
+  async function custody(): Promise<{
+    Contract: new (witnesses: unknown) => { impureCircuits: Record<string, unknown> };
+    expectedVk: Record<string, string>;
+  }> {
+    return (await loadContractModule('account-custody')) as unknown as {
+      Contract: new (witnesses: unknown) => { impureCircuits: Record<string, unknown> };
+      expectedVk: Record<string, string>;
+    };
+  }
+
+  it('loads through loadContractModule, under the runtime this app resolves', async () => {
+    /* The generated module opens with `checkRuntimeVersion('0.19.0')`, which
+       throws if the `compact-runtime` resolved from its staged location is not
+       that one. Getting a circuit surface back at all is the assertion. */
+    const module = await custody();
+    expect(typeof module.Contract).toBe('function');
+  });
+
+  it('declares exactly the thirty provable circuits the build has keys for', async () => {
+    const module = await custody();
+    const circuits = Object.keys(new module.Contract(CUSTODY_WITNESSES).impureCircuits);
+    expect(circuits).toHaveLength(30);
+    /* The discriminator `accountBuildFromOperations` reads off the chain. If
+       this name ever moves, that decision is reading for a circuit no build
+       has, and every account custody account is opened with the wrong module. */
+    expect(circuits).toContain('withdraw_shielded_with_k256');
+  });
+
+  it('carries the k256 arm, which is the whole reason it exists', async () => {
+    const module = await custody();
+    const circuits = Object.keys(new module.Contract(CUSTODY_WITNESSES).impureCircuits);
+    const k256 = circuits.filter((circuit) => circuit.endsWith('_with_k256'));
+    const jubjub = circuits.filter((circuit) => circuit.endsWith('_with_jubjub'));
+    /* Two arms of the same size: every gated operation exists on both curves,
+       which is what lets a passkey device and a Dynamic device hold one
+       account between them. */
+    expect(k256.length).toBeGreaterThan(0);
+    expect(k256).toHaveLength(jubjub.length);
+  });
+
+  it('is not the prototype build under another name', async () => {
+    const module = await custody();
+    const circuits = Object.keys(new module.Contract(CUSTODY_WITNESSES).impureCircuits);
+    /* No shared key file, no shared tree, and here is the reason in the
+       module: the prototype's twelve circuits are not a subset of these. */
+    expect(circuits).not.toContain('transfer_shielded_to_account');
+    expect(await circuitsOf('account')).not.toContain('withdraw_shielded_with_k256');
+  });
+
+  it('finds every circuit’s verifier key in its OWN manifest, at the hash it expects', async () => {
+    const manifest = manifestOf('account-custody');
+    const module = await custody();
+    const circuits = Object.keys(new module.Contract(CUSTODY_WITNESSES).impureCircuits);
+    for (const circuit of circuits) {
+      const entry = manifest.keys?.[`${circuit}.verifier`];
+      expect(entry, `/zk/account-custody/keys/${circuit}.verifier`).toBeDefined();
+      expect(entry?.hash, `${circuit} verifier key hash`).toBe(module.expectedVk[circuit]);
+    }
+  });
+
+  it('finds every circuit’s prover key and ZKIR there too', async () => {
+    const manifest = manifestOf('account-custody');
+    const module = await custody();
+    for (const circuit of Object.keys(new module.Contract(CUSTODY_WITNESSES).impureCircuits)) {
+      expect(manifest.keys?.[`${circuit}.prover`], `keys/${circuit}.prover`).toBeDefined();
+      expect(manifest.zkir?.[`${circuit}.bzkir`], `zkir/${circuit}.bzkir`).toBeDefined();
+    }
+  });
+
+  it('has a manifest that names sixty key files and sixty IR files, and nothing spare', () => {
+    /* Thirty circuits, a prover and a verifier each. A spare entry would mean
+       the manifest and the module came from different compiles — the failure
+       no hash of a bundle can see. */
+    const manifest = manifestOf('account-custody');
+    const files = (section: Record<string, { type: string }> | undefined) =>
+      Object.entries(section ?? {}).filter(([name, entry]) => name !== 'type' && entry.type === 'file');
+    expect(files(manifest.keys)).toHaveLength(60);
+    expect(files(manifest.zkir)).toHaveLength(60);
   });
 });

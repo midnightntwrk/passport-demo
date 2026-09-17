@@ -27,6 +27,17 @@ examples/passport-demo/contracts/stagenet/
 # ARE tracked — see .github/workflows/deploy-demo.yml.
 examples/passport-balancer/contracts-stagenet/managed/*/keys/
 examples/passport-balancer/contracts-stagenet/managed/*/zkir/
+# Prover keys that never reach a browser. sync-account-custody-contract.mjs
+# parks the account custody build's 3.2 GB here rather than in keys/, so that
+# `keys/` is what it is everywhere else — the verifier keys a browser fetches.
+# This directory is what an operator copies to the proving server.
+examples/passport-balancer/contracts-stagenet/managed/*/prover-keys/
+# The account custody contract, downloaded rather than kept. It is Nicolas's
+# and no copy of it lives in this repository: scripts/sync-account-custody-contract.mjs
+# fetches it from the commit pinned in scripts/account-custody-contract.lock.json,
+# checks its sha256, and compiles it into managed/account-custody. Only the
+# compiler output of that unchanged source is tracked.
+examples/passport-balancer/contracts-stagenet/upstream/
 
 # Vercel CLI link state and the locally assembled Build Output (see
 # scripts/build-vercel-output.mjs). Never committed — the deployed artefacts
