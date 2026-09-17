@@ -1492,12 +1492,56 @@ export async function resolveTxCommitmentWindowOnce(
   indexerHttpUrl: string,
   identifier: string,
 ): Promise<{ startIndex: number; endIndex: number } | null> {
+  const window = await commitmentWindowAt(indexerHttpUrl, `{ identifier: "${identifier}" }`);
+  return window === 'refused' ? null : window;
+}
+
+/**
+ * The same window, asked for by the transaction's HASH rather than by the
+ * 33-byte identifier midnight-js reports.
+ *
+ * WHY BOTH EXIST. A coin recovered from an account's own list of deliveries is
+ * identified by the transaction that wrote the entry, and the only place that
+ * transaction is named is the contract's action history — which answers a
+ * `hash` (`./custodyInboxIndex.ts`, `src/verify/indexer.ts`). Nothing in that
+ * answer carries an identifier, and the two are different values: the
+ * identifier is what a submitting client holds and the hash is what the chain
+ * knows (the lesson written down in `docs/demo/dynamic-build-out-plan.md` §6).
+ * Asking with one where the schema wants the other returns nothing at all,
+ * which the store would read as "not answered yet" and retry for ever.
+ *
+ * THE SCHEMA TAKES EITHER. `TransactionOffset` accepts `{ hash }` or
+ * `{ identifier }` — introspected against the v4 endpoint on 2026/08/04 and
+ * written down in `../lib/indexerTx.ts`, which is why this is a hash offset
+ * rather than a hash resolved to an identifier first. A deployment that refuses
+ * the `hash` spelling falls back to the identifier form with the same value, so
+ * the caller gets an answer wherever one can be had; nothing is invented when
+ * neither spelling works, and `null` means what it always means here.
+ */
+export async function resolveTxCommitmentWindowByHashOnce(
+  indexerHttpUrl: string,
+  hash: string,
+): Promise<{ startIndex: number; endIndex: number } | null> {
+  const byHash = await commitmentWindowAt(indexerHttpUrl, `{ hash: "${hash}" }`);
+  if (byHash !== 'refused') return byHash;
+  const byIdentifier = await commitmentWindowAt(indexerHttpUrl, `{ identifier: "${hash}" }`);
+  return byIdentifier === 'refused' ? null : byIdentifier;
+}
+
+/**
+ * One commitment-window lookup at whatever offset the caller names, under both
+ * spellings of the two fields. `'refused'` is a schema that knew neither.
+ */
+async function commitmentWindowAt(
+  indexerHttpUrl: string,
+  offset: string,
+): Promise<{ startIndex: number; endIndex: number } | null | 'refused'> {
   const ask = async (
     startField: string,
     endField: string,
   ): Promise<{ startIndex: number; endIndex: number } | null | 'refused'> => {
     const query =
-      `{ transactions(offset: { identifier: "${identifier}" }) ` +
+      `{ transactions(offset: ${offset}) ` +
       `{ ... on RegularTransaction { ${startField} ${endField} } } }`;
     try {
       const response = await fetch(indexerHttpUrl, {
@@ -1530,8 +1574,7 @@ export async function resolveTxCommitmentWindowOnce(
   };
   const first = await ask('startIndex', 'endIndex');
   if (first !== 'refused') return first;
-  const second = await ask('zswapStartIndex', 'zswapEndIndex');
-  return second === 'refused' ? null : second;
+  return ask('zswapStartIndex', 'zswapEndIndex');
 }
 
 /**

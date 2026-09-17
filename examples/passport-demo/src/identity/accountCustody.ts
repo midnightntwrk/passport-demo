@@ -1861,8 +1861,16 @@ export async function withdrawShielded(
  * Decodes an `mn_shield-addr…` into its two keys, refusing wrong networks the
  * same way {@link unshieldedAddressBytes} does — a shielded withdrawal to an
  * address from another network would be unrecoverable.
+ *
+ * EXPORTED for the one caller that needs the keys and not the withdrawal:
+ * `withdraw_shielded_with_k256` on the account custody build takes a 32-byte
+ * coin public key rather than an address, and the Dynamic screen's shielded
+ * send pays that leg into its OWN receiving address. Letting it decode with the
+ * address SDK itself would be a second copy of the network check below, which
+ * is the check that stops a stagenet payment being sent to a mainnet-shaped
+ * address and vanishing.
  */
-async function decodeShieldedRecipient(
+export async function decodeShieldedRecipient(
   address: string,
   networkId: string,
 ): Promise<{ coinPublicKey: Uint8Array; encryptionPublicKey: Uint8Array }> {
