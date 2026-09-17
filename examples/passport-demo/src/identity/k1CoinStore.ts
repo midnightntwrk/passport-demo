@@ -69,15 +69,48 @@
  *
  * WHAT THIS MODULE IS NOT
  * -----------------------
- * It is not wired into anything. No screen reads it, no flow writes it, and
- * nothing in the app's behaviour changes by its existing — the k1 module itself
- * does not exist yet (design §1). It holds no DOM, no React, no wallet SDK, and
- * no network: {@link reconcileK1CoinFromChain} is handed a reader rather than
- * making a query, so the whole of this file is drilled directly in
+ * It holds no DOM, no React, no wallet SDK, and no network:
+ * {@link reconcileK1CoinFromChain} is handed a reader rather than making a
+ * query, so the whole of this file is drilled directly in
  * `./k1CoinStore.test.ts` and sits in the coverage denominator at 100%. The
  * reader it is handed on a real connection is
  * `./contractRuntime.ts`'s `resolveTxCommitmentWindowOnce`, which is where the
  * indexer and its ten-second ceiling live.
+ *
+ * WHAT THE SPEND ADDED (2026/09/17)
+ * ---------------------------------
+ * The store is now WIRED IN: `./custodyContractClient.ts` serves it to
+ * midnight-js as the custody connection's private-state provider, so
+ * `held_coin` reads `context.privateState.coins[colourHex]` and a shielded
+ * spend is a read of this file. Three things follow, and all three are here
+ * rather than in the flow that needed them, because they are facts about what
+ * an account holds and not steps in a send.
+ *
+ *   1. SPENT NONCES. A withdrawal consumes the whole held coin. The nonce it
+ *      consumed is recorded ({@link replaceK1Coin}, {@link dropK1Coin}) and
+ *      never accepted back — not by an inbox walk that re-reads the entry that
+ *      first described it, and not by midnight-js writing the private state it
+ *      read BEFORE the call back over the top of the change afterwards. See
+ *      {@link k1PrivateStateProvider} for that second one, which is the
+ *      dangerous one: it is a write this module does not make and cannot see
+ *      coming.
+ *   2. A QUEUE. The contract holds any number of coins per colour and
+ *      `held_coin(color)` can name exactly one, so the second and later coins
+ *      of a colour are {@link enqueueK1Coin}d instead of overwriting the first.
+ *      What an account HOLDS of a colour is therefore held + queued
+ *      ({@link k1ColourBalance}); what it can send in one payment is the held
+ *      coin alone, which is a real limit and is said in a sentence rather than
+ *      hidden (`./custodyContractSend.ts`).
+ *   3. CANDIDATE POSITIONS. A withdrawal's transaction carries TWO shielded
+ *      outputs — the recipient's note and the contract's change — so the
+ *      commitment window it lands in gives two positions and no way to tell
+ *      them apart from here. {@link putK1CoinCandidates} keeps both, in order,
+ *      with the first as the current guess; a spend that fails to prove
+ *      against it moves to the next ({@link advanceK1CoinCandidate}) and a
+ *      spend that proves settles it ({@link settleK1Coin}). A guess is never
+ *      written as a fact: a coin with candidates outstanding says so, in the
+ *      store, until the chain has been asked the only question that decides it
+ *      — can this position be proved.
  */
 
 import { normalisedColourHex } from '../lib/colour.js';
@@ -127,6 +160,42 @@ export interface K1CoinStoreState {
   readonly encSecretKeyHex: string | null;
   /** Colour (64-hex, lowercase) → the one coin held in it. */
   readonly coins: Record<string, StoredK1Coin>;
+  /**
+   * Colour → the account's FURTHER coins of that colour, oldest first.
+   *
+   * Not part of the reference's shape, and it cannot be: the witness takes a
+   * colour and returns a coin, so a second coin of a colour has nowhere to go
+   * in `coins` and would otherwise be dropped by the write that stored the
+   * first. A dropped description is an unspendable balance for ever, so they
+   * are kept here and promoted into `coins` one at a time as spends empty it.
+   *
+   * The witness never reads this. A private state carrying a field the
+   * contract's witness does not name costs nothing — the witness reads
+   * `coins` — and losing the coins would cost everything.
+   */
+  readonly queued: Record<string, readonly StoredK1Coin[]>;
+  /**
+   * Every coin nonce a withdrawal has consumed, newest last.
+   *
+   * The store's memory of what is GONE, which is as load-bearing as its memory
+   * of what is held: a consumed coin is still described by the inbox entry
+   * that announced it and by the private state midnight-js read before the
+   * spend, and both of those are re-read afterwards. Without this list either
+   * of them puts the spent coin back and the account spends a coin that no
+   * longer exists — a proof that fails, every time, naming nothing a reader
+   * could act on.
+   */
+  readonly spentNonces: readonly string[];
+  /**
+   * Colour → the commitment-tree positions a held coin might occupy, in the
+   * order they are to be tried, when the chain gave more than one.
+   *
+   * The head is always the position in `coins[colour].mtIndex`, so a reader
+   * that knows nothing about candidates still reads a complete coin. An empty
+   * or absent list means the position is SETTLED — either the transaction had
+   * one output, or a spend proved against it.
+   */
+  readonly mtIndexCandidates: Record<string, readonly string[]>;
 }
 
 /**
@@ -214,6 +283,49 @@ function rowFromCoin(coin: K1HeldCoin): StoredK1Coin {
   };
 }
 
+/**
+ * The queued rows of one colour, filtered the way {@link readAll} filters the
+ * held ones — the key has to agree with the row, and a row that is not a coin
+ * is dropped rather than repaired.
+ */
+function queuedRowsFrom(colourKey: string, rows: unknown): StoredK1Coin[] {
+  if (!Array.isArray(rows)) return [];
+  const wanted = normalisedColourHex(colourKey);
+  const kept: StoredK1Coin[] = [];
+  for (const row of rows as unknown[]) {
+    const coin = coinFromRow(row);
+    if (coin === null || coin.colour !== wanted) continue;
+    kept.push(rowFromCoin(coin));
+  }
+  return kept;
+}
+
+/** A stored list of 64-hex nonces, deduplicated, oldest first. */
+function nonceListFrom(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const kept: string[] = [];
+  for (const entry of value as unknown[]) {
+    /* `typeof` first, because the normaliser takes a string and a stored list
+       is whatever JSON somebody else's build left behind. */
+    const nonce = typeof entry === 'string' ? normalisedColourHex(entry) : null;
+    if (nonce === null || kept.includes(nonce)) continue;
+    kept.push(nonce);
+  }
+  return kept;
+}
+
+/** A stored candidate list: decimal positions, in the order they are tried. */
+function candidateListFrom(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const kept: string[] = [];
+  for (const entry of value as unknown[]) {
+    const index = normalisedDecimal(entry);
+    if (index === null || kept.includes(index)) continue;
+    kept.push(index);
+  }
+  return kept;
+}
+
 /** Every account's state, with unreadable accounts and rows filtered out. */
 function readAll(): Record<string, K1CoinStoreState> {
   try {
@@ -237,9 +349,33 @@ function readAll(): Record<string, K1CoinStoreState> {
           coins[coin.colour] = rowFromCoin(coin);
         }
       }
+      const queued = emptyMap<readonly StoredK1Coin[]>();
+      if (entry.queued && typeof entry.queued === 'object') {
+        for (const [colourKey, rows] of Object.entries(entry.queued as Record<string, unknown>)) {
+          const colour = normalisedColourHex(colourKey);
+          const kept = colour === null ? [] : queuedRowsFrom(colourKey, rows);
+          /* An empty list is not written back. A colour whose every queued row
+             was unreadable is a colour with nothing queued, and a key mapping
+             to `[]` would be a row this store hands out for ever. */
+          if (colour !== null && kept.length > 0) queued[colour] = kept;
+        }
+      }
+      const mtIndexCandidates = emptyMap<readonly string[]>();
+      if (entry.mtIndexCandidates && typeof entry.mtIndexCandidates === 'object') {
+        for (const [colourKey, list] of Object.entries(
+          entry.mtIndexCandidates as Record<string, unknown>,
+        )) {
+          const colour = normalisedColourHex(colourKey);
+          const kept = candidateListFrom(list);
+          if (colour !== null && kept.length > 0) mtIndexCandidates[colour] = kept;
+        }
+      }
       accounts[key] = {
         encSecretKeyHex: typeof entry.encSecretKeyHex === 'string' ? entry.encSecretKeyHex : null,
         coins,
+        queued,
+        spentNonces: nonceListFrom(entry.spentNonces),
+        mtIndexCandidates,
       };
     }
     return accounts;
@@ -293,7 +429,22 @@ function requireAccount(account: K1Account): K1Account {
 /* The store                                                                  */
 /* -------------------------------------------------------------------------- */
 
-const EMPTY_STATE: K1CoinStoreState = { encSecretKeyHex: null, coins: emptyMap() };
+/**
+ * A fresh empty state.
+ *
+ * A FUNCTION, not a shared constant, because the maps in it are mutable
+ * objects: one shared instance handed to two accounts is one account's coin
+ * appearing in the other's store the moment anything wrote to it in place.
+ */
+function emptyState(): K1CoinStoreState {
+  return {
+    encSecretKeyHex: null,
+    coins: emptyMap(),
+    queued: emptyMap(),
+    spentNonces: [],
+    mtIndexCandidates: emptyMap(),
+  };
+}
 
 /**
  * The whole private state of one account — what {@link k1PrivateStateProvider}
@@ -301,16 +452,106 @@ const EMPTY_STATE: K1CoinStoreState = { encSecretKeyHex: null, coins: emptyMap()
  */
 export function loadK1CoinStore(account: K1Account): K1CoinStoreState {
   const normalised = normalisedAccount(account);
-  if (normalised === null) return EMPTY_STATE;
+  if (normalised === null) return emptyState();
   const accounts = readAll();
   const key = k1AccountKey(normalised);
-  return Object.hasOwn(accounts, key) ? accounts[key] : EMPTY_STATE;
+  return Object.hasOwn(accounts, key) ? accounts[key] : emptyState();
 }
 
 function saveK1CoinStore(account: K1Account, state: K1CoinStoreState): void {
   const accounts = readAll();
   accounts[k1AccountKey(account)] = state;
   writeAll(accounts);
+}
+
+/**
+ * The state of one account, in a shape a writer can edit, and the save that
+ * puts it back.
+ *
+ * Every writer below goes through this rather than assembling a whole state
+ * itself: five fields assembled by hand in seven places is six places for a
+ * field to be quietly dropped, and a dropped `spentNonces` is a spent coin
+ * that comes back.
+ */
+interface K1StoreDraft {
+  encSecretKeyHex: string | null;
+  coins: Record<string, StoredK1Coin>;
+  queued: Record<string, StoredK1Coin[]>;
+  spentNonces: string[];
+  mtIndexCandidates: Record<string, string[]>;
+}
+
+function draftOf(state: K1CoinStoreState): K1StoreDraft {
+  const coins = emptyMap<StoredK1Coin>();
+  Object.assign(coins, state.coins);
+  const queued = emptyMap<StoredK1Coin[]>();
+  for (const [colour, rows] of Object.entries(state.queued)) queued[colour] = [...rows];
+  const mtIndexCandidates = emptyMap<string[]>();
+  for (const [colour, list] of Object.entries(state.mtIndexCandidates)) {
+    mtIndexCandidates[colour] = [...list];
+  }
+  return {
+    encSecretKeyHex: state.encSecretKeyHex,
+    coins,
+    queued,
+    spentNonces: [...state.spentNonces],
+    mtIndexCandidates,
+  };
+}
+
+/**
+ * How many spent nonces are remembered.
+ *
+ * Bounded because this list only ever grows and lives in storage somebody
+ * else's data shares, and unbounded growth in `localStorage` is how a write
+ * starts failing for reasons no screen can explain. The oldest are dropped
+ * first: a nonce spent a thousand coins ago cannot be offered back by an inbox
+ * walk that has long since passed it, and the write that would resurrect it —
+ * midnight-js handing back the private state it read before the last call — is
+ * about a coin spent moments ago, not months.
+ */
+const SPENT_NONCE_MEMORY = 256;
+
+function rememberSpentNonce(draft: K1StoreDraft, nonce: string): void {
+  if (draft.spentNonces.includes(nonce)) return;
+  draft.spentNonces.push(nonce);
+  if (draft.spentNonces.length > SPENT_NONCE_MEMORY) {
+    draft.spentNonces = draft.spentNonces.slice(-SPENT_NONCE_MEMORY);
+  }
+}
+
+/**
+ * Moves the next queued coin of a colour into the held slot, when the slot is
+ * empty and the queue is not.
+ *
+ * A colour with a queue and no held coin is a balance nobody can spend: the
+ * witness reads `coins[colour]` and finds nothing while the store plainly
+ * holds something. Every write that can empty the slot ends here.
+ */
+function promoteQueued(draft: K1StoreDraft, colour: string): void {
+  if (Object.hasOwn(draft.coins, colour)) return;
+  const queue = Object.hasOwn(draft.queued, colour) ? draft.queued[colour] : [];
+  const next = queue.shift();
+  if (next === undefined) return;
+  draft.coins[colour] = next;
+  if (queue.length === 0) delete draft.queued[colour];
+}
+
+function saveDraft(account: K1Account, draft: K1StoreDraft): void {
+  saveK1CoinStore(account, {
+    encSecretKeyHex: draft.encSecretKeyHex,
+    coins: draft.coins,
+    queued: draft.queued,
+    spentNonces: draft.spentNonces,
+    mtIndexCandidates: draft.mtIndexCandidates,
+  });
+}
+
+/** Load, edit, save — the shape every writer below has. */
+function editStore(account: K1Account, edit: (draft: K1StoreDraft) => void): void {
+  const draft = draftOf(loadK1CoinStore(account));
+  edit(draft);
+  saveDraft(account, draft);
 }
 
 /** The coin this account holds in this colour, or null. */
@@ -364,32 +605,231 @@ export function refuseK1Coin(coin: K1HeldCoin): string | null {
  */
 export function putK1Coin(account: K1Account, coin: K1HeldCoin): void {
   const target = requireAccount(account);
+  const normalised = requireCoin(coin);
+  editStore(target, (draft) => {
+    draft.coins[normalised.colour] = rowFromCoin(normalised);
+    /* A coin put here is a coin somebody KNOWS the position of — a
+       single-output transaction, or the winner of a candidate run. Any
+       outstanding guesses about that colour are about the coin that has just
+       been replaced, so they go with it. */
+    delete draft.mtIndexCandidates[normalised.colour];
+  });
+}
+
+/** The coin, normalised, or a throw carrying the refusal. */
+function requireCoin(coin: K1HeldCoin): K1HeldCoin {
   const refusal = refuseK1Coin(coin);
   if (refusal !== null) throw new Error(refusal);
-  const normalised: K1HeldCoin = {
+  return {
     colour: normalisedColourHex(coin.colour)!,
     nonce: normalisedColourHex(coin.nonce)!,
     value: coin.value,
     mtIndex: coin.mtIndex,
   };
-  const state = loadK1CoinStore(target);
-  const coins = emptyMap<StoredK1Coin>();
-  Object.assign(coins, state.coins);
-  coins[normalised.colour] = rowFromCoin(normalised);
-  saveK1CoinStore(target, { encSecretKeyHex: state.encSecretKeyHex, coins });
 }
 
-/** Forgets the coin held in a colour. Silent when there was none. */
+/**
+ * Forgets the coin held in a colour, remembering that its nonce is gone.
+ *
+ * Used where a coin has LEFT the account by a route that returns no change —
+ * and the nonce is recorded for the same reason {@link replaceK1Coin} records
+ * it: the description survives in an inbox entry and in whatever private state
+ * midnight-js last read, and both are re-read. Silent when there was none.
+ */
 export function dropK1Coin(account: K1Account, colour: string): void {
   const target = requireAccount(account);
+  const wanted = requireColour(colour);
+  editStore(target, (draft) => {
+    if (!Object.hasOwn(draft.coins, wanted)) return;
+    rememberSpentNonce(draft, draft.coins[wanted].nonceHex);
+    delete draft.coins[wanted];
+    delete draft.mtIndexCandidates[wanted];
+    promoteQueued(draft, wanted);
+  });
+}
+
+function requireColour(colour: string): string {
   const wanted = normalisedColourHex(colour);
   if (wanted === null) throw new Error(`Not a colour: ${JSON.stringify(colour)}.`);
+  return wanted;
+}
+
+/* -------------------------------------------------------------------------- */
+/* More than one coin of a colour                                             */
+/* -------------------------------------------------------------------------- */
+
+/** The further coins this account holds of a colour, oldest first. */
+export function queuedK1Coins(account: K1Account, colour: string): K1HeldCoin[] {
+  const wanted = normalisedColourHex(colour);
+  if (wanted === null) return [];
+  const state = loadK1CoinStore(account);
+  const queue = Object.hasOwn(state.queued, wanted) ? state.queued[wanted] : [];
+  return queue.map(coinFromStoredRow);
+}
+
+/**
+ * What this account holds of a colour: the held coin plus everything queued
+ * behind it.
+ *
+ * The figure a holder is shown. It is deliberately NOT the figure a single
+ * payment can draw on — that is the held coin alone, because the witness can
+ * name one coin — and the two are allowed to differ on screen only because the
+ * refusal that meets the difference says so in a sentence.
+ */
+export function k1ColourBalance(account: K1Account, colour: string): bigint {
+  const held = heldK1Coin(account, colour);
+  let total = held === null ? 0n : held.value;
+  for (const coin of queuedK1Coins(account, colour)) total += coin.value;
+  return total;
+}
+
+/** Whether a nonce belongs to a coin this account has already spent. */
+export function isK1NonceSpent(account: K1Account, nonce: string): boolean {
+  const wanted = normalisedColourHex(nonce);
+  if (wanted === null) return false;
+  return loadK1CoinStore(account).spentNonces.includes(wanted);
+}
+
+/**
+ * Remembers a coin WITHOUT displacing the one already held in its colour.
+ *
+ * The rule an inbox walk and a deposit both want: the first coin of a colour
+ * becomes the held one, and every later coin joins the queue behind it. A coin
+ * already known — same nonce, held or queued — is not stored twice, and a coin
+ * whose nonce has been spent is refused outright, which is what makes a second
+ * walk of the same inbox harmless.
+ *
+ * Returns where the coin went, because the caller's next sentence depends on
+ * it: `'held'` is spendable now, `'queued'` is arriving behind something, and
+ * `'spent'` or `'known'` are nothing happening at all.
+ */
+export function enqueueK1Coin(
+  account: K1Account,
+  coin: K1HeldCoin,
+): 'held' | 'queued' | 'known' | 'spent' {
+  const target = requireAccount(account);
+  const normalised = requireCoin(coin);
   const state = loadK1CoinStore(target);
-  if (!Object.hasOwn(state.coins, wanted)) return;
-  const coins = emptyMap<StoredK1Coin>();
-  Object.assign(coins, state.coins);
-  delete coins[wanted];
-  saveK1CoinStore(target, { encSecretKeyHex: state.encSecretKeyHex, coins });
+  if (state.spentNonces.includes(normalised.nonce)) return 'spent';
+  const held = Object.hasOwn(state.coins, normalised.colour)
+    ? state.coins[normalised.colour]
+    : null;
+  if (held !== null && held.nonceHex === normalised.nonce) return 'known';
+  const queue = Object.hasOwn(state.queued, normalised.colour)
+    ? state.queued[normalised.colour]
+    : [];
+  if (queue.some((row) => row.nonceHex === normalised.nonce)) return 'known';
+  editStore(target, (draft) => {
+    if (held === null) {
+      draft.coins[normalised.colour] = rowFromCoin(normalised);
+      return;
+    }
+    const existing = Object.hasOwn(draft.queued, normalised.colour)
+      ? draft.queued[normalised.colour]
+      : [];
+    existing.push(rowFromCoin(normalised));
+    draft.queued[normalised.colour] = existing;
+  });
+  return held === null ? 'held' : 'queued';
+}
+
+/* -------------------------------------------------------------------------- */
+/* A position that is a guess, and how it stops being one                     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Stores a coin whose position the chain gave more than one answer for.
+ *
+ * The first candidate becomes the coin's `mtIndex` and the rest wait beside
+ * it. That is not "storing a guess as a fact": the fact is the list, it is
+ * stored as a list, and the coin is only complete enough to TRY. The thing
+ * that decides is a proof — an incorrect qualified description is an
+ * unsatisfiable witness and no transaction is submitted (MIP-0012 INV-5) — so
+ * the sequence is try, fail cheaply, {@link advanceK1CoinCandidate}, try
+ * again, and {@link settleK1Coin} the one that worked.
+ *
+ * Refuses an empty list rather than storing a coin with no position at all.
+ */
+export function putK1CoinCandidates(
+  account: K1Account,
+  coin: Omit<K1HeldCoin, 'mtIndex'>,
+  candidates: readonly bigint[],
+): void {
+  const target = requireAccount(account);
+  if (candidates.length === 0) {
+    throw new Error('A coin whose position is not known needs at least one candidate position.');
+  }
+  const normalised = requireCoin({ ...coin, mtIndex: candidates[0] });
+  /* Every candidate is checked BEFORE anything is written, so a list with a
+     bad entry in the middle cannot leave the store holding half of it. */
+  const positions = candidates.map((index) => {
+    if (typeof index !== 'bigint' || index < 0n) {
+      throw new Error('A held coin needs a commitment-tree position of zero or more.');
+    }
+    return index.toString();
+  });
+  editStore(target, (draft) => {
+    draft.coins[normalised.colour] = rowFromCoin(normalised);
+    draft.mtIndexCandidates[normalised.colour] = positions;
+  });
+}
+
+/** The positions still to be tried for a colour, current guess first. */
+export function k1CoinCandidates(account: K1Account, colour: string): bigint[] {
+  const wanted = normalisedColourHex(colour);
+  if (wanted === null) return [];
+  const state = loadK1CoinStore(account);
+  const list = Object.hasOwn(state.mtIndexCandidates, wanted)
+    ? state.mtIndexCandidates[wanted]
+    : [];
+  return list.map((index) => BigInt(index));
+}
+
+/**
+ * The spend against the current position failed to prove; move to the next.
+ *
+ * Returns the coin as it now stands, or null when the candidates are
+ * exhausted. Exhausted does NOT drop the coin: the description is still the
+ * only one that exists, the failure may have been about something else
+ * entirely, and a re-reconciliation against the same transaction can hand back
+ * the same list to start again. What it does mean is that this module has
+ * nothing further to suggest, and the caller says so rather than looping.
+ */
+export function advanceK1CoinCandidate(account: K1Account, colour: string): K1HeldCoin | null {
+  const target = requireAccount(account);
+  const wanted = requireColour(colour);
+  const draft = draftOf(loadK1CoinStore(target));
+  const list = Object.hasOwn(draft.mtIndexCandidates, wanted)
+    ? draft.mtIndexCandidates[wanted]
+    : [];
+  const remaining = list.slice(1);
+  if (remaining.length === 0 || !Object.hasOwn(draft.coins, wanted)) {
+    /* Nothing left to try, or nothing to try it with. The list goes, because a
+       one-entry list says "still guessing" about a position nothing is going
+       to move off. */
+    delete draft.mtIndexCandidates[wanted];
+    saveDraft(target, draft);
+    return null;
+  }
+  draft.mtIndexCandidates[wanted] = remaining;
+  draft.coins[wanted] = { ...draft.coins[wanted], mtIndex: remaining[0] };
+  saveDraft(target, draft);
+  return coinFromStoredRow(draft.coins[wanted]);
+}
+
+/**
+ * The position in the store proved; it is a fact from here.
+ *
+ * Called on the success of a spend, which is the only evidence available:
+ * nothing the indexer says distinguishes the two outputs of a withdrawal, and
+ * a proof that verified against a position is the chain agreeing with it.
+ */
+export function settleK1Coin(account: K1Account, colour: string): void {
+  const target = requireAccount(account);
+  const wanted = requireColour(colour);
+  editStore(target, (draft) => {
+    delete draft.mtIndexCandidates[wanted];
+  });
 }
 
 /**
@@ -413,26 +853,29 @@ export function replaceK1Coin(
   change: K1HeldCoin | null,
 ): void {
   const target = requireAccount(account);
-  const spent = normalisedColourHex(spentColour);
-  if (spent === null) throw new Error(`Not a colour: ${JSON.stringify(spentColour)}.`);
-  if (change !== null) {
-    const refusal = refuseK1Coin(change);
-    if (refusal !== null) throw new Error(refusal);
-  }
-  const state = loadK1CoinStore(target);
-  const coins = emptyMap<StoredK1Coin>();
-  Object.assign(coins, state.coins);
-  delete coins[spent];
-  if (change !== null) {
-    const normalised: K1HeldCoin = {
-      colour: normalisedColourHex(change.colour)!,
-      nonce: normalisedColourHex(change.nonce)!,
-      value: change.value,
-      mtIndex: change.mtIndex,
-    };
-    coins[normalised.colour] = rowFromCoin(normalised);
-  }
-  saveK1CoinStore(target, { encSecretKeyHex: state.encSecretKeyHex, coins });
+  const spent = requireColour(spentColour);
+  const normalised = change === null ? null : requireCoin(change);
+  editStore(target, (draft) => {
+    /* THE SPENT NONCE IS RECORDED IN THE SAME WRITE. It has to be: the change
+       coin arrives on the private channel, and the private state midnight-js
+       hands back after the call is the one it READ BEFORE it — the spent coin
+       still in it. Two writes would leave a moment in which the store says the
+       coin is gone and does not yet say which one, and the write that lands in
+       that moment puts it back. */
+    if (Object.hasOwn(draft.coins, spent)) rememberSpentNonce(draft, draft.coins[spent].nonceHex);
+    delete draft.coins[spent];
+    /* The guesses were about the coin that has just been spent. Whatever the
+       change coin's position turns out to be, it is not one of them. */
+    delete draft.mtIndexCandidates[spent];
+    if (normalised !== null) {
+      draft.coins[normalised.colour] = rowFromCoin(normalised);
+      delete draft.mtIndexCandidates[normalised.colour];
+    }
+    /* No change, and a queue behind it: the next coin of that colour becomes
+       the held one, so a Passport that was paid twice can spend the second
+       payment the moment the first is gone. */
+    promoteQueued(draft, spent);
+  });
 }
 
 /**
@@ -443,10 +886,9 @@ export function replaceK1Coin(
  */
 export function rememberK1EncSecretKey(account: K1Account, encSecretKeyHex: string | null): void {
   const target = requireAccount(account);
-  const state = loadK1CoinStore(target);
-  const coins = emptyMap<StoredK1Coin>();
-  Object.assign(coins, state.coins);
-  saveK1CoinStore(target, { encSecretKeyHex, coins });
+  editStore(target, (draft) => {
+    draft.encSecretKeyHex = encSecretKeyHex;
+  });
 }
 
 /** Forgets everything this account holds. Used by a reset, never by a spend. */
@@ -542,6 +984,23 @@ export async function reconcileK1CoinFromChain(
   account: K1Account,
   pending: K1PendingCoin,
   reader: K1CommitmentWindowReader,
+  options: {
+    /**
+     * What to do when the transaction had more than one shielded output.
+     *
+     * `'report'`, the default, is the inbox walk's rule and the one the
+     * `'ambiguous'` doc above describes: say so and store nothing.
+     *
+     * `'store'` is the SPEND's rule, and it is new (2026/09/17). A withdrawal's
+     * transaction always has two outputs — the payee's note and the account's
+     * change — so `'report'` would make every change coin unstorable and every
+     * Dynamic Passport spendable exactly once. The candidates are kept in
+     * order instead ({@link putK1CoinCandidates}), which is not the same as
+     * writing a guess: the store says the position is one of these and the
+     * next spend is what decides.
+     */
+    readonly candidates?: 'report' | 'store';
+  } = {},
 ): Promise<K1Reconciliation> {
   const refusal = refuseK1Account(account);
   if (refusal !== null) return { outcome: 'refused', reason: refusal };
@@ -589,6 +1048,9 @@ export async function reconcileK1CoinFromChain(
   if (end - start > 1) {
     const candidates: bigint[] = [];
     for (let index = start; index < end; index += 1) candidates.push(BigInt(index));
+    if (options.candidates === 'store') {
+      putK1CoinCandidates(target, { colour, nonce, value }, candidates);
+    }
     return { outcome: 'ambiguous', candidates };
   }
   const coin: K1HeldCoin = { colour, nonce, value, mtIndex: BigInt(start) };
@@ -636,6 +1098,56 @@ export interface K1PrivateStateProvider {
   removeSigningKey(address: string): Promise<void>;
   clearSigningKeys(): Promise<void>;
   exportPrivateStates(): Promise<never>;
+}
+
+/**
+ * A private state handed back by midnight-js, merged into the store rather
+ * than written over it.
+ *
+ * THIS IS THE WRITE THAT WOULD OTHERWISE ERASE THE CHANGE COIN, and it is
+ * worth being exact about how. `submitCallTx` builds a call against the
+ * private state it reads BEFORE the circuit runs, carries the result of the
+ * witnesses in `nextPrivateState`, and on success writes that back:
+ * `privateStateProvider.set(id, callTxData.private.nextPrivateState)`
+ * (`@midnight-ntwrk/midnight-js-contracts`, `TransactionContext[Submit]`).
+ * `held_coin` is a READ — it returns the private state unchanged — so the
+ * state written back after a withdrawal is the one that still holds the coin
+ * the withdrawal has just consumed.
+ *
+ * The caller's own `replaceK1Coin` happens after that write resolves, so the
+ * ORDER is in our favour today. The order is not a thing to depend on: it is
+ * midnight-js's, it changed once already this release (`submitCallTxAsync`
+ * hands the write back to the caller entirely), and a store whose correctness
+ * rests on which of two writes lands last is a store that loses a coin the day
+ * somebody adds an await. So the merge makes the order not matter:
+ *
+ *   - a row whose nonce this store has recorded as SPENT is dropped. That is
+ *     the change coin's protection, and it is why {@link replaceK1Coin} writes
+ *     the spent nonce in the same write as the change;
+ *   - a colour this store already holds a coin in keeps the STORED coin. The
+ *     incoming state is a snapshot from before the call and can only be older;
+ *     nothing in it was learned after it was served;
+ *   - a colour the store does not hold is taken from the incoming state, so a
+ *     coin that reached the private state some other way is not lost;
+ *   - the queue, the spent nonces, and the candidate positions are this app's
+ *     own and are never taken from an incoming state. midnight-js round-trips
+ *     whatever it was served, so an incoming copy is at best equal and at
+ *     worst stale;
+ *   - a viewing secret is not cleared by a state that carries none.
+ */
+function mergeIntoK1CoinStore(account: K1Account, incoming: K1CoinStoreState): void {
+  editStore(account, (draft) => {
+    for (const [colourKey, row] of Object.entries(incoming.coins)) {
+      const coin = coinFromRow(row);
+      if (coin === null || coin.colour !== normalisedColourHex(colourKey)) continue;
+      if (draft.spentNonces.includes(coin.nonce)) continue;
+      if (Object.hasOwn(draft.coins, coin.colour)) continue;
+      draft.coins[coin.colour] = rowFromCoin(coin);
+    }
+    if (typeof incoming.encSecretKeyHex === 'string' && draft.encSecretKeyHex === null) {
+      draft.encSecretKeyHex = incoming.encSecretKeyHex;
+    }
+  });
 }
 
 function isCoinStoreState(state: unknown): state is K1CoinStoreState {
@@ -687,15 +1199,7 @@ export function k1PrivateStateProvider(account: K1Account): K1PrivateStateProvid
          and a coin that fails the check here is one that would be read back
          unspendable. */
       if (!isCoinStoreState(state)) return Promise.resolve();
-      const coins = emptyMap<StoredK1Coin>();
-      for (const [colourKey, row] of Object.entries(state.coins)) {
-        const coin = coinFromRow(row);
-        if (coin === null || coin.colour !== normalisedColourHex(colourKey)) continue;
-        coins[coin.colour] = rowFromCoin(coin);
-      }
-      const encSecretKeyHex =
-        typeof state.encSecretKeyHex === 'string' ? state.encSecretKeyHex : null;
-      saveK1CoinStore(target, { encSecretKeyHex, coins });
+      mergeIntoK1CoinStore(target, state);
       return Promise.resolve();
     },
     get(id: string): Promise<unknown> {

@@ -15,22 +15,31 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  advanceK1CoinCandidate,
+  enqueueK1Coin,
   forgetK1Account,
   heldK1Coin,
+  isK1NonceSpent,
   k1AccountKey,
+  k1CoinCandidates,
+  k1ColourBalance,
   k1PrivateStateId,
   k1PrivateStateProvider,
   listK1Coins,
   loadK1CoinStore,
   putK1Coin,
+  putK1CoinCandidates,
+  queuedK1Coins,
   dropK1Coin,
   reconcileK1CoinFromChain,
   refuseK1Account,
   refuseK1Coin,
   rememberK1EncSecretKey,
   replaceK1Coin,
+  settleK1Coin,
   type K1Account,
   type K1CommitmentWindow,
+  type K1CommitmentWindowReader,
   type K1HeldCoin,
 } from './k1CoinStore.js';
 
@@ -44,6 +53,15 @@ const NIGHT = '0'.repeat(64);
 const MUSD = '1a'.repeat(32);
 const NONCE = '7f'.repeat(32);
 const OTHER_NONCE = '3e'.repeat(32);
+
+/** The whole private state of an account that holds nothing. */
+const EMPTY_STORE = {
+  encSecretKeyHex: null,
+  coins: {},
+  queued: {},
+  spentNonces: [],
+  mtIndexCandidates: {},
+};
 
 function coin(patch: Partial<K1HeldCoin> = {}): K1HeldCoin {
   return { colour: NIGHT, nonce: NONCE, value: 100n, mtIndex: 42n, ...patch };
@@ -109,6 +127,9 @@ describe('a coin survives the thing that loses it today', () => {
           mtIndex: '9007199254740993',
         },
       },
+      queued: {},
+      spentNonces: [],
+      mtIndexCandidates: {},
     });
     expect(heldK1Coin(ALICE, NIGHT)?.value).toBe(2n ** 70n);
     expect(heldK1Coin(ALICE, NIGHT)?.mtIndex).toBe(9007199254740993n);
@@ -283,10 +304,7 @@ describe('what the store will not hold', () => {
   });
 
   it('answers empty rather than throwing when a READ names an account it cannot parse', () => {
-    expect(loadK1CoinStore({ network: '', address: ALICE.address })).toEqual({
-      encSecretKeyHex: null,
-      coins: {},
-    });
+    expect(loadK1CoinStore({ network: '', address: ALICE.address })).toEqual(EMPTY_STORE);
     expect(heldK1Coin({ network: '', address: ALICE.address }, NIGHT)).toBeNull();
     expect(heldK1Coin(ALICE, 'not-a-colour')).toBeNull();
     expect(listK1Coins({ network: '', address: ALICE.address })).toEqual([]);
@@ -333,9 +351,9 @@ describe('a storage blob that is not what this build wrote', () => {
       [k1AccountKey(BOB)]: 'not an object',
       [k1AccountKey(ALICE_ON_PREVIEW)]: { encSecretKeyHex: 12 },
     });
-    expect(loadK1CoinStore(ALICE)).toEqual({ encSecretKeyHex: 'ab', coins: {} });
-    expect(loadK1CoinStore(BOB)).toEqual({ encSecretKeyHex: null, coins: {} });
-    expect(loadK1CoinStore(ALICE_ON_PREVIEW)).toEqual({ encSecretKeyHex: null, coins: {} });
+    expect(loadK1CoinStore(ALICE)).toEqual({ ...EMPTY_STORE, encSecretKeyHex: 'ab' });
+    expect(loadK1CoinStore(BOB)).toEqual(EMPTY_STORE);
+    expect(loadK1CoinStore(ALICE_ON_PREVIEW)).toEqual(EMPTY_STORE);
   });
 
   it('cannot be made to write through `__proto__`', () => {
@@ -469,7 +487,7 @@ describe('the private-state provider midnight-js is given', () => {
     putK1Coin(ALICE, coin());
     const provider = k1PrivateStateProvider(ALICE);
     expect(await provider.get(provider.privateStateId)).toEqual({
-      encSecretKeyHex: null,
+      ...EMPTY_STORE,
       coins: { [NIGHT]: { nonceHex: NONCE, colorHex: NIGHT, value: '100', mtIndex: '42' } },
     });
   });
@@ -487,8 +505,11 @@ describe('the private-state provider midnight-js is given', () => {
     expect(listK1Coins(ALICE)).toEqual([{ colour: NIGHT, nonce: NONCE, value: 100n, mtIndex: 42n }]);
     expect(loadK1CoinStore(ALICE).encSecretKeyHex).toBe('ff'.repeat(32));
 
+    /* A state that carries NO secret does not clear the one the store holds.
+       The write comes from midnight-js handing back what it read, and what it
+       read is at best as new as the store — see `mergeIntoK1CoinStore`. */
     await provider.set(provider.privateStateId, { coins: {}, encSecretKeyHex: 12 });
-    expect(loadK1CoinStore(ALICE).encSecretKeyHex).toBeNull();
+    expect(loadK1CoinStore(ALICE).encSecretKeyHex).toBe('ff'.repeat(32));
   });
 
   it('ignores a write under its own id that is not a coin store at all', async () => {
@@ -537,5 +558,337 @@ describe('the private-state provider midnight-js is given', () => {
     await provider.clearSigningKeys();
     expect(await provider.getSigningKey('0xabc')).toBeNull();
     await expect(provider.exportPrivateStates()).rejects.toThrow(/not supported/);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+
+/**
+ * More than one coin of a colour, which the contract permits and the witness
+ * cannot describe.
+ *
+ * The failure this guards against is arithmetic that a holder can see: two
+ * payments arrive, the second write lands on the first, and a Passport that
+ * was paid twice shows one of them. The queue is the answer, and the rule that
+ * makes it safe is that the held slot is never empty while the queue is not.
+ */
+describe('a second coin of the same colour', () => {
+  it('queues behind the held one and counts towards the balance', () => {
+    expect(enqueueK1Coin(ALICE, coin({ value: 100n }))).toBe('held');
+    expect(enqueueK1Coin(ALICE, coin({ value: 250n, nonce: OTHER_NONCE, mtIndex: 43n }))).toBe(
+      'queued',
+    );
+    expect(heldK1Coin(ALICE, NIGHT)?.value).toBe(100n);
+    expect(queuedK1Coins(ALICE, NIGHT)).toEqual([
+      { colour: NIGHT, nonce: OTHER_NONCE, value: 250n, mtIndex: 43n },
+    ]);
+    expect(k1ColourBalance(ALICE, NIGHT)).toBe(350n);
+    expect(k1ColourBalance(ALICE, MUSD)).toBe(0n);
+  });
+
+  it('does not store the same coin twice, held or queued', () => {
+    enqueueK1Coin(ALICE, coin());
+    expect(enqueueK1Coin(ALICE, coin())).toBe('known');
+    enqueueK1Coin(ALICE, coin({ nonce: OTHER_NONCE }));
+    expect(enqueueK1Coin(ALICE, coin({ nonce: OTHER_NONCE }))).toBe('known');
+    expect(k1ColourBalance(ALICE, NIGHT)).toBe(200n);
+  });
+
+  it('refuses a coin this account has already spent, however it is offered again', () => {
+    putK1Coin(ALICE, coin());
+    replaceK1Coin(ALICE, NIGHT, null);
+    expect(isK1NonceSpent(ALICE, NONCE)).toBe(true);
+    expect(isK1NonceSpent(ALICE, OTHER_NONCE)).toBe(false);
+    expect(isK1NonceSpent(ALICE, 'not-a-nonce')).toBe(false);
+    expect(enqueueK1Coin(ALICE, coin())).toBe('spent');
+    expect(heldK1Coin(ALICE, NIGHT)).toBeNull();
+  });
+
+  it('promotes the next queued coin when a spend leaves no change', () => {
+    enqueueK1Coin(ALICE, coin({ value: 100n }));
+    enqueueK1Coin(ALICE, coin({ value: 250n, nonce: OTHER_NONCE, mtIndex: 43n }));
+    enqueueK1Coin(ALICE, coin({ value: 7n, nonce: 'a1'.repeat(32), mtIndex: 44n }));
+    replaceK1Coin(ALICE, NIGHT, null);
+    expect(heldK1Coin(ALICE, NIGHT)).toEqual({
+      colour: NIGHT,
+      nonce: OTHER_NONCE,
+      value: 250n,
+      mtIndex: 43n,
+    });
+    expect(queuedK1Coins(ALICE, NIGHT)).toHaveLength(1);
+    expect(k1ColourBalance(ALICE, NIGHT)).toBe(257n);
+  });
+
+  it('leaves the queue alone when the spend returned change', () => {
+    enqueueK1Coin(ALICE, coin({ value: 100n }));
+    enqueueK1Coin(ALICE, coin({ value: 250n, nonce: OTHER_NONCE, mtIndex: 43n }));
+    replaceK1Coin(ALICE, NIGHT, {
+      colour: NIGHT,
+      nonce: 'a1'.repeat(32),
+      value: 40n,
+      mtIndex: 99n,
+    });
+    expect(heldK1Coin(ALICE, NIGHT)?.value).toBe(40n);
+    expect(queuedK1Coins(ALICE, NIGHT)).toHaveLength(1);
+    expect(isK1NonceSpent(ALICE, NONCE)).toBe(true);
+  });
+
+  it('promotes on a drop as well, so a colour never keeps a queue with no head', () => {
+    enqueueK1Coin(ALICE, coin({ value: 100n }));
+    enqueueK1Coin(ALICE, coin({ value: 250n, nonce: OTHER_NONCE, mtIndex: 43n }));
+    dropK1Coin(ALICE, NIGHT);
+    expect(heldK1Coin(ALICE, NIGHT)?.nonce).toBe(OTHER_NONCE);
+    expect(queuedK1Coins(ALICE, NIGHT)).toEqual([]);
+    expect(isK1NonceSpent(ALICE, NONCE)).toBe(true);
+    dropK1Coin(ALICE, MUSD);
+    expect(queuedK1Coins(ALICE, 'not-a-colour')).toEqual([]);
+  });
+
+  it('remembers a bounded number of spent nonces, oldest dropped first', () => {
+    /* The cap is 256. Two hundred and sixty spends leave the first four
+       forgotten and the last in place, which is the direction that matters:
+       the nonce a write could resurrect is the one spent moments ago. */
+    for (let index = 0; index < 260; index += 1) {
+      const nonce = index.toString(16).padStart(64, '0');
+      putK1Coin(ALICE, coin({ nonce }));
+      replaceK1Coin(ALICE, NIGHT, null);
+    }
+    expect(isK1NonceSpent(ALICE, '0'.repeat(63) + '0')).toBe(false);
+    expect(isK1NonceSpent(ALICE, (259).toString(16).padStart(64, '0'))).toBe(true);
+    expect(loadK1CoinStore(ALICE).spentNonces).toHaveLength(256);
+  });
+
+  it('records a nonce once, however many times the same coin is spent again', () => {
+    /* `putK1Coin` is the low-level writer and does not consult the spent list —
+       a reconciliation re-learning a position is entitled to write a coin
+       whatever this store thinks of it — so the same nonce can reach the spend
+       path twice. The list is a set, not a log. */
+    putK1Coin(ALICE, coin());
+    dropK1Coin(ALICE, NIGHT);
+    putK1Coin(ALICE, coin());
+    dropK1Coin(ALICE, NIGHT);
+    expect(loadK1CoinStore(ALICE).spentNonces).toEqual([NONCE]);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+
+/**
+ * A position that is a guess, and the rule that stops it being written as a
+ * fact.
+ *
+ * A withdrawal's transaction carries two shielded outputs and the indexer
+ * reports the window they share, so the change coin's position is one of two
+ * numbers with nothing here to choose between them. Storing the first and
+ * calling it the coin is precisely the "confident wrong answer" the module is
+ * written against; storing both and letting a proof decide is not.
+ */
+describe('a coin whose position the chain gave two answers for', () => {
+  const CANDIDATES = [10n, 11n];
+
+  it('stores the coin at the first candidate and keeps the rest beside it', () => {
+    putK1CoinCandidates(ALICE, { colour: NIGHT, nonce: NONCE, value: 60n }, CANDIDATES);
+    expect(heldK1Coin(ALICE, NIGHT)).toEqual({
+      colour: NIGHT,
+      nonce: NONCE,
+      value: 60n,
+      mtIndex: 10n,
+    });
+    expect(k1CoinCandidates(ALICE, NIGHT)).toEqual([10n, 11n]);
+    expect(k1CoinCandidates(ALICE, 'not-a-colour')).toEqual([]);
+    expect(k1CoinCandidates(ALICE, MUSD)).toEqual([]);
+  });
+
+  it('moves to the next candidate when the current one will not prove', () => {
+    putK1CoinCandidates(ALICE, { colour: NIGHT, nonce: NONCE, value: 60n }, CANDIDATES);
+    expect(advanceK1CoinCandidate(ALICE, NIGHT)).toEqual({
+      colour: NIGHT,
+      nonce: NONCE,
+      value: 60n,
+      mtIndex: 11n,
+    });
+    expect(heldK1Coin(ALICE, NIGHT)?.mtIndex).toBe(11n);
+    expect(k1CoinCandidates(ALICE, NIGHT)).toEqual([11n]);
+  });
+
+  it('runs out rather than looping, and keeps the coin when it does', () => {
+    putK1CoinCandidates(ALICE, { colour: NIGHT, nonce: NONCE, value: 60n }, [10n]);
+    expect(advanceK1CoinCandidate(ALICE, NIGHT)).toBeNull();
+    expect(heldK1Coin(ALICE, NIGHT)?.mtIndex).toBe(10n);
+    expect(k1CoinCandidates(ALICE, NIGHT)).toEqual([]);
+    /* And with no coin to advance at all, which is a resumed run against a
+       store somebody has reset in another tab. */
+    expect(advanceK1CoinCandidate(ALICE, MUSD)).toBeNull();
+  });
+
+  it('drops the candidates for a colour whose coin was spent or settled', () => {
+    putK1CoinCandidates(ALICE, { colour: NIGHT, nonce: NONCE, value: 60n }, CANDIDATES);
+    settleK1Coin(ALICE, NIGHT);
+    expect(k1CoinCandidates(ALICE, NIGHT)).toEqual([]);
+    expect(heldK1Coin(ALICE, NIGHT)?.mtIndex).toBe(10n);
+
+    putK1CoinCandidates(ALICE, { colour: MUSD, nonce: NONCE, value: 60n }, CANDIDATES);
+    replaceK1Coin(ALICE, MUSD, null);
+    expect(k1CoinCandidates(ALICE, MUSD)).toEqual([]);
+
+    putK1CoinCandidates(ALICE, { colour: MUSD, nonce: NONCE, value: 60n }, CANDIDATES);
+    putK1Coin(ALICE, coin({ colour: MUSD, mtIndex: 7n }));
+    expect(k1CoinCandidates(ALICE, MUSD)).toEqual([]);
+  });
+
+  it('refuses a candidate list that decides nothing', () => {
+    expect(() =>
+      putK1CoinCandidates(ALICE, { colour: NIGHT, nonce: NONCE, value: 60n }, []),
+    ).toThrow(/at least one candidate/);
+    expect(() =>
+      putK1CoinCandidates(ALICE, { colour: NIGHT, nonce: NONCE, value: 60n }, [10n, -1n]),
+    ).toThrow(/zero or more/);
+    expect(() =>
+      putK1CoinCandidates(
+        ALICE,
+        { colour: NIGHT, nonce: NONCE, value: 60n },
+        [10n, 2 as unknown as bigint],
+      ),
+    ).toThrow(/zero or more/);
+    /* Nothing was written by the refused calls. */
+    expect(heldK1Coin(ALICE, NIGHT)).toBeNull();
+  });
+
+  it('refuses a colour it cannot read, on every writer that takes one', () => {
+    expect(() => dropK1Coin(ALICE, 'nope')).toThrow(/Not a colour/);
+    expect(() => replaceK1Coin(ALICE, 'nope', null)).toThrow(/Not a colour/);
+    expect(() => advanceK1CoinCandidate(ALICE, 'nope')).toThrow(/Not a colour/);
+    expect(() => settleK1Coin(ALICE, 'nope')).toThrow(/Not a colour/);
+  });
+
+  it('is what a reconciliation writes when the spend asks it to', async () => {
+    const window: K1CommitmentWindow = { startIndex: 10, endIndex: 12 };
+    const reader = vi.fn<K1CommitmentWindowReader>().mockResolvedValue(window);
+
+    const reported = await reconcileK1CoinFromChain(
+      ALICE,
+      { colour: NIGHT, nonce: NONCE, value: 60n, txId: 'tx-1' },
+      reader,
+    );
+    expect(reported).toEqual({ outcome: 'ambiguous', candidates: [10n, 11n] });
+    expect(heldK1Coin(ALICE, NIGHT)).toBeNull();
+
+    const stored = await reconcileK1CoinFromChain(
+      ALICE,
+      { colour: NIGHT, nonce: NONCE, value: 60n, txId: 'tx-1' },
+      reader,
+      { candidates: 'store' },
+    );
+    expect(stored).toEqual({ outcome: 'ambiguous', candidates: [10n, 11n] });
+    expect(heldK1Coin(ALICE, NIGHT)?.mtIndex).toBe(10n);
+    expect(k1CoinCandidates(ALICE, NIGHT)).toEqual([10n, 11n]);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The write this module does not make, and the one that would otherwise cost a
+ * change coin.
+ *
+ * midnight-js writes `nextPrivateState` back through the provider after a
+ * successful call, and that state is the one it READ BEFORE the call — the
+ * spent coin still in it. These drills run the write in both orders, because
+ * the order is midnight-js's and not ours.
+ */
+describe('a private state written back over the top of a spend', () => {
+  const CHANGE: K1HeldCoin = { colour: NIGHT, nonce: OTHER_NONCE, value: 40n, mtIndex: 77n };
+
+  /** What midnight-js read before the call: the coin the call consumed. */
+  const BEFORE_THE_CALL = {
+    encSecretKeyHex: null,
+    coins: { [NIGHT]: { nonceHex: NONCE, colorHex: NIGHT, value: '100', mtIndex: '42' } },
+  };
+
+  it('cannot resurrect the spent coin when the write lands AFTER the change', async () => {
+    putK1Coin(ALICE, coin());
+    replaceK1Coin(ALICE, NIGHT, CHANGE);
+    const provider = k1PrivateStateProvider(ALICE);
+    await provider.set(provider.privateStateId, BEFORE_THE_CALL);
+    expect(heldK1Coin(ALICE, NIGHT)).toEqual(CHANGE);
+  });
+
+  it('cannot resurrect it when the write lands BEFORE the change either', async () => {
+    putK1Coin(ALICE, coin());
+    const provider = k1PrivateStateProvider(ALICE);
+    /* The spend records the nonce and the change in ONE write, so a write that
+       lands before it is simply the state as it was. */
+    await provider.set(provider.privateStateId, BEFORE_THE_CALL);
+    replaceK1Coin(ALICE, NIGHT, CHANGE);
+    await provider.set(provider.privateStateId, BEFORE_THE_CALL);
+    expect(heldK1Coin(ALICE, NIGHT)).toEqual(CHANGE);
+  });
+
+  it('never overwrites a held coin, and still fills a colour the store lacks', async () => {
+    putK1Coin(ALICE, coin({ value: 5n, nonce: OTHER_NONCE }));
+    const provider = k1PrivateStateProvider(ALICE);
+    await provider.set(provider.privateStateId, {
+      encSecretKeyHex: 'ab'.repeat(32),
+      coins: {
+        ...BEFORE_THE_CALL.coins,
+        [MUSD]: { nonceHex: 'a1'.repeat(32), colorHex: MUSD, value: '9', mtIndex: '3' },
+      },
+    });
+    expect(heldK1Coin(ALICE, NIGHT)?.value).toBe(5n);
+    expect(heldK1Coin(ALICE, MUSD)?.value).toBe(9n);
+    expect(loadK1CoinStore(ALICE).encSecretKeyHex).toBe('ab'.repeat(32));
+  });
+
+  it('leaves the queue, the spent nonces, and the candidates to this app', async () => {
+    enqueueK1Coin(ALICE, coin({ value: 100n }));
+    enqueueK1Coin(ALICE, coin({ value: 250n, nonce: OTHER_NONCE, mtIndex: 43n }));
+    const provider = k1PrivateStateProvider(ALICE);
+    await provider.set(provider.privateStateId, {
+      ...BEFORE_THE_CALL,
+      queued: {},
+      spentNonces: [OTHER_NONCE],
+      mtIndexCandidates: { [NIGHT]: ['1'] },
+    });
+    expect(queuedK1Coins(ALICE, NIGHT)).toHaveLength(1);
+    expect(isK1NonceSpent(ALICE, OTHER_NONCE)).toBe(false);
+    expect(k1CoinCandidates(ALICE, NIGHT)).toEqual([]);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+
+describe('the new fields, read out of a blob somebody else wrote', () => {
+  it('drops what it cannot read and keeps what it can', () => {
+    seed({
+      [k1AccountKey(ALICE)]: {
+        encSecretKeyHex: null,
+        coins: { [NIGHT]: { nonceHex: NONCE, colorHex: NIGHT, value: '100', mtIndex: '42' } },
+        queued: {
+          [NIGHT]: [
+            { nonceHex: OTHER_NONCE, colorHex: NIGHT, value: '250', mtIndex: '43' },
+            { nonceHex: 'short', colorHex: NIGHT, value: '1', mtIndex: '0' },
+            { nonceHex: NONCE, colorHex: MUSD, value: '1', mtIndex: '0' },
+          ],
+          [MUSD]: 'not a list',
+          bad_colour_key: [{ nonceHex: NONCE, colorHex: NIGHT, value: '1', mtIndex: '0' }],
+          ['ee'.repeat(32)]: [{ nonceHex: 'short', colorHex: 'ee'.repeat(32), value: '1', mtIndex: '0' }],
+        },
+        spentNonces: [OTHER_NONCE, OTHER_NONCE, 'short', 12, `0x${NONCE.toUpperCase()}`],
+        mtIndexCandidates: {
+          [NIGHT]: ['10', '10', '11', 'x', 12],
+          bad_colour_key: ['1'],
+          [MUSD]: [],
+          ['ee'.repeat(32)]: 'not a list',
+        },
+      },
+    });
+    const state = loadK1CoinStore(ALICE);
+    expect(queuedK1Coins(ALICE, NIGHT)).toEqual([
+      { colour: NIGHT, nonce: OTHER_NONCE, value: 250n, mtIndex: 43n },
+    ]);
+    expect(Object.keys(state.queued)).toEqual([NIGHT]);
+    expect(state.spentNonces).toEqual([OTHER_NONCE, NONCE]);
+    expect(k1CoinCandidates(ALICE, NIGHT)).toEqual([10n, 11n]);
+    expect(Object.keys(state.mtIndexCandidates)).toEqual([NIGHT]);
   });
 });
