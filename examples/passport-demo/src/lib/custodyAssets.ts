@@ -39,6 +39,7 @@
 import {
   MUSD_COLOUR_HEX,
   NIGHT_COLOUR_HEX,
+  describeColour,
   describeColours,
   normalisedColourHex,
   sortTokenHoldings,
@@ -270,7 +271,6 @@ export type CustodyResumeOffer =
  */
 export function custodyResumeOffer(
   record: CustodyShieldedSendRecord | null,
-  asset: { readonly symbol: string; readonly decimals: number },
 ): CustodyResumeOffer {
   if (record === null) return { kind: 'none' };
   const step = nextCustodyShieldedSendStep(record);
@@ -278,11 +278,30 @@ export function custodyResumeOffer(
   if (step === 'report' || step === 'withdraw') {
     return { kind: 'report', sentence: custodyShieldedSendOutcome(record) };
   }
+  /* NAMED HERE, from the colour, rather than taken from the rows on screen.
+     The money has left the account, so the colour it was in may have no row
+     left at all — and "your payment of 40" with nothing after it is worse than
+     a shortened colour. */
+  const identity = describeColour(record.colourHex);
   const who = record.recipientLabel.trim().length > 0 ? record.recipientLabel.trim() : 'somebody';
-  const figure = formatCustodyAmount(BigInt(record.amount), asset.decimals);
+  const figure = formatCustodyAmount(BigInt(record.amount), identity.decimals);
   return {
     kind: 'finish',
-    sentence: `Your payment of ${figure} ${asset.symbol} to ${who} did not finish. It has left your Passport and can still be delivered.`,
+    sentence: `Your payment of ${figure} ${identity.symbol} to ${who} did not finish. It has left your Passport and can still be delivered.`,
     action: 'Finish this payment',
   };
+}
+
+/**
+ * What to say when a payment that could not be delivered went back where it
+ * came from.
+ *
+ * NOT {@link custodyShieldedSendOutcome}'s `returning` sentence, which says it
+ * is BEING put back: by the time this is shown the deposit has landed, and a
+ * sentence that leaves somebody waiting for money that is already there is a
+ * sentence they will refresh at for a minute.
+ */
+export function custodyReturnedSentence(recipientLabel: string): string {
+  const who = recipientLabel.trim().length > 0 ? recipientLabel.trim() : 'them';
+  return `It did not reach ${who}, so it is back in your Passport.`;
 }

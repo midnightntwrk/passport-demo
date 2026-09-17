@@ -18,6 +18,7 @@ import {
   custodyAssetRow,
   custodyAssetRows,
   custodyResumeOffer,
+  custodyReturnedSentence,
   custodyStablecoinColour,
   formatCustodyAmount,
   parseCustodyAmount,
@@ -188,10 +189,8 @@ describe('custodyArrivingSentence', () => {
 });
 
 describe('custodyResumeOffer', () => {
-  const asset = { symbol: 'mUSD', decimals: 0 };
-
   it('offers to finish a payment whose last leg needs no approval', () => {
-    const offer = custodyResumeOffer(sendRecord(), asset);
+    const offer = custodyResumeOffer(sendRecord());
     expect(offer).toEqual({
       kind: 'finish',
       sentence:
@@ -201,35 +200,41 @@ describe('custodyResumeOffer', () => {
   });
 
   it('offers the same when the note still has to be identified', () => {
-    expect(custodyResumeOffer(sendRecord({ stage: 'awaiting-note' }), asset).kind).toBe('finish');
+    expect(custodyResumeOffer(sendRecord({ stage: 'awaiting-note' })).kind).toBe('finish');
     expect(
-      custodyResumeOffer(sendRecord({ stage: 'depositing', noteNonce: null }), asset).kind,
+      custodyResumeOffer(sendRecord({ stage: 'depositing', noteNonce: null })).kind,
     ).toBe('finish');
   });
 
   it('names somebody when the record kept no name', () => {
-    const offer = custodyResumeOffer(sendRecord({ recipientLabel: '  ' }), asset);
+    const offer = custodyResumeOffer(sendRecord({ recipientLabel: '  ' }));
     expect(offer.kind === 'finish' && offer.sentence).toContain('to somebody');
   });
 
   it('quotes the figure in the asset own scale', () => {
-    const offer = custodyResumeOffer(sendRecord({ amount: '2500000' }), {
-      symbol: 'NIGHT',
-      decimals: 6,
-    });
+    const offer = custodyResumeOffer(sendRecord({ amount: '2500000', colourHex: NIGHT_COLOUR_HEX }));
     expect(offer.kind === 'finish' && offer.sentence).toContain('2.5 NIGHT');
   });
 
   it('reports rather than offers where there is no leg left to run', () => {
     for (const stage of ['returning', 'stranded', 'withdrawing'] as const) {
-      const offer = custodyResumeOffer(sendRecord({ stage }), asset);
+      const offer = custodyResumeOffer(sendRecord({ stage }));
       expect(offer.kind).toBe('report');
     }
   });
 
   it('says nothing about a payment that finished, or one that was never made', () => {
-    expect(custodyResumeOffer(sendRecord({ stage: 'done' }), asset)).toEqual({ kind: 'none' });
-    expect(custodyResumeOffer(null, asset)).toEqual({ kind: 'none' });
+    expect(custodyResumeOffer(sendRecord({ stage: 'done' }))).toEqual({ kind: 'none' });
+    expect(custodyResumeOffer(null)).toEqual({ kind: 'none' });
+  });
+
+  it('says a returned payment is back, not on its way back', () => {
+    expect(custodyReturnedSentence('alice')).toBe(
+      'It did not reach alice, so it is back in your Passport.',
+    );
+    expect(custodyReturnedSentence('  ')).toBe(
+      'It did not reach them, so it is back in your Passport.',
+    );
   });
 
   it('says none of the words a person has never chosen to meet', () => {
@@ -237,10 +242,12 @@ describe('custodyResumeOffer', () => {
     const sentences = [
       custodyArrivingSentence(1),
       custodyArrivingSentence(4),
-      custodyResumeOffer(sendRecord(), asset),
-      custodyResumeOffer(sendRecord({ stage: 'returning' }), asset),
-      custodyResumeOffer(sendRecord({ stage: 'stranded' }), asset),
-      custodyResumeOffer(sendRecord({ stage: 'withdrawing' }), asset),
+      custodyResumeOffer(sendRecord()),
+      custodyResumeOffer(sendRecord({ stage: 'returning' })),
+      custodyResumeOffer(sendRecord({ stage: 'stranded' })),
+      custodyResumeOffer(sendRecord({ stage: 'withdrawing' })),
+      custodyReturnedSentence('alice'),
+      custodyReturnedSentence(' '),
     ]
       .flatMap((value) =>
         typeof value === 'string'

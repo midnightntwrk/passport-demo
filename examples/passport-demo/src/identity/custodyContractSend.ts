@@ -57,8 +57,10 @@
  * reader instead. {@link custodyShieldedSendOutcome} is the sentence for every
  * stage this can stop at, including the one where the return fails too.
  *
- * {@link shieldedSendRefusal} is left in place for the surfaces that still show
- * it while the screen is built; nothing in this file needs it any more.
+ * The sentence that stood in for this send while it was being built —
+ * "sending it is not built yet" — is GONE rather than kept for reference
+ * (2026/09/17). A refusal nothing reaches is a refusal somebody shows again by
+ * accident, and the screen now has the send it described.
  */
 
 import type { CustodyAccountRecord, CustodyStorage } from './custodyContractPlan.js';
@@ -579,19 +581,6 @@ export function custodyApprovalPrompt(provider: string | null): string {
 
 /** What the sheet says while the sign-in is being asked for a signature. */
 export const CUSTODY_APPROVAL_WAITING = 'Waiting for your approval';
-
-/**
- * Why a shielded amount cannot be sent from one of these Passports yet.
- *
- * SHOWN, NOT HIDDEN. A balance the holder can see and a Send control that
- * silently omits it is a Passport that appears to have lost money. One sentence
- * that says what is true — it is there, it arrived, it cannot go out yet — is
- * the honest surface, and it is the sentence the Assets row carries too.
- */
-export function shieldedSendRefusal(symbol: string | null): string {
-  const asset = typeof symbol === 'string' && symbol.trim().length > 0 ? symbol.trim() : 'This';
-  return `${asset} can be received into this Passport, but sending it is not built yet.`;
-}
 
 /* -------------------------------------------------------------------------- */
 /* The account's own NIGHT, read off the custody ledger                            */

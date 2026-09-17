@@ -47,6 +47,43 @@
   color: var(--mn-text-muted, inherit);
 }
 
+/*
+ * Every other token the Passport holds, under the NIGHT figure.
+ *
+ * A LIST AND NOT MORE BIG FIGURES. NIGHT is the one asset every Passport has
+ * and the only thing a fee is ever quoted in, so it leads; a token somebody was
+ * paid is a row they read, and three 34px figures stacked would make the screen
+ * about the numbers rather than about the one they are looking for.
+ */
+.mndyn-holdings {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  margin: 0 0 10px;
+  padding: 0;
+  list-style: none;
+}
+
+.mndyn-holding {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.mndyn-holding-figure {
+  font-family: var(--mn-font-display, inherit);
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--mn-text-strong, inherit);
+}
+
+.mndyn-holding-unit {
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--mn-text-muted, inherit);
+}
+
 .mndyn-receive {
   display: flex;
   align-items: center;

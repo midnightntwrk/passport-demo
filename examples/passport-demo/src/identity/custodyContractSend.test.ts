@@ -33,7 +33,6 @@ import {
   custodySendRefusal,
   custodyUnshieldedBalance,
   planCustodySend,
-  shieldedSendRefusal,
   type CustodySendPlanInput,
   type CustodyShieldedSendPlanInput,
   type CustodyShieldedSendRecord,
@@ -164,18 +163,6 @@ describe('the words a person reads', () => {
 
   it('has one line for the wait', () => {
     expect(CUSTODY_APPROVAL_WAITING).toBe('Waiting for your approval');
-  });
-
-  it('says a shielded balance is there and cannot go out yet', () => {
-    expect(shieldedSendRefusal('mUSD')).toBe(
-      'mUSD can be received into this Passport, but sending it is not built yet.',
-    );
-    expect(shieldedSendRefusal(null)).toBe(
-      'This can be received into this Passport, but sending it is not built yet.',
-    );
-    expect(shieldedSendRefusal(' ')).toBe(
-      'This can be received into this Passport, but sending it is not built yet.',
-    );
   });
 });
 
