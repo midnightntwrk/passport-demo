@@ -836,8 +836,16 @@ async function runWaveOne(
 
   const deploy = new ledgerApi.ContractDeploy(wave1);
   const address = String(deploy.address);
-  const intent = ledgerApi.Intent.new(new Date(deps.now() + CUSTODY_TX_TTL_MS));
-  intent.addDeploy(deploy);
+  /* THE RETURN VALUE IS THE INTENT THAT CARRIES THE DEPLOY. `addDeploy` hands
+     back a new `Intent` rather than mutating the receiver — the binding is a
+     wasm value, not an object with methods on it — so building the transaction
+     out of the intent this call was made ON submits an EMPTY one. Three live
+     deploys were paid for and landed as transactions carrying nothing on
+     2026/09/17 before this was found: the node accepted each, no contract was
+     created, and the wave that followed waited for an account that did not
+     exist. The reference client at `scratchpad/ref-wave-deploy.ts` always
+     chained the call for this reason. */
+  const intent = ledgerApi.Intent.new(new Date(deps.now() + CUSTODY_TX_TTL_MS)).addDeploy(deploy);
   const unprovenTx = ledgerApi.Transaction.fromParts(
     ledgerApi.networkId(),
     undefined,
@@ -968,8 +976,11 @@ async function runMaintenanceWave(
   }
   const bare = new ledgerApi.MaintenanceUpdate(address, updates, counter);
   const signed = bare.addSignature(0n, ledgerApi.signData(signingKey, bare.dataToSign));
-  const intent = ledgerApi.Intent.new(new Date(deps.now() + CUSTODY_TX_TTL_MS));
-  intent.addMaintenanceUpdate(signed);
+  /* Chained for the reason `runWaveOne` gives: the intent that carries the
+     update is the one this call RETURNS. */
+  const intent = ledgerApi.Intent.new(new Date(deps.now() + CUSTODY_TX_TTL_MS)).addMaintenanceUpdate(
+    signed,
+  );
   const unprovenTx = ledgerApi.Transaction.fromParts(
     ledgerApi.networkId(),
     undefined,

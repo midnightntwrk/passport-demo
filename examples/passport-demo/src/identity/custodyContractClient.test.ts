@@ -245,23 +245,14 @@ function ledgerFake(chain: FakeChain, built: unknown[][]): CustodyLedgerApi {
     Intent: {
       /* The intent IS the transaction here: `fromParts` is handed the object
          `addDeploy` returned, so what it carries has to be what the node will
-         be asked to apply. */
-      new: () => {
-        const intent = {
-          kind: 'tx' as const,
-          deploys: null as string[] | null,
-          inserts: null as string[] | null,
-          addDeploy(deploy: unknown) {
-            intent.deploys = (deploy as { circuits: string[] }).circuits;
-            return intent;
-          },
-          addMaintenanceUpdate(update: unknown) {
-            intent.inserts = (update as { circuits: string[] }).circuits;
-            return intent;
-          },
-        };
-        return intent;
-      },
+         be asked to apply.
+         AND IT RETURNS A NEW ONE, never itself. That is what the real binding
+         does — `Intent.addDeploy` hands back a fresh wasm value and leaves the
+         receiver alone — and a fake that mutated in place made three live
+         deploys' worth of empty transactions invisible here (2026/09/17). With
+         this shape, code that drops the return value submits a transaction
+         carrying nothing, and the drills below say so. */
+      new: () => intentFake(null, null),
     },
     MaintenanceUpdate: class {
       dataToSign = new Uint8Array([1]);
@@ -296,6 +287,7 @@ function ledgerFake(chain: FakeChain, built: unknown[][]): CustodyLedgerApi {
 }
 
 interface Harness {
+  submitted: { unprovenTx: FakeTx }[];
   deps: Partial<CustodyDeps>;
   storage: ReturnType<typeof storageFake>;
   chain: FakeChain;
@@ -341,6 +333,9 @@ function harness(
      the objection is fair — an `async` here would be decoration. */
   const connections: { privateStateId: string; account: unknown }[] = [];
   const opened: string[] = [];
+  /* Every transaction as it was handed to the node, so a drill can assert what
+     it CARRIED and not only that one was sent. */
+  const submitted: { unprovenTx: FakeTx }[] = [];
   let lagReadsLeft = overrides.indexerLagReads ?? 0;
   const providers: Record<string, unknown> = {
     zkConfigProvider: {
@@ -442,6 +437,7 @@ function harness(
           }),
         submitTx: (_providers: unknown, options: unknown) => {
           state.submits += 1;
+          submitted.push(options as { unprovenTx: FakeTx });
           /* THE NODE APPLYING THE TRANSACTION, which is a different event from
              accepting it. `dropSubmissions` is the node that accepts and never
              applies — a real and unremarkable outcome — and it is what holds
@@ -485,8 +481,26 @@ function harness(
     calls,
     connections,
     opened,
+    submitted,
     get submits() {
       return state.submits;
+    },
+  };
+}
+
+/**
+ * An intent whose `add*` calls return a NEW intent, as the wasm binding's do.
+ */
+function intentFake(deploys: string[] | null, inserts: string[] | null) {
+  return {
+    kind: 'tx' as const,
+    deploys,
+    inserts,
+    addDeploy(deploy: unknown) {
+      return intentFake((deploy as { circuits: string[] }).circuits, inserts);
+    },
+    addMaintenanceUpdate(update: unknown) {
+      return intentFake(deploys, (update as { circuits: string[] }).circuits);
     },
   };
 }
@@ -776,6 +790,23 @@ describe('creating a Dynamic Passport', () => {
     const updates = test.built.filter((entry) => entry[0] === 'update');
     expect(updates).toHaveLength(2);
     expect(test.built.filter((entry) => entry[0] === 'retire')).toHaveLength(1);
+  });
+
+  /* THE DEFECT THIS CATCHES cost three live deploys on 2026/09/17. `addDeploy`
+     hands back a NEW intent, so a transaction built from the intent the call
+     was made ON carries nothing: the node accepts it, a fee is booked, and no
+     contract is created. Asserted on what was SUBMITTED, because everything
+     else about that run looked right. */
+  it('submits a transaction that actually carries the deploy', async () => {
+    const test = harness();
+    const { session, device } = deviceFake();
+    await deployCustodyAccount(session, device, undefined, test.deps);
+
+    const first = test.submitted[0].unprovenTx;
+    expect(first.deploys).toHaveLength(10);
+    /* And each maintenance wave carries its ten keys. */
+    expect(test.submitted[1].unprovenTx.inserts).toHaveLength(10);
+    expect(test.submitted[2].unprovenTx.inserts).toHaveLength(10);
   });
 
   /* THE DEFECT THIS CATCHES ended every live setup on stagenet on 2026/09/17,
