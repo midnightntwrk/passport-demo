@@ -923,6 +923,44 @@ export async function k1Call(
  * the same call the stagenet run used as its proof on 2026/09/16, and for the
  * same reason.
  */
+/**
+ * A PERMISSIONLESS call on a k1 account: the deposits, which anybody may make
+ * and which carry no authorisation trailer. `k1Call` always appends
+ * `_with_k256` and the four auth arguments, so paying INTO a k1 account —
+ * this Passport's own opening balance arriving, or a send to somebody who
+ * holds one of these Passports — goes through here with the plain circuit
+ * name and the circuit's own arguments, nothing more.
+ */
+export async function k1PermissionlessCall(
+  session: K1DynamicSession,
+  request: { operation: string; args: readonly unknown[] },
+  onPhase?: (phase: K1Phase) => void,
+  overrides: Partial<K1Deps> = {},
+): Promise<K1StepResult> {
+  const deps = withDefaults(overrides);
+  const user = k1UserKey(session);
+  const wallet = await deps.wallet(user);
+  const network = wallet.network.networkId;
+  const storage = deps.storage();
+  const record = loadK1Record(storage, user, network);
+  if (!record || record.address === null || nextK1Step(record) !== 'ready') {
+    throw new Error('This Passport is not finished being set up yet.');
+  }
+  const { callTx, providers } = await openK1Account(deps, wallet, record, request.operation);
+  onPhase?.({ step: 'submit' });
+  const call = callTx[request.operation];
+  if (!call) throw new Error('This Passport cannot do that yet.');
+  const result = await call(...request.args);
+  onPhase?.({ step: 'confirm' });
+  const txHash = await resolveHash(providers, result);
+  const next: K1AccountRecord = {
+    ...record,
+    txHashes: txHash ? [...record.txHashes, txHash] : record.txHashes,
+  };
+  saveK1Record(storage, next);
+  return { record: next, txHash, explorerUrl: txHash ? k1ExplorerLink(txHash, network) : null };
+}
+
 export async function appendInboxK1(
   session: K1DynamicSession,
   device: K256DeviceIdentity,
@@ -1019,7 +1057,11 @@ async function queryStateData(
   providers: Record<string, unknown>,
   address: string,
 ): Promise<unknown> {
-  return (await queryState(providers, address));
+  /* `ledger()` decodes the STATE VALUE, not the contract state that wraps it
+     — `accountCustody.ts` and the sponsor both hand it `.data`. Handing it the
+     wrapper decoded nothing; caught by the flow that first read a k1 balance
+     (2026/09/17). */
+  return ((await queryState(providers, address)) as unknown as { data: unknown }).data;
 }
 
 /**
