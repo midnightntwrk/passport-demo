@@ -4,7 +4,8 @@ interface ImportMetaEnv {
   readonly VITE_PASSPORT_ORIGIN?: string;
   readonly VITE_TELEGRAM_URL?: string;
   /**
-   * The preview unshielded address (`mn_addr…`) the raffle operator controls.
+   * The unshielded address (`mn_addr…`) the raffle operator controls, on the
+   * network Passport runs on (stagenet for the deployed demo).
    * Set it to turn on real on-chain entry; leave it unset and the raffle stays
    * in profile-only mode and says so.
    */

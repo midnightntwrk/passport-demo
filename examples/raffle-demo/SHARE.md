@@ -22,7 +22,7 @@ hand over, and what must not go with it.
 
 - **`.env.local`, or any real environment values.** Ship `.env.example` only.
   `VITE_RAFFLE_COLLECTION_ADDRESS` in particular is an address that collects
-  real preview NIGHT.
+  real NIGHT on the network it is on.
 - **`.vercel/`**, `dist/`, and `node_modules/`. Deployment linkage,
   build output, and dependencies are not part of the example.
 - **Anything from `.planning/`**, and any internal or stakeholder framing. The
