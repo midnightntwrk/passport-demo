@@ -618,6 +618,16 @@ export async function readInboxCustody(
   options: {
     txIdFor(index: bigint, coin: CustodyInboxCoin): string | null;
     windows: K1CommitmentWindowReader;
+    /**
+     * What to do with a delivery whose transaction had several shielded
+     * outputs — passed straight through to {@link reconcileK1CoinFromChain}.
+     *
+     * `'report'` stays the default. `'store'` is what the screen asks for: a
+     * payer sending part of what it holds makes a two-output transaction, which
+     * is the ordinary case, and reporting those would leave every such payment
+     * unshowable for ever.
+     */
+    candidates?: 'report' | 'store';
     deps?: CustodyInboxDeps;
   },
 ): Promise<CustodyWalkResult> {
@@ -658,6 +668,7 @@ export async function readInboxCustody(
         account,
         { colour: coin.colour, nonce: coin.nonce, value: coin.value, txId },
         options.windows,
+        { candidates: options.candidates ?? 'report' },
       ),
     });
   }

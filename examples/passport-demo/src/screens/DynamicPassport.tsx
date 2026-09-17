@@ -220,6 +220,8 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
      `CUSTODY_SETUP_INTERRUPTED` at whoever pressed it. */
   const [interrupted, setInterrupted] = useState(false)
   const device = useRef<K256DeviceIdentity | null>(null)
+  /* Whether a payment or a setup is running. See {@link run}. */
+  const inFlight = useRef(false)
 
   /** Re-reads what is stored and moves the screen to match it. */
   const refresh = useCallback((): DynamicPassportView | null => {
@@ -273,6 +275,13 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
    */
   const run = useCallback(
     async (label: string, work: () => Promise<void>): Promise<void> => {
+      /* NOTHING ELSE READS THE STORE WHILE THIS RUNS. `readHoldings` fires from
+         an effect, and the inbox walk inside it writes coins — so a walk that
+         landed in the middle of a payment could file a delivery over the coin
+         the payment had just spent, or re-place one it had just moved. A ref
+         rather than `busy`, because the guard has to be true from the first
+         line of the payment and a state update is not. */
+      inFlight.current = true
       setBusy(label)
       setError(null)
       try {
@@ -284,6 +293,7 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
         }
         setError(custodyFailureSentence(cause))
       } finally {
+        inFlight.current = false
         setBusy(null)
       }
     },
@@ -410,7 +420,7 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
     async (
       wallet: { network: { indexerHttpUrl: string } },
       account: { network: string; address: string },
-    ): Promise<void> => {
+    ): Promise<number> => {
       const [{ loadK1CoinStore }, { readInboxCustody }, accountModule, runtime] = await Promise.all([
         import('../identity/k1CoinStore.js'),
         import('../identity/custodyInbox.js'),
@@ -421,7 +431,7 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
       /* No viewing secret, nothing to open the list with. That is a Passport
          restored from a name on a second device, and the sentence for it is not
          here — the row simply shows what the store holds. */
-      if (encSecretKeyHex === null) return
+      if (encSecretKeyHex === null) return 0
       const indexerHttpUrl = wallet.network.indexerHttpUrl
       const reader = await accountModule.readCustodyAccountView({ indexerHttpUrl }, account.address)
       const actions = await readCustodyActions(indexerHttpUrl, account.address)
@@ -431,10 +441,28 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
         txIdFor,
         windows: (txId: string) =>
           runtime.resolveTxCommitmentWindowByHashOnce(indexerHttpUrl, txId),
+        /* A DELIVERY'S TRANSACTION HAS TWO SHIELDED OUTPUTS when the payer sent
+           part of what it held, which is the ordinary case — so the window
+           gives two positions and reporting them would leave every such payment
+           permanently unshowable. They are kept as candidates, in order, in the
+           same way a spend's change is; `stored` says whether that happened,
+           because candidates go in a colour's held slot or nowhere. */
+        candidates: 'store',
       })
+      /* WHAT THE CHAIN COULD NOT PLACE IS STILL HERE. A coin whose position the
+         indexer has not answered for, or answered ambiguously into a colour
+         already holding something, is demonstrably delivered and not yet
+         spendable — which is what "arriving" means. Counting only the store's
+         own awaiting rows made those coins vanish off the screen entirely. */
+      const unplaced = walked.outcomes.filter(
+        (entry) =>
+          entry.reconciliation.outcome === 'unavailable' ||
+          (entry.reconciliation.outcome === 'ambiguous' && !entry.reconciliation.stored),
+      ).length
       console.info(
         `[account-custody] read ${walked.coins.length} of this Passport's own deliveries`,
       )
+      return unplaced
     },
     [],
   )
@@ -443,6 +471,10 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
   const readHoldings = useCallback(async (): Promise<void> => {
     const record = view?.record ?? null
     if (user === null || record?.address == null) return
+    /* A payment is running and it owns the store until it is finished. What is
+       already on the screen stays on it; this read happens again when the
+       payment does finish, which is the moment the figures change anyway. */
+    if (inFlight.current) return
     const account = { network: record.network, address: record.address }
     const deps = defaultCustodyDeps()
     let opened: Awaited<ReturnType<typeof deps.wallet>> | null = null
@@ -472,9 +504,31 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
       setBalanceFailed(true)
     }
 
+    let unplaced = 0
     if (opened !== null) {
+      /* EVERY AWAITING COIN IS ASKED ABOUT AGAIN, on every read. A spend files
+         its change with a description and no position, and the one question
+         that settles it was asked once — immediately after the withdrawal, when
+         the indexer had not seen the transaction yet, and never again. The coin
+         then read as "arriving" for the rest of the account's life. Asking here
+         costs one indexer call per waiting coin and is what makes a reload, or
+         simply coming back tomorrow, the remedy it ought to be. */
       try {
-        await walkDeliveries(opened, account)
+        const { awaitingK1Coins, settleK1AwaitingCoin } = await import(
+          '../identity/k1CoinStore.js'
+        )
+        const runtime = await import('../identity/contractRuntime.js')
+        for (const waiting of awaitingK1Coins(account)) {
+          await settleK1AwaitingCoin(account, waiting.colour, (txId) =>
+            runtime.resolveTxCommitmentWindowByHashOnce(opened.network.indexerHttpUrl, txId),
+          )
+        }
+      } catch (cause) {
+        console.info('[account-custody] a waiting coin could not be placed this time', cause)
+      }
+
+      try {
+        unplaced = await walkDeliveries(opened, account)
       } catch (cause) {
         /* QUIET ON PURPOSE, and not the same silence as above: this costs the
            descriptions that have not been filed YET, and the ones already
@@ -498,7 +552,9 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
           amount: k1ColourBalance(account, coin.colour),
         })),
       )
-      setArriving(awaitingK1Coins(account).length)
+      /* The store's own waiting rows PLUS the deliveries this walk could not
+         place. Both are coins that are here and cannot be spent yet. */
+      setArriving(awaitingK1Coins(account).length + unplaced)
     } catch (cause) {
       console.warn('[account-custody] could not read what this Passport was paid', cause)
     }
@@ -593,6 +649,29 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
         })
       } catch (cause) {
         console.warn('[account-custody] the last leg did not land', cause)
+
+        /* IS THE NOTE STILL HERE? A throw from the leg above is not evidence
+           that nothing happened: a transaction can be broadcast and then the
+           promise rejected — a socket dropping, a confirmation wait running
+           out — and the recipient has the money. Putting it "back" in that case
+           is a second spend of a note that is gone, which the node refuses,
+           after a screen has told somebody it is held for them. So the wallet
+           is asked what it holds before anything is sent anywhere. */
+        const { walletShieldedNotes } = await import('../identity/accountCustody.js')
+        const { shieldedNoteId } = await import('../lib/shieldedNote.js')
+        const wanted = shieldedNoteId(note)
+        const stillHeld = await walletShieldedNotes(wallet)
+          .then((notes) => notes.some((held) => shieldedNoteId(held) === wanted))
+          .catch(() => null)
+        if (stillHeld === false) {
+          /* Gone from this wallet, and this screen cannot see whether the
+             recipient has it. It says that, rather than either receipt. */
+          const unseen: CustodyShieldedSendRecord = { ...record, stage: 'unconfirmed' }
+          saveCustodyShieldedSend(window.localStorage, unseen)
+          setStopped(unseen)
+          throw new Error(custodyShieldedSendOutcome(unseen))
+        }
+
         const returning: CustodyShieldedSendRecord = { ...record, stage: 'returning' }
         saveCustodyShieldedSend(window.localStorage, returning)
         setStopped(returning)

@@ -623,3 +623,32 @@ describe('the record a stopped send leaves behind', () => {
     );
   });
 });
+
+describe('a payment whose last leg threw after the note had gone', () => {
+  /* THE DEFECT THIS NAMES is a screen that says "held for you" while the
+     recipient has the money. Leg three can be broadcast and still reject — a
+     socket dropping, a confirmation wait running out — so the screen re-reads
+     the wallet before it tries to put anything back, and where the note has
+     left it says exactly that it cannot see which side has it. */
+  it('says nothing here can see whether it arrived, and does not claim it came back', () => {
+    const sentence = custodyShieldedSendOutcome({
+      stage: 'unconfirmed',
+      network: 'stagenet',
+      accountAddress: 'ab'.repeat(32),
+      recipientAccountAddress: 'cd'.repeat(32),
+      recipientLabel: 'alice.night',
+      colourHex: 'ef'.repeat(32),
+      amount: '40',
+      noteNonce: '01'.repeat(32),
+      withdrawTxId: 'ab'.repeat(32),
+      depositTxId: null,
+      startedAt: 1789689600000,
+    });
+    expect(sentence).toBe(
+      'It has left your Passport and nothing here can see whether alice.night has it yet. Check with alice.night before sending it again.',
+    );
+    /* Not the stranded sentence, which promises a sweep of value this Passport
+       may not have. */
+    expect(sentence).not.toMatch(/held for you/);
+  });
+});

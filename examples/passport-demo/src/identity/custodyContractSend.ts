@@ -634,6 +634,17 @@ export type CustodyShieldedSendStage =
   | 'returning'
   /** The recipient has it. */
   | 'done'
+  /**
+   * Leg three threw AFTER the note had left this wallet.
+   *
+   * Which is a real outcome and not a tidy one: a transaction can be broadcast
+   * and its promise still reject — a socket dropping, a confirmation wait
+   * running out — and the recipient then has the money while this screen has an
+   * error. The note is demonstrably gone from the sender's wallet, so it cannot
+   * be put back, and nothing here can see the recipient's side. Saying "it is
+   * held for you" would be a lie in the direction that costs the most.
+   */
+  | 'unconfirmed'
   /** The value is out of the account and in neither account. */
   | 'stranded';
 
@@ -849,6 +860,8 @@ export function custodyShieldedSendOutcome(record: CustodyShieldedSendRecord): s
       return `It has left your Passport and has not reached ${who} yet. Open Passport again in a moment and it will finish by itself.`;
     case 'returning':
       return `It did not reach ${who}, so it is being put back into your Passport.`;
+    case 'unconfirmed':
+      return `It has left your Passport and nothing here can see whether ${who} has it yet. Check with ${who} before sending it again.`;
     default:
       return `It did not reach ${who}, and it could not be put back either. It is being held for you at your own receiving address, and the next version of Passport will sweep it up.`;
   }
