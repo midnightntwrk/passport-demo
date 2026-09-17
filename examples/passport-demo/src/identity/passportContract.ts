@@ -513,6 +513,55 @@ export async function accountHasOneTxTransfer(
 }
 
 /**
+ * The circuit only the k1-arm build has, and so the thing that identifies it.
+ *
+ * It is a WITHDRAWAL circuit rather than one of the cheaper-looking `derive_*`
+ * ones on purpose: pure circuits do not appear in `operations()` at all, which
+ * lists the deployed contract's entry points. This one does, it is named for
+ * the arm it belongs to, and no build of the prototype account contract has
+ * ever carried a `_with_k256` anything.
+ */
+export const K256_ARM_OPERATION = 'withdraw_shielded_with_k256';
+
+/** Which compiled build a deployed account is, read off its own entry points. */
+export type AccountBuild = 'account' | 'account-v1' | 'account-k1';
+
+/**
+ * The build, from the entry points the chain reports.
+ *
+ * THE K1 QUESTION IS ASKED FIRST, AND IT IS THE ONLY POSITIVE ONE. The two
+ * prototype builds are told apart by an ABSENCE — no
+ * `transfer_shielded_to_account` means the older of the two — and an absence
+ * cannot tell "the old build" from "a build that is neither". The k1 build
+ * shares not one circuit name with either prototype (checked 2026/09/16: its
+ * thirty names and the account build's twelve do not intersect at all), so the
+ * older question answers `account-v1` for a k1 account, and `account-v1` is a
+ * module that cannot open it. `withdraw_shielded_with_k256` is the one name
+ * that identifies a build rather than ruling one out, so it is asked first and
+ * the absence-based question is left to decide between the two it can.
+ *
+ * Kept separate from the read so it can be drilled on a list of names.
+ */
+export function accountBuildFromOperations(operations: readonly string[]): AccountBuild {
+  if (operations.includes(K256_ARM_OPERATION)) return 'account-k1';
+  if (operations.includes(ONE_TX_TRANSFER_OPERATION)) return 'account';
+  return 'account-v1';
+}
+
+/**
+ * Which build the account at `address` is — or `null` when the chain could not
+ * be asked, for the reason {@link accountHasOneTxTransfer} gives at length.
+ */
+export async function readAccountBuild(
+  indexerHttpUrl: string,
+  address: string,
+): Promise<AccountBuild | null> {
+  const operations = await readAccountOperations(indexerHttpUrl, address);
+  if (operations === null) return null;
+  return accountBuildFromOperations(operations);
+}
+
+/**
  * How long a deploy this browser SUBMITTED and never heard back about is given
  * to appear, when the app is opened again.
  *

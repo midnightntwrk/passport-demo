@@ -95,14 +95,39 @@ const managedRoot =
  * second staged tree would be ~20 MB of identical bytes and a second manifest
  * to drift from. See `contractAssetBase` in `src/identity/contractRuntime.ts`.
  *
+ * `account-k1` is the k1-arm reference build, and it is the third case:
+ * `assets: 'when-present'`. It DOES bring its own artefacts — thirty circuits
+ * whose keys are its own and share nothing with the account build — but no
+ * release bundle carries them yet, so demanding them here would fail every
+ * build on every machine that did not compile them, which is the exact defect
+ * `assets: false` was introduced to fix on 2026/09/14. So its MODULE is staged
+ * unconditionally, its artefacts are staged when they are on disk, and their
+ * absence is said out loud and is not a failure. Nothing in the app asks for
+ * the module yet.
+ *
+ * WHEN A BUNDLE CARRIES THEM, measure before promoting anything: `keys/` for
+ * this build is 3.2 GB against ~100 MB for the account build, which is past
+ * what a Vercel deployment will take. `.vercelignore` and the artefact origin
+ * (`PASSPORT_ZK_ORIGIN`) become load-bearing rather than convenient, and that
+ * decision is not this script's to make.
+ *
  * The mUSD faucet has no caller here.
  */
 const CONTRACTS = [
   { name: 'account', assets: true },
   { name: 'account-v1', assets: false },
+  { name: 'account-k1', assets: 'when-present' },
   { name: 'midnames', assets: true },
 ];
 const STAGED_SUBDIRECTORIES = ['compiler', 'keys', 'zkir'];
+/**
+ * Builds whose PROVER keys never reach a browser. The k1 build's prover keys
+ * are 3.2 GB (224 MB per k256 circuit); its proofs are made on the server, so
+ * a browser needs only the verifier keys (74 KB for all thirty) and the IR
+ * (under 1 MB). Their `keys/` ships verifier files only, and a `.prover` that
+ * happens to be on a developer's disk is left behind here.
+ */
+const SERVER_ONLY_PROVER = new Set(['account-k1']);
 
 function fail(message) {
   console.error(`prepare-zk-assets: ${message}`);
@@ -158,6 +183,28 @@ function stage({ name, assets }) {
     stageModule(name, source, moduleDestination);
     return;
   }
+
+  if (assets === 'when-present') {
+    /* ARTEFACTS IF THEY ARE HERE, AND A SENTENCE IF THEY ARE NOT. This build's
+       artefacts are its own — nothing else serves them — but no bundle carries
+       them yet, so their absence is a state this script reports rather than one
+       it fails on. The module is staged either way, which is all anything in
+       the app can reach today. */
+    const staged = STAGED_SUBDIRECTORIES.filter((subdirectory) =>
+      existsSync(resolve(source, subdirectory)),
+    );
+    if (staged.length !== STAGED_SUBDIRECTORIES.length) {
+      stageModule(name, source, moduleDestination);
+      console.warn(
+        `prepare-zk-assets: the ${name} build's ZK artefacts are not on disk ` +
+          `(${STAGED_SUBDIRECTORIES.filter((subdirectory) => !staged.includes(subdirectory)).join(
+            ' and ',
+          )} missing), so nothing is served under /zk/${name}. The module is staged. ` +
+          'Run `node scripts/fetch-zk-artefacts.mjs` for a bundle that carries them.',
+      );
+      return;
+    }
+  }
   for (const subdirectory of STAGED_SUBDIRECTORIES) {
     if (!existsSync(resolve(source, subdirectory))) {
       fail(`the ${name} build is incomplete — ${subdirectory}/ is missing.`);
@@ -185,7 +232,13 @@ function stage({ name, assets }) {
   rmSync(next, { recursive: true, force: true });
   mkdirSync(next, { recursive: true });
   for (const subdirectory of STAGED_SUBDIRECTORIES) {
-    cpSync(resolve(source, subdirectory), resolve(next, subdirectory), { recursive: true });
+    cpSync(resolve(source, subdirectory), resolve(next, subdirectory), {
+      recursive: true,
+      filter:
+        subdirectory === 'keys' && SERVER_ONLY_PROVER.has(name)
+          ? (from) => !from.endsWith('.prover')
+          : undefined,
+    });
   }
   replaceDirectory(next, destination);
 
