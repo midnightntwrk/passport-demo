@@ -625,6 +625,17 @@
  * this one. It holds no DOM, no React, and no network: keys, bytes, and an
  * injected reader.
  *
+ * `src/lib/custodyDelivery.ts` went IN on 2026/09/17 with the module itself. It
+ * decides ONE thing — whether a shielded payment into an account that keeps no
+ * readable balance was seen to arrive — and both wrong answers are a sentence
+ * on a screen that is not true: "they were paid" over a payment the network
+ * refused, or "not confirmed" over one that is demonstrably there. The list it
+ * walks is public and grows for everybody's payments, so the difference between
+ * "it grew" and "OUR delivery is in it" is the whole of the module, and the
+ * third answer — a list this build could not read at all — must never collapse
+ * into either. It holds no network, no clock, and no contract: an injected
+ * reader, two positions, and the bytes.
+ *
  * `src/identity/timestamps.ts` went IN on 2026/08/26 with the module itself: it
  * is the ISO-8601 reader `backup.ts` and `incentiveStore.ts` now share, it is
  * four lines of pure decision, and both of its answers are drilled by
@@ -691,6 +702,7 @@ export default mergeConfig(
           'src/lib/claimSteps.ts',
           'src/lib/companionLink.ts',
           'src/lib/colour.ts',
+          'src/lib/custodyDelivery.ts',
           'src/lib/dynamicSession.ts',
           'src/lib/endpoints.ts',
           'src/lib/feeReadinessPoll.ts',
