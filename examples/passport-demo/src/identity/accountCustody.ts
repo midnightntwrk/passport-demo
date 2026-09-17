@@ -907,7 +907,7 @@ export async function readCustodyAccountView(
   if (!state) {
     throw new AccountCustodyError(
       'contract-not-found',
-      'There is no Passport account at that address, so nothing was sent.',
+      'There is no Passport account there, so nothing was sent.',
     );
   }
 
@@ -924,7 +924,7 @@ export async function readCustodyAccountView(
   } catch (cause) {
     throw new AccountCustodyError(
       'contract-not-found',
-      'That address does not hold a Passport account, so nothing was sent.',
+      'That is not a Passport account, so nothing was sent.',
       cause instanceof Error ? cause.message : String(cause),
       { cause },
     );
