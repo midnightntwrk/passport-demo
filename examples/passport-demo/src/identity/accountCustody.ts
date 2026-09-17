@@ -17,6 +17,19 @@
  * path that reports a transfer that was not submitted, and no path that reports
  * a balance that was not decoded from ledger state served by the indexer.
  *
+ * IT PAYS THREE BUILDS AND SPENDS FROM ONE (2026/09/17)
+ * -----------------------------------------------------
+ * Every WITHDRAWAL here is against the Passport this device holds, which is one
+ * of the two prototype builds. Every DEPOSIT is against somebody else's
+ * account, and that may now be the account custody contract — Nicolas's,
+ * consumed unchanged at a pinned commit — whose deposits are the same
+ * permissionless calls under different names, with a sealed delivery beside the
+ * shielded one. So the deposits ask the chain which build they are paying and
+ * call what it carries ({@link depositNight}, {@link depositShielded}), and
+ * {@link payCustodyAccount} is the one entry point a surface needs for any of
+ * them. Nothing here spends from one of those accounts: that is a signature the
+ * Dynamic sign-in makes, and it lives in `./custodyContractClient.ts`.
+ *
  * IT IS A SIBLING OF `./passportContract.ts` AND `./midnames.ts`
  * -------------------------------------------------------------
  * Those two are the proven shapes in this repository for "a browser talks to a
@@ -77,6 +90,16 @@ import type { LocalMidnightWallet } from '../lib/localWallet.js';
    a type has no instance, so this adds no module to either graph. */
 import type { Ledger as AccountLedger } from '../../contracts/stagenet/account/contract/index.js';
 import { sponsorFeeRefusal, sponsorReadiness } from '../lib/sponsor.js';
+import {
+  scanCustodyInbox,
+  type CustodyDelivery,
+} from '../lib/custodyDelivery.js';
+/* The deposit circuit's name per build, from the module that already had to
+   decide it for the Dynamic Passport's own send. One mapping, two callers. */
+import { depositCircuitFor } from './custodyContractSend.js';
+/* Type only: the reader shape `readInboxCustody` walks, so the view this module
+   returns is the same value that module's recovery walk takes. */
+import type { CustodyInboxReader } from './custodyInbox.js';
 import {
   createContractProviders,
   compiledContractFor,
@@ -805,6 +828,130 @@ function projectAccountState(decoded: AccountLedger): AccountState {
   };
 }
 
+/* -------------------------------------------------------------------------- */
+/* The newer account's public state — the key to seal to, and the deliveries   */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The two public cells a PAYER of one of these accounts reads, and nothing
+ * else.
+ *
+ * Deliberately not an equivalent of {@link AccountState}: that shape is the
+ * prototype's ledger, and the newer build's is a different contract's. What a
+ * payer needs is exactly this — the key to seal a delivery to, and the list to
+ * confirm it in — so this is exactly that, and reading it cannot be mistaken
+ * for reading a balance the build does not keep.
+ *
+ * It satisfies `custodyInbox.ts`'s own reader interface, so the same value that
+ * confirms a payment also drives that module's recovery walk for the account's
+ * owner. One decode, two readers.
+ */
+export interface CustodyAccountView extends CustodyInboxReader {
+  /**
+   * The account's published encryption key as 64 hex characters, or null where
+   * it publishes none this client can use.
+   *
+   * NULL IS A REFUSAL AND NEVER A DEFAULT. A delivery sealed to anything but
+   * the account's own key is one its holder can never open, with a coin inside
+   * it that is then unreachable for good — so the one honest response to null
+   * is to send nothing. See {@link depositShielded}.
+   */
+  readonly encKeyHex: string | null;
+}
+
+/** The three cells this module reads off the newer build's decoded ledger. */
+interface CustodyLedgerView {
+  readonly enc_key: Uint8Array;
+  readonly inbox_count: bigint;
+  readonly inbox: { member(key: bigint): boolean; lookup(key: bigint): Uint8Array };
+}
+
+/**
+ * Reads the account custody build's public state through the indexer and
+ * decodes it with that build's own `ledger()`.
+ *
+ * ITS OWN MODULE, NOT THE PROTOTYPE'S. {@link readAccountState} decodes with
+ * the account contract's `ledger()`, and Compact decodes POSITIONALLY: handed
+ * the other contract's state it does not fail, it answers nonsense. So a reader
+ * for this build loads this build.
+ *
+ * Deliberately uncached, exactly as {@link readAccountState} is, and for a
+ * sharper reason: the key this answers with is sealed to seconds later, and a
+ * cached key is a delivery sealed to one the holder has rotated away from.
+ */
+export async function readCustodyAccountView(
+  network: AccountNetwork,
+  contractAddress: string,
+): Promise<CustodyAccountView> {
+  const address = rawContractAddress(contractAddress);
+  const [{ sharedPublicDataProvider }, module] = await Promise.all([
+    import('./contractRuntime.js'),
+    loadContractModule('account-custody'),
+  ]);
+
+  let state: unknown;
+  try {
+    const provider = (await sharedPublicDataProvider(
+      network.indexerHttpUrl,
+      network.indexerWsUrl ?? indexerWsFrom(network.indexerHttpUrl),
+    )) as { queryContractState(address: string): Promise<unknown> };
+    state = await provider.queryContractState(address);
+  } catch (cause) {
+    throw new AccountCustodyError(
+      'network-unreachable',
+      'We could not reach that Passport just now, so nothing was sent.',
+      cause instanceof Error ? cause.message : String(cause),
+      { cause },
+    );
+  }
+  if (!state) {
+    throw new AccountCustodyError(
+      'contract-not-found',
+      'There is no Passport account there, so nothing was sent.',
+    );
+  }
+
+  let decoded: CustodyLedgerView;
+  try {
+    const ledger = module.ledger as (data: unknown) => CustodyLedgerView;
+    decoded = ledger((state as { data: unknown }).data);
+    /* READ ONE CELL NOW, inside this try. `ledger()` builds its accessors
+       lazily, so state that is not one of these accounts decodes without
+       complaint and fails on the first field read — as a `TypeError` about a
+       property nobody has heard of, at whichever call site happened to look
+       first. Touching one here is what turns that into the sentence below. */
+    void decoded.inbox_count;
+  } catch (cause) {
+    throw new AccountCustodyError(
+      'contract-not-found',
+      'That is not a Passport account, so nothing was sent.',
+      cause instanceof Error ? cause.message : String(cause),
+      { cause },
+    );
+  }
+
+  const ledger = decoded;
+  return {
+    encKeyHex:
+      ledger.enc_key instanceof Uint8Array && ledger.enc_key.length === 32
+        ? bytesToHex(ledger.enc_key)
+        : null,
+    count: () => ledger.inbox_count,
+    entryAt: (index: bigint) => {
+      try {
+        if (index < 0n || index >= ledger.inbox_count) return null;
+        if (!ledger.inbox.member(index)) return null;
+        const entry = ledger.inbox.lookup(index);
+        return entry instanceof Uint8Array ? entry : null;
+      } catch {
+        /* A position this decode cannot read. The walk skips it and says so —
+           an unreadable list is never reported as a delivery. */
+        return null;
+      }
+    },
+  };
+}
+
 /**
  * Whether the account contract at `address` holds THIS device — the one whose
  * secret is given — as an active device.
@@ -1009,6 +1156,37 @@ export async function accountModuleFor(
   return build;
 }
 
+/**
+ * The same question, for a caller that is NARROWING A CHOICE rather than making
+ * a payment: the build at `contractAddress`, or null where it could not be
+ * established.
+ *
+ * WHAT IT IS FOR, AND THE ONE RULE ABOUT USING IT. A send picks its route
+ * before it starts, and one of those routes — the single-transaction transfer —
+ * cannot pay an account on the newer build at all (see
+ * {@link transferShieldedToAccount}). Asking here lets the route be chosen
+ * correctly; it does not let a payment be decided. Every path that must KNOW
+ * the build still goes through {@link accountModuleFor}, which refuses an
+ * unreadable answer, so a null here narrows nothing and changes no behaviour
+ * for the accounts that were reachable before it existed.
+ *
+ * It shares that function's per-address cache, so the question costs one read
+ * per account per session however many times it is asked.
+ */
+export async function accountModuleIfKnown(
+  network: AccountNetwork,
+  contractAddress: string,
+): Promise<PassportContractName | null> {
+  try {
+    return await accountModuleFor(network, contractAddress);
+  } catch {
+    /* Unreadable, or not an address at all. Both are "nothing to narrow on",
+       and neither is this caller's to report: the send that follows will meet
+       the same refusal from the path that cannot smooth it over. */
+    return null;
+  }
+}
+
 /* -------------------------------------------------------------------------- */
 /* Providers                                                                  */
 /* -------------------------------------------------------------------------- */
@@ -1068,14 +1246,53 @@ async function createAccountProviders(
 /**
  * The compiled artefact for one build of the account contract.
  *
- * THE LABEL IS THE SAME ON BOTH, deliberately: `passport-account` is what names
- * the circuit in every artefact URL the ZK config provider composes
- * (`passport-account#withdraw_night`), and the eleven circuits' key files ARE
- * the twelve-circuit build's key files — `cmp` clean, 2026/09/14. A second
- * label would ask for artefacts under a name nothing has staged.
+ * THE LABEL IS THE SAME ON BOTH PROTOTYPES, deliberately: `passport-account`
+ * is what names the circuit in every artefact URL the ZK config provider
+ * composes (`passport-account#withdraw_night`), and the eleven circuits' key
+ * files ARE the twelve-circuit build's key files — `cmp` clean, 2026/09/14. A
+ * second label would ask for artefacts under a name nothing has staged.
+ *
+ * THE ACCOUNT CUSTODY BUILD IS THE THIRD CASE AND TAKES ITS OWN (2026/09/17).
+ * It shares no circuit name and not one key file with either prototype, and its
+ * artefacts are staged under their own tree, so a deposit into one of those
+ * accounts labelled `passport-account` would ask for keys for circuits that
+ * tree has never heard of and fail at the first proof. See
+ * {@link accountContractLabel}.
  */
 async function compiledAccountContract(module: PassportContractName, witnesses: unknown) {
-  return compiledContractFor(module, 'passport-account', witnesses);
+  return compiledContractFor(module, accountContractLabel(module), witnesses);
+}
+
+/**
+ * The artefact namespace a build's circuits are fetched under.
+ *
+ * Exported for one reason: `./custodyContractClient.ts` declares the same
+ * string for the same build (`ACCOUNT_CUSTODY_LABEL`) and the two must never
+ * drift, so `accountCustody.test.ts` asserts they agree. It is not IMPORTED
+ * from there because that module carries the Dynamic signing session and a
+ * wallet factory, and a deposit has no business pulling either into its graph.
+ */
+export function accountContractLabel(module: PassportContractName): string {
+  return module === 'account-custody' ? 'passport-account-custody' : 'passport-account';
+}
+
+/**
+ * The witness set a DEPOSIT opens the account custody build with.
+ *
+ * ONE WITNESS EXISTS ON THAT BUILD — `held_coin`, which hands the circuit a
+ * coin the account already holds — and no deposit invokes it: paying value IN
+ * spends the caller's own funds and asks the recipient's account for nothing.
+ * So this refuses rather than reaching for a coin store that belongs to another
+ * Passport entirely, and the refusal is the assertion that no path reached from
+ * here can spend what the recipient holds. Spending from one's own custody
+ * account goes through `./custodyContractClient.ts`, which has the store.
+ */
+function depositOnlyCustodyWitnesses(): Record<string, () => never> {
+  return {
+    held_coin(): never {
+      throw new Error('A payment into a Passport cannot spend what that Passport holds.');
+    },
+  };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1186,10 +1403,42 @@ async function openAccountContract(
      The GRANT secret is carried when the caller has one, so the grant-authorised
      circuits (`grant_withdraw_night` / `grant_withdraw_shielded`) can be reached
      through this same plumbing later without changing it. */
-  const initialPrivateState = accountPrivateStateFrom(options.secrets);
+  /* THE ACCOUNT CUSTODY BUILD IS A DIFFERENT CONTRACT, and all three of the
+     things this line chooses are different for it (2026/09/17): its private
+     state is the coin store's shape, its only witness is `held_coin`, and its
+     artefacts live under their own label. Handing it the prototype's three
+     witnesses and a private state full of secrets it has never declared is a
+     connection that fails at the first proof, if it opens at all.
+
+     NO SECRET IS CARRIED INTO ONE. Every circuit on that build that needs
+     authority takes a signature as an ARGUMENT rather than through a witness,
+     so a secret here would authorise nothing and would only put one in memory
+     on a path that has no use for it. Everything this module reaches on that
+     build is permissionless — the two deposits — and a caller that arrived with
+     a secret has confused its own account for somebody else's. */
+  const custody = options.module === 'account-custody';
+  const carriesSecret =
+    options.secrets.deviceSecret !== undefined || options.secrets.grantSecret !== undefined;
+  if (custody && carriesSecret) {
+    throw new AccountCustodyError(
+      'invalid-request',
+      'That Passport cannot be paid this way.',
+      'a device or grant secret was carried into an account-custody connection, which reaches only the permissionless deposits',
+    );
+  }
+  const initialPrivateState = custody
+    ? /* The coin store's own shape, empty. Nothing reached from here reads it —
+         see {@link depositOnlyCustodyWitnesses} — but midnight-js writes the
+         next private state back after a call, and an undeclared shape going in
+         is a shape coming out. */
+      { coins: {} }
+    : accountPrivateStateFrom(options.secrets);
   const [providers, compiledContract, { findDeployedContract }] = await Promise.all([
     createAccountProviders(wallet, options.module, options.privateStateId, initialPrivateState),
-    compiledAccountContract(options.module, accountWitnesses()),
+    compiledAccountContract(
+      options.module,
+      custody ? depositOnlyCustodyWitnesses() : accountWitnesses(),
+    ),
     import('@midnight-ntwrk/midnight-js-contracts'),
   ]);
 
@@ -1807,6 +2056,11 @@ export interface DepositNightRequest {
  * The wallet's own holding is checked first, for the same reason the withdrawal
  * checks the contract's: the failure would otherwise arrive as an SDK balancing
  * error after a proof.
+ *
+ * WHICH CIRCUIT IS THE RECIPIENT'S QUESTION (2026/09/17). The newer build calls
+ * the same permissionless deposit `deposit_unshielded`, so this asks the chain
+ * what the account at that address is and calls what it carries. Nothing about
+ * the caller changes: the same wallet funds it, the same sponsor pays the fee.
  */
 export async function depositNight(
   handle: LocalMidnightWallet,
@@ -1827,11 +2081,31 @@ export async function depositNight(
     );
   }
 
+  /* WHICH CIRCUIT THE RECIPIENT'S OWN BUILD CALLS THIS, asked of the chain
+     rather than assumed (2026/09/17). Both prototypes spell it `deposit_night`;
+     the account custody build renamed it `deposit_unshielded` along with the
+     mirror it writes. `depositCircuitFor` in `./custodyContractSend.ts` is the
+     one place that mapping is written down, so the passkey Passport's send and
+     the Dynamic one cannot disagree about it.
+
+     ASKED HERE AND NOT EARLIER, so an unreadable recipient still meets the fee
+     gate and the balance check in the order they have always run. The answer is
+     cached per address, so this costs one read per recipient per session. */
+  const module = await accountModuleFor(handle.network, request.contractAddress);
+  const circuit = depositCircuitFor(module);
+  if (circuit === null) {
+    throw new AccountCustodyError(
+      'invalid-request',
+      'That name does not belong to a Passport that can be paid.',
+      `the ${module} build has no unshielded deposit`,
+    );
+  }
+
   return callAccountCircuit(
     handle,
     {
       contractAddress: request.contractAddress,
-      circuit: 'deposit_night',
+      circuit,
       args: [colour, request.amount],
       secrets: {},
       prepared: request.prepared ?? null,
@@ -1852,6 +2126,66 @@ export interface DepositShieldedRequest {
   prepared?: PreparedAccountCall | null;
 }
 
+/** What a shielded deposit did, and — on the newer build — whether it arrived. */
+export interface DepositShieldedResult extends AccountCustodyTxResult {
+  /**
+   * Whether the payment was SEEN to arrive, on an account that keeps no balance
+   * to read back.
+   *
+   * Absent for the prototype accounts, whose credit is simply readable, so a
+   * caller that does not know about this field behaves exactly as it did.
+   * Present for the newer build, where `delivered` means this payment's own
+   * sealed bytes were found in the recipient's public list of deliveries and
+   * `unconfirmed` means they were not found YET — which is not a failure and
+   * must never be shown as one. See `../lib/custodyDelivery.ts`.
+   */
+  readonly delivery?: CustodyDelivery;
+}
+
+/** Attempts, {@link CUSTODY_DELIVERY_INTERVAL_MS} apart, to see a payment land. */
+const CUSTODY_DELIVERY_ATTEMPTS = 20;
+/**
+ * The gap between them. A minute in total, which is several stagenet blocks and
+ * well past the indexer's usual lag — and short enough that somebody watching
+ * the screen is told what is known rather than kept waiting for certainty that
+ * may not come. Running out reports `unconfirmed`, never a failure.
+ */
+const CUSTODY_DELIVERY_INTERVAL_MS = 3_000;
+
+/**
+ * Watches for THIS payment's own sealed bytes in the recipient's public list.
+ *
+ * Every read is a fresh decode of the recipient's state, because that is the
+ * only thing that changes: the bytes we are looking for were fixed when the
+ * payment was sealed. A read that fails is not an answer and is simply asked
+ * again; running out of attempts is `unconfirmed`.
+ */
+async function confirmCustodyDelivery(
+  network: AccountNetwork,
+  address: string,
+  inboxBefore: bigint,
+  entry: Uint8Array,
+  onPhase?: (progress: AccountCustodyProgress) => void,
+): Promise<CustodyDelivery> {
+  for (let attempt = 0; attempt < CUSTODY_DELIVERY_ATTEMPTS; attempt += 1) {
+    onPhase?.({ phase: 'confirming' });
+    try {
+      const view = await readCustodyAccountView(network, address);
+      const scan = scanCustodyInbox(
+        (index) => view.entryAt(index),
+        inboxBefore,
+        view.count(),
+        entry,
+      );
+      if (scan === 'found') return 'delivered';
+    } catch {
+      /* The indexer, not the payment. Asked again below. */
+    }
+    if (attempt + 1 < CUSTODY_DELIVERY_ATTEMPTS) await wait(CUSTODY_DELIVERY_INTERVAL_MS);
+  }
+  return 'unconfirmed';
+}
+
 /**
  * Moves one shielded note the calling wallet holds into the account contract.
  *
@@ -1863,12 +2197,29 @@ export interface DepositShieldedRequest {
  *
  * No contract-side balance check is possible or needed here: the constraint is
  * that the wallet really holds the note, and the wallet is the one that said so.
+ *
+ * THE NEWER BUILD TAKES A SECOND ARGUMENT, AND IT IS THE WHOLE PAYMENT
+ * -------------------------------------------------------------------
+ * `deposit_shielded(coin, entry)` there: the coin, and a sealed container
+ * carrying that coin's description to the only party who can open it. The
+ * account itself keeps no record of what it holds — that is the point of it —
+ * so the container IS how the recipient learns they were paid. A deposit made
+ * without one still LANDS: the value moves into the account and is then
+ * unreachable by anybody, for ever, because its holder can never name the coin.
+ * That is why a recipient publishing no key we can seal to is refused here in
+ * one sentence rather than paid on a guess.
+ *
+ * THE KEY IS READ AT THE MOMENT OF SEALING, ONCE, and never cached. An account
+ * may rotate its key at any time, and a payment sealed to a key its holder has
+ * moved on from is the same unreachable coin by another route. The read that
+ * takes it also takes the list's length, so the confirmation below compares
+ * against the state the seal was made over rather than a later one.
  */
 export async function depositShielded(
   handle: LocalMidnightWallet,
   request: DepositShieldedRequest,
   onPhase?: (progress: AccountCustodyProgress) => void,
-): Promise<AccountCustodyTxResult> {
+): Promise<DepositShieldedResult> {
   onPhase?.({ phase: 'checking' });
   const { coin } = request;
   if (coin.nonce.length !== 32) {
@@ -1886,13 +2237,140 @@ export async function depositShielded(
   requirePositiveAmount(coin.value, 'A deposit');
   await requireFees();
 
-  return callAccountCircuit(
+  const address = rawContractAddress(request.contractAddress);
+  const module = await accountModuleFor(handle.network, address);
+  if (module !== 'account-custody') {
+    /* THE PROTOTYPE PATH, UNCHANGED. One argument, no seal, no delivery field:
+       those accounts mirror what they hold and a caller reads the credit back. */
+    return callAccountCircuit(
+      handle,
+      {
+        contractAddress: address,
+        circuit: 'deposit_shielded',
+        args: [{ nonce: coin.nonce, color: coin.color, value: coin.value }],
+        secrets: {},
+        prepared: request.prepared ?? null,
+      },
+      onPhase,
+    );
+  }
+
+  /* ONE READ, TAKEN HERE: the key this payment is sealed to and the length of
+     the list it will be confirmed in. Both belong to the same moment — a key
+     read earlier could have been rotated away from by now, and a length read
+     later would already include this payment's own entry. */
+  const view = await readCustodyAccountView(handle.network, address);
+  if (view.encKeyHex === null) {
+    throw new AccountCustodyError(
+      'invalid-request',
+      'That Passport cannot receive this kind of payment yet, so nothing was sent.',
+      `the account at ${address.slice(0, 10)}… publishes no usable encryption key`,
+    );
+  }
+  const inboxBefore = view.count();
+  /* Loaded here rather than imported at the top: the sealing is X25519 and
+     AES-GCM over a wire format, and a NIGHT payment has no use for any of it. */
+  const { depositShieldedCustody } = await import('./custodyInbox.js');
+  const sealed = await depositShieldedCustody(view.encKeyHex, {
+    colour: bytesToHex(coin.color),
+    nonce: bytesToHex(coin.nonce),
+    value: coin.value,
+  });
+
+  const result = await callAccountCircuit(
     handle,
     {
-      contractAddress: request.contractAddress,
+      contractAddress: address,
       circuit: 'deposit_shielded',
-      args: [{ nonce: coin.nonce, color: coin.color, value: coin.value }],
+      args: [sealed.coin, sealed.entry],
       secrets: {},
+      prepared: request.prepared ?? null,
+    },
+    onPhase,
+  );
+  /* SUBMITTED IS NOT ARRIVED, and on this build nothing else can say which. */
+  const delivery = await confirmCustodyDelivery(
+    handle.network,
+    address,
+    inboxBefore,
+    sealed.entry,
+    onPhase,
+  );
+  return { ...result, delivery };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Paying a Passport — one call, whichever build the recipient holds           */
+/* -------------------------------------------------------------------------- */
+
+/** A payment into somebody's account, in the vocabulary a screen has. */
+export type PayAccountRequest =
+  | {
+      /** The recipient's account contract, raw 64-hex or prefixed. */
+      targetAddress: string;
+      kind: 'night';
+      colourHex: string;
+      amount: bigint;
+      prepared?: PreparedAccountCall | null;
+    }
+  | {
+      targetAddress: string;
+      kind: 'shielded';
+      /** The exact note to move, nonce and all — see {@link DepositShieldedRequest}. */
+      coin: AccountShieldedCoin;
+      prepared?: PreparedAccountCall | null;
+    };
+
+/**
+ * PAYS ANOTHER PASSPORT'S ACCOUNT, WITHOUT THE CALLER KNOWING ANY OF THIS.
+ *
+ * THE CONTRACT THIS KEEPS
+ * -----------------------
+ *   - the caller names a recipient, an asset, and an amount, and nothing else.
+ *     Which circuit that account carries, what arguments it takes, and whether
+ *     a delivery has to be sealed for it are all read off the chain here;
+ *   - it is PERMISSIONLESS on every build: no signature, no approval, nothing
+ *     of the recipient's is spent. What moves is the CALLING wallet's own
+ *     value, which its balancing covers, and the fee is the sponsor's as it is
+ *     everywhere else in this module;
+ *   - it either returns a transaction the chain accepted, or throws an
+ *     {@link AccountCustodyError} whose message is one sentence a person can
+ *     read. There is no path that reports a payment it did not submit;
+ *   - `delivery` on the result is the honest extra: `delivered` where this
+ *     payment's own bytes were found in the recipient's public list,
+ *     `unconfirmed` where they have not appeared yet, and absent where the
+ *     recipient's build keeps a balance a caller can simply read back.
+ *
+ * WHY IT EXISTS. Two surfaces pay a Passport — the passkey one through its name
+ * send, and the Dynamic one paying another Dynamic Passport — and the second
+ * must not grow its own copy of the first's circuit names. This is the one
+ * copy. It adds no decision of its own: both branches are the deposits
+ * immediately above, which is why a caller may also reach those directly when
+ * it already holds a prepared connection or wants the deposit's own request
+ * shape.
+ */
+export async function payCustodyAccount(
+  handle: LocalMidnightWallet,
+  request: PayAccountRequest,
+  onPhase?: (progress: AccountCustodyProgress) => void,
+): Promise<DepositShieldedResult> {
+  if (request.kind === 'night') {
+    return depositNight(
+      handle,
+      {
+        contractAddress: request.targetAddress,
+        colourHex: request.colourHex,
+        amount: request.amount,
+        prepared: request.prepared ?? null,
+      },
+      onPhase,
+    );
+  }
+  return depositShielded(
+    handle,
+    {
+      contractAddress: request.targetAddress,
+      coin: request.coin,
       prepared: request.prepared ?? null,
     },
     onPhase,
