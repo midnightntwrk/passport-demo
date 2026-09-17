@@ -40,6 +40,7 @@
 import { expect, test, type Locator, type Page } from '@playwright/test';
 
 import { installVirtualAuthenticator, uniqueAlias } from './passkey.js';
+import { SIGN_IN_BUTTON } from './walkContext.js';
 
 /** Only runs deliberately. Every run spends stagenet NIGHT and claims a name. */
 const live = process.env.RUN_LIVE === '1';
@@ -143,8 +144,8 @@ test.describe('@live the account model on stagenet', () => {
 
   test('a passkey creates a Passport and lands on the name step', async () => {
     await page.goto('/');
-    await expect(page.getByRole('button', { name: /Continue with Passkey/i })).toBeVisible();
-    await page.getByRole('button', { name: /Continue with Passkey/i }).click();
+    await expect(page.getByRole('button', { name: SIGN_IN_BUTTON })).toBeVisible();
+    await page.getByRole('button', { name: SIGN_IN_BUTTON }).click();
 
     /* A brand-new Passport is welcomed before it is asked for a name — the
        screen added on 2026/08/30. One control; the reading is the price. */

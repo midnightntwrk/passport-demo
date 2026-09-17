@@ -46,13 +46,19 @@ export function activationLegs(input: ActivationLegsInput): ActivationLegs {
  *
  * Yes for anything the chain or this wallet might do differently a moment
  * later — a refusal, a landing that did not apply, a confirmation that ran
- * out. No for the two the caller has to fix: an address that is not an
- * account, and an indexer that cannot be reached at all (the retry would sit
- * on the same unreachable indexer). A DUST shortfall is handled before this
- * is asked: nothing was built, and the caller's own wait rebuilds it.
+ * out. No for the three the caller or the operator has to fix: an address that
+ * is not an account, an indexer that cannot be reached at all (the retry would
+ * sit on the same unreachable indexer), and no proof server for that build
+ * (`BALANCER_PROVER_URL_V3` is unset or the artefacts are not on this host —
+ * neither changes between now and fifteen seconds' time, and retrying would
+ * write the same line into the journal every quarter-minute for ever). A DUST
+ * shortfall is handled before this is asked: nothing was built, and the
+ * caller's own wait rebuilds it.
  */
 export function shouldRetryGrant(code: string): boolean {
-  return code !== 'not-an-account' && code !== 'indexer-unreachable';
+  return (
+    code !== 'not-an-account' && code !== 'indexer-unreachable' && code !== 'prover-unavailable'
+  );
 }
 
 /** How long the sponsor waits before its own second attempt at a grant. */

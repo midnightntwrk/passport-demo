@@ -62,7 +62,7 @@ import {
   sponsorRoute,
   type NetworkBoundary,
 } from './mocks.js';
-import { walkContextOptions } from './walkContext.js';
+import { SIGN_IN_BUTTON, walkContextOptions } from './walkContext.js';
 import { installVirtualAuthenticator } from './passkey.js';
 
 test.describe.configure({ mode: 'serial' });
@@ -97,7 +97,7 @@ test('the landing screen offers one way in, and says what network this is', asyn
   await page.goto('/');
 
   await expect(page.getByRole('heading', { name: /Midnight\s*Passport/ })).toBeVisible();
-  await expect(page.getByRole('button', { name: /Continue with Passkey/i })).toBeVisible();
+  await expect(page.getByRole('button', { name: SIGN_IN_BUTTON })).toBeVisible();
   await expect(page.getByText(/Test network demo — not production/)).toBeVisible();
 
   /* One primary action. There is no hosted route to offer and no vendor
@@ -118,7 +118,7 @@ test('a passkey is welcomed, and the welcome leads to the name step', async () =
      Passport is and who is paying. Two reviewers asked for the missing half on
      2026/08/26 ("an intro page… what is this, what am I getting"). One screen,
      four promises the build actually keeps, one primary action. */
-  await page.getByRole('button', { name: /Continue with Passkey/i }).click();
+  await page.getByRole('button', { name: SIGN_IN_BUTTON }).click();
 
   // The ceremony, then the wallet opening. Both are the real code paths.
   await expect(page.getByRole('heading', { name: /Welcome to Passport/i })).toBeVisible({
@@ -1122,7 +1122,7 @@ test('a send whose passkey will not answer offers a retry and a way out, in the 
      reach any other way when the failure happens on the name step, and it is
      the same control here. */
   await signOut.click();
-  await expect(page.getByRole('button', { name: /Continue with Passkey/i })).toBeVisible({
+  await expect(page.getByRole('button', { name: SIGN_IN_BUTTON })).toBeVisible({
     timeout: 60_000,
   });
 });
@@ -1198,7 +1198,7 @@ test('a passkey this browser does not know about never blocks the way in', async
 
   try {
     await fresh.goto('/');
-    await fresh.getByRole('button', { name: /Continue with Passkey/i }).click();
+    await fresh.getByRole('button', { name: SIGN_IN_BUTTON }).click();
 
     /* A brand-new Passport, so it is welcomed — and the one control on that
        screen is a real way onward, not a decoration. */
@@ -1329,7 +1329,7 @@ test('a Passport whose passkey this device cannot produce is offered a new one',
     await seedStrandedProfile(stranded, STRANDED_CREDENTIAL_ID);
     await stranded.reload();
 
-    await stranded.getByRole('button', { name: /Continue with Passkey/i }).click();
+    await stranded.getByRole('button', { name: SIGN_IN_BUTTON }).click();
 
     /* Not a sentence about what went wrong. A sentence about what can be done
        about it, and the control that does it. */
@@ -1342,7 +1342,7 @@ test('a Passport whose passkey this device cannot produce is offered a new one',
 
     /* And the retry is still there beside it: this state offers both readings
        of what happened — the passkey is gone, or it is merely not here now. */
-    await expect(stranded.getByRole('button', { name: /Continue with Passkey/i })).toBeVisible();
+    await expect(stranded.getByRole('button', { name: SIGN_IN_BUTTON })).toBeVisible();
 
     /* Nothing raw from the platform. `NotAllowedError`'s own message says the
        operation "either timed out or was not allowed", which is true of four
@@ -1500,7 +1500,7 @@ test('a passkey that is still there is signed in to, never created over', async 
 
   try {
     await held.goto('/');
-    await held.getByRole('button', { name: /Continue with Passkey/i }).click();
+    await held.getByRole('button', { name: SIGN_IN_BUTTON }).click();
     await expect(held.getByRole('heading', { name: /Welcome to Passport/i })).toBeVisible({
       timeout: 120_000,
     });
@@ -1523,7 +1523,7 @@ test('a passkey that is still there is signed in to, never created over', async 
     await held.evaluate(() => {
       (window as unknown as { __refuseNextAssertion?: boolean }).__refuseNextAssertion = true;
     });
-    await held.getByRole('button', { name: /Continue with Passkey/i }).click();
+    await held.getByRole('button', { name: SIGN_IN_BUTTON }).click();
     await expect(held.getByText(/Could not load your passkey/i)).toBeVisible({ timeout: 60_000 });
 
     await held.getByRole('button', { name: /Create a new passkey/i }).click();
@@ -1610,7 +1610,7 @@ test('a claim whose passkey will not answer offers a retry, a way out, and a way
 
   try {
     await stalled.goto('/');
-    await stalled.getByRole('button', { name: /Continue with Passkey/i }).click();
+    await stalled.getByRole('button', { name: SIGN_IN_BUTTON }).click();
     await expect(stalled.getByRole('heading', { name: /Welcome to Passport/i })).toBeVisible({
       timeout: 120_000,
     });
@@ -1669,12 +1669,12 @@ test('a claim whose passkey will not answer offers a retry, a way out, and a way
        has, and it has to lead somewhere: the landing screen, whose keyless
        panel makes the offer this one deliberately does not. */
     await stalled.getByRole('button', { name: 'Sign out' }).click();
-    await expect(stalled.getByRole('button', { name: /Continue with Passkey/i })).toBeVisible({
+    await expect(stalled.getByRole('button', { name: SIGN_IN_BUTTON })).toBeVisible({
       timeout: 60_000,
     });
 
     await arm();
-    await stalled.getByRole('button', { name: /Continue with Passkey/i }).click();
+    await stalled.getByRole('button', { name: SIGN_IN_BUTTON }).click();
     await expect(stalled.getByText(/Could not load your passkey/i)).toBeVisible({ timeout: 90_000 });
     await stalled.getByRole('button', { name: /Create a new passkey/i }).click();
 

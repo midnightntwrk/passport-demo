@@ -40,7 +40,7 @@
 import { expect, test, type Page } from '@playwright/test';
 
 import { installNetworkBoundary, type NetworkBoundary } from './mocks.js';
-import { walkContextOptions } from './walkContext.js';
+import { SIGN_IN_BUTTON, walkContextOptions } from './walkContext.js';
 import { installVirtualAuthenticator } from './passkey.js';
 
 test.describe.configure({ mode: 'serial' });
@@ -94,7 +94,7 @@ test.afterAll(async () => {
 
 test('the first step says what it usually costs, and counts the seconds it really costs', async () => {
   await page.goto('/');
-  await page.getByRole('button', { name: /Continue with Passkey/i }).click();
+  await page.getByRole('button', { name: SIGN_IN_BUTTON }).click();
   await expect(page.getByRole('heading', { name: /Welcome to Passport/i })).toBeVisible({
     timeout: 60_000,
   });

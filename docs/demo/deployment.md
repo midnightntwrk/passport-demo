@@ -66,9 +66,9 @@ unset fails by name rather than falling back to the staging project.
      examples/passport-balancer/contracts-stagenet/managed/midnames/zkir
    ```
 
-   **`account-k1` is packed too, verifier keys and IR only.** The k1-arm
-   build's prover keys are 3.2 GB (224 MB per k256 circuit); its proofs are
-   made on the proving server, which holds them under
+   **`account-k1` is packed when the tree has it, verifier keys and IR only.**
+   The k1-arm build's prover keys are 3.2 GB (224 MB per k256 circuit); its
+   proofs are made on the proving server, which holds them under
    `/opt/passport-k1-artefacts/managed/account-k1`, so a browser needs only
    the 74 KB of verifier keys and the IR. `tag-release.mjs` refuses to pack a
    `.prover` under `managed/account-k1/keys`, `prepare-zk-assets.mjs` leaves
@@ -76,6 +76,28 @@ unset fails by name rather than falling back to the staging project.
    without the k1 artefacts still builds: the module is staged, the artefacts
    are reported absent, and nothing is served under `/zk/account-k1` until
    `fetch-zk-artefacts.mjs` brings a bundle that carries them.
+
+   **Those directories are gitignored, so whether they are here is a fact
+   about the machine and not about the commit.** `tag-release.mjs` treats them
+   the way `prepare-zk-assets.mjs` does: packed when present, and when absent
+   it prints one line saying the bundle will not carry `account-k1` and cuts
+   the release anyway. That is deliberate — a fix release for the prototype
+   Passports, which do not use this build at all, must be cuttable from an
+   ordinary clone. Half a build is still fatal: keys without IR, or IR without
+   keys, is an interrupted copy and the script says so rather than shipping a
+   bundle that looks complete and fails at the first proof.
+
+   **For the release that ships the Dynamic-only Passport, pass
+   `--require-k1`** (or set `PASSPORT_RELEASE_REQUIRE_K1=1`). That release
+   cannot work without those artefacts, so their absence has to be an error
+   rather than a smaller bundle:
+
+   ```sh
+   PASSPORT_RELEASE_NOTES='…' node scripts/tag-release.mjs --kind feature --require-k1
+   ```
+
+   If it refuses, run `node scripts/fetch-zk-artefacts.mjs` for a bundle that
+   carries them, or cut the release from the host that compiled the build.
 
    **Measure before you add it.** `managed/account-k1/keys` is **3.2 GB** —
    thirty circuits against the account build's twelve, with the k256 arm's
