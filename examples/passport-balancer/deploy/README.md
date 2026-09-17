@@ -61,6 +61,17 @@ systemctl reload caddy
 ```
 
 `/prover-local/*` reaches our own proof server directly, bypassing the gateway.
+
+`/prover-v3/*` reaches the same process under a different name, and the name is
+the point. `/prover-local` answers "this box rather than the gateway", which is
+an operational question; `/prover-v3` answers "an image that can prove ZKIR v3",
+which is a capability. The `account-custody` build is compiled with
+`--feature-zkir-v3`, and neither `/prover` (the 1AM gateway first, which is
+`ledger9-zkir2-dispatch`) nor the demo's in-tab prover (`@midnight-ntwrk/zkir-v2`)
+can prove those circuits at all. The demo reads this address as
+`VITE_MIDNIGHT_PROVING_URL_V3`, for that one module; nothing asks for it yet.
+Added 2026/09/16, validated with `caddy validate` and applied with
+`systemctl reload caddy`.
 It is the quickest way to tell which of the two answered a request: the gateway
 returns `500` with a JSON body and Cloudflare headers, ours returns `400` with
 `text/plain`.
@@ -84,6 +95,7 @@ alive and unable to submit for five hours and nothing restarted it.
 | `systemctl is-active caddy` | `active` |
 | `GET https://67-205-177-162.sslip.io/balancer/status` | `200` — through Caddy, resolved to the loopback so the probe measures our Caddy rather than DNS |
 | `GET https://67-205-177-162.sslip.io/prover/health` | `200`, unless the proof server behind it is itself down |
+| `GET https://67-205-177-162.sslip.io/prover-v3/health` | `200`. The droplet's own proof server, which is what answers ZKIR v3. |
 
 `/status` is read with `python3`, not `grep`: three of those terms are numbers,
 and a `grep` for `"synced":true` cannot tell a missing key from a false one.
