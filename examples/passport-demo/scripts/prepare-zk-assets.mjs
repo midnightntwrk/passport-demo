@@ -65,7 +65,7 @@
  */
 
 import { cpSync, existsSync, mkdirSync, renameSync, rmSync, statSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { basename, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const scriptsDirectory = dirname(fileURLToPath(import.meta.url));
@@ -124,14 +124,23 @@ const CONTRACTS = [
 ];
 const STAGED_SUBDIRECTORIES = ['compiler', 'keys', 'zkir'];
 /**
- * Builds whose PROVER keys never reach a browser. The account custody build's
- * prover keys are 3.2 GB (224 MB per k256 circuit); its proofs are made on the
- * server, so a browser needs only the verifier keys (74 KB for all thirty) and
- * the IR
- * (under 1 MB). Their `keys/` ships verifier files only, and a `.prover` that
- * happens to be on a developer's disk is left behind here.
+ * Builds whose PROVER keys are mostly made on the server. The account custody
+ * build's prover keys are 3.2 GB (224 MB per k256 circuit); those proofs are
+ * made on the server, so a browser needs only their verifier keys (74 KB for
+ * all thirty) and the IR (under 1 MB).
+ *
+ * TWO CIRCUITS ARE THE EXCEPTION, and leaving them out is why a live run could
+ * not be paid on 2026/09/17. `deposit_shielded` (11 MB) and
+ * `deposit_unshielded` (0.4 MB) are PERMISSIONLESS — anybody pays an account
+ * with them, including a passkey Passport that has never heard of this build —
+ * so they are proved in the tab through the ordinary v3 route, and
+ * `FetchZkConfigProvider` fetches `keys/<circuit>.prover` to do it. Excluding
+ * the whole build's prover keys made both 404. They are staged by name; every
+ * other `.prover` is left behind.
  */
 const SERVER_ONLY_PROVER = new Set(['account-custody']);
+/** The prover keys a browser does need from an otherwise server-proved build. */
+const BROWSER_PROVER_KEYS = new Set(['deposit_shielded.prover', 'deposit_unshielded.prover']);
 
 function fail(message) {
   console.error(`prepare-zk-assets: ${message}`);
@@ -240,7 +249,7 @@ function stage({ name, assets }) {
       recursive: true,
       filter:
         subdirectory === 'keys' && SERVER_ONLY_PROVER.has(name)
-          ? (from) => !from.endsWith('.prover')
+          ? (from) => !from.endsWith('.prover') || BROWSER_PROVER_KEYS.has(basename(from))
           : undefined,
     });
   }
