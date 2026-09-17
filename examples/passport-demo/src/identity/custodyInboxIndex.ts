@@ -163,7 +163,10 @@ const KNOWN_ACTION_KINDS: readonly CustodyActionKind[] = [
  * forwards through history, because inbox key 0 is the FIRST entry ever
  * written.
  */
-export function custodyActionRowsFrom(body: unknown): CustodyActionRow[] | null {
+export function custodyActionRowsFrom(
+  body: unknown,
+  limit: number = CUSTODY_ACTION_HISTORY_LIMIT,
+): CustodyActionRow[] | null {
   if (!body || typeof body !== 'object') return null;
   const envelope = body as { data?: unknown; errors?: unknown };
   /* A partially answered query is not an answer: a history missing rows counts
@@ -200,6 +203,15 @@ export function custodyActionRowsFrom(body: unknown): CustodyActionRow[] | null 
           : null,
     });
   }
+  /* A FULL PAGE IS A TRUNCATED ONE, and a truncated history counts SHORT.
+     `actions(limit: N)` gives the newest N; index 0 of the reversed list is
+     then not the first action this account ever took, and every inbox index
+     derived from it points at somebody else's transaction — a confident wrong
+     position, which is the one thing this module exists never to produce. The
+     header has always said an account with more history than this answers
+     `null`; this is where it does. Paging it is a later change, and it is only
+     worth making for an account that has had two hundred deliveries. */
+  if (rows.length >= limit) return null;
   return rows.reverse();
 }
 

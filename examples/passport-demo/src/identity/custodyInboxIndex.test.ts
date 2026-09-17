@@ -219,3 +219,33 @@ describe('custodyTxIdForInboxIndex', () => {
     expect(txIdFor(99n)).toBeNull();
   });
 });
+
+describe('a history longer than one page', () => {
+  /* THE DEFECT THIS CATCHES points every coin at the wrong transaction.
+     `actions(limit: N)` gives the NEWEST N, so a full page is a truncated
+     history: reversed, its index 0 is not the first action the account ever
+     took, and every inbox index derived from it is out by however many were
+     dropped. The module's header has always said such an account answers
+     `null`; this is the assertion that it does. */
+  it('answers nothing rather than counting a truncated history', () => {
+    const full = Array.from({ length: CUSTODY_ACTION_HISTORY_LIMIT }, (_unused, index) =>
+      call('deposit_shielded', `${index}`.padStart(64, '0')),
+    );
+    expect(custodyActionRowsFrom(answer(full))).toBeNull();
+  });
+
+  it('counts a page that is not full', () => {
+    const nearly = Array.from({ length: CUSTODY_ACTION_HISTORY_LIMIT - 1 }, (_unused, index) =>
+      call('deposit_shielded', `${index}`.padStart(64, '0')),
+    );
+    expect(custodyActionRowsFrom(answer(nearly))).toHaveLength(CUSTODY_ACTION_HISTORY_LIMIT - 1);
+  });
+
+  /* And the limit is the caller's, so a caller that asks for fewer is held to
+     its own page rather than to the default. */
+  it('uses the limit it was asked about', () => {
+    const three = [call('deposit_shielded', 'aa'.repeat(32)), call('deposit_shielded', 'bb'.repeat(32)), call('deposit_shielded', 'cc'.repeat(32))];
+    expect(custodyActionRowsFrom(answer(three), 3)).toBeNull();
+    expect(custodyActionRowsFrom(answer(three), 4)).toHaveLength(3);
+  });
+});
