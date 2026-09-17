@@ -127,10 +127,18 @@
  *                        into passport-demo, or filling in a release after the
  *                        fact — because `dist/` has moved on.
  *
+ *   --require-k1         refuse to cut the release unless the account-k1
+ *                        artefacts are in this tree. They are gitignored, so
+ *                        an ordinary checkout has none and the bundle is
+ *                        simply cut without them; pass this for the release
+ *                        that ships the Dynamic-only Passport, which cannot
+ *                        work without them.
+ *
  *   The commit has to be on the remote already; if it is not, `gh` says so and
  *   this exits non-zero — push, then re-run.
  *
  *   PASSPORT_RELEASE_REPO    same as `--repo` (the flag wins).
+ *   PASSPORT_RELEASE_REQUIRE_K1  `1` is the same as `--require-k1`.
  *   PASSPORT_RELEASE_NOTES   the gate summary, appended to the body verbatim.
  *                            Whatever was actually run: typecheck, unit tests,
  *                            the PWA check, a browser walk.
@@ -159,13 +167,39 @@ import {
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const serviceWorker = path.join(repositoryRoot, 'examples/passport-demo/dist/sw.js');
 const zkBundleName = 'passport-zk-artefacts.tar.zst';
-const zkArtefactDirectories = [
+/**
+ * The artefacts every release carries. Missing one is fatal: the deployed
+ * contracts know only this compiler output, and a bundle without it is a
+ * release nothing can prove against.
+ */
+const requiredZkDirectories = [
   'examples/passport-balancer/contracts-stagenet/managed/account/keys',
   'examples/passport-balancer/contracts-stagenet/managed/account/zkir',
   'examples/passport-balancer/contracts-stagenet/managed/midnames/keys',
   'examples/passport-balancer/contracts-stagenet/managed/midnames/zkir',
-  /* The k1 build ships VERIFIER keys and IR only; its prover keys (3.2 GB) live
-     on the proving server. `refuseProverKeysIn` below keeps the bundle honest. */
+];
+
+/**
+ * The k1 build's, WHEN THE TREE HAS THEM — the same view `prepare-zk-assets.mjs`
+ * takes of the same directories.
+ *
+ * They are gitignored, so whether they are here is a fact about the machine
+ * rather than about the commit: a clone has none, the host that compiled the
+ * build has all of them, and `fetch-zk-artefacts.mjs` puts them on a third. A
+ * release script that demanded them could only be run in one place, which is
+ * the opposite of what a release is for — and it would have blocked every fix
+ * release for the prototype Passports, which do not use this build at all.
+ *
+ * So: packed when present, reported in one line when absent, and fatal on
+ * absence only when the release is asked to guarantee them — `--require-k1`, or
+ * `PASSPORT_RELEASE_REQUIRE_K1=1`, which is what the release shipping the
+ * Dynamic-only Passport is cut with.
+ *
+ * VERIFIER KEYS AND IR ONLY. The prover keys are 3.2 GB and live on the proving
+ * server; `refuseProverKeysIn` below keeps the bundle honest about that, and it
+ * is the one thing that is fatal whether or not the k1 build was asked for.
+ */
+const optionalZkDirectories = [
   'examples/passport-balancer/contracts-stagenet/managed/account-k1/keys',
   'examples/passport-balancer/contracts-stagenet/managed/account-k1/zkir',
 ];
@@ -174,6 +208,10 @@ const verifierOnlyKeyDirectories = [
 ];
 
 const dryRun = process.argv.includes('--dry-run');
+/* The release that ships the Dynamic-only Passport says so, and then a tree
+   without the k1 artefacts is an error rather than a smaller bundle. */
+const requireK1 =
+  process.argv.includes('--require-k1') || process.env.PASSPORT_RELEASE_REQUIRE_K1 === '1';
 const allowLong = process.argv.includes('--allow-long');
 const releaseRepository = option('--repo') || process.env.PASSPORT_RELEASE_REPO || 'midnightntwrk/passport-demo';
 const requestedCommit = option('--commit');
@@ -229,17 +267,54 @@ function git(...args) {
 }
 
 /**
- * The deploy workflow cannot rebuild these keys: the deployed contracts know
- * only this compiler output. Packaging them at release time makes the release
- * self-contained, rather than hoping an Actions cache happens to be warm.
+ * What this tree can put in the bundle, decided WITHOUT touching anything.
+ *
+ * Read-only on purpose, so `--dry-run` answers the question an operator
+ * actually has — will this release carry account-k1? — instead of discovering
+ * it at the real cut, several minutes and one `gh` call later.
  */
-function packageZkArtefacts() {
-  for (const directory of zkArtefactDirectories) {
+function zkDirectoriesToPack() {
+  for (const directory of requiredZkDirectories) {
     if (!existsSync(path.join(repositoryRoot, directory))) {
       fail(`${directory} is missing, so the release cannot carry the pinned ZK artefacts.`);
     }
   }
 
+  /* ALL OF THEM OR NONE OF THEM. A tree with the keys and no IR is a copy that
+     was interrupted, and packing half a build is worse than packing none: the
+     bundle would look complete and fail at the first proof. */
+  const presentOptional = optionalZkDirectories.filter((directory) =>
+    existsSync(path.join(repositoryRoot, directory)),
+  );
+  if (presentOptional.length > 0 && presentOptional.length !== optionalZkDirectories.length) {
+    fail(
+      'the account-k1 build is half here — ' +
+        `${optionalZkDirectories.filter((directory) => !presentOptional.includes(directory)).join(' and ')} ` +
+        'missing. Complete the copy, or remove what is there and cut the release without it.',
+    );
+  }
+  const carriesK1 = presentOptional.length === optionalZkDirectories.length;
+  if (!carriesK1) {
+    if (requireK1) {
+      fail(
+        'this release was asked to carry the account-k1 artefacts and they are not in this tree. ' +
+          'Run `node scripts/fetch-zk-artefacts.mjs`, or cut it from the host that compiled the build.',
+      );
+    }
+    console.log(
+      'tag-release: the account-k1 artefacts are not in this tree, so the bundle will not carry ' +
+        'them; everything else is packed as usual. Pass --require-k1 to make this fatal.',
+    );
+  }
+  return carriesK1 ? [...requiredZkDirectories, ...optionalZkDirectories] : requiredZkDirectories;
+}
+
+/**
+ * The deploy workflow cannot rebuild these keys: the deployed contracts know
+ * only this compiler output. Packaging them at release time makes the release
+ * self-contained, rather than hoping an Actions cache happens to be warm.
+ */
+function packageZkArtefacts(packedDirectories) {
   const verified = run(process.execPath, [
     path.join(repositoryRoot, '.github/workflows/scripts/verify-zk-artefacts.mjs'),
   ], { cwd: repositoryRoot });
@@ -249,10 +324,13 @@ function packageZkArtefacts() {
     );
   }
 
+  /* CHECKED WHENEVER THE DIRECTORY EXISTS, asked for or not. A prover key in
+     this tree is 224 MB of key material that belongs on the proving server and
+     nowhere else, and the release is the last place it could travel from. */
   for (const relative of verifierOnlyKeyDirectories) {
-    const provers = readdirSync(path.join(repositoryRoot, relative)).filter((name) =>
-      name.endsWith('.prover'),
-    );
+    const absolute = path.join(repositoryRoot, relative);
+    if (!existsSync(absolute)) continue;
+    const provers = readdirSync(absolute).filter((name) => name.endsWith('.prover'));
     if (provers.length > 0) {
       fail(
         `${relative} holds ${provers.length} prover key file(s); this build ships verifier keys only. Remove them before packing.`,
@@ -267,7 +345,7 @@ function packageZkArtefacts() {
     archive,
     '-C',
     repositoryRoot,
-    ...zkArtefactDirectories,
+    ...packedDirectories,
   ]);
   if (packed.status !== 0) {
     rmSync(directory, { force: true, recursive: true });
@@ -294,6 +372,10 @@ const auth = run('gh', ['auth', 'status']);
 if (auth.status !== 0) {
   fail('`gh` is not authenticated. Run `gh auth login`.');
 }
+
+/* Decided here, in the read-only preflight, so `--dry-run` says what the bundle
+   would carry and `--require-k1` refuses before anything is created. */
+const packedZkDirectories = zkDirectoriesToPack();
 
 const commit = git('rev-parse', requestedCommit ?? 'HEAD');
 
@@ -526,14 +608,16 @@ if (dryRun) {
       `tag-release: --dry-run, creating nothing. Would create tag ${tag}, titled ` +
         `"${releaseTitle(version, date)}" (a ${releaseKind}). ${delta.length} new ` +
         `${delta.length === 1 ? 'entry' : 'entries'} against ${against}; ` +
-        `body is ${body.length} characters. Would run:\n\ngh ${quoted} ${zkBundleName}`,
+        `body is ${body.length} characters. The bundle would carry ` +
+        `${packedZkDirectories.length} artefact directories. Would run:` +
+        `\n\ngh ${quoted} ${zkBundleName}`,
     );
   }
   console.log(`\n${'-'.repeat(72)}\n${body}\n${'-'.repeat(72)}\n`);
   process.exit(0);
 }
 
-const bundle = packageZkArtefacts();
+const bundle = packageZkArtefacts(packedZkDirectories);
 let created;
 try {
   created = run('gh', [...args, bundle.archive]);
