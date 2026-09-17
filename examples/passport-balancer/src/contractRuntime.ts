@@ -492,23 +492,37 @@ export type ContractProvingMode = 'server' | 'wasm';
  * always come from the published source: they are a property of the circuit
  * size, not of the contract.
  */
+/**
+ * A proof provider that is a NAMED SERVER and has no fallback.
+ *
+ * The no-fallback part is the point. {@link createContractProofProvider} falls
+ * back to this process's own prover when no server is configured, which is
+ * right for the ZKIR v2 builds and wrong for `account-k1`: the in-process
+ * prover is `@midnight-ntwrk/zkir-v2` and cannot prove a v3 circuit, so a
+ * fallback there would turn a clear refusal into a proof that fails several
+ * seconds later with a message about key material. A caller that needs a
+ * particular server asks for it by URL and gets that server or nothing.
+ */
+export async function createServerProofProvider(
+  url: string,
+  zkConfigProvider: ZKConfigProvider<string>,
+): Promise<unknown> {
+  const { httpClientProofProvider } = await import(
+    '@midnight-ntwrk/midnight-js-http-client-proof-provider'
+  );
+  return countedProofProvider(
+    httpClientProofProvider({ url, zkConfigProvider, timeout: CONTRACT_PROOF_TIMEOUT_MS } as never),
+  );
+}
+
 export async function createContractProofProvider(
   config: BalancerConfig,
   zkConfigProvider: ZKConfigProvider<string>,
 ): Promise<{ mode: ContractProvingMode; proofProvider: unknown }> {
   if (config.provingServerUrl) {
-    const { httpClientProofProvider } = await import(
-      '@midnight-ntwrk/midnight-js-http-client-proof-provider'
-    );
     return {
       mode: 'server',
-      proofProvider: countedProofProvider(
-        httpClientProofProvider({
-          url: config.provingServerUrl,
-          zkConfigProvider,
-          timeout: CONTRACT_PROOF_TIMEOUT_MS,
-        } as never),
-      ),
+      proofProvider: await createServerProofProvider(config.provingServerUrl, zkConfigProvider),
     };
   }
 
