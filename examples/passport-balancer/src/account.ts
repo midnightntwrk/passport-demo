@@ -75,7 +75,9 @@ import {
   proverForModule,
   type AccountModuleName,
   accountEncKey,
-  sealedShieldedArgs,
+  inboxHoldsEntry,
+  InboxEntryRequired,
+  sealedShieldedDeposit,
   shieldedDepositConfirmed,
 } from './accountModule.js';
 import { randomBytes } from 'node:crypto';
@@ -273,6 +275,15 @@ interface K1AccountLedger {
   readonly device_epoch: bigint;
   readonly booted: boolean;
   readonly inbox_count: bigint;
+  /**
+   * The entries themselves, keyed by the index they were written at.
+   *
+   * PUBLIC, and the reason a k1 deposit is confirmable at all. The 192 bytes
+   * are opaque to everybody but the owner, but a depositor that kept the bytes
+   * it sealed can find them here and know that its own deposit landed rather
+   * than merely that somebody's did.
+   */
+  inbox: { member(index: bigint): boolean; lookup(index: bigint): Uint8Array };
   /** The account's advertised X25519 key. Every inbox entry is sealed to it. */
   readonly enc_key: Uint8Array;
   devices: { member(entry: Uint8Array): boolean; size(): bigint };
@@ -311,9 +322,26 @@ interface AccountView {
    *
    * It is the ONLY public trace a shielded deposit into a k1 account leaves —
    * custody there is stateless by design, so there is no balance to read back
-   * and this is what a confirmation has to be built out of.
+   * and this is what a confirmation has to be built out of. It says how many
+   * entries there are and NOT whose they are: see {@link AccountView.inboxEntry}.
    */
   inboxCount(): bigint | null;
+  /**
+   * The entry at one index, or `null` when there is none, or when this build
+   * has no inbox at all.
+   *
+   * What turns "the inbox grew" into "our deposit landed". Never throws: a map
+   * this service cannot walk is a `null` and a weaker confirmation, not a
+   * failed activation.
+   */
+  inboxEntry(index: bigint): Uint8Array | null;
+}
+
+/** Byte-for-byte, and length first so two keys of different lengths are not equal. */
+function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) if (a[i] !== b[i]) return false;
+  return true;
 }
 
 export type AccountFundingErrorCode =
@@ -787,8 +815,19 @@ export interface AssetFunding {
   amount: bigint;
   /** 64 lower-case hex: `rawTokenType(domain separator, faucet address)`. */
   colourHex: string;
-  /** The account's own `coins[colour].value` once the credit was seen. */
-  balanceAfter: bigint;
+  /**
+   * The account's own `coins[colour].value` once the credit was seen — READ,
+   * never computed.
+   *
+   * ABSENT on the k1-arm build, and that absence is the honest answer rather
+   * than a gap. Shielded custody there is stateless (MIP-0012 §6.1): the
+   * account holds the coin and no ledger entry says so, so there is no number
+   * to report. Reporting `before + grant` instead, as this did until it was
+   * reviewed, publishes an arithmetic result in the field that claims to be a
+   * reading — and it would have gone on reporting it if the deposit had
+   * credited the wrong colour, the wrong amount, or nothing at all.
+   */
+  balanceAfter?: bigint;
   fundedAt: string;
 }
 
@@ -1370,6 +1409,18 @@ export async function createAccountFunder(
         shielded: () => null,
         encKey: () => accountEncKey(ledgerK1),
         inboxCount: () => ledgerK1.inbox_count,
+        inboxEntry: (index) => {
+          try {
+            if (index < 0n || index >= ledgerK1.inbox_count) return null;
+            if (!ledgerK1.inbox.member(index)) return null;
+            const entry = ledgerK1.inbox.lookup(index);
+            return entry instanceof Uint8Array ? entry : null;
+          } catch {
+            /* An older build, or a map shape this decode does not know. The
+               confirmation falls back to the deposit's own inclusion. */
+            return null;
+          }
+        },
       };
     }
     const decoded = decodePrototypeAccount(state, address);
@@ -1381,6 +1432,7 @@ export async function createAccountFunder(
          instead, which is what `shielded` above reads. */
       encKey: () => null,
       inboxCount: () => null,
+      inboxEntry: () => null,
     };
   };
 
@@ -1798,15 +1850,18 @@ export async function createAccountFunder(
          refused here, before a coin was minted, because nothing in this
          repository could build one; `./k1Inbox.ts` now can.
 
-         The key is read off the account's live state in the same pass as the
-         balance and is never cached: `rotate_enc_key_with_k256` may have landed
-         a block ago, and an entry sealed to a superseded key is a coin the
-         owner can never name. An account that advertises no usable key is still
-         refused, and still before anything is minted — a deposit made with a
-         placeholder entry LANDS, and the coin is then gone. */
+         THE KEY IS NOT READ HERE. This read is a PRE-FLIGHT and nothing else:
+         an account that advertises no usable key at all is refused now, before
+         a coin is minted, because a deposit made with a placeholder entry LANDS
+         and the coin is then gone. The key that is actually SEALED TO is read
+         in the same breath as the sealing, minutes later — minting a coin and
+         waiting for it to become spendable is most of an activation, and
+         `rotate_enc_key_with_k256` is a circuit the owner may call in any of
+         those minutes. A key read here and sealed to there is a race whose
+         loser is a coin nobody can ever name. */
       const assetDeposits = accountDeposits(view.module);
-      const assetEncKey = view.encKey();
-      if (!assetDeposits.mirrorsShieldedBalance && assetEncKey === null) {
+      const sealsToEncKey = !assetDeposits.mirrorsShieldedBalance;
+      if (sealsToEncKey && view.encKey() === null) {
         throw new AccountFundingError(
           'asset-unsupported',
           `The account at ${address} advertises no usable encryption key, so the ${ASSET_SYMBOL} grant cannot be sealed for it and nothing was minted or spent.`,
@@ -1837,6 +1892,14 @@ export async function createAccountFunder(
       /* ------------------------------------------------------------------ */
 
       const privateStateId = `passport-balancer-account-${address}`;
+
+      /* The key this deposit is sealed to, and the bytes that sealing produced.
+         Both are set inside the job below, once, at the moment of sealing.
+         `sealedEntry` is what makes the confirmation about THIS deposit rather
+         than about the account's inbox; `sealedTo` is what a refusal compares
+         against when it has to say whether the key moved under us. */
+      let sealedEntry: Uint8Array | null = null;
+      let sealedTo: Uint8Array | null = null;
 
       let depositTx: string;
       try {
@@ -1872,21 +1935,50 @@ export async function createAccountFunder(
             color: colourBytes,
             value: coin.value,
           };
-          /* Sealed HERE, inside the job, from the key read at the top of this
-             call. The ephemeral secret never leaves `sealInboxEntry`, so this
-             service cannot read back what it just deposited — which is the
-             point: the description is the owner's, not the depositor's. */
-          const deposit = await callTx[opening.deposits.shieldedCircuit](
-            ...sealedShieldedArgs(opening.module, depositCoin, assetEncKey),
-          );
+          /* READ ONCE, HERE, AND SEALED TO THAT SAME VALUE. Not read at the
+             top of this call, where the account's state was fetched for the
+             pre-flight: minting the coin above takes minutes, and a key that
+             rotated during them would leave this entry sealed to a secret the
+             owner has destroyed, with a coin inside it that is unspendable for
+             ever. Not read twice either — a second read to "check" the first
+             would seal to one value and verify another.
+
+             The ephemeral secret never leaves `sealInboxEntry`, so this service
+             cannot read back what it just deposited. It keeps the CIPHERTEXT,
+             which is public the moment the circuit writes it into `inbox`, and
+             that is what the confirmation below looks for. */
+          const sealKey = (await readAccountView(address)).encKey();
+          if (sealsToEncKey && sealKey === null) throw new InboxEntryRequired();
+          const sealed = sealedShieldedDeposit(opening.module, depositCoin, sealKey);
+          sealedEntry = sealed.entry;
+          sealedTo = sealKey;
+          const deposit = await callTx[opening.deposits.shieldedCircuit](...sealed.args);
           return transactionIdentifier(deposit);
           }, { label: `deposit_shielded into ${address}` }),
           { label: `deposit_shielded into ${address}`, synced: caughtUp, ...heightGate },
         );
       } catch (cause) {
+        /* WHICH refusal this was matters to whoever reads it. A deposit that
+           failed because the account rotated its key between the seal and the
+           block is not a fault of this service's and not a permanent one: the
+           owner moved, and the next attempt seals to the new key and works.
+           Established by asking the chain once more — a read that costs nothing
+           on a path that has already failed — and said plainly rather than left
+           inside the prover's own sentence. */
+        let rotated = false;
+        if (sealedTo !== null) {
+          try {
+            const settled = (await readAccountView(address)).encKey();
+            rotated = settled === null || !sameBytes(settled, sealedTo);
+          } catch {
+            /* The indexer is what is broken, then, and not the key. */
+          }
+        }
         throw new AccountFundingError(
           'asset-deposit-failed',
-          `The ${ASSET_SYMBOL} grant was minted but could not be deposited into ${address}; the coin stayed with the balancer.`,
+          rotated
+            ? `The ${ASSET_SYMBOL} grant was minted but ${address} rotated its encryption key while the deposit was being proved, so the entry would have been sealed to a key the owner has moved on from. Nothing was credited and the coin stayed with the balancer; asking again seals to the new key.`
+            : `The ${ASSET_SYMBOL} grant was minted but could not be deposited into ${address}; the coin stayed with the balancer.`,
           `mint ${mintTx}: ${cause instanceof Error ? cause.message : String(cause)}`,
         );
       }
@@ -1897,12 +1989,27 @@ export async function createAccountFunder(
 
       /* TWO BUILDS, TWO DIFFERENT QUESTIONS, and the difference is not a
          convenience. The prototype builds mirror shielded holdings, so the
-         credit itself can be read back. The reference contract mirrors nothing
-         (MIP-0012 §6.1), so the only thing the chain will ever say about this
-         deposit is that the inbox grew — and that is what is waited on, rather
-         than reporting a balance nobody can read as though it had been
-         checked. */
+         credit itself can be read back and `>= before + grant` is the answer.
+
+         The reference contract mirrors nothing (MIP-0012 §6.1), so there is no
+         balance to read and the inbox is the whole of the public trace. But the
+         inbox is the ACCOUNT'S, not this deposit's: it grows for every other
+         sponsor's deposit, for the change entry of every send the owner makes,
+         and for every `append_inbox` backfill. Waiting on it to grow, as this
+         did until it was reviewed, is waiting for somebody — anybody — to write
+         to this account, and a busy Passport satisfies it without our coin ever
+         having landed.
+
+         What is waited on instead is OUR ENTRY: the 192 bytes sealed above,
+         found in the public `inbox` map at one of the indices that have
+         appeared since. Nothing else can produce them. When the map cannot be
+         walked at all — an older decode, a shape this build does not know —
+         the fallback is the deposit TRANSACTION resolving to a block at the
+         indexer, which is still a fact about this deposit and not about the
+         account's week. */
       let balanceAfter: bigint | null = null;
+      let confirmed = false;
+      let sawInbox: bigint | null = inboxBefore;
       for (let attempt = 0; attempt < CONFIRM_ATTEMPTS; attempt += 1) {
         try {
           const after = await readAccountView(address);
@@ -1910,15 +2017,37 @@ export async function createAccountFunder(
             inboxBefore === null
               ? after.shielded(colourBytes) ?? 0n
               : after.inboxCount() ?? inboxBefore;
+          if (inboxBefore !== null) sawInbox = observed;
+          const evidence =
+            inboxBefore === null
+              ? undefined
+              : {
+                  entryFound: inboxHoldsEntry(
+                    (index) => after.inboxEntry(index),
+                    inboxBefore,
+                    observed,
+                    sealedEntry,
+                  ),
+                  /* Asked only once the inbox has moved, so the ordinary path
+                     costs no extra indexer round trip. */
+                  included:
+                    observed > inboxBefore &&
+                    (await resolveTransactionHash(config.indexerHttpUrls, depositTx)).block !==
+                      null,
+                };
           if (
             shieldedDepositConfirmed(
               view.module,
               inboxBefore ?? before,
               observed,
               config.assetGrant,
+              evidence,
             )
           ) {
-            balanceAfter = inboxBefore === null ? observed : before + config.assetGrant;
+            /* READ, or absent. On the k1 build there is nothing to read, and
+               the field is left off rather than filled with `before + grant`. */
+            balanceAfter = inboxBefore === null ? observed : null;
+            confirmed = true;
             progress('confirmed');
             break;
           }
@@ -1927,13 +2056,15 @@ export async function createAccountFunder(
         }
         await wait(CONFIRM_INTERVAL_MS);
       }
-      if (balanceAfter === null) {
+      if (!confirmed) {
         throw new AccountFundingError(
           'asset-confirmation-failed',
           inboxBefore === null
             ? `The ${ASSET_SYMBOL} grant for ${address} was submitted but the account's coins map has not shown the credit yet.`
-            : `The ${ASSET_SYMBOL} grant for ${address} was submitted but the account's inbox has not grown yet.`,
-          `mint ${mintTx}, deposit ${depositTx}, held ${before} before`,
+            : `The ${ASSET_SYMBOL} grant for ${address} was submitted but the entry it sealed has not appeared in the account's inbox yet.`,
+          inboxBefore === null
+            ? `mint ${mintTx}, deposit ${depositTx}, held ${before} before`
+            : `mint ${mintTx}, deposit ${depositTx}, inbox ${inboxBefore} before and ${sawInbox ?? inboxBefore} at the last read`,
         );
       }
 
@@ -1955,7 +2086,7 @@ export async function createAccountFunder(
         depositBlock: depositResolved.block,
         amount: config.assetGrant,
         colourHex: bytesToHex(colourBytes),
-        balanceAfter,
+        ...(balanceAfter === null ? {} : { balanceAfter }),
         fundedAt: new Date().toISOString(),
       };
     },

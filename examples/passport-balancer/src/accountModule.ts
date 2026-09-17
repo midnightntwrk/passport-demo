@@ -316,30 +316,121 @@ export function sealedShieldedArgs(
   coin: ShieldedCoin,
   encKey: Uint8Array | null,
 ): readonly unknown[] {
+  return sealedShieldedDeposit(module, coin, encKey).args;
+}
+
+/**
+ * The same seal, with the ENTRY KEPT — which is what makes the deposit
+ * confirmable afterwards.
+ *
+ * `sealInboxEntry` throws its ephemeral secret away, so this service can never
+ * read back what it deposited. It can still RECOGNISE it: the 192 bytes it
+ * handed the circuit are the 192 bytes `do_append_inbox` writes into
+ * `inbox[inbox_count]`, and that map is public. Holding on to them turns the
+ * only public trace of a k1 deposit from "the inbox is one longer than it was",
+ * which any other depositor's entry satisfies, into "OUR entry is in the
+ * inbox", which nothing else does.
+ *
+ * `entry` is `null` on the prototype builds, which take the coin alone.
+ */
+export function sealedShieldedDeposit(
+  module: AccountModuleName,
+  coin: ShieldedCoin,
+  encKey: Uint8Array | null,
+): { readonly args: readonly unknown[]; readonly entry: Uint8Array | null } {
   const deposits = accountDeposits(module);
-  if (deposits.mirrorsShieldedBalance) return deposits.shieldedArgs(coin);
+  if (deposits.mirrorsShieldedBalance) return { args: deposits.shieldedArgs(coin), entry: null };
   if (encKey === null) throw new InboxEntryRequired();
-  return deposits.shieldedArgs(coin, sealInboxEntry(encKey, coin));
+  const entry = sealInboxEntry(encKey, coin);
+  return { args: deposits.shieldedArgs(coin, entry), entry };
+}
+
+/** How far back through new inbox entries one confirmation will look. */
+export const INBOX_SCAN_MAX = 64n;
+
+/**
+ * Whether one of the inbox slots that appeared since `before` holds `entry`.
+ *
+ * The indices are SCANNED rather than assumed, because `inbox_count` is not
+ * ours to reserve: another depositor's entry can land in the slot this one was
+ * built for, and our deposit is still perfectly good one index further along.
+ * Bounded by the growth, so a long-lived account is never walked end to end,
+ * and by {@link INBOX_SCAN_MAX}, so a burst of somebody else's traffic cannot
+ * turn one confirmation into thousands of map lookups.
+ *
+ * `read` answers `null` for a slot it cannot read, which is the honest answer
+ * for a build whose map this service cannot walk; the caller then falls back to
+ * the deposit transaction's own inclusion — weaker, but still a fact about this
+ * deposit rather than about the account.
+ */
+export function inboxHoldsEntry(
+  read: (index: bigint) => Uint8Array | null,
+  before: bigint,
+  observed: bigint,
+  entry: Uint8Array | null,
+): boolean {
+  if (entry === null || observed <= before) return false;
+  const last = observed - 1n;
+  const first = observed - before > INBOX_SCAN_MAX ? last - (INBOX_SCAN_MAX - 1n) : before;
+  for (let index = first; index <= last; index += 1n) {
+    const found = read(index);
+    if (found !== null && sameEntryBytes(found, entry)) return true;
+  }
+  return false;
+}
+
+/** Byte for byte, length first. */
+function sameEntryBytes(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+/**
+ * What the chain says about a k1 deposit, as opposed to what it says about the
+ * inbox.
+ *
+ * Both fields are about THIS deposit and neither is about the account's
+ * activity. `entryFound` is the strong one: the 192 bytes this service sealed,
+ * found in the account's public `inbox` map. `included` is the weaker one, for
+ * a state read that could not be decoded far enough to walk the map — the
+ * deposit transaction itself resolved to a block at the indexer, so it is on
+ * chain rather than merely submitted.
+ */
+export interface OwnDepositEvidence {
+  /** The entry this service sealed is in the account's inbox. */
+  readonly entryFound: boolean;
+  /** The deposit transaction resolved to a block. */
+  readonly included: boolean;
 }
 
 /**
  * Whether a shielded deposit has been seen on chain yet.
  *
  * TWO BUILDS, TWO DIFFERENT QUESTIONS. A prototype account mirrors what it
- * holds, so the credit itself is read back and `>=` the target is the answer. A
- * k1 account mirrors nothing (MIP-0012 §6.1) — the coin's description never
- * reaches public state — so the only thing the chain will ever say about the
- * deposit is that the inbox grew by one, and that is what is waited on. The
- * alternative, reporting a balance nobody can read as though it had been
- * checked, is a confirmation that confirms nothing.
+ * holds, so the credit itself is read back and `>=` the target is the answer.
+ *
+ * A k1 account mirrors nothing (MIP-0012 §6.1) — the coin's description never
+ * reaches public state — so the confirmation has to be built out of the inbox.
+ * The inbox GROWING is not that confirmation, and this is the correction: the
+ * inbox grows for every deposit any sponsor makes, for the change entry of
+ * every send the owner does, and for every `append_inbox` backfill, so a wait
+ * on `observed > before` is satisfied by somebody else's transaction and would
+ * report a coin delivered that had in fact been refused. It is necessary —
+ * nothing was written if the inbox did not move — and on its own it is nothing.
+ *
+ * What confirms is `evidence`: this service's OWN entry in the map, or failing
+ * that its own transaction in a block. Called without evidence, a k1 deposit is
+ * never confirmed, which is the honest answer when the caller has not looked.
  */
 export function shieldedDepositConfirmed(
   module: AccountModuleName,
   before: bigint,
   observed: bigint,
   amount: bigint,
+  evidence?: OwnDepositEvidence,
 ): boolean {
-  return accountDeposits(module).mirrorsShieldedBalance
-    ? observed >= before + amount
-    : observed > before;
+  if (accountDeposits(module).mirrorsShieldedBalance) return observed >= before + amount;
+  if (observed <= before) return false;
+  return evidence?.entryFound === true || evidence?.included === true;
 }
