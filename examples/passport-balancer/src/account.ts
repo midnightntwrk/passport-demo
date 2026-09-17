@@ -69,7 +69,17 @@
  * verifier keys as the contracts the migrated PWA deploys on stagenet.
  */
 
-import { accountModuleFor } from './accountModule.js';
+import {
+  accountDeposits,
+  accountModuleForState,
+  proverForModule,
+  type AccountModuleName,
+  accountEncKey,
+  scanInboxForEntry,
+  InboxEntryRequired,
+  sealedShieldedDeposit,
+  shieldedDepositConfirmed,
+} from './accountModule.js';
 import { randomBytes } from 'node:crypto';
 
 import * as ledger from '@midnightntwrk/ledger-v9';
@@ -80,6 +90,7 @@ import {
   bytesToHex,
   contractProviders,
   createContractProofProvider,
+  createServerProofProvider,
   hexToBytes,
   isConfirmationTimeout,
   managedBuildPath,
@@ -138,6 +149,22 @@ function accountManagedPath(configured?: string): string {
     configured,
     remedy:
       'The build ships in examples/passport-balancer/contracts-stagenet/managed/account; set BALANCER_ACCOUNT_ASSETS to point elsewhere.',
+  });
+}
+
+/**
+ * The same, for the k1-arm reference build. `BALANCER_ACCOUNT_K1_ASSETS`
+ * overrides the search.
+ *
+ * Its `keys/` and `zkir/` are not in any release bundle yet — the directory is
+ * 3.2 GB where the whole bundle is 110 MB — so the remedy names the rsync
+ * rather than pretending a checkout is enough.
+ */
+function accountK1ManagedPath(configured?: string): string {
+  return managedBuildPath('account-k1', {
+    configured,
+    remedy:
+      'The module ships in examples/passport-balancer/contracts-stagenet/managed/account-k1; its keys/ and zkir/ are not in any release bundle and must be rsynced onto the host. Set BALANCER_ACCOUNT_K1_ASSETS to point elsewhere.',
   });
 }
 
@@ -221,6 +248,102 @@ export interface AccountLedger {
  */
 export const ONE_TX_TRANSFER_OPERATION = 'transfer_shielded_to_account';
 
+/**
+ * The k1-arm reference contract's module, and the little of its ledger this
+ * service reads.
+ *
+ * Two differences from {@link AccountLedger} matter here and both are
+ * deliberate in the contract rather than incidental:
+ *
+ *   - `unshielded_balances` is what `night_balances` is: the explicit per-colour
+ *     mirror `deposit_unshielded` writes, and the only reason a deposit is
+ *     visible to anyone but the depositor (MIP-0012 §5).
+ *   - THERE IS NO `coins` MAP. Shielded custody is stateless by design
+ *     (MIP-0012 §6.1): no held coin's description ever reaches public state.
+ *     So a shielded credit cannot be read back off the chain at all, and the
+ *     inbox — `inbox_count` entries of 192 opaque bytes — is the only public
+ *     trace a deposit leaves.
+ */
+interface K1AccountModule {
+  Contract: new (witnesses: unknown) => unknown;
+  ledger: (state: unknown) => K1AccountLedger;
+}
+
+interface K1AccountLedger {
+  readonly round: bigint;
+  readonly device_count: bigint;
+  readonly device_epoch: bigint;
+  readonly booted: boolean;
+  readonly inbox_count: bigint;
+  /**
+   * The entries themselves, keyed by the index they were written at.
+   *
+   * PUBLIC, and the reason a k1 deposit is confirmable at all. The 192 bytes
+   * are opaque to everybody but the owner, but a depositor that kept the bytes
+   * it sealed can find them here and know that its own deposit landed rather
+   * than merely that somebody's did.
+   */
+  inbox: { member(index: bigint): boolean; lookup(index: bigint): Uint8Array };
+  /** The account's advertised X25519 key. Every inbox entry is sealed to it. */
+  readonly enc_key: Uint8Array;
+  devices: { member(entry: Uint8Array): boolean; size(): bigint };
+  unshielded_balances: {
+    member(colour: Uint8Array): boolean;
+    lookup(colour: Uint8Array): bigint;
+  };
+}
+
+/**
+ * What this service needs to know about an account it is about to pay, read off
+ * the account's own state in one pass: which build it is, and what it already
+ * holds of the colour being deposited.
+ */
+interface AccountView {
+  readonly module: AccountModuleName;
+  /** The mirrored unshielded balance of `colour` — `night_balances` or `unshielded_balances`. */
+  unshielded(colour: Uint8Array): bigint;
+  /**
+   * The mirrored shielded balance of `colour`, or `null` on a build that keeps
+   * no such mirror. `null` is not "zero": it is "this cannot be asked".
+   */
+  shielded(colour: Uint8Array): bigint | null;
+  /**
+   * The account's advertised `enc_key`, or `null` on a build that has none.
+   *
+   * READ LIVE, EVERY TIME, and never cached: `rotate_enc_key_with_k256` is a
+   * circuit an owner may call at any moment, and a depositor sealing to a key
+   * the account has moved on from writes an entry the owner cannot open, with
+   * a coin inside it that is then unspendable for ever. The cost of asking
+   * again is one state read; the cost of not asking is the deposit.
+   */
+  encKey(): Uint8Array | null;
+  /**
+   * `inbox_count`, or `null` on a build that has no inbox.
+   *
+   * It is the ONLY public trace a shielded deposit into a k1 account leaves —
+   * custody there is stateless by design, so there is no balance to read back
+   * and this is what a confirmation has to be built out of. It says how many
+   * entries there are and NOT whose they are: see {@link AccountView.inboxEntry}.
+   */
+  inboxCount(): bigint | null;
+  /**
+   * The entry at one index, or `null` when there is none, or when this build
+   * has no inbox at all.
+   *
+   * What turns "the inbox grew" into "our deposit landed". Never throws: a map
+   * this service cannot walk is a `null` and a weaker confirmation, not a
+   * failed activation.
+   */
+  inboxEntry(index: bigint): Uint8Array | null;
+}
+
+/** Byte-for-byte, and length first so two keys of different lengths are not equal. */
+function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) if (a[i] !== b[i]) return false;
+  return true;
+}
+
 export type AccountFundingErrorCode =
   /** No state at that address, or state that does not decode as an account. */
   | 'not-an-account'
@@ -239,7 +362,13 @@ export type AccountFundingErrorCode =
   /** `deposit_shielded` was refused or failed; the coin stayed with the balancer. */
   | 'asset-deposit-failed'
   /** The deposit landed, but the account's `coins` map never showed the credit. */
-  | 'asset-confirmation-failed';
+  | 'asset-confirmation-failed'
+  /**
+   * No proof server this service can reach proves that build's circuits.
+   * Today that is `account-k1` with no `BALANCER_PROVER_URL_V3` set: nothing
+   * was built and nothing was spent.
+   */
+  | 'prover-unavailable';
 
 /* -------------------------------------------------------------------------- */
 /* Rebuilding a transaction the node refused                                  */
@@ -686,8 +815,19 @@ export interface AssetFunding {
   amount: bigint;
   /** 64 lower-case hex: `rawTokenType(domain separator, faucet address)`. */
   colourHex: string;
-  /** The account's own `coins[colour].value` once the credit was seen. */
-  balanceAfter: bigint;
+  /**
+   * The account's own `coins[colour].value` once the credit was seen — READ,
+   * never computed.
+   *
+   * ABSENT on the k1-arm build, and that absence is the honest answer rather
+   * than a gap. Shielded custody there is stateless (MIP-0012 §6.1): the
+   * account holds the coin and no ledger entry says so, so there is no number
+   * to report. Reporting `before + grant` instead, as this did until it was
+   * reviewed, publishes an arithmetic result in the field that claims to be a
+   * reading — and it would have gone on reporting it if the deposit had
+   * credited the wrong colour, the wrong amount, or nothing at all.
+   */
+  balanceAfter?: bigint;
   fundedAt: string;
 }
 
@@ -702,6 +842,12 @@ export interface AccountBalances {
 export interface AccountFunder {
   /** Where the compiled build was found, for the start-up log. */
   readonly assetsPath: string;
+  /**
+   * One sentence about the third build: where its artefacts are, what proves
+   * them, or why neither. Read at start-up so an operator learns it from the
+   * journal rather than from the first k1 Passport that asks for a grant.
+   */
+  readonly k1Readiness: string;
   /** The grant this service deposits, in atomic NIGHT. */
   readonly grantAtomic: bigint;
   /** How contract circuits are proved — `'wasm'` needs no proof server. */
@@ -843,6 +989,25 @@ export async function createAccountFunder(
     config,
     zkConfigProvider as never,
   );
+  /* The k1 artefacts are ALLOWED TO BE ABSENT, and the service starts without
+     them. The build's `keys/` is 3.2 GB against the 110 MB of the whole release
+     bundle (see `scripts/zk-artefacts.lock.json`), so a host that has not been
+     given them is the normal case today, and a start-up that died on it would
+     take every Passport in existence down with a build none of them is. */
+  let k1ManagedPath: string | null = null;
+  let k1Unavailable: string | null = null;
+  try {
+    k1ManagedPath = accountK1ManagedPath(config.accountK1AssetsPath);
+  } catch (cause) {
+    k1Unavailable = cause instanceof Error ? cause.message : String(cause);
+  }
+  const k1ZkConfigProvider = k1ManagedPath ? new NodeZkConfigProvider(k1ManagedPath) : null;
+  const k1Prover = proverForModule('account-k1', config);
+  const k1Readiness = !k1ManagedPath
+    ? `account-k1 is UNAVAILABLE: ${k1Unavailable}`
+    : k1Prover.kind === 'server'
+      ? `account-k1 artefacts ${k1ManagedPath}, proving at ${k1Prover.url}`
+      : `account-k1 artefacts ${k1ManagedPath}, but NO PROVER: ${k1Prover.why}`;
   const reader = await publicDataProviderFor(config);
   const colour = nativeColourBytes();
 
@@ -1005,32 +1170,131 @@ export async function createAccountFunder(
     } as never),
     CompiledContract.withCompiledFileAssets(managedPath),
   );
-  /** Reads whether the deployed account carries the one-transaction circuit. */
-  const oneTxTransferOf = async (rawAddress: string): Promise<boolean | null> => {
-    let state: unknown;
-    try {
-      state = await reader.queryContractState(rawAddress);
-    } catch {
-      return null;
+  /** Built once, on the first k1 account, out of the module loaded for it. */
+  let compiledContractK1: unknown = null;
+  const compiledContractK1Once = async (): Promise<unknown> => {
+    const assets = k1ManagedPath;
+    if (!assets) {
+      throw new AccountFundingError(
+        'not-an-account',
+        `The contract is a k1-arm account and the compiled account-k1 build is not on this host, so it cannot be opened. ${k1Unavailable ?? ''}`.trim(),
+      );
     }
-    const operations = (state as { operations?: () => (string | Uint8Array)[] } | null)
-      ?.operations;
-    if (typeof operations !== 'function') return null;
+    compiledContractK1 ??= CompiledContract.make(
+      'passport-account-k1',
+      (await accountK1Once()).Contract as never,
+    ).pipe(
+      CompiledContract.withWitnesses({
+        /* ONE witness, and one refusal. The reference contract's shielded
+           custody takes the coin it is spending from `held_coin`, so a caller
+           that could answer it could move an account's money. This service only
+           ever puts money IN, and cannot answer it. */
+        held_coin: refusingWitness('held coin'),
+      } as never),
+      CompiledContract.withCompiledFileAssets(assets),
+    );
+    return compiledContractK1;
+  };
+
+  /**
+   * The k1-arm reference contract's module, loaded ON FIRST USE.
+   *
+   * A DIFFERENT CONTRACT, not a later revision: thirty circuits against twelve,
+   * its own vocabulary for the same deposits, its own ledger shape, and ZKIR v3
+   * where both prototypes are v2 — so it has its own artefact directory, its
+   * own key material, and its own proof route. See `./accountModule.ts`.
+   *
+   * It is loaded here rather than beside the other two because the process must
+   * not depend on it. Every activation, every gift, and every name claim this
+   * service has ever paid for is a prototype account; a host whose
+   * `contracts-stagenet` tree predates the k1 build, or carries it half-copied,
+   * would have failed at start-up on a build none of those Passports is. The
+   * load now happens when a k1 account is actually opened, and its failure is
+   * the same refusal an unconfigured v3 prover gets: this account cannot be
+   * served here, and every other account still can.
+   */
+  let accountK1: Promise<K1AccountModule> | null = null;
+  const accountK1Once = async (): Promise<K1AccountModule> => {
+    /* A LITERAL specifier, for the reason the three imports above give: a
+       computed path into `contracts-stagenet` resolves a second compact
+       runtime, and decoding a state then dies on `expected instance of
+       ChargedState`. */
+    accountK1 ??= import('../contracts-stagenet/managed/account-k1/contract/index.js') as unknown as Promise<K1AccountModule>;
     try {
-      const decoder = new TextDecoder();
-      const names = operations
-        .call(state)
-        .map((entry) => (typeof entry === 'string' ? entry : decoder.decode(entry)));
-      return names.includes(ONE_TX_TRANSFER_OPERATION);
-    } catch {
-      return null;
+      return await accountK1;
+    } catch (cause) {
+      /* Not remembered, so a host that has the build rsynced under it while it
+         runs picks it up on the next request rather than at the next restart. */
+      accountK1 = null;
+      throw new AccountFundingError(
+        'prover-unavailable',
+        'The compiled account-k1 build is not readable on this host, so a k1-arm Passport cannot be served here.',
+        cause instanceof Error ? cause.message : String(cause),
+      );
     }
   };
-  /** The module a deployed account must be opened with — read from its state. */
-  const compiledFor = async (rawAddress: string) =>
-    accountModuleFor(await oneTxTransferOf(rawAddress)) === 'account-v1'
-      ? compiledContractV1
-      : compiledContract;
+
+  /**
+   * The k1 proof route, built ON FIRST USE rather than at start-up.
+   *
+   * A droplet with no `BALANCER_PROVER_URL_V3` must still start, still activate
+   * every Passport in existence, and still pay every gift — none of those is a
+   * k1 account. The refusal belongs on the one path that needs the server, not
+   * on the process.
+   */
+  let k1ProofProvider: Promise<unknown> | null = null;
+  const k1ProofProviderOnce = (): Promise<unknown> => {
+    if (!k1ProofProvider) {
+      const choice = proverForModule('account-k1', config);
+      if (choice.kind !== 'server') {
+        return Promise.reject(
+          new AccountFundingError('prover-unavailable', choice.why),
+        );
+      }
+      console.log(`[account] account-k1 proves at ${choice.url} (${choice.why})`);
+      k1ProofProvider = createServerProofProvider(choice.url, k1ZkConfigProvider as never);
+    }
+    return k1ProofProvider;
+  };
+
+  /**
+   * How a deployed account is to be OPENED: its build, its compiled module, the
+   * artefacts its verifier keys come from, and the server that proves them.
+   *
+   * All four travel together because they have to. `findDeployedContract`
+   * refuses a module whose circuit set does not match the state, the ZK config
+   * provider has to be the one holding that build's keys, and the k1 build's
+   * circuits are ZKIR v3 and cannot be proved by the route the other two use.
+   * Picking the module and leaving the other three behind is how a deposit
+   * reaches a proof server that cannot answer it.
+   */
+  interface AccountOpening {
+    readonly module: AccountModuleName;
+    readonly compiledContract: unknown;
+    readonly zkConfigProvider: unknown;
+    readonly proofProvider: unknown;
+    readonly deposits: ReturnType<typeof accountDeposits>;
+  }
+
+  const openingFor = async (module: AccountModuleName): Promise<AccountOpening> => {
+    const deposits = accountDeposits(module);
+    if (module === 'account-k1') {
+      return {
+        module,
+        compiledContract: await compiledContractK1Once(),
+        zkConfigProvider: k1ZkConfigProvider,
+        proofProvider: await k1ProofProviderOnce(),
+        deposits,
+      };
+    }
+    return {
+      module,
+      compiledContract: module === 'account-v1' ? compiledContractV1 : compiledContract,
+      zkConfigProvider,
+      proofProvider,
+      deposits,
+    };
+  };
 
   /**
    * Reads the account's ledger state, or refuses.
@@ -1063,6 +1327,11 @@ export async function createAccountFunder(
         `No contract state is served at ${address} on ${config.networkId}, so there is no account to fund. Deploy the account-custody contract first.`,
       );
     }
+    return decodePrototypeAccount(state, address);
+  };
+
+  /** The prototype builds' decode and fingerprint, over a state already read. */
+  const decodePrototypeAccount = (state: unknown, address: string): AccountLedger => {
     let decoded: AccountLedger | null = null;
     try {
       const candidate = account.ledger((state as { data: unknown }).data);
@@ -1080,6 +1349,91 @@ export async function createAccountFunder(
       );
     }
     return decoded;
+  };
+
+  /**
+   * The same read as {@link readAccount}, for all THREE builds.
+   *
+   * One query, because the module and the balance come off the same state and
+   * asking twice would let them disagree. The fingerprint is per build and
+   * every one of them is structural for the reason `readAccount` gives: Compact
+   * decodes positionally, a foreign contract can look plausible, and the
+   * balancer will not pay coins into a contract it cannot recognise. The k1
+   * fingerprint is `booted` with at least one device — the constructor sets
+   * both, and no gated circuit can take either away.
+   */
+  const readAccountView = async (address: string): Promise<AccountView> => {
+    let state: unknown;
+    try {
+      state = await reader.queryContractState(address);
+    } catch (cause) {
+      throw new AccountFundingError(
+        'indexer-unreachable',
+        `The ${config.networkId} indexer could not be read, so nothing can be established about the contract at ${address}.`,
+        cause instanceof Error ? cause.message : String(cause),
+      );
+    }
+    if (!state) {
+      throw new AccountFundingError(
+        'not-an-account',
+        `No contract state is served at ${address} on ${config.networkId}, so there is no account to fund. Deploy the account-custody contract first.`,
+      );
+    }
+    const module = accountModuleForState(state);
+    const data = (state as { data: unknown }).data;
+    if (module === 'account-k1') {
+      /* OUTSIDE the try below, deliberately. That try exists to turn a state
+         that does not decode into `not-an-account`, and a host that cannot load
+         the build at all has said nothing about this account — swallowing its
+         refusal there would tell a caller its Passport is not a Passport. */
+      const k1 = await accountK1Once();
+      let decoded: K1AccountLedger | null = null;
+      try {
+        const candidate = k1.ledger(data);
+        if (candidate.booted && candidate.device_count >= 1n) decoded = candidate;
+      } catch {
+        decoded = null;
+      }
+      if (!decoded) {
+        throw new AccountFundingError(
+          'not-an-account',
+          `The contract at ${address} declares the k1-arm circuits but its state does not decode as a k1-arm account, so the balancer will not deposit into it.`,
+        );
+      }
+      const ledgerK1 = decoded;
+      return {
+        module,
+        unshielded: (c) =>
+          ledgerK1.unshielded_balances.member(c) ? ledgerK1.unshielded_balances.lookup(c) : 0n,
+        /* Stateless shielded custody: there is no mirror to read. NOT zero. */
+        shielded: () => null,
+        encKey: () => accountEncKey(ledgerK1),
+        inboxCount: () => ledgerK1.inbox_count,
+        inboxEntry: (index) => {
+          try {
+            if (index < 0n || index >= ledgerK1.inbox_count) return null;
+            if (!ledgerK1.inbox.member(index)) return null;
+            const entry = ledgerK1.inbox.lookup(index);
+            return entry instanceof Uint8Array ? entry : null;
+          } catch {
+            /* An older build, or a map shape this decode does not know. The
+               confirmation falls back to the deposit's own inclusion. */
+            return null;
+          }
+        },
+      };
+    }
+    const decoded = decodePrototypeAccount(state, address);
+    return {
+      module,
+      unshielded: () => mirroredNight(decoded),
+      shielded: () => heldAsset(decoded),
+      /* The prototype builds have neither. They mirror their shielded holdings
+         instead, which is what `shielded` above reads. */
+      encKey: () => null,
+      inboxCount: () => null,
+      inboxEntry: () => null,
+    };
   };
 
   /** The mirrored NIGHT balance, treating an absent colour as zero. */
@@ -1306,6 +1660,7 @@ export async function createAccountFunder(
 
   return {
     assetsPath: managedPath,
+    k1Readiness,
     grantAtomic: config.accountGrantAtomic,
     provingMode,
     assetAvailable,
@@ -1317,7 +1672,7 @@ export async function createAccountFunder(
     assetGrant: config.assetGrant,
 
     async nightBalance(contractAddress: string): Promise<bigint> {
-      return mirroredNight(await readAccount(rawContractAddress(contractAddress)));
+      return (await readAccountView(rawContractAddress(contractAddress))).unshielded(colour);
     },
 
     async balances(contractAddress: string): Promise<AccountBalances> {
@@ -1363,14 +1718,19 @@ export async function createAccountFunder(
       /* Read inside the lock, immediately before spending: the confirmation
          below is "this deposit's credit is visible", not "the balance is
          non-zero", and it needs a baseline nothing else can have moved since. */
-      const before = mirroredNight(await readAccount(address));
+      const view = await readAccountView(address);
+      const before = view.unshielded(colour);
+      /* Which build, and therefore which module, which keys, which prover, and
+         what the deposit circuit is CALLED. All of it is settled here, before a
+         provider exists, because the providers are part of the answer. */
+      const opening = await openingFor(view.module);
 
       const privateStateId = `passport-balancer-account-${address}`;
       const providers = await contractProviders(config, {
         privateStateId,
         initialPrivateState: {},
-        zkConfigProvider: zkConfigProvider as never,
-        proofProvider,
+        zkConfigProvider: opening.zkConfigProvider as never,
+        proofProvider: opening.proofProvider,
         walletProvider: wallet.contractWalletProvider(),
       });
 
@@ -1387,7 +1747,7 @@ export async function createAccountFunder(
         depositTx = await withNodeRejectionRetry(
           async () => {
             const found = await findDeployedContract(providers as never, {
-              compiledContract: await compiledFor(address),
+              compiledContract: opening.compiledContract,
               contractAddress: address,
               privateStateId,
               initialPrivateState: {},
@@ -1400,10 +1760,21 @@ export async function createAccountFunder(
                and the balancer's own wallet provider balances that from the
                balancer's own NIGHT — the same mechanism that pays Midnames its
                COST. */
-            const deposit = await callTx.deposit_night(colour, config.accountGrantAtomic);
+            /* The circuit is `deposit_night` on the prototype builds and
+               `deposit_unshielded` on the reference contract, and it takes
+               `(colour, amount)` on all three. Same semantics, same arguments,
+               different name — so the name is looked up rather than spelled,
+               and the arguments come from the same place as the name. */
+            const deposit = await callTx[opening.deposits.unshieldedCircuit](
+              ...opening.deposits.unshieldedArgs(colour, config.accountGrantAtomic),
+            );
             return transactionIdentifier(deposit);
           },
-          { label: `deposit_night into ${address}`, synced: caughtUp, ...heightGate },
+          {
+            label: `${opening.deposits.unshieldedCircuit} into ${address}`,
+            synced: caughtUp,
+            ...heightGate,
+          },
         );
       } catch (cause) {
         /* A DUST shortfall is not a failed deposit — nothing was built, nothing
@@ -1411,6 +1782,10 @@ export async function createAccountFunder(
            `./server.ts` can wait for a coin and rebuild this leg rather than
            telling the caller its grant failed. */
         if (isDustShortfall(cause)) throw cause;
+        /* A refusal this leg raised before it built anything — no prover for
+           this build, no artefacts for it — travels out as itself. Wrapping it
+           in `deposit-failed` would say a deposit failed when none was made. */
+        if (cause instanceof AccountFundingError) throw cause;
         throw new AccountFundingError(
           'deposit-failed',
           `The activation grant could not be deposited into ${address}; nothing was credited.`,
@@ -1425,7 +1800,7 @@ export async function createAccountFunder(
       let balanceAfter: bigint | null = null;
       for (let attempt = 0; attempt < CONFIRM_ATTEMPTS; attempt += 1) {
         try {
-          const held = mirroredNight(await readAccount(address));
+          const held = (await readAccountView(address)).unshielded(colour);
           if (held >= target) {
             balanceAfter = held;
             progress('confirmed');
@@ -1468,7 +1843,35 @@ export async function createAccountFunder(
       const address = rawContractAddress(contractAddress);
       /* The same baseline discipline as the NIGHT leg: the confirmation below
          is "THIS deposit's credit is visible", not "the map is non-empty". */
-      const before = heldAsset(await readAccount(address));
+      const view = await readAccountView(address);
+      /* The reference contract's shielded leg needs a SECOND argument: a
+         192-byte InboxEntry v1 encrypted to the account's own `enc_key`, which
+         is the only channel the coin's description travels on. It used to be
+         refused here, before a coin was minted, because nothing in this
+         repository could build one; `./k1Inbox.ts` now can.
+
+         THE KEY IS NOT READ HERE. This read is a PRE-FLIGHT and nothing else:
+         an account that advertises no usable key at all is refused now, before
+         a coin is minted, because a deposit made with a placeholder entry LANDS
+         and the coin is then gone. The key that is actually SEALED TO is read
+         in the same breath as the sealing, minutes later — minting a coin and
+         waiting for it to become spendable is most of an activation, and
+         `rotate_enc_key_with_k256` is a circuit the owner may call in any of
+         those minutes. A key read here and sealed to there is a race whose
+         loser is a coin nobody can ever name. */
+      const assetDeposits = accountDeposits(view.module);
+      const sealsToEncKey = !assetDeposits.mirrorsShieldedBalance;
+      if (sealsToEncKey && view.encKey() === null) {
+        throw new AccountFundingError(
+          'asset-unsupported',
+          `The account at ${address} advertises no usable encryption key, so the ${ASSET_SYMBOL} grant cannot be sealed for it and nothing was minted or spent.`,
+        );
+      }
+      const opening = await openingFor(view.module);
+      const before = view.shielded(colourBytes) ?? 0n;
+      /* On a k1 account there is no balance to read back — custody there is
+         stateless — so the confirmation below watches the inbox grow instead. */
+      const inboxBefore = view.inboxCount();
 
       /* ------------------------------------------------------------------ */
       /* 1. Take a grant-sized coin — the spare if one is ready              */
@@ -1490,6 +1893,14 @@ export async function createAccountFunder(
 
       const privateStateId = `passport-balancer-account-${address}`;
 
+      /* The key this deposit is sealed to, and the bytes that sealing produced.
+         Both are set inside the job below, once, at the moment of sealing.
+         `sealedEntry` is what makes the confirmation about THIS deposit rather
+         than about the account's inbox; `sealedTo` is what a refusal compares
+         against when it has to say whether the key moved under us. */
+      let sealedEntry: Uint8Array | null = null;
+      let sealedTo: Uint8Array | null = null;
+
       let depositTx: string;
       try {
         depositTx = await withNodeRejectionRetry(
@@ -1502,12 +1913,12 @@ export async function createAccountFunder(
           const accountProviders = await contractProviders(config, {
             privateStateId,
             initialPrivateState: {},
-            zkConfigProvider: zkConfigProvider as never,
-            proofProvider,
+            zkConfigProvider: opening.zkConfigProvider as never,
+            proofProvider: opening.proofProvider,
             walletProvider: wallet.contractWalletProvider(),
           });
           const found = await findDeployedContract(accountProviders as never, {
-            compiledContract: await compiledFor(address),
+            compiledContract: opening.compiledContract,
             contractAddress: address,
             privateStateId,
             initialPrivateState: {},
@@ -1519,19 +1930,55 @@ export async function createAccountFunder(
              transaction and writes it into the account's `coins` map. The
              balancer's own wallet provider supplies the shielded input that
              makes the transaction offer it. */
-          const deposit = await callTx.deposit_shielded({
+          const depositCoin = {
             nonce: hexToBytes(coin.nonce),
             color: colourBytes,
             value: coin.value,
-          });
+          };
+          /* READ ONCE, HERE, AND SEALED TO THAT SAME VALUE. Not read at the
+             top of this call, where the account's state was fetched for the
+             pre-flight: minting the coin above takes minutes, and a key that
+             rotated during them would leave this entry sealed to a secret the
+             owner has destroyed, with a coin inside it that is unspendable for
+             ever. Not read twice either — a second read to "check" the first
+             would seal to one value and verify another.
+
+             The ephemeral secret never leaves `sealInboxEntry`, so this service
+             cannot read back what it just deposited. It keeps the CIPHERTEXT,
+             which is public the moment the circuit writes it into `inbox`, and
+             that is what the confirmation below looks for. */
+          const sealKey = (await readAccountView(address)).encKey();
+          if (sealsToEncKey && sealKey === null) throw new InboxEntryRequired();
+          const sealed = sealedShieldedDeposit(opening.module, depositCoin, sealKey);
+          sealedEntry = sealed.entry;
+          sealedTo = sealKey;
+          const deposit = await callTx[opening.deposits.shieldedCircuit](...sealed.args);
           return transactionIdentifier(deposit);
           }, { label: `deposit_shielded into ${address}` }),
           { label: `deposit_shielded into ${address}`, synced: caughtUp, ...heightGate },
         );
       } catch (cause) {
+        /* WHICH refusal this was matters to whoever reads it. A deposit that
+           failed because the account rotated its key between the seal and the
+           block is not a fault of this service's and not a permanent one: the
+           owner moved, and the next attempt seals to the new key and works.
+           Established by asking the chain once more — a read that costs nothing
+           on a path that has already failed — and said plainly rather than left
+           inside the prover's own sentence. */
+        let rotated = false;
+        if (sealedTo !== null) {
+          try {
+            const settled = (await readAccountView(address)).encKey();
+            rotated = settled === null || !sameBytes(settled, sealedTo);
+          } catch {
+            /* The indexer is what is broken, then, and not the key. */
+          }
+        }
         throw new AccountFundingError(
           'asset-deposit-failed',
-          `The ${ASSET_SYMBOL} grant was minted but could not be deposited into ${address}; the coin stayed with the balancer.`,
+          rotated
+            ? `The ${ASSET_SYMBOL} grant was minted but ${address} rotated its encryption key while the deposit was being proved, so the entry would have been sealed to a key the owner has moved on from. Nothing was credited and the coin stayed with the balancer; asking again seals to the new key.`
+            : `The ${ASSET_SYMBOL} grant was minted but could not be deposited into ${address}; the coin stayed with the balancer.`,
           `mint ${mintTx}: ${cause instanceof Error ? cause.message : String(cause)}`,
         );
       }
@@ -1540,13 +1987,81 @@ export async function createAccountFunder(
       /* 3. Read the credit back off the chain                               */
       /* ------------------------------------------------------------------ */
 
-      const target = before + config.assetGrant;
+      /* TWO BUILDS, TWO DIFFERENT QUESTIONS, and the difference is not a
+         convenience. The prototype builds mirror shielded holdings, so the
+         credit itself can be read back and `>= before + grant` is the answer.
+
+         The reference contract mirrors nothing (MIP-0012 §6.1), so there is no
+         balance to read and the inbox is the whole of the public trace. But the
+         inbox is the ACCOUNT'S, not this deposit's: it grows for every other
+         sponsor's deposit, for the change entry of every send the owner makes,
+         and for every `append_inbox` backfill. Waiting on it to grow, as this
+         did until it was reviewed, is waiting for somebody — anybody — to write
+         to this account, and a busy Passport satisfies it without our coin ever
+         having landed.
+
+         What is waited on instead is OUR ENTRY: the 192 bytes sealed above,
+         found in the public `inbox` map at one of the indices that have
+         appeared since. Nothing else can produce them. When the map cannot be
+         walked at all — an older decode, a shape this build does not know —
+         and ONLY then, the fallback is the deposit TRANSACTION resolving to a
+         block at the indexer, which is still a fact about this deposit and not
+         about the account's week. It is only a fallback because reaching a
+         block is not the same as being accepted in it: the indexer answers
+         where a transaction was processed and never whether it succeeded, so
+         beside an inbox somebody else grew it would report a refused deposit
+         as delivered. Where the map can be walked, the map decides. */
       let balanceAfter: bigint | null = null;
+      let confirmed = false;
+      let sawInbox: bigint | null = inboxBefore;
       for (let attempt = 0; attempt < CONFIRM_ATTEMPTS; attempt += 1) {
         try {
-          const held = heldAsset(await readAccount(address));
-          if (held >= target) {
-            balanceAfter = held;
+          const after = await readAccountView(address);
+          const observed =
+            inboxBefore === null
+              ? after.shielded(colourBytes) ?? 0n
+              : after.inboxCount() ?? inboxBefore;
+          if (inboxBefore !== null) sawInbox = observed;
+          const scan =
+            inboxBefore === null
+              ? null
+              : scanInboxForEntry(
+                  (index) => after.inboxEntry(index),
+                  inboxBefore,
+                  observed,
+                  sealedEntry,
+                );
+          const evidence =
+            inboxBefore === null || scan === null
+              ? undefined
+              : {
+                  entryFound: scan === 'found',
+                  inboxUnreadable: scan === 'unreadable',
+                  /* Asked only where the map could not be walked at all, which
+                     is the one case this answer decides — so the ordinary path
+                     costs no extra indexer round trip, and a walked map that
+                     does not hold our entry is never talked out of itself by
+                     a block height that says nothing about whether the deposit
+                     was accepted in it. */
+                  included:
+                    scan === 'unreadable' &&
+                    observed > inboxBefore &&
+                    (await resolveTransactionHash(config.indexerHttpUrls, depositTx)).block !==
+                      null,
+                };
+          if (
+            shieldedDepositConfirmed(
+              view.module,
+              inboxBefore ?? before,
+              observed,
+              config.assetGrant,
+              evidence,
+            )
+          ) {
+            /* READ, or absent. On the k1 build there is nothing to read, and
+               the field is left off rather than filled with `before + grant`. */
+            balanceAfter = inboxBefore === null ? observed : null;
+            confirmed = true;
             progress('confirmed');
             break;
           }
@@ -1555,11 +2070,15 @@ export async function createAccountFunder(
         }
         await wait(CONFIRM_INTERVAL_MS);
       }
-      if (balanceAfter === null) {
+      if (!confirmed) {
         throw new AccountFundingError(
           'asset-confirmation-failed',
-          `The ${ASSET_SYMBOL} grant for ${address} was submitted but the account's coins map has not shown the credit yet.`,
-          `mint ${mintTx}, deposit ${depositTx}, held ${before} before`,
+          inboxBefore === null
+            ? `The ${ASSET_SYMBOL} grant for ${address} was submitted but the account's coins map has not shown the credit yet.`
+            : `The ${ASSET_SYMBOL} grant for ${address} was submitted but the entry it sealed has not appeared in the account's inbox yet.`,
+          inboxBefore === null
+            ? `mint ${mintTx}, deposit ${depositTx}, held ${before} before`
+            : `mint ${mintTx}, deposit ${depositTx}, inbox ${inboxBefore} before and ${sawInbox ?? inboxBefore} at the last read`,
         );
       }
 
@@ -1581,7 +2100,7 @@ export async function createAccountFunder(
         depositBlock: depositResolved.block,
         amount: config.assetGrant,
         colourHex: bytesToHex(colourBytes),
-        balanceAfter,
+        ...(balanceAfter === null ? {} : { balanceAfter }),
         fundedAt: new Date().toISOString(),
       };
     },

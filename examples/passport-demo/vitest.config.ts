@@ -599,6 +599,20 @@
  * credential may adopt a record written before any of them were labelled — and
  * `aliasStore.test.ts` holds both at 100%.
  *
+ * `src/identity/k1CoinStore.ts` went IN on 2026/09/16 with the module itself,
+ * and it is in the denominator because of what it holds rather than because of
+ * how much of it there is. A k1 account's qualified shielded coins exist in
+ * exactly one place — this store — and the chain carries no copy: a description
+ * this module drops, mangles, or hands back under the wrong colour is a balance
+ * nobody can ever spend again, discovered at proving time with nothing to point
+ * at. Every branch in it is either a row it refuses to read back or a write it
+ * refuses to make, and both are met in `k1CoinStore.test.ts`. It holds no DOM,
+ * no React, no wallet SDK, and no network — the one thing it cannot do for
+ * itself, asking the indexer where a transaction's outputs landed, is INJECTED
+ * as a reader, and the real one (`contractRuntime.ts`'s
+ * `resolveTxCommitmentWindowOnce`) sits on the far side of that seam, in a
+ * module that is out for the reason given below.
+ *
  * `src/identity/timestamps.ts` went IN on 2026/08/26 with the module itself: it
  * is the ISO-8601 reader `backup.ts` and `incentiveStore.ts` now share, it is
  * four lines of pure decision, and both of its answers are drilled by
@@ -698,6 +712,7 @@ export default mergeConfig(
           'src/identity/aliasStore.ts',
           'src/identity/backup.ts',
           'src/identity/claimWarmup.ts',
+          'src/identity/k1CoinStore.ts',
           'src/identity/midnamesText.ts',
           'src/identity/sponsoredAlias.ts',
           'src/identity/timestamps.ts',

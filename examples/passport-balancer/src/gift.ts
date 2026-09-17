@@ -41,7 +41,7 @@
  * sUSD.
  */
 
-import { accountModuleFor, carriesOneTxTransferIn } from './accountModule.js';
+import { accountDeposits, accountModuleForState } from './accountModule.js';
 import { randomBytes } from 'node:crypto';
 
 import * as ledger from '@midnightntwrk/ledger-v9';
@@ -498,14 +498,35 @@ export function createColourPayer(deps: {
       const decoded = built.account.ledger((state as { data: unknown }).data);
       return decoded.coins.member(colourBytes) ? decoded.coins.lookup(colourBytes).value : 0n;
     };
-    const before = await held();
     /* Which build this account is: read off its own state, not assumed. */
+    const module = accountModuleForState(
+      await built.reader.queryContractState(address).catch(() => null),
+    );
+    /* A GIFT INTO A k1-ARM ACCOUNT IS STILL REFUSED, before a coin is minted,
+       and the reason has MOVED. It used to be the inbox entry: every gift is
+       shielded, `deposit_shielded` on the reference contract pairs the coin
+       with a 192-byte InboxEntry v1 encrypted to the account's `enc_key`, and
+       nothing here could build one. `./k1Inbox.ts` now can, and `./account.ts`
+       uses it for the opening balance.
+
+       What this desk is short of is the BUILD. It prepares three compiled
+       contracts — the faucet and the two prototype account builds — and none of
+       them is `account-k1`, whose thirty circuits, verifier keys, and remote
+       proving are wired in `./account.ts` and nowhere else. Depositing through a
+       module the account does not carry is not a smaller version of this
+       working; it is a transaction the node refuses after the coin has been
+       minted. So the refusal stays, and it names what it is actually waiting
+       for. Refusing costs a gift; guessing costs the gift AND the coin. */
+    if (!accountDeposits(module).mirrorsShieldedBalance) {
+      throw new ColourPayFailure(
+        501,
+        'k1-account-build-required',
+        `${name} cannot be paid into ${address}: it is a k1-arm account, and this desk does not carry that build. The entry it needs can now be sealed, but the deposit cannot be proved from here. Nothing was minted and nothing was spent.`,
+      );
+    }
+    const before = await held();
     const compiledForAccount =
-      accountModuleFor(
-        carriesOneTxTransferIn(await built.reader.queryContractState(address).catch(() => null)),
-      ) === 'account-v1'
-        ? built.compiledAccountV1
-        : built.compiledAccount;
+      module === 'account-v1' ? built.compiledAccountV1 : built.compiledAccount;
 
     /* 1 and 2. mint_shielded to this wallet, and the wait for it to be
        spendable here. See {@link mintToSelf}. */

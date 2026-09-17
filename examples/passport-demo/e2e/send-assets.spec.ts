@@ -45,7 +45,7 @@ import {
   RECIPIENT_ACCOUNT_ADDRESS,
   RESOLVABLE_NAME,
 } from './mocks.js';
-import { walkContextOptions } from './walkContext.js';
+import { SIGN_IN_BUTTON, walkContextOptions } from './walkContext.js';
 import { installVirtualAuthenticator } from './passkey.js';
 
 test.describe.configure({ mode: 'serial' });
@@ -80,7 +80,7 @@ test.beforeAll(async ({ browser }) => {
   /* A Passport that already exists — the state this sheet is used in. The
      ceremony itself is drilled by `onboarding.spec.ts`. */
   await page.goto('/');
-  await page.getByRole('button', { name: /Continue with Passkey/i }).click();
+  await page.getByRole('button', { name: SIGN_IN_BUTTON }).click();
   await expect(page.getByRole('heading', { name: /Welcome to Passport/i })).toBeVisible({
     timeout: 90_000,
   });
