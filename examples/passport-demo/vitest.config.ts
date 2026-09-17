@@ -472,6 +472,46 @@
  * server resolves the protocol builtins itself — are drilled against a local
  * HTTP server rather than a real prover.
  *
+ * `src/identity/custodyContractSigning.ts` went IN on 2026/09/16, the day it was written,
+ * and it is in the denominator because every function in it decides what a key
+ * SIGNS. The custody account contract gates each asset-releasing circuit on a
+ * signature over a challenge, and that signature is single-use: the wrong
+ * digest, the wrong envelope id, or two signature scalars read out of the bytes
+ * in the wrong order all produce a call the circuit refuses AFTER somebody has
+ * been asked to approve it. None of those are visible from inside the app — a
+ * refused proof looks the same whichever of them caused it — so the rules are
+ * held directly, and two of them are held against evidence rather than against
+ * themselves: the digest fixtures are the values the compiled contract's own
+ * `envelope_digest` pure circuit returned, and the signature round trip goes
+ * back through the curve rather than comparing bigints to bigints.
+ *
+ * The module holds no React, no DOM, no network, no storage, and no contract
+ * module: the compiled contract's pure circuits are INJECTED, which is what
+ * makes it drillable at all — the real build is ~100 MB of prover keys that a
+ * unit test cannot load. It is not wired into the app; `App.tsx` is untouched.
+ *
+ * `src/identity/custodyContractPlan.ts` went IN on 2026/09/16, beside it, and for the
+ * same kind of reason one step further out: it holds the decisions a custody deploy
+ * makes BEFORE anything is signed. Three of them cost a sponsored transaction
+ * when they are wrong and cannot be checked by running the flow. A wave plan
+ * that leaves `activate_initial_device_with_k256` out of wave 1 deploys an
+ * account nobody can ever open, and no later wave can repair it. A proving
+ * endpoint on the wrong origin is a 404 arriving after a proof has been waited
+ * for — and the endpoint does not exist yet, so nothing else in the tree can
+ * hold it. A stale use counter derives a device entry the ledger does not hold,
+ * and the call is refused in-circuit after the holder has approved it. It holds
+ * no React, no DOM, no network and no contract module; its storage is an
+ * injected three-method interface.
+ *
+ * `src/identity/custodyContractClient.ts` is deliberately OUT, and it is the sibling
+ * of the module above rather than an oversight. It is the half with the sockets
+ * on the end of it: a wallet, a sponsor, an indexer, a proof service that does
+ * not exist yet, and midnight-js's deploy and call entry points. Every decision
+ * it makes has been lifted into `custodyContractPlan.ts` precisely so that what is
+ * left is wiring, and it is drilled through its injected `CustodyDeps` seams in
+ * `custodyContractClient.test.ts` rather than being held to a percentage that would
+ * only measure how much of midnight-js a fake can imitate.
+ *
  *   assert-shim.ts      A three-line stand-in for Node's `assert`, aliased in
  *                       by `vite.config.ts` for @subsquid/scale-codec. It has
  *                       no behaviour of ours in it.
@@ -544,7 +584,7 @@
  *
  * `src/identity/k1CoinStore.ts` went IN on 2026/09/16 with the module itself,
  * and it is in the denominator because of what it holds rather than because of
- * how much of it there is. A k1 account's qualified shielded coins exist in
+ * how much of it there is. A custody account's qualified shielded coins exist in
  * exactly one place — this store — and the chain carries no copy: a description
  * this module drops, mangles, or hands back under the wrong colour is a balance
  * nobody can ever spend again, discovered at proving time with nothing to point
@@ -648,6 +688,8 @@ export default mergeConfig(
           'src/lib/walletProver.ts',
           'src/lib/waitingGame.ts',
           'src/lib/zkArtefactCache.ts',
+          'src/identity/custodyContractSigning.ts',
+          'src/identity/custodyContractPlan.ts',
           'src/identity/aliasStore.ts',
           'src/identity/backup.ts',
           'src/identity/claimWarmup.ts',

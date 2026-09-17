@@ -67,6 +67,38 @@ if (!import.meta.env.DEV || window.location.origin === requiredDevelopmentOrigin
      button and never a boot. */
   if (import.meta.env.VITE_DYNAMIC_ENVIRONMENT_ID) {
     void import('./lib/dynamic.js').then((module) => module.mountDynamic()).catch(() => {});
+
+    /* The Dynamic Passport milestone, when somebody has asked for it — a build
+       made for it (`VITE_ACCOUNT_CUSTODY_MILESTONE=1`) or a `?custody=1` on one that was not.
+       Never in any build shipped today, and never without a sign-in to show:
+       nested inside the condition above because the screen's first row IS the
+       Dynamic session, and a milestone that opens on "sign in first" with no
+       sign-in available is a dead panel over the app.
+
+       ITS OWN ROOT, for the reason `dynamic.tsx` uses one: inserting anything
+       above `<PassportDemo />` after boot makes React unmount and remount the
+       whole tree, and mid-ceremony that is a passkey prompt abandoned halfway.
+       A developer surface must not be able to cost that.
+
+       The rejection is swallowed and the import runs after `root.render`, the
+       same two properties the sign-in mount has, and for the same reason. */
+    if (
+      import.meta.env.VITE_ACCOUNT_CUSTODY_MILESTONE === '1' ||
+      new URLSearchParams(window.location.search).get('custody') === '1'
+    ) {
+      void Promise.all([import('./screens/CustodyMilestone.js'), import('react-dom/client')])
+        .then(([screen, reactDom]) => {
+          const host = document.createElement('div');
+          host.id = 'mn-account-custody-root';
+          document.body.appendChild(host);
+          reactDom.createRoot(host).render(
+            <React.StrictMode>
+              <screen.default />
+            </React.StrictMode>,
+          );
+        })
+        .catch(() => {});
+    }
   }
 
   // Retire the inline splash from index.html once React has painted, keeping

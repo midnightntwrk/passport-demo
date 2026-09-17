@@ -125,6 +125,35 @@ export async function mountDynamic(): Promise<void> {
             if (!signature) throw new Error('Nothing was signed. The request may have been dismissed.')
             return signature
           },
+          /* THE RAW PATH, and the only one the custody account contract can verify.
+             It is reached through the CONNECTOR rather than the wallet, because
+             `signRawMessage` is a capability of Dynamic's embedded (WaaS)
+             connector and not of the wallet interface every connector
+             satisfies — an externally connected MetaMask has no such method,
+             and the `typeof` check below is what says so in a sentence instead
+             of throwing `is not a function` from inside the vendor.
+
+             The 64-hex, no-`0x` argument shape is the SDK's, not ours:
+             `@dynamic-labs-sdk/client` enforces
+             `RAW_MESSAGE_MESSAGE_REQUIRED_LENGTH = 64` and throws otherwise. */
+          signRaw: async (digestHex: string) => {
+            if (!wallet) throw new Error('Sign in first — there is no key to sign with yet.')
+            const connector = wallet.connector as unknown as {
+              signRawMessage?: (input: {
+                accountAddress: string
+                message: string
+              }) => Promise<string | undefined>
+            }
+            if (typeof connector?.signRawMessage !== 'function') {
+              throw new Error('This sign-in cannot approve Passport actions yet.')
+            }
+            const signature = await connector.signRawMessage({
+              accountAddress: wallet.address,
+              message: digestHex,
+            })
+            if (!signature) throw new Error('Nothing was signed. The request may have been dismissed.')
+            return signature
+          },
           signOut: async () => {
             await handleLogOut()
           },
@@ -183,6 +212,8 @@ export function useDynamicSession(): DynamicSession & {
   openAuthFlow: () => void
   /** Signs `text` with the embedded Ethereum key. */
   signMessage: (text: string) => Promise<string>
+  /** Signs a 64-hex digest verbatim. The only path a custody account can verify. */
+  signRaw: (digestHex: string) => Promise<string>
   /** Ends the Dynamic session, leaving the Passport passkey alone. */
   signOut: () => Promise<void>
 } {
@@ -204,9 +235,22 @@ export function useDynamicSession(): DynamicSession & {
     return actions.signMessage(text)
   }, [])
 
-  const signOut = useCallback(async () => {
-    await readDynamicActions()?.signOut()
+  const signRaw = useCallback(async (digestHex: string) => {
+    const actions = readDynamicActions()
+    if (!actions) throw new Error('Sign-in is still starting up. Try again in a moment.')
+    return actions.signRaw(digestHex)
   }, [])
 
-  return { ...session, openAuthFlow, signMessage, signOut }
+  const signOut = useCallback(async () => {
+    await readDynamicActions()?.signOut()
+    /* THE NEXT PERSON TO SIGN IN ON THIS TAB IS NOT THIS ONE. The custody layer
+       caches a maintenance signing key per account for the life of the tab, so
+       signing out has to drop it — otherwise a second sign-in in the same tab
+       carries the first one's key. Imported lazily: this hook is on the entry
+       graph and the custody layer must not be. */
+    const { resetCustodySessionState } = await import('../identity/custodyContractClient.js')
+    resetCustodySessionState()
+  }, [])
+
+  return { ...session, openAuthFlow, signMessage, signRaw, signOut }
 }
