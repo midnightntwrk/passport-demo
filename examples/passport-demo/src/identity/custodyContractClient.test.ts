@@ -313,6 +313,12 @@ function harness(
     chain?: Partial<FakeChain>;
     /** A node that accepts a submission and never applies it. */
     dropSubmissions?: boolean;
+    /**
+     * How many reads of the contract state answer NOTHING after the deploy has
+     * landed — the indexer's own lag behind the node, which is a state every
+     * live setup passes through and no fake had (2026/09/17).
+     */
+    indexerLagReads?: number;
     storage?: ReturnType<typeof storageFake>;
   } = {},
 ): Harness {
@@ -335,6 +341,7 @@ function harness(
      the objection is fair — an `async` here would be decoration. */
   const connections: { privateStateId: string; account: unknown }[] = [];
   const opened: string[] = [];
+  let lagReadsLeft = overrides.indexerLagReads ?? 0;
   const providers: Record<string, unknown> = {
     zkConfigProvider: {
       getVerifierKey: (circuit: string) =>
@@ -344,12 +351,20 @@ function harness(
       /* NOTHING AT THAT ADDRESS UNTIL WAVE 1 HAS LANDED. The module reads this
          to decide whether to deploy at all, so a fake that always answered with
          a state would make that decision untestable. */
-      queryContractState: () =>
-        Promise.resolve(
+      queryContractState: () => {
+        /* The indexer's lag: the deploy has landed and this address is not
+           served yet. Counted down so the same fake answers honestly once it
+           has caught up. */
+        if (chain.deployed && lagReadsLeft > 0) {
+          lagReadsLeft -= 1;
+          return Promise.resolve(null);
+        }
+        return Promise.resolve(
           chain.deployed
             ? { serialize: () => new Uint8Array([chain.operations.size]), data: 'state' }
             : null,
-        ),
+        );
+      },
     },
     privateStateProvider: {
       setContractAddress: () => undefined,
@@ -761,6 +776,31 @@ describe('creating a Dynamic Passport', () => {
     const updates = test.built.filter((entry) => entry[0] === 'update');
     expect(updates).toHaveLength(2);
     expect(test.built.filter((entry) => entry[0] === 'retire')).toHaveLength(1);
+  });
+
+  /* THE DEFECT THIS CATCHES ended every live setup on stagenet on 2026/09/17,
+     about twenty seconds in. The deploy lands, the wave that follows it asks
+     the chain for the authority counter, and for the first seconds the indexer
+     does not serve the new address yet — `queryContractState` answers null and
+     `queryState` turns that into a refusal. The wait is the one caller that has
+     a recourse, so an unreadable read is "not yet" here, not a failure. */
+  it('waits through an indexer that does not serve the new account yet', async () => {
+    const test = harness({ indexerLagReads: 6 });
+    const { session, device } = deviceFake();
+    const result = await deployCustodyAccount(session, device, undefined, test.deps);
+
+    expect(result.record.wavesDone).toBe(3);
+    expect(test.submits).toBe(3);
+  });
+
+  /* And the deadline still refuses, so an indexer that never answers is a
+     sentence rather than a spinner. */
+  it('gives up in one sentence when the account is never served', async () => {
+    const test = harness({ indexerLagReads: Number.MAX_SAFE_INTEGER });
+    const { session, device } = deviceFake();
+    await expect(deployCustodyAccount(session, device, undefined, test.deps)).rejects.toThrow(
+      'Setting up your Passport is taking longer than expected. Try again.',
+    );
   });
 
   /* `'v4'` is load-bearing: `compact-js` hardcodes `'v3'`, whose keys carry a

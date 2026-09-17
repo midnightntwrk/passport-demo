@@ -934,7 +934,12 @@ async function runMaintenanceWave(
 ): Promise<CustodyAccountRecord> {
   const { deps, ledgerApi, providers, storage, wave, verifierKeys } = context;
   const address = context.record.address as string;
-  const counter = await authorityCounter(providers, ledgerApi, address);
+  /* THROUGH THE WAIT, NOT A BARE READ. This is the first thing asked of the
+     chain after the deploy landed, and for the first seconds the indexer does
+     not serve the new address — which ended every live setup on 2026/09/17.
+     `0n` is a counter every live authority is at or past, so this waits for the
+     account to be READABLE and takes whatever counter it reports. */
+  const counter = await awaitAuthorityCounter(deps, providers, ledgerApi, address, 0n);
 
   const updates: unknown[] = wave.circuits.map((circuit) => {
     const key = verifierKeys.get(circuit);
@@ -1013,6 +1018,16 @@ async function authorityCounter(
  *
  * Without this the next wave is built against a stale counter and the node
  * rejects it — after a sponsored fee has been booked for it.
+ *
+ * AN UNREADABLE STATE IS "NOT YET", NOT A FAILURE. Between the deploy landing
+ * and the indexer serving the new address there is a window — 20-odd seconds on
+ * stagenet — in which `queryContractState` answers null, and `queryState` turns
+ * that into a plain refusal for the callers that have no other recourse. Here
+ * there is one: this function's whole job is to wait. Letting the refusal out
+ * of the FIRST poll ended every live setup on 2026/09/17 about twenty seconds
+ * in, with a Passport that was deployed, paid for, and abandoned. So a read
+ * that cannot answer is retried to the same deadline as a counter that has not
+ * moved, and only the deadline refuses.
  */
 async function awaitAuthorityCounter(
   deps: CustodyDeps,
@@ -1020,11 +1035,11 @@ async function awaitAuthorityCounter(
   ledgerApi: CustodyLedgerApi,
   address: string,
   expected: bigint,
-): Promise<void> {
+): Promise<bigint> {
   const deadline = deps.now() + CUSTODY_AUTHORITY_WAIT_MS;
   for (;;) {
-    const seen = await authorityCounter(providers, ledgerApi, address);
-    if (seen >= expected) return;
+    const seen = await authorityCounter(providers, ledgerApi, address).catch(() => null);
+    if (seen !== null && seen >= expected) return seen;
     if (deps.now() >= deadline) {
       throw new Error('Setting up your Passport is taking longer than expected. Try again.');
     }
