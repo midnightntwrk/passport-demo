@@ -66,16 +66,16 @@ unset fails by name rather than falling back to the staging project.
      examples/passport-balancer/contracts-stagenet/managed/midnames/zkir
    ```
 
-   **`account-k1` is not in that list, and a future release has to put it
-   there.** The k1-arm build landed on 2026/09/16 with its `contract/` and
-   `compiler/` halves tracked like every other build's, and with no artefacts
-   in any bundle. Nothing in the app asks for the module yet, so nothing is
-   broken by the gap: `prepare-zk-assets.mjs` stages the module, says the
-   artefacts are absent, and serves nothing under `/zk/account-k1`;
-   `verify-zk-artefacts.mjs` skips a contract that shipped neither `keys/` nor
-   `zkir/`, by design. The moment a flow asks for that module, the bundle must
-   carry `managed/account-k1/{keys,zkir}` and this pin must move to the release
-   that does.
+   **`account-k1` is packed too, verifier keys and IR only.** The k1-arm
+   build's prover keys are 3.2 GB (224 MB per k256 circuit); its proofs are
+   made on the proving server, which holds them under
+   `/opt/passport-k1-artefacts/managed/account-k1`, so a browser needs only
+   the 74 KB of verifier keys and the IR. `tag-release.mjs` refuses to pack a
+   `.prover` under `managed/account-k1/keys`, `prepare-zk-assets.mjs` leaves
+   one behind, and `verify-zk-artefacts.mjs` fails if one shipped. A checkout
+   without the k1 artefacts still builds: the module is staged, the artefacts
+   are reported absent, and nothing is served under `/zk/account-k1` until
+   `fetch-zk-artefacts.mjs` brings a bundle that carries them.
 
    **Measure before you add it.** `managed/account-k1/keys` is **3.2 GB** —
    thirty circuits against the account build's twelve, with the k256 arm's

@@ -13,8 +13,11 @@ import {
 } from './accountK1.js';
 import {
   allK1Circuits,
-  hexToBytes,
+  K1_ENROLMENT_UNCONFIRMED,
   K1_PROVER_UNAVAILABLE,
+  K1_SETUP_INTERRUPTED,
+  hexToBytes,
+  loadK1AuthorityKey,
   loadK1Record,
   type K1Storage,
 } from './accountK1Plan.js';
@@ -28,6 +31,7 @@ import {
   k1Witnesses,
   recoverK1DevicePoint,
   resetK1SessionState,
+  startK1AccountAgain,
   type K1ContractModule,
   type K1Deps,
   type K1DynamicSession,
@@ -122,12 +126,25 @@ function pureFake(): K1PureCircuits {
 
 const ADDRESS = 'ab'.repeat(32);
 
-/** A ledger the fake contract module reports, mutable so a call can advance it. */
+/**
+ * The chain, as much of it as this module can see: a ledger a call advances,
+ * and — the part that matters for the resume rule — THE OPERATIONS THE CONTRACT
+ * ACTUALLY CARRIES.
+ *
+ * `operations` is why the fake is shaped this way rather than reporting a fixed
+ * state. The module decides whether to submit a wave by asking what is already
+ * deployed, so a fake that answered "all thirty, always" would make every drill
+ * of that decision pass by accident. Here the deploy and each maintenance
+ * update ADD to this set, exactly as the node would, and `deployed` is false
+ * until wave 1 has landed so the read can answer "there is nothing there".
+ */
 interface FakeChain {
   authNonce: bigint;
   epoch: bigint;
   devices: Set<string>;
   authorityCounter: bigint;
+  deployed: boolean;
+  operations: Set<string>;
 }
 
 function moduleFake(chain: FakeChain): K1ContractModule {
@@ -145,17 +162,30 @@ function moduleFake(chain: FakeChain): K1ContractModule {
   };
 }
 
+/** What a submitted transaction would do to the chain if the node applied it. */
+interface FakeTx {
+  kind: 'tx';
+  deploys: string[] | null;
+  inserts: string[] | null;
+}
+
 /** The ledger-v9 constructors, as objects that record what they were built with. */
 function ledgerFake(chain: FakeChain, built: unknown[][]): K1LedgerApi {
+  /* The constructor's own state carries all thirty operations; a state read off
+     the chain carries the ones that have actually landed. The two arrive
+     through the same `deserialize`, and the serialised length is what tells
+     them apart — which is the fake's own convention and is why the deploy data
+     below serialises to `[30]`. */
   class State {
     data: unknown = null;
     maintenanceAuthority = { counter: chain.authorityCounter };
     private ops = new Map<string, unknown>();
-    static deserialize(): State {
+    static deserialize(raw: Uint8Array): State {
       const state = new State();
-      state.data = 'constructor-state';
       state.maintenanceAuthority = { counter: chain.authorityCounter };
-      for (const circuit of allK1Circuits('k256')) state.ops.set(circuit, `op:${circuit}`);
+      const roster = raw[0] === 30 ? allK1Circuits('k256') : [...chain.operations];
+      state.data = raw[0] === 30 ? 'constructor-state' : 'chain-state';
+      for (const circuit of roster) state.ops.set(circuit, `op:${circuit}`);
       return state;
     }
     operation(circuit: string): unknown {
@@ -167,16 +197,18 @@ function ledgerFake(chain: FakeChain, built: unknown[][]): K1LedgerApi {
     serialize(): Uint8Array {
       return new Uint8Array([this.ops.size]);
     }
-    get operationCount(): number {
-      return this.ops.size;
+    get operationIds(): string[] {
+      return [...this.ops.keys()];
     }
   }
   return {
     ContractState: State,
     ContractDeploy: class {
       address = ADDRESS;
+      circuits: string[];
       constructor(state: unknown) {
-        built.push(['deploy', (state as State).operationCount]);
+        this.circuits = (state as State).operationIds;
+        built.push(['deploy', this.circuits.length]);
       }
     },
     ContractMaintenanceAuthority: class {
@@ -190,14 +222,34 @@ function ledgerFake(chain: FakeChain, built: unknown[][]): K1LedgerApi {
       }
     },
     Intent: {
-      new: () => ({
-        addDeploy: (deploy: unknown) => deploy,
-        addMaintenanceUpdate: (update: unknown) => update,
-      }),
+      /* The intent IS the transaction here: `fromParts` is handed the object
+         `addDeploy` returned, so what it carries has to be what the node will
+         be asked to apply. */
+      new: () => {
+        const intent = {
+          kind: 'tx' as const,
+          deploys: null as string[] | null,
+          inserts: null as string[] | null,
+          addDeploy(deploy: unknown) {
+            intent.deploys = (deploy as { circuits: string[] }).circuits;
+            return intent;
+          },
+          addMaintenanceUpdate(update: unknown) {
+            intent.inserts = (update as { circuits: string[] }).circuits;
+            return intent;
+          },
+        };
+        return intent;
+      },
     },
     MaintenanceUpdate: class {
       dataToSign = new Uint8Array([1]);
+      circuits: string[];
       constructor(address: string, updates: unknown[], counter: bigint) {
+        this.circuits = updates
+          .filter((update): update is { circuit: string } => typeof
+            (update as { circuit?: unknown }).circuit === 'string')
+          .map((update) => update.circuit);
         built.push(['update', address, updates.length, counter]);
       }
       addSignature(): unknown {
@@ -209,9 +261,11 @@ function ledgerFake(chain: FakeChain, built: unknown[][]): K1LedgerApi {
         built.push(['retire']);
       }
     },
-    Transaction: { fromParts: () => ({ kind: 'tx' }) },
+    Transaction: {
+      fromParts: (_network: string, _g: undefined, _f: undefined, intent: unknown) => intent,
+    },
     VerifierKeyInsert: class {
-      constructor(circuit: string) {
+      constructor(readonly circuit: string) {
         built.push(['insert', circuit]);
       }
     },
@@ -229,18 +283,27 @@ interface Harness {
   submits: number;
 }
 
-function harness(overrides: { chain?: Partial<FakeChain> } = {}): Harness {
+function harness(
+  overrides: {
+    chain?: Partial<FakeChain>;
+    /** A node that accepts a submission and never applies it. */
+    dropSubmissions?: boolean;
+    storage?: ReturnType<typeof storageFake>;
+  } = {},
+): Harness {
   const chain: FakeChain = {
     authNonce: 0n,
     epoch: 0n,
     devices: new Set<string>(),
     authorityCounter: 0n,
+    deployed: false,
+    operations: new Set<string>(),
     ...overrides.chain,
   };
-  const storage = storageFake();
+  const storage = overrides.storage ?? storageFake();
   const built: unknown[][] = [];
   const calls: { circuit: string; args: unknown[] }[] = [];
-  const state = { submits: 0 };
+  const state = { submits: 0, clock: 1_700_000_000_000 };
 
   /* Every fake resolves rather than being `async`: a promise-returning stub with
      nothing to await is what `@typescript-eslint/require-await` objects to, and
@@ -251,8 +314,15 @@ function harness(overrides: { chain?: Partial<FakeChain> } = {}): Harness {
         Promise.resolve(allK1Circuits('k256').includes(circuit) ? new Uint8Array(2_400) : null),
     },
     publicDataProvider: {
+      /* NOTHING AT THAT ADDRESS UNTIL WAVE 1 HAS LANDED. The module reads this
+         to decide whether to deploy at all, so a fake that always answered with
+         a state would make that decision untestable. */
       queryContractState: () =>
-        Promise.resolve({ serialize: () => new Uint8Array([1]), data: 'state' }),
+        Promise.resolve(
+          chain.deployed
+            ? { serialize: () => new Uint8Array([chain.operations.size]), data: 'state' }
+            : null,
+        ),
     },
     privateStateProvider: {
       setContractAddress: () => undefined,
@@ -307,16 +377,36 @@ function harness(overrides: { chain?: Partial<FakeChain> } = {}): Harness {
             public: { initialContractState: { serialize: () => new Uint8Array([30]) } },
             private: { signingKey: 'the-signing-key', initialPrivateState: {} },
           }),
-        submitTx: () => {
+        submitTx: (_providers: unknown, options: unknown) => {
           state.submits += 1;
-          /* Each maintenance update the node applies advances the authority
-             counter, which is what the next wave builds against. */
-          chain.authorityCounter += 1n;
+          /* THE NODE APPLYING THE TRANSACTION, which is a different event from
+             accepting it. `dropSubmissions` is the node that accepts and never
+             applies — a real and unremarkable outcome — and it is what holds
+             the rule that a wave is recorded only once the chain shows it. */
+          if (!overrides.dropSubmissions) {
+            const tx = (options as { unprovenTx: FakeTx }).unprovenTx;
+            if (tx.deploys) {
+              chain.deployed = true;
+              for (const circuit of tx.deploys) chain.operations.add(circuit);
+            }
+            if (tx.inserts) {
+              for (const circuit of tx.inserts) chain.operations.add(circuit);
+              /* Each maintenance update the node applies advances the authority
+                 counter, which is what the next wave builds against. */
+              chain.authorityCounter += 1n;
+            }
+          }
           return Promise.resolve({ public: { txId: `wave-${state.submits}` } });
         },
         findDeployedContract: () => Promise.resolve({ callTx }),
       }),
-    now: () => 1_700_000_000_000,
+    /* A CLOCK THAT MOVES. `awaitAuthorityCounter` gives up on a deadline, and a
+       frozen clock would spin for ever in the one drill that wants to see it
+       give up. Five seconds a read reaches the deadline in two dozen turns. */
+    now: () => {
+      state.clock += 5_000;
+      return state.clock;
+    },
     sleep: () => Promise.resolve(undefined),
   };
 
@@ -332,8 +422,23 @@ function harness(overrides: { chain?: Partial<FakeChain> } = {}): Harness {
   };
 }
 
+/** The secp256k1 group order, for making the high-S twin of a signature. */
+const CURVE_N = BigInt('0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141');
+
+/**
+ * What a signer does with the two things a recovery depends on.
+ *
+ * These are not invented shapes. `lowS` is the ordinary one and `highS` is the
+ * malleated twin WITH `v` flipped to match, which is still a correct signature
+ * and which the contract accepts. `highSKeepingV` is the defect: the S form
+ * changed and the recovery byte left alone, which is what a signer that
+ * normalises without flipping emits — every signature verifies, and every
+ * recovery lands on a point the key cannot sign for.
+ */
+type SignerStyle = 'lowS' | 'highS' | 'highSKeepingV' | 'zeroBasedV' | 'tampered';
+
 /** A real secp256k1 key standing in for Dynamic's embedded one. */
-function deviceFake(): {
+function deviceFake(style: SignerStyle = 'lowS'): {
   session: K1DynamicSession;
   device: K256DeviceIdentity;
   signed: Uint8Array[];
@@ -351,14 +456,29 @@ function deviceFake(): {
       const digest = hexToBytes(message);
       signed.push(digest);
       const recovered = secp256k1.sign(digest, secret, { prehash: false, format: 'recovered' });
-      const v = recovered[0] + 27;
-      return Promise.resolve(
-        `0x${bytesToHex(recovered.subarray(1))}${v.toString(16).padStart(2, '0')}`,
-      );
+      let r = BigInt(`0x${bytesToHex(recovered.subarray(1, 33))}`);
+      let s = BigInt(`0x${bytesToHex(recovered.subarray(33, 65))}`);
+      let v = recovered[0];
+      if (style === 'highS' || style === 'highSKeepingV') {
+        s = CURVE_N - s;
+        /* Flipping S moves R to its other root, so a correct signer flips the
+           recovery byte with it. `highSKeepingV` is the one that does not. */
+        if (style === 'highS') v = v ^ 1;
+      }
+      if (style === 'tampered') r = r ^ 1n;
+      const encoded =
+        bytesToHex(scalarToBytesBE(r)) +
+        bytesToHex(scalarToBytesBE(s)) +
+        (style === 'zeroBasedV' ? v : v + 27).toString(16).padStart(2, '0');
+      return Promise.resolve(`0x${encoded}`);
     },
   };
   return { session, device: { arm: 'k256', pk: point, envelope: K256_ENVELOPE_NONE }, signed };
 }
+
+/** The recovery `src/lib/k1Recover.ts` performs, written out for the drill. */
+const recoverHere = (digest: Uint8Array, r: bigint, s: bigint, v: number): Uint8Array =>
+  new secp256k1.Signature(r, s, v).recoverPublicKey(digest).toBytes(false);
 
 /** The uncompressed SEC1 bytes of a point, for handing to a curve library. */
 function uncompressed(point: CurvePoint): Uint8Array {
@@ -492,19 +612,64 @@ describe('the device point', () => {
   /* Dynamic exports no key and no point, so the point is recovered from a
      signature over a digest we chose. Held by signing with a KNOWN key and
      getting that key's point back — not by comparing it to itself. */
-  it('is recovered from one signature at enrolment', async () => {
+  it('is recovered from a signature, and confirmed against a second one', async () => {
     const { session, device, signed } = deviceFake();
-    const point = await recoverK1DevicePoint({
-      session,
-      /* The same recovery `src/lib/k1Recover.ts` performs, written out here so
-         the drill does not depend on a lazy import of the curve. */
-      recover: (digest, r, s, v) =>
-        new secp256k1.Signature(r, s, v).recoverPublicKey(digest).toBytes(false),
-    });
+    const point = await recoverK1DevicePoint({ session, recover: recoverHere });
     expect(point.x).toBe(device.pk.x);
     expect(point.y).toBe(device.pk.y);
-    expect(signed).toHaveLength(1);
+    /* TWO DIGESTS, AND THEY ARE DIFFERENT ONES. One signature proves nothing:
+       recovery always succeeds, and a recovery byte that does not match the
+       signature it arrives with simply lands on another point. */
+    expect(signed).toHaveLength(2);
     expect(signed[0]).toHaveLength(32);
+    expect(bytesToHex(signed[1])).not.toBe(bytesToHex(signed[0]));
+  });
+
+  /* The contract accepts both S forms, so enrolment must too — a low-S rule
+     imposed here would refuse signers the seam itself is happy with. */
+  it('accepts a high-S signature whose recovery byte was flipped with it', async () => {
+    const { session, device } = deviceFake('highS');
+    const point = await recoverK1DevicePoint({ session, recover: recoverHere });
+    expect(point.x).toBe(device.pk.x);
+    expect(point.y).toBe(device.pk.y);
+  });
+
+  it('accepts a recovery byte given as 0 or 1 rather than 27 or 28', async () => {
+    const { session, device } = deviceFake('zeroBasedV');
+    const point = await recoverK1DevicePoint({ session, recover: recoverHere });
+    expect(point.x).toBe(device.pk.x);
+  });
+
+  /* THE DEFECT THIS EXISTS FOR. High S with the recovery byte left alone
+     recovers a point the key cannot sign for, silently, and enrolling it would
+     activate an account around a device that can never authorise anything. */
+  it('refuses a high-S signature whose recovery byte was not flipped', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const { session } = deviceFake('highSKeepingV');
+    await expect(recoverK1DevicePoint({ session, recover: recoverHere })).rejects.toThrow(
+      K1_ENROLMENT_UNCONFIRMED,
+    );
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('refuses a signature whose scalars were tampered with', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const { session } = deviceFake('tampered');
+    await expect(recoverK1DevicePoint({ session, recover: recoverHere })).rejects.toThrow(
+      K1_ENROLMENT_UNCONFIRMED,
+    );
+    warn.mockRestore();
+  });
+
+  it('refuses a recovery byte that is no dialect at all', async () => {
+    const session: K1DynamicSession = {
+      address: '0xabc',
+      signRaw: () => Promise.resolve(`0x${'11'.repeat(64)}07`),
+    };
+    await expect(recoverK1DevicePoint({ session, recover: recoverHere })).rejects.toThrow(
+      /recovery byte out of range/,
+    );
   });
 });
 
@@ -542,12 +707,19 @@ describe('creating a Dynamic Passport', () => {
     expect([...versions]).toEqual(['v4']);
   });
 
+  /* The constructor mints the authority at counter 0, and only an APPLIED
+     maintenance update advances it — the deploy does not. So wave 2 builds
+     against 0 and wave 3 against 1, each read off the chain at the time rather
+     than assumed from the deploy. */
   it('builds each maintenance update against the counter the chain reports', async () => {
     const test = harness();
     const { session, device } = deviceFake();
     await deployK1Account(session, device, undefined, test.deps);
     const counters = test.built.filter((e) => e[0] === 'update').map((e) => e[3]);
-    expect(counters).toEqual([1n, 2n]);
+    expect(counters).toEqual([0n, 1n]);
+    /* And the retirement carries the counter its own application expects: one
+       past the update it rides on. */
+    expect(test.built.filter((e) => e[0] === 'authority').map((e) => e[3])).toEqual([2n]);
   });
 
   it('remembers where it got to, and resumes rather than redeploying', async () => {
@@ -726,5 +898,262 @@ describe('the witnesses', () => {
     const witnesses = k1Witnesses();
     expect(Object.keys(witnesses)).toEqual(['held_coin']);
     expect(() => witnesses.held_coin?.()).toThrow(/not built yet/);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+
+describe('resuming a half-built Passport', () => {
+  /* THREE CASES, AND EACH OF THEM HAPPENED TO SOMEBODY. The record and the
+     chain disagree in both directions, and the module now asks the chain. */
+
+  it('re-submits a wave the record calls done that the chain does not have', async () => {
+    const test = harness();
+    const { session, device } = deviceFake();
+    await deployK1Account(session, device, undefined, test.deps);
+
+    /* Wave 3's keys are taken back off the chain, as a dropped update would
+       leave them, while the record still says all three waves landed. */
+    for (const circuit of ['issue_grant_with_k256', 'revoke_grant_with_k256',
+      'revoke_all_grants_with_k256']) {
+      test.chain.operations.delete(circuit);
+    }
+    const before = test.submits;
+    await deployK1Account(session, device, undefined, test.deps);
+    expect(test.submits).toBeGreaterThan(before);
+    /* And what it re-submitted is a maintenance update, not a second deploy. */
+    expect(test.built.filter((entry) => entry[0] === 'deploy')).toHaveLength(1);
+  });
+
+  it('skips a wave the chain has that the record never recorded', async () => {
+    const test = harness();
+    const { session, device } = deviceFake();
+    await deployK1Account(session, device, undefined, test.deps);
+    const landed = test.submits;
+
+    /* The tab closed before the last write: the chain is complete, the record
+       is two waves behind. Nothing may be paid for twice. */
+    const record = loadK1Record(test.storage, k1UserKey(session), 'stagenet');
+    test.storage.data.set(
+      'passport-k1-account:v1',
+      JSON.stringify({
+        [`${k1UserKey(session)}|stagenet`]: { ...record, wavesDone: 1 },
+      }),
+    );
+
+    const again = await deployK1Account(session, device, undefined, test.deps);
+    expect(test.submits).toBe(landed);
+    expect(again.record.wavesDone).toBe(3);
+    expect(loadK1Record(test.storage, k1UserKey(session), 'stagenet')?.wavesDone).toBe(3);
+  });
+
+  it('redeploys when the record names an address the chain has never heard of', async () => {
+    const test = harness();
+    const { session, device } = deviceFake();
+    await deployK1Account(session, device, undefined, test.deps);
+
+    /* The deploy itself was dropped: a record, an address, and nothing there. */
+    test.chain.deployed = false;
+    test.chain.operations.clear();
+    test.chain.authorityCounter = 0n;
+    await deployK1Account(session, device, undefined, test.deps);
+    expect(test.built.filter((entry) => entry[0] === 'deploy')).toHaveLength(2);
+  });
+
+  /* THE ORDER THAT MATTERS: the counter first, the record second. A submission
+     the node accepts and never applies must leave `wavesDone` where it was, or
+     the next attempt skips ten circuits nothing can add afterwards. */
+  it('does not record a wave whose update never landed', async () => {
+    const test = harness();
+    const { session, device } = deviceFake();
+    await deployK1Account(session, device, undefined, test.deps);
+
+    const stuck = harness({
+      chain: { ...test.chain, operations: new Set(test.chain.operations) },
+      storage: test.storage,
+      dropSubmissions: true,
+    });
+    stuck.chain.operations.delete('issue_grant_with_k256');
+    const before = loadK1Record(test.storage, k1UserKey(session), 'stagenet')?.wavesDone;
+
+    await expect(deployK1Account(session, device, undefined, stuck.deps)).rejects.toThrow(
+      /taking longer than expected/,
+    );
+    expect(loadK1Record(test.storage, k1UserKey(session), 'stagenet')?.wavesDone).toBe(before);
+  });
+});
+
+describe('a setup that cannot be finished', () => {
+  /** A node that applies the first transaction and drops every one after it. */
+  const oneWaveOnly = (deps: Partial<K1Deps>): Partial<K1Deps> => {
+    let submits = 0;
+    return {
+      ...deps,
+      /* The counter is OUTSIDE the factory on purpose: the module asks for
+         `contracts()` once per wave, so a counter made inside would restart at
+         zero every time and never refuse anything. */
+      contracts: async () => {
+        const real = await (deps.contracts as NonNullable<K1Deps['contracts']>)();
+        return {
+          ...real,
+          submitTx: (providers: unknown, options: unknown) => {
+            submits += 1;
+            if (submits > 1) return Promise.reject(new Error('tab closed'));
+            return real.submitTx(providers, options);
+          },
+        };
+      },
+    };
+  };
+
+  /** Providers whose private-state store has never heard of this account. */
+  const withoutTheProvidersKey = async (deps: Partial<K1Deps>) => ({
+    ...(await (deps.providers as NonNullable<K1Deps['providers']>)(null as never, 'p')),
+    privateStateProvider: {
+      setContractAddress: () => undefined,
+      setSigningKey: () => Promise.resolve(undefined),
+      getSigningKey: () => Promise.resolve(null),
+      set: () => Promise.resolve(undefined),
+    },
+  });
+
+  /* THE KEY IS PERSISTED, WHICH IS WHAT MAKES A RELOAD SURVIVABLE. The
+     private-state provider this app builds is in-memory, so a reload between
+     wave 1 and wave 3 used to leave a live account with a live authority and
+     no key anywhere that could drive it. */
+  it('keeps the maintenance key where a reload can find it', async () => {
+    const test = harness();
+    const { session, device } = deviceFake();
+    await expect(
+      deployK1Account(session, device, undefined, oneWaveOnly(test.deps)),
+    ).rejects.toThrow('tab closed');
+
+    const address = loadK1Record(test.storage, k1UserKey(session), 'stagenet')?.address as string;
+    expect(loadK1AuthorityKey(test.storage, address)).toBe('the-signing-key');
+
+    /* THE RELOAD: the tab's own cache is gone and the provider never held it,
+       so only the stored key can finish the account. */
+    resetK1SessionState();
+    const reloaded = harness({ chain: test.chain, storage: test.storage });
+    const finished = await deployK1Account(session, device, undefined, {
+      ...reloaded.deps,
+      providers: () => withoutTheProvidersKey(reloaded.deps),
+    });
+    expect(finished.record.wavesDone).toBe(3);
+    /* The retirement landed with the last wave, so the key is deleted rather
+       than left in a browser for ever. */
+    expect(loadK1AuthorityKey(test.storage, address)).toBeNull();
+  });
+
+  /* THE OTHER PATH. When the key is genuinely gone — a browser that cleared
+     its storage, or one that refused to write it in the first place — the
+     record says so ONCE and every entry point refuses from there, rather than
+     offering a step that fails every time it is pressed. */
+  it('marks the record terminal when the key is gone, and refuses from then on', async () => {
+    const test = harness();
+    const { session, device } = deviceFake();
+    /* A browser that remembers the progress and not the key. */
+    const forgetful: K1Storage = {
+      getItem: (key) => test.storage.getItem(key),
+      setItem: (key, value) => {
+        if (key === 'passport-k1-authority:v1') return;
+        test.storage.setItem(key, value);
+      },
+      removeItem: (key) => test.storage.removeItem(key),
+    };
+    await expect(
+      deployK1Account(session, device, undefined, {
+        ...oneWaveOnly(test.deps),
+        storage: () => forgetful,
+      }),
+    ).rejects.toThrow('tab closed');
+
+    resetK1SessionState();
+    const reloaded = harness({ chain: test.chain, storage: test.storage });
+    await expect(
+      deployK1Account(session, device, undefined, {
+        ...reloaded.deps,
+        storage: () => forgetful,
+        providers: () => withoutTheProvidersKey(reloaded.deps),
+      }),
+    ).rejects.toThrow(K1_SETUP_INTERRUPTED);
+
+    expect(loadK1Record(test.storage, k1UserKey(session), 'stagenet')?.interrupted).toBe(true);
+
+    /* Every door is shut from here, and each says the same sentence. */
+    await expect(deployK1Account(session, device, undefined, test.deps)).rejects.toThrow(
+      K1_SETUP_INTERRUPTED,
+    );
+    await expect(activateK1Device(session, device, undefined, test.deps)).rejects.toThrow(
+      K1_SETUP_INTERRUPTED,
+    );
+  });
+
+  it('starts again by throwing the record and the key away', async () => {
+    const test = harness();
+    const { session, device } = deviceFake();
+    await deployK1Account(session, device, undefined, test.deps);
+    const address = loadK1Record(test.storage, k1UserKey(session), 'stagenet')?.address as string;
+
+    await startK1AccountAgain(session, test.deps);
+    expect(loadK1Record(test.storage, k1UserKey(session), 'stagenet')).toBeNull();
+    expect(loadK1AuthorityKey(test.storage, address)).toBeNull();
+
+    /* A fresh chain, and the next press builds a whole Passport again. */
+    const fresh = harness({ storage: test.storage });
+    const again = await deployK1Account(session, device, undefined, fresh.deps);
+    expect(again.record.wavesDone).toBe(3);
+    expect(fresh.built.filter((entry) => entry[0] === 'deploy')).toHaveLength(1);
+  });
+
+  it('has nothing to throw away when there is no record', async () => {
+    const test = harness();
+    const { session } = deviceFake();
+    await expect(startK1AccountAgain(session, test.deps)).resolves.toBeUndefined();
+  });
+});
+
+describe('the proving deadline', () => {
+  /* IT DOES NOT HANG, and this is the part of that claim `fetch` does not give
+     you for nothing: a socket to a box that stopped answering without closing
+     it stays open until the operating system gives up. */
+  it('carries an abort on every request', async () => {
+    const fetchFn = vi.fn(() =>
+      Promise.resolve(new Response(JSON.stringify({ provenTx: 'ab' }), { status: 200 })),
+    );
+    const provider = k1ProofProvider({
+      endpoint: 'https://example.test/balancer/prove-k1',
+      network: 'stagenet',
+      circuit: 'append_inbox_with_k256',
+      deserialise: (bytes) => bytes,
+      fetchFn,
+    });
+    await provider.proveTx({ serialize: () => new Uint8Array([1]) });
+    const init = (fetchFn.mock.calls[0] as unknown as [string, RequestInit])[1];
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+    expect(init.signal?.aborted).toBe(false);
+  });
+
+  it('gives up in one sentence when the deadline passes', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const provider = k1ProofProvider({
+      endpoint: 'https://example.test/balancer/prove-k1',
+      network: 'stagenet',
+      circuit: 'append_inbox_with_k256',
+      deserialise: (bytes) => bytes,
+      timeoutMs: 1,
+      /* A request that never answers, exactly as a hung socket does not. */
+      fetchFn: (_url, init) =>
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () =>
+            reject(new DOMException('aborted', 'TimeoutError')),
+          );
+        }),
+    });
+    await expect(provider.proveTx({ serialize: () => new Uint8Array([1]) })).rejects.toThrow(
+      K1_PROVER_UNAVAILABLE,
+    );
+    expect(warn.mock.calls[0]?.[0]).toContain('/prove-k1');
+    warn.mockRestore();
   });
 });

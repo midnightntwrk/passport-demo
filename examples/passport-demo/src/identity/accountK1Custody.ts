@@ -91,10 +91,18 @@ import {
 } from './accountK1.js';
 import {
   allK1Circuits,
+  forgetK1AuthorityKey,
   hexToBytes,
+  k1EnrolmentChallenges,
   k1ExplorerLink,
   k1ProvingEndpoint,
+  k1SamePoint,
+  k1WaveIsOnChain,
+  K1_ENROLMENT_UNCONFIRMED,
+  K1_PROOF_TIMEOUT_MS,
   K1_PROVER_UNAVAILABLE,
+  K1_SETUP_INTERRUPTED,
+  loadK1AuthorityKey,
   loadK1Record,
   newK1Record,
   nextK1Step,
@@ -102,7 +110,9 @@ import {
   describeProveK1Failure,
   planK1Waves,
   proveK1Request,
+  removeK1Record,
   resolveK1UseCounter,
+  saveK1AuthorityKey,
   saveK1Record,
   type K1AccountRecord,
   type K1Storage,
@@ -296,6 +306,8 @@ export interface K1ProofProviderOptions {
   /** Rehydrates the proven bytes. Injected so a drill needs no ledger WASM. */
   readonly deserialise: (bytes: Uint8Array) => unknown;
   readonly fetchFn?: typeof fetch;
+  /** Overridable so a drill does not wait four minutes to watch one expire. */
+  readonly timeoutMs?: number;
 }
 
 /**
@@ -309,15 +321,23 @@ export interface K1ProofProviderOptions {
  * `Transaction.deserialize('signature', 'proof', 'pre-binding', …)` in the
  * other, and the three marker strings are the whole contract.
  *
- * IT DOES NOT HANG. A proof server behind `httpClientProofProvider` fails after
- * `PROOF_TIMEOUT_MS`, which is ten minutes of a spinner. This endpoint does not
- * exist yet, so the failure has to be immediate and legible: one sentence for
- * the person, one line naming the endpoint for whoever is reading a console.
+ * IT DOES NOT HANG, AND THE ABORT IS WHAT MAKES THAT TRUE. A proof server
+ * behind `httpClientProofProvider` fails after `PROOF_TIMEOUT_MS`, which is ten
+ * minutes of a spinner. `fetch` on its own fails after nothing at all: a socket
+ * to a box that has stopped answering without closing it stays open until the
+ * operating system gives up, and on a phone that is minutes with no screen to
+ * read. So every request carries {@link K1_PROOF_TIMEOUT_MS} of
+ * `AbortSignal.timeout`, above the service's own 180-second deadline so that a
+ * slow proof still comes back as the service's own answer rather than as this.
+ * An abort lands in the same `catch` as a refused connection and reads as the
+ * same sentence, which is the right reading: from the person's side the service
+ * did not answer.
  */
 export function k1ProofProvider(options: K1ProofProviderOptions): {
   proveTx(unprovenTx: { serialize(): Uint8Array }): Promise<unknown>;
 } {
   const fetchFn = options.fetchFn ?? globalThis.fetch.bind(globalThis);
+  const timeoutMs = options.timeoutMs ?? K1_PROOF_TIMEOUT_MS;
   return {
     async proveTx(unprovenTx: { serialize(): Uint8Array }): Promise<unknown> {
       const body = proveK1Request(options.circuit, unprovenTx.serialize(), options.network);
@@ -327,6 +347,7 @@ export function k1ProofProvider(options: K1ProofProviderOptions): {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
+          signal: AbortSignal.timeout(timeoutMs),
         });
       } catch (cause) {
         console.warn(
@@ -412,6 +433,17 @@ export function k1WalletSeed(deps: K1Deps, user: string): Uint8Array {
  * goes through the injected `recover`. `accountK1.test.ts` already establishes
  * that `@noble/curves` is a TEST dependency here and never a `src` one; this
  * signature is what keeps that true.
+ *
+ * TWO SIGNATURES, AND THE POINT HAS TO SURVIVE BOTH. Recovery never fails: it
+ * is arithmetic, and a recovery byte that does not match the signature it
+ * arrives with simply yields a DIFFERENT point, silently. That shape is not
+ * hypothetical — a signer that normalises S to the low form without flipping
+ * `v` to match produces it on every signature it makes — and the point it
+ * yields is one the key cannot sign for, so the account would be activated
+ * around a device that can never authorise anything. Recovering the point from
+ * a second, distinct challenge and requiring the two to agree is what rules
+ * that out; see {@link k1EnrolmentChallenges} for the whole argument and for
+ * what is, and is not, yet known about the live vendor's output.
  */
 export async function recoverK1DevicePoint(options: {
   session: K1DynamicSession;
@@ -424,14 +456,53 @@ export async function recoverK1DevicePoint(options: {
   ) => Uint8Array | Promise<Uint8Array>;
   message?: string;
 }): Promise<CurvePoint> {
-  const challenge = new TextEncoder().encode(options.message ?? K1_ENROLMENT_MESSAGE);
+  const [first, second] = k1EnrolmentChallenges(options.message ?? K1_ENROLMENT_MESSAGE);
+  const claimed = await recoverOnce(options, first);
+  const confirming = await recoverOnce(options, second);
+  if (!k1SamePoint(claimed, confirming)) {
+    console.warn(
+      '[k1] the two enrolment signatures recovered different points; the recovery byte ' +
+        'or the signature does not match the key that is signing',
+    );
+    throw new Error(K1_ENROLMENT_UNCONFIRMED);
+  }
+  return claimed;
+}
+
+/** One challenge: hash it, have it signed, recover the point behind it. */
+async function recoverOnce(
+  options: {
+    session: K1DynamicSession;
+    recover: (
+      digest: Uint8Array,
+      r: bigint,
+      s: bigint,
+      v: number,
+    ) => Uint8Array | Promise<Uint8Array>;
+  },
+  message: string,
+): Promise<CurvePoint> {
+  const challenge = new TextEncoder().encode(message);
   const digest = await envelopeDigest(K256_ENVELOPE_NONE, await sha256(challenge));
   const raw = await options.session.signRaw({
     accountAddress: options.session.address,
     message: bytesToHex(digest),
   });
+  /* `parseEvmSignature` takes all four dialects of the recovery byte — 0, 1,
+     27, 28 — and hands back 0 or 1, so nothing downstream has to ask which one
+     the vendor speaks. It also refuses anything else outright. */
   const parsed = parseEvmSignature(raw);
-  return pointFromUncompressed(await options.recover(digest, parsed.r, parsed.s, parsed.v));
+  try {
+    return pointFromUncompressed(await options.recover(digest, parsed.r, parsed.s, parsed.v));
+  } catch (cause) {
+    /* Recovery USUALLY succeeds and lands somewhere wrong, which is what the
+       second challenge is for. Sometimes it fails outright instead — a
+       tampered `r` names an x with no square root on the curve — and a curve
+       library's own words for that ("bad point: is not on curve, sqrt error")
+       are not something to put in front of a person. */
+    console.warn('[k1] the enrolment signature did not yield a point', cause);
+    throw new Error(K1_ENROLMENT_UNCONFIRMED);
+  }
 }
 
 /** SHA-256 through WebCrypto, the way every other hash in this app is taken. */
@@ -457,9 +528,21 @@ export interface K1StepResult {
  *
  * THE CHAIN IS CHECKED BEFORE EVERY STEP, not the record — the same rule
  * `accountUpgrade.ts` keeps. The record says where we think we got to; the
- * authority counter on the ledger says where we actually did, and when they
- * disagree the ledger wins. A wave that has landed but whose write was lost to
- * a closed tab is therefore skipped rather than replayed into a rejection.
+ * OPERATIONS THE CONTRACT CARRIES say where we actually did, and when they
+ * disagree the chain wins, in both directions:
+ *
+ *   a wave that landed but whose write was lost to a closed tab is SKIPPED
+ *   rather than replayed into a rejection the sponsor has already paid for;
+ *
+ *   a wave that was recorded but never landed — a submission dropped by the
+ *   node, a tab closed after `saveK1Record` and before the transaction was
+ *   included — is RE-SUBMITTED rather than skipped, which matters more: the
+ *   last wave retires the maintenance authority, so ten circuits missed here
+ *   are ten circuits nothing can ever add.
+ *
+ * And a record is written only once the chain has shown the wave applied. The
+ * previous order wrote first and waited afterwards, which is what made the
+ * second case reachable at all.
  *
  * Three transactions, and all three sponsored: the deploy carries the deposits
  * and the whole k256 arm — which is what makes the account activatable and
@@ -488,6 +571,10 @@ export async function deployK1Account(
       saltHex: bytesToHex(deps.randomBytes(32)),
       totalWaves: 3,
     });
+  /* TERMINAL, AND NOT A STEP TO OFFER AGAIN. The key that signs the remaining
+     waves is gone; the account on chain cannot be completed by anybody. The
+     only move is `startK1AccountAgain`, which is what the screen offers. */
+  if (record.interrupted === true) throw new Error(K1_SETUP_INTERRUPTED);
 
   const [module, ledgerApi, contracts] = await Promise.all([
     deps.contractModule(),
@@ -501,7 +588,15 @@ export async function deployK1Account(
   const waves = planK1Waves(sizes, 'k256');
   record = { ...record, totalWaves: waves.length };
 
-  if (record.address === null) {
+  /* What the chain already carries, read ONCE before any wave runs. Null means
+     there is nothing at that address — either no deploy yet, or a deploy that
+     was recorded and never landed — and both answers are the same wave. */
+  let onChain =
+    record.address === null
+      ? null
+      : await readK1ChainOperations(providers, ledgerApi, record.address, waves);
+
+  if (onChain === null) {
     onPhase?.({ step: 'deploy', detail: `1 of ${waves.length}` });
     record = await runWaveOne({
       deps,
@@ -514,10 +609,19 @@ export async function deployK1Account(
       providers,
       storage,
     });
+    onChain = new Set(waves[0].circuits);
   }
 
   for (const wave of waves.slice(1)) {
-    if (record.wavesDone >= wave.index) continue;
+    if (k1WaveIsOnChain(wave, onChain)) {
+      /* On chain but not in the record: the write was lost, not the wave. Catch
+         the record up rather than paying for the same update twice. */
+      if (record.wavesDone < wave.index) {
+        record = { ...record, wavesDone: wave.index };
+        saveK1Record(storage, record);
+      }
+      continue;
+    }
     onPhase?.({ step: 'waves', detail: `${wave.index} of ${waves.length}` });
     record = await runMaintenanceWave({
       deps,
@@ -553,6 +657,41 @@ async function readVerifierKeys(
     keys.set(circuit, key);
   }
   return keys;
+}
+
+/**
+ * The operations a deployed account already carries, or null when there is
+ * nothing at that address.
+ *
+ * ONLY THE PLAN'S OWN CIRCUITS ARE PROBED, not the whole roster: a wave is
+ * skipped on the strength of this, so what it needs to answer is "is every
+ * circuit of wave N present", and asking about thirty operations to decide
+ * about twenty is work with no reader.
+ *
+ * A read that fails is NOT an empty answer. `queryState` throws its own plain
+ * sentence, and that is the right outcome: an indexer that cannot be reached
+ * must not be read as "the chain has nothing", which would redeploy an account
+ * that already exists.
+ */
+async function readK1ChainOperations(
+  providers: Record<string, unknown>,
+  ledgerApi: K1LedgerApi,
+  address: string,
+  waves: readonly K1Wave[],
+): Promise<Set<string> | null> {
+  const reader = providers.publicDataProvider as {
+    queryContractState(address: string): Promise<{ serialize(): Uint8Array } | null>;
+  };
+  const state = await reader.queryContractState(address);
+  if (!state) return null;
+  const ledgerState = ledgerApi.ContractState.deserialize(state.serialize());
+  const present = new Set<string>();
+  for (const wave of waves) {
+    for (const circuit of wave.circuits) {
+      if (ledgerState.operation(circuit)) present.add(circuit);
+    }
+  }
+  return present;
 }
 
 interface WaveContext {
@@ -625,7 +764,7 @@ async function runWaveOne(
   priv.setContractAddress?.(address);
   await priv.setSigningKey(address, signingKey);
   await priv.set(context.record.privateStateId, deployData.private.initialPrivateState);
-  rememberSigningKey(address, signingKey);
+  rememberSigningKey(storage, address, signingKey);
 
   const next: K1AccountRecord = {
     ...context.record,
@@ -698,7 +837,15 @@ async function runMaintenanceWave(
     );
   }
 
-  const signingKey = await signingKeyFor(providers, address);
+  const signingKey = await signingKeyFor(providers, storage, address);
+  if (signingKey === null) {
+    /* The account exists, its authority is live, and the key that drives it is
+       gone. Nothing later can finish it, so the record says so ONCE and every
+       entry point refuses from here rather than offering a step that cannot
+       work. The screen offers starting again instead. */
+    saveK1Record(storage, { ...context.record, interrupted: true });
+    throw new Error(K1_SETUP_INTERRUPTED);
+  }
   const bare = new ledgerApi.MaintenanceUpdate(address, updates, counter);
   const signed = bare.addSignature(0n, ledgerApi.signData(signingKey, bare.dataToSign));
   const intent = ledgerApi.Intent.new(new Date(deps.now() + K1_TX_TTL_MS));
@@ -714,14 +861,24 @@ async function runMaintenanceWave(
   const result = await contracts.submitTx(providers, { unprovenTx });
   const txHash = await resolveHash(providers, result);
 
+  /* THE WAIT COMES FIRST, AND THE WRITE AFTER IT. A submission that is accepted
+     is not a wave that landed: it can still be dropped, and the counter is what
+     says otherwise. Recording the wave before the counter moved is what made a
+     dropped update look finished, and a finished-looking wave 3 is an account
+     missing ten circuits with a retired authority and no way to add them. If
+     the wait times out the record is untouched, so the next attempt reads the
+     chain and re-submits. */
+  await awaitAuthorityCounter(deps, providers, ledgerApi, address, counter + 1n);
+
   const next: K1AccountRecord = {
     ...context.record,
     wavesDone: wave.index,
     txHashes: txHash ? [...context.record.txHashes, txHash] : context.record.txHashes,
   };
   saveK1Record(storage, next);
-
-  await awaitAuthorityCounter(deps, providers, ledgerApi, address, counter + 1n);
+  /* The retirement landed with this update: the key authorises nothing from
+     here, so it is deleted rather than left in a browser for ever. */
+  if (wave.retiresAuthority) forgetK1AuthorityKey(storage, address);
   return next;
 }
 
@@ -788,6 +945,7 @@ export async function activateK1Device(
   const network = wallet.network.networkId;
   const storage = deps.storage();
   const record = loadK1Record(storage, user, network);
+  if (record?.interrupted === true) throw new Error(K1_SETUP_INTERRUPTED);
   if (!record || record.address === null) {
     throw new Error('There is no Passport to add this key to yet.');
   }
@@ -923,6 +1081,44 @@ export async function k1Call(
  * the same call the stagenet run used as its proof on 2026/09/16, and for the
  * same reason.
  */
+/**
+ * A PERMISSIONLESS call on a k1 account: the deposits, which anybody may make
+ * and which carry no authorisation trailer. `k1Call` always appends
+ * `_with_k256` and the four auth arguments, so paying INTO a k1 account —
+ * this Passport's own opening balance arriving, or a send to somebody who
+ * holds one of these Passports — goes through here with the plain circuit
+ * name and the circuit's own arguments, nothing more.
+ */
+export async function k1PermissionlessCall(
+  session: K1DynamicSession,
+  request: { operation: string; args: readonly unknown[] },
+  onPhase?: (phase: K1Phase) => void,
+  overrides: Partial<K1Deps> = {},
+): Promise<K1StepResult> {
+  const deps = withDefaults(overrides);
+  const user = k1UserKey(session);
+  const wallet = await deps.wallet(user);
+  const network = wallet.network.networkId;
+  const storage = deps.storage();
+  const record = loadK1Record(storage, user, network);
+  if (!record || record.address === null || nextK1Step(record) !== 'ready') {
+    throw new Error('This Passport is not finished being set up yet.');
+  }
+  const { callTx, providers } = await openK1Account(deps, wallet, record, request.operation);
+  onPhase?.({ step: 'submit' });
+  const call = callTx[request.operation];
+  if (!call) throw new Error('This Passport cannot do that yet.');
+  const result = await call(...request.args);
+  onPhase?.({ step: 'confirm' });
+  const txHash = await resolveHash(providers, result);
+  const next: K1AccountRecord = {
+    ...record,
+    txHashes: txHash ? [...record.txHashes, txHash] : record.txHashes,
+  };
+  saveK1Record(storage, next);
+  return { record: next, txHash, explorerUrl: txHash ? k1ExplorerLink(txHash, network) : null };
+}
+
 export async function appendInboxK1(
   session: K1DynamicSession,
   device: K256DeviceIdentity,
@@ -1019,7 +1215,11 @@ async function queryStateData(
   providers: Record<string, unknown>,
   address: string,
 ): Promise<unknown> {
-  return (await queryState(providers, address));
+  /* `ledger()` decodes the STATE VALUE, not the contract state that wraps it
+     — `accountCustody.ts` and the sponsor both hand it `.data`. Handing it the
+     wrapper decoded nothing; caught by the flow that first read a k1 balance
+     (2026/09/17). */
+  return ((await queryState(providers, address)) as unknown as { data: unknown }).data;
 }
 
 /**
@@ -1053,18 +1253,29 @@ async function resolveHash(
   }
 }
 
-/* The maintenance signing key, for the waves that follow the deploy. Held for
-   the life of the tab only: a durable private-state provider is PR 4, and a
-   reload mid-deploy therefore cannot continue — which the milestone screen
-   says rather than retrying into a rejection. */
+/**
+ * The maintenance signing key, for the waves that follow the deploy.
+ *
+ * THREE PLACES, AND THE ORDER IS THE POINT. This tab's own map is first because
+ * it is free. The private-state provider is second, because that is where
+ * midnight-js's own deploy puts it and a durable one would answer here. And
+ * `localStorage` is third and is the one that actually survives a reload today,
+ * because the provider this app builds is `inMemoryPrivateStateProvider` — so
+ * without it a reload between wave 1 and wave 3 left a live account nobody
+ * could finish. See {@link K1_AUTHORITY_STORAGE_KEY} for what that costs and
+ * why it is paid.
+ */
 const signingKeys = new Map<string, unknown>();
 
-function rememberSigningKey(address: string, key: unknown): void {
+function rememberSigningKey(storage: K1Storage, address: string, key: unknown): void {
   signingKeys.set(address, key);
+  saveK1AuthorityKey(storage, address, key);
 }
 
+/** The key for an address, or null when it is genuinely gone. */
 async function signingKeyFor(
   providers: Record<string, unknown>,
+  storage: K1Storage,
   address: string,
 ): Promise<unknown> {
   const held = signingKeys.get(address);
@@ -1073,12 +1284,38 @@ async function signingKeyFor(
     getSigningKey(address: string): Promise<unknown>;
   };
   const stored = await priv.getSigningKey(address);
-  if (stored === null || stored === undefined) {
-    throw new Error(
-      'Setting up this Passport was interrupted. Start again to finish it.',
-    );
+  if (stored !== null && stored !== undefined) return stored;
+  const remembered = loadK1AuthorityKey(storage, address);
+  if (remembered !== null) {
+    signingKeys.set(address, remembered);
+    return remembered;
   }
-  return stored;
+  return null;
+}
+
+/**
+ * Abandon a half-built Passport, so the next attempt deploys a fresh one.
+ *
+ * The account already on chain is LEFT WHERE IT IS. It is dormant — the device
+ * was never activated, so it holds nothing and nobody can call it — and there
+ * is no transaction that would tidy it away. Deleting the record and the key is
+ * the whole of what can be done, and it is what turns a screen that fails for
+ * ever into one press that works.
+ */
+export async function startK1AccountAgain(
+  session: K1DynamicSession,
+  overrides: Partial<K1Deps> = {},
+): Promise<void> {
+  const deps = withDefaults(overrides);
+  const user = k1UserKey(session);
+  const wallet = await deps.wallet(user);
+  const storage = deps.storage();
+  const record = loadK1Record(storage, user, wallet.network.networkId);
+  if (record?.address) {
+    signingKeys.delete(record.address);
+    forgetK1AuthorityKey(storage, record.address);
+  }
+  removeK1Record(storage, user, wallet.network.networkId);
 }
 
 /** Reset the in-tab signing-key cache. For drills, and for a sign-out. */
