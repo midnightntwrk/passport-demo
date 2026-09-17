@@ -3,22 +3,31 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   allK1Circuits,
   describeProveK1Failure,
+  forgetK1AuthorityKey,
   hexToBytes,
   k1AccountIsUsable,
   k1ArmCircuits,
+  k1EnrolmentChallenges,
   k1ExplorerLink,
+  k1FailureSentence,
   k1GrantTwins,
   k1LifecycleCircuits,
   k1MilestoneEnabled,
   k1OtherArm,
   k1ProvingEndpoint,
   k1RecordKey,
+  k1SamePoint,
+  k1WaveIsOnChain,
+  K1_AUTHORITY_STORAGE_KEY,
+  K1_PROOF_TIMEOUT_MS,
   K1_PROVE_PATH,
   K1_PROVER_UNCONFIGURED,
   K1_RESCAN_LIMIT,
   K1_SHARED_CIRCUITS,
   K1_STORAGE_KEY,
+  K1_UNEXPECTED,
   K1_VERIFIER_BYTE_BUDGET,
+  loadK1AuthorityKey,
   loadK1Record,
   loadK1Records,
   newK1Record,
@@ -26,7 +35,9 @@ import {
   parseProveK1Response,
   planK1Waves,
   proveK1Request,
+  removeK1Record,
   resolveK1UseCounter,
+  saveK1AuthorityKey,
   saveK1Record,
   type K1AccountRecord,
   type K1Storage,
@@ -146,13 +157,16 @@ describe('the wave plan', () => {
     expect(planK1Waves(evenSizes(), 'k256', false).some((w) => w.retiresAuthority)).toBe(false);
   });
 
-  /* A key bigger than the whole budget still has to go SOMEWHERE — it gets a
-     wave of its own rather than making the plan unsatisfiable. */
-  it('gives an oversized key its own wave rather than refusing', () => {
+  /* A key bigger than the whole budget is a plan that cannot land: a wave of
+     its own is still over the ceiling, and the node refuses it at submission
+     with a message naming neither the circuit nor the size — after the sponsor
+     has paid. The reference stops here and so does this. */
+  it('refuses a key bigger than the whole budget, naming it', () => {
     const sizes = evenSizes();
     sizes.set('activate_initial_device_with_jubjub', K1_VERIFIER_BYTE_BUDGET + 1);
-    const waves = planK1Waves(sizes, 'k256');
-    expect(waves[1]?.circuits).toEqual(['activate_initial_device_with_jubjub']);
+    expect(() => planK1Waves(sizes, 'k256')).toThrow(
+      /activate_initial_device_with_jubjub.*exceeds the per-update budget/,
+    );
   });
 
   it('refuses a roster it has no size for', () => {
@@ -365,5 +379,132 @@ describe('the milestone switch and its links', () => {
   it('links a hash to the explorer, with or without 0x', () => {
     expect(k1ExplorerLink('0xabc')).toBe('https://explorer.1am.xyz/tx/abc?network=stagenet');
     expect(k1ExplorerLink('abc', 'devnet')).toBe('https://explorer.1am.xyz/tx/abc?network=devnet');
+  });
+});
+
+describe('the resume rule', () => {
+  const wave = { index: 2, circuits: ['a', 'b'], retiresAuthority: false };
+
+  /* THE RECORD IS A HINT AND THE CHAIN IS THE ANSWER. Both directions are held
+     here because both were reachable and only one of them is loud: replaying a
+     landed wave costs a sponsored rejection, and skipping a dropped one leaves
+     ten circuits that nothing can ever add, silently. */
+  it('skips a wave the chain already carries in full', () => {
+    expect(k1WaveIsOnChain(wave, new Set(['a', 'b', 'c']))).toBe(true);
+  });
+
+  it('does not skip a wave the chain carries only part of', () => {
+    expect(k1WaveIsOnChain(wave, new Set(['a']))).toBe(false);
+    expect(k1WaveIsOnChain(wave, new Set())).toBe(false);
+  });
+
+  it('is terminal once the key that finishes a setup is gone', () => {
+    const half: K1AccountRecord = {
+      ...newK1Record({
+        user: 'u',
+        network: 'n',
+        privateStateId: 'p',
+        saltHex: '',
+        totalWaves: 3,
+      }),
+      address: 'aa'.repeat(32),
+      wavesDone: 1,
+      interrupted: true,
+    };
+    expect(nextK1Step(half)).toBe('interrupted');
+    expect(k1AccountIsUsable(half)).toBe(false);
+  });
+});
+
+describe('throwing a half-built Passport away', () => {
+  it('removes the record and leaves anything else stored alone', () => {
+    const storage = STORAGE();
+    saveK1Record(storage, newK1Record({ user: 'a', network: 'n', privateStateId: 'p', saltHex: '', totalWaves: 3 }));
+    saveK1Record(storage, newK1Record({ user: 'b', network: 'n', privateStateId: 'p', saltHex: '', totalWaves: 3 }));
+    removeK1Record(storage, 'A', 'n');
+    expect(loadK1Record(storage, 'a', 'n')).toBeNull();
+    expect(loadK1Record(storage, 'b', 'n')).not.toBeNull();
+  });
+});
+
+describe('the maintenance signing key', () => {
+  const KEY = { tag: 'bip340', value: 'ff'.repeat(32) };
+
+  /* IT IS PERSISTED, AND THAT IS THE WHOLE POINT. The provider this app builds
+     is in-memory, so without this a reload between wave 1 and wave 3 left a
+     live account nobody could finish. */
+  it('is remembered per address and read back', () => {
+    const storage = STORAGE();
+    saveK1AuthorityKey(storage, 'AA'.repeat(32), KEY);
+    expect(loadK1AuthorityKey(storage, 'aa'.repeat(32))).toEqual(KEY);
+    expect(storage.data.has(K1_AUTHORITY_STORAGE_KEY)).toBe(true);
+  });
+
+  it('takes a key that is a plain string too', () => {
+    const storage = STORAGE();
+    saveK1AuthorityKey(storage, 'bb'.repeat(32), 'a-signing-key');
+    expect(loadK1AuthorityKey(storage, 'bb'.repeat(32))).toBe('a-signing-key');
+  });
+
+  it('reads absent for an address it has never held, and for rubbish', () => {
+    const storage = STORAGE();
+    expect(loadK1AuthorityKey(storage, 'cc'.repeat(32))).toBeNull();
+    storage.data.set(K1_AUTHORITY_STORAGE_KEY, JSON.stringify({ [`${'dd'.repeat(32)}`]: 7 }));
+    expect(loadK1AuthorityKey(storage, 'dd'.repeat(32))).toBeNull();
+  });
+
+  /* The retirement lands, the key authorises nothing, and it is deleted rather
+     than left in a browser for ever. */
+  it('is deleted once it is of no further use', () => {
+    const storage = STORAGE();
+    saveK1AuthorityKey(storage, 'ee'.repeat(32), KEY);
+    forgetK1AuthorityKey(storage, 'EE'.repeat(32));
+    expect(loadK1AuthorityKey(storage, 'ee'.repeat(32))).toBeNull();
+  });
+});
+
+describe('enrolling a signed-in key', () => {
+  it('asks for two distinct messages', () => {
+    const [first, second] = k1EnrolmentChallenges('m');
+    expect(first).toBe('m');
+    expect(second).not.toBe(first);
+  });
+
+  it('compares two recovered points by their coordinates', () => {
+    expect(k1SamePoint({ x: 1n, y: 2n }, { x: 1n, y: 2n })).toBe(true);
+    expect(k1SamePoint({ x: 1n, y: 2n }, { x: 1n, y: 3n })).toBe(false);
+    expect(k1SamePoint({ x: 1n, y: 2n }, { x: 4n, y: 2n })).toBe(false);
+  });
+});
+
+describe('what a screen is allowed to paint', () => {
+  it('paints a sentence this layer wrote', () => {
+    expect(k1FailureSentence(new Error('Try again in a moment.'))).toBe('Try again in a moment.');
+  });
+
+  /* A CAUSE IS NOT COPY. These are the shapes that actually arrive — a vendor
+     string, a node rejection, a thrown value that is not an Error at all — and
+     every one of them would put a word on screen that the demo keeps off it. */
+  it('refuses a cause carrying vocabulary a reader has no use for', () => {
+    expect(k1FailureSentence(new Error('contract state not found'))).toBe(K1_UNEXPECTED);
+    expect(k1FailureSentence(new Error('1010: Invalid Transaction: DustDoubleSpend'))).toBe(
+      K1_UNEXPECTED,
+    );
+    expect(k1FailureSentence(new Error('the SDK returned nothing'))).toBe(K1_UNEXPECTED);
+    expect(k1FailureSentence(new Error('no wallet address for this session'))).toBe(K1_UNEXPECTED);
+  });
+
+  it('refuses an empty message, a stack-shaped one, and a thrown non-error', () => {
+    expect(k1FailureSentence(new Error('   '))).toBe(K1_UNEXPECTED);
+    expect(k1FailureSentence(new Error('x'.repeat(161)))).toBe(K1_UNEXPECTED);
+    expect(k1FailureSentence('just a string')).toBe(K1_UNEXPECTED);
+  });
+});
+
+describe('the proving deadline', () => {
+  /* ABOVE THE SERVICE'S OWN 180 SECONDS, so a slow proof still comes back as
+     the service's answer rather than as a browser giving up first. */
+  it('is longer than the deadline the service keeps', () => {
+    expect(K1_PROOF_TIMEOUT_MS).toBeGreaterThan(180_000);
   });
 });

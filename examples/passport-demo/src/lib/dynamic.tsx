@@ -243,6 +243,13 @@ export function useDynamicSession(): DynamicSession & {
 
   const signOut = useCallback(async () => {
     await readDynamicActions()?.signOut()
+    /* THE NEXT PERSON TO SIGN IN ON THIS TAB IS NOT THIS ONE. The k1 layer
+       caches a maintenance signing key per account for the life of the tab, so
+       signing out has to drop it — otherwise a second sign-in in the same tab
+       carries the first one's key. Imported lazily: this hook is on the entry
+       graph and the custody layer must not be. */
+    const { resetK1SessionState } = await import('../identity/accountK1Custody.js')
+    resetK1SessionState()
   }, [])
 
   return { ...session, openAuthFlow, signMessage, signRaw, signOut }
