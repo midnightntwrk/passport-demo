@@ -632,29 +632,29 @@ Seven live two-output transactions in `RUN.md` split three-first / four-second,
 and this run adds more. **There is still no stable output order**, which is why
 the window is walked rather than indexed into.
 
-#### Known defect: the retry cannot recognise its own failure (RED, open)
+#### What decides a retry: the proof boundary, not the wording
 
-Removing midnight-js's `scoped()` wrapper removed the words
-`spendPositionMayBeWrong` matches on. It still ends
+A wrong position does not produce a wrong Merkle path. It traps the runtime
+while the circuit executes, and the trap says only `RuntimeError: unreachable` —
+no position, no witness, no words. For a while the predicate that decides a
+retry required midnight-js's `scoped()` wrapper text beside that word, which
+this build removed when it started composing its own transaction; the predicate
+was therefore always false and the one failure the retry exists for was the one
+it could not see. D1 met it live on 2026/09/18 and could not send at all.
 
-```ts
-return text.includes('runtimeerror') && text.includes('executing scoped transaction');
-```
+Widening the match was not available: `RuntimeError` marks every WebAssembly
+trap there is, and `submitTx` proves, balances and submits behind one call, so a
+trap read as a position's trap could ask for a second approval on a transaction
+already on its way. **A retry is safe exactly while the transaction is still in
+this tab's hands, and that line is the proof coming back** — after it, `submitTx`
+goes on to balance and submit.
 
-while the retry site's own comment says the trap "now happens inside this
-function's own `createUnprovenCallTx` rather than inside midnight-js's scoped
-wrapper, so the wrapper's wording is no longer there to recognise it by". Both
-are in the tree; the matcher is the one that runs. A spend on a stale position
-therefore dies on the first candidate with the bare word `unreachable` on screen
-instead of retrying — observed live, 2026/09/18 (`RUN-direct.md`, defect 19).
-
-It must NOT be fixed by matching `RuntimeError` alone: the `try` around it spans
-`createUnprovenCallTx`, `submitTx` and `settleShieldedChange`, and retrying a
-trap raised during submission would ask for a second approval on a transaction
-that may already be away. The trap has to be attributed to the execution phase
-by the code that knows the phase — a `try` around the two `createUnprovenCallTx`
-calls that rethrows under a recognised name, as `CUSTODY_PROOF_NOT_BUILT_NAME`
-already does for the other tell.
+So the proof provider reports that moment (`onProved`), `spendShieldedK1` tracks
+which side of it each attempt is on, and only the near side is retried. Phase
+decides whether a retry is SAFE; the wording now only decides whether it is
+WORTH it, and may therefore match the bare trap. The drills fix the line in
+place with the same words on both sides of it — retried before the proof,
+refused after — because that is the property, and no wording can express it.
 
 #### The change backfill
 
@@ -675,6 +675,17 @@ Stages are `sending` and `done`, and `nextCustodyShieldedSendStep` returns
 so there is no leg for a button to run, and a button offering to "finish" one
 would be a button offering to pay twice. What is owed is a sentence and a
 Dismiss, and the sentence points at the balance on the same screen.
+
+**The stage does not decide the sentence on its own; `sendTxId` does.** Most of
+what goes wrong with a payment goes wrong before a transaction exists — the
+approval is dismissed, the proving service does not answer, the position cannot
+be proved — and in all of those the coin is untouched. So the id is written on
+the `confirm` phase, the first moment a transaction exists, and the outcome
+reads its absence as *"Nothing was sent, and it is all still in your Passport."*
+and its presence as *"either it reached them or nothing left your Passport"*.
+Hedging about money that demonstrably never moved is a worse answer than the
+truth, and until 2026/09/18 the field was declared, defaulted, read back — and
+never written, so the hedge was all anybody got.
 
 #### On §6, "Restorable on another device"
 
