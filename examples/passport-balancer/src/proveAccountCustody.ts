@@ -514,6 +514,24 @@ export async function custodyImpureCircuits(): Promise<readonly string[]> {
 export interface CustodyProvingSnapshot {
   /** True when both the assets and a v3 proof server are configured. */
   readonly configured: boolean;
+  /**
+   * WHICH CIRCUITS ARE ACTUALLY STAGED, counted per authorisation arm.
+   *
+   * `configured` says a directory was named and a prover was named. It does
+   * not say the 3.5 GB under that directory arrived, and it cannot: the
+   * artefacts are rsynced by hand, arm by arm, and the k256 set landed on the
+   * droplet weeks before the jubjub one existed. A host with only the k256 arm
+   * staged answers `configured: true` and then refuses every passkey Passport
+   * `503 prover-unavailable` at the moment it proves — which is the deploy
+   * gate for the passkey arm, and the reason it is published rather than
+   * inferred.
+   *
+   * Counted the same way the route decides: a circuit is staged when all three
+   * of its files — `keys/<name>.prover`, `keys/<name>.verifier`,
+   * `zkir/<name>.bzkir` — are on disk. `null` where there is no assets
+   * directory at all, which is a different thing from zero.
+   */
+  readonly staged: CustodyStagedCircuits | null;
   /** Running plus waiting. */
   readonly queueDepth: number;
   /** Waiting alone, against {@link CustodyProverOptions.maxWaiting}. */
@@ -526,6 +544,84 @@ export interface CustodyProvingSnapshot {
   readonly lastProofAt: string | null;
   /** The last refusal's code and its detail, redacted. `null` until there is one. */
   readonly lastError: { readonly code: string; readonly detail: string; readonly at: string } | null;
+}
+
+/**
+ * How much of each arm is on this host, and what a half-finished rsync looks
+ * like from outside.
+ *
+ * The arms are told apart by the circuit's own name — every gated operation of
+ * the account custody contract is declared once per arm, `<operation>_with_jubjub`
+ * and `<operation>_with_k256` — and `shared` is the two permissionless deposits,
+ * which have no arm and are what every sponsor needs whichever key the account
+ * was born on.
+ */
+export interface CustodyStagedCircuits {
+  /** Circuits of the build, from the build itself. */
+  readonly total: number;
+  /** Of those, the ones whose three files are all on disk. */
+  readonly ready: number;
+  /** The same counts per arm, so a missing arm is legible rather than a total. */
+  readonly jubjub: { readonly total: number; readonly ready: number };
+  readonly k256: { readonly total: number; readonly ready: number };
+  readonly shared: { readonly total: number; readonly ready: number };
+  /**
+   * Up to five circuit names the build declares and this host cannot prove.
+   *
+   * Bounded because `/status` is a status page and an empty artefacts
+   * directory would otherwise publish thirty names; five is enough for an
+   * operator to see WHICH arm is missing, which is the whole question.
+   */
+  readonly missing: readonly string[];
+}
+
+/** Which arm a circuit belongs to, by its own name. */
+export function custodyCircuitArm(name: string): 'jubjub' | 'k256' | 'shared' {
+  if (name.endsWith('jubjub')) return 'jubjub';
+  if (name.endsWith('k256')) return 'k256';
+  return 'shared';
+}
+
+/**
+ * Whether one circuit's key material is on this host — the same three files,
+ * asked the same way, as the check the route makes before it proves.
+ */
+export function custodyCircuitStaged(
+  assetsPath: string,
+  name: string,
+  exists: (file: string) => boolean = existsSync,
+): boolean {
+  return (
+    exists(join(assetsPath, 'keys', `${name}.prover`)) &&
+    exists(join(assetsPath, 'keys', `${name}.verifier`)) &&
+    exists(join(assetsPath, 'zkir', `${name}.bzkir`))
+  );
+}
+
+/** {@link CustodyStagedCircuits} for one host and one circuit list. */
+export function custodyStagedCircuits(
+  assetsPath: string,
+  circuits: readonly string[],
+  exists: (file: string) => boolean = existsSync,
+): CustodyStagedCircuits {
+  const counts = {
+    jubjub: { total: 0, ready: 0 },
+    k256: { total: 0, ready: 0 },
+    shared: { total: 0, ready: 0 },
+  };
+  const missing: string[] = [];
+  let ready = 0;
+  for (const name of circuits) {
+    const arm = counts[custodyCircuitArm(name)];
+    arm.total += 1;
+    if (custodyCircuitStaged(assetsPath, name, exists)) {
+      arm.ready += 1;
+      ready += 1;
+    } else if (missing.length < 5) {
+      missing.push(name);
+    }
+  }
+  return { total: circuits.length, ready, ...counts, missing };
 }
 
 export interface CustodyProverOptions {
@@ -568,6 +664,20 @@ export interface CustodyProver {
    */
   prove(body: Buffer | string, signal?: AbortSignal): Promise<ProveAccountCustodyOutcome>;
   snapshot(): CustodyProvingSnapshot;
+  /**
+   * One line for the start-up journal, and the only thing that reads the build
+   * before a Passport does.
+   *
+   * It exists because `configured: true` is not readiness. The artefacts are
+   * rsynced by arm and by hand — the k256 set reached the droplet weeks before
+   * the jubjub one was compiled — so a host can be perfectly configured and
+   * still refuse every passkey Passport at the moment it proves. An operator
+   * who has just staged an arm should learn that from the journal, not from
+   * the first person whose Passport cannot be activated.
+   *
+   * Never throws: a build this host cannot read is a sentence saying so.
+   */
+  readiness(): Promise<string>;
 }
 
 /**
@@ -624,6 +734,9 @@ export function createCustodyProver(options: CustodyProverOptions): CustodyProve
   const queue = new CustodyProofQueue(maxWaiting);
 
   let circuits: Promise<readonly string[]> | null = null;
+  /* The resolved list, kept beside the promise so `snapshot()` can answer
+     synchronously. See the `staged` field it feeds. */
+  let knownCircuits: readonly string[] | null = null;
   let proofsServed = 0;
   let lastProofMs: number | null = null;
   let lastProofAt: string | null = null;
@@ -770,6 +883,7 @@ export function createCustodyProver(options: CustodyProverOptions): CustodyProve
     let known: readonly string[];
     try {
       known = await circuits;
+      knownCircuits = known;
     } catch (cause) {
       circuits = null;
       return refused(
@@ -949,10 +1063,44 @@ export function createCustodyProver(options: CustodyProverOptions): CustodyProve
     }
   };
 
+  /** See {@link CustodyProver.readiness}. */
+  const readiness = async (): Promise<string> => {
+    if (!options.assetsPath) return `account-custody proving is OFF: ${options.proverWhy}`;
+    let names: readonly string[];
+    try {
+      circuits ??= readCircuits();
+      names = await circuits;
+      knownCircuits = names;
+    } catch (cause) {
+      circuits = null;
+      return `account-custody proving cannot read the compiled build: ${cause instanceof Error ? cause.message : String(cause)}`;
+    }
+    const staged = custodyStagedCircuits(options.assetsPath, names);
+    const arms = (['jubjub', 'k256', 'shared'] as const)
+      .map((arm) => `${arm} ${staged[arm].ready}/${staged[arm].total}`)
+      .join(', ');
+    const where = options.proverUrl ? `proving at ${options.proverUrl}` : `NO PROVER: ${options.proverWhy}`;
+    const short =
+      staged.ready === staged.total
+        ? ''
+        : ` — NOT STAGED: ${staged.missing.join(', ')}${staged.total - staged.ready > staged.missing.length ? ', …' : ''}`;
+    return `account-custody proving ${staged.ready}/${staged.total} circuits staged (${arms}), ${where}${short}`;
+  };
+
   return {
     prove,
+    readiness,
     snapshot: (): CustodyProvingSnapshot => ({
       configured: Boolean(options.assetsPath && options.proverUrl),
+      /* Read off the LAST circuit list this process asked the build for, never
+         by reading the build here: `snapshot()` answers a `/status` request and
+         must not do a 9.8 MB module load on the health path. Null until the
+         first proof has been asked for, which is honest — nothing has looked
+         yet — and the start-up line below asks once so an operator does not
+         have to wait for a Passport to find out. */
+      staged: options.assetsPath && knownCircuits
+        ? custodyStagedCircuits(options.assetsPath, knownCircuits)
+        : null,
       queueDepth: queue.depth,
       queueWaiting: queue.waiting,
       queueMax: maxWaiting,

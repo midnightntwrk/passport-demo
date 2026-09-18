@@ -43,11 +43,12 @@ import {
   DROPLET_V3_PROVER_URL,
   INBOX_ENTRY_BYTES,
   InboxEntryRequired,
-  K256_WITHDRAWAL_OPERATION_NAME,
+  CUSTODY_DEPOSIT_OPERATION_NAME,
+  LEGACY_WITHDRAWAL_OPERATION_NAME,
   ONE_TX_TRANSFER_OPERATION_NAME,
   accountDeposits,
   accountModuleForState,
-  carriesK256WithdrawalIn,
+  carriesCustodyDepositIn,
   proverForModule,
   type AccountModuleName,
 } from '../src/accountModule.js';
@@ -91,25 +92,44 @@ const accountCustodyNames = namesOf('account-custody');
 
 describe('telling the account custody build apart from the two prototypes', () => {
   it('finds the discriminating circuit in the account custody build and in neither prototype', () => {
-    assert.ok(accountCustodyNames.includes(K256_WITHDRAWAL_OPERATION_NAME));
-    assert.ok(!accountNames.includes(K256_WITHDRAWAL_OPERATION_NAME));
-    assert.ok(!accountV1Names.includes(K256_WITHDRAWAL_OPERATION_NAME));
+    assert.ok(accountCustodyNames.includes(CUSTODY_DEPOSIT_OPERATION_NAME));
+    assert.ok(!accountNames.includes(CUSTODY_DEPOSIT_OPERATION_NAME));
+    assert.ok(!accountV1Names.includes(CUSTODY_DEPOSIT_OPERATION_NAME));
+  });
+
+  it("finds the eleven-circuit build's own marker in both prototypes and in neither custody arm", () => {
+    /* The other half of asking positively: `withdraw_shielded` is bare on both
+       prototypes and arm-suffixed on every custody withdrawal, so the older
+       build is recognised by what it HAS. */
+    assert.ok(accountNames.includes(LEGACY_WITHDRAWAL_OPERATION_NAME));
+    assert.ok(accountV1Names.includes(LEGACY_WITHDRAWAL_OPERATION_NAME));
+    assert.ok(!accountCustodyNames.includes(LEGACY_WITHDRAWAL_OPERATION_NAME));
   });
 
   it('reads it off a served state, in either encoding, and says null when it cannot', () => {
-    assert.equal(carriesK256WithdrawalIn(stateOf(accountCustodyNames)), true);
-    assert.equal(carriesK256WithdrawalIn(stateOf(accountNames)), false);
+    assert.equal(carriesCustodyDepositIn(stateOf(accountCustodyNames)), true);
+    assert.equal(carriesCustodyDepositIn(stateOf(accountNames)), false);
     assert.equal(
-      carriesK256WithdrawalIn({
-        operations: () => [new TextEncoder().encode(K256_WITHDRAWAL_OPERATION_NAME)],
+      carriesCustodyDepositIn({
+        operations: () => [new TextEncoder().encode(CUSTODY_DEPOSIT_OPERATION_NAME)],
       }),
       true,
     );
-    assert.equal(carriesK256WithdrawalIn(null), null);
-    assert.equal(carriesK256WithdrawalIn({}), null);
+    assert.equal(carriesCustodyDepositIn(null), null);
+    assert.equal(carriesCustodyDepositIn({}), null);
   });
 
-  it('picks each of the three modules from that build own circuit set', () => {
+  it('is the custody build from wave 1, before either arm withdrawal has landed', () => {
+    /* The regression the marker was changed for. A jubjub-born account carries
+       the two deposits and the eight jubjub device circuits in wave 1; every
+       k256 circuit arrives two maintenance updates later. Keyed on
+       `withdraw_shielded_with_k256`, the sponsor called this `account-v1`. */
+    const waveOne = accountCustodyNames.filter((name) => !name.endsWith('_with_k256'));
+    assert.ok(waveOne.includes(CUSTODY_DEPOSIT_OPERATION_NAME));
+    assert.equal(accountModuleForState(stateOf(waveOne)), 'account-custody');
+  });
+
+  it("picks each of the three modules from that build's own circuit set", () => {
     assert.equal(accountModuleForState(stateOf(accountNames)), 'account');
     assert.equal(accountModuleForState(stateOf(accountV1Names)), 'account-v1');
     assert.equal(accountModuleForState(stateOf(accountCustodyNames)), 'account-custody');
@@ -123,6 +143,9 @@ describe('telling the account custody build apart from the two prototypes', () =
     assert.equal(accountCustodyNames.includes(ONE_TX_TRANSFER_OPERATION_NAME), false);
     assert.equal(accountModuleFor(false, true), 'account-custody');
     assert.equal(accountModuleFor(null, true), 'account-custody');
+    /* And not even when the eleven-circuit build's own marker is asked for too:
+       the custody answer outranks both prototypes. */
+    assert.equal(accountModuleFor(false, true, false), 'account-custody');
   });
 
   it('leaves the two-build question exactly as it was when nothing is known about the account custody build', () => {
@@ -130,6 +153,9 @@ describe('telling the account custody build apart from the two prototypes', () =
     assert.equal(accountModuleFor(true, null), 'account');
     assert.equal(accountModuleFor(null, false), 'account');
     assert.equal(accountModuleFor(false, false), 'account-v1');
+    /* And the eleven-circuit build says so itself when it is asked to. */
+    assert.equal(accountModuleFor(false, false, true), 'account-v1');
+    assert.equal(accountModuleFor(null, false, true), 'account-v1');
   });
 });
 

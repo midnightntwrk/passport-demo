@@ -10,7 +10,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
@@ -1005,5 +1005,126 @@ describe('the hex on the wire', () => {
     const bytes = new Uint8Array([0x00, 0x0f, 0xa0, 0xff]);
     assert.equal(hexFromBytes(bytes), '000fa0ff');
     assert.deepEqual([...bytesFromHex('000fa0ff')], [...bytes]);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* What is staged, per arm                                                    */
+/* -------------------------------------------------------------------------- */
+
+import {
+  custodyCircuitArm,
+  custodyCircuitStaged,
+  custodyStagedCircuits,
+} from '../src/proveAccountCustody.js';
+
+/**
+ * The thirty entry points of the build, read off the compiler's own
+ * `contract-info.json` rather than written down here, so a rebuild that adds an
+ * arm fails these tests instead of agreeing with a stale copy.
+ *
+ * IMPURE ONLY, which is what the route resolves against: the build declares
+ * sixty-nine circuits and thirty-nine of them are pure — challenge builders,
+ * digests, commitments — which have no proving key, no verifier key, and no
+ * ZKIR, so counting them as unstaged would report every host as half-empty.
+ */
+const custodyCircuitNames: string[] = (
+  JSON.parse(
+    readFileSync(
+      join(
+        import.meta.dirname,
+        '..',
+        '..',
+        'contracts-stagenet',
+        'managed',
+        'account-custody',
+        'compiler',
+        'contract-info.json',
+      ),
+      'utf8',
+    ),
+  ) as { circuits: { name: string; pure: boolean }[] }
+).circuits.filter((circuit) => !circuit.pure).map((circuit) => circuit.name);
+
+/** A host whose `keys/` and `zkir/` hold exactly these circuits. */
+const hostWith = (names: readonly string[]) => (file: string) =>
+  names.some(
+    (name) =>
+      file.endsWith(`/keys/${name}.prover`) ||
+      file.endsWith(`/keys/${name}.verifier`) ||
+      file.endsWith(`/zkir/${name}.bzkir`),
+  );
+
+describe('which arm a circuit belongs to', () => {
+  it('counts the same circuits the route resolves against', async () => {
+    /* The two lists have to be the same list. `readiness()` counts what is
+       staged against `custodyImpureCircuits()`, read out of the compiled
+       contract; these tests count against `contract-info.json`. If a rebuild
+       ever made them disagree, `/status` would report a fraction of a build
+       that nobody is proving. */
+    assert.deepEqual([...(await custodyImpureCircuits())].sort(), [...custodyCircuitNames].sort());
+  });
+
+
+  it("reads the arm off the circuit's own name, for every circuit of the build", () => {
+    const arms = { jubjub: 0, k256: 0, shared: 0 };
+    for (const name of custodyCircuitNames) arms[custodyCircuitArm(name)] += 1;
+    /* Every gated operation is declared once per arm, and the two deposits are
+       permissionless and armless — which is why they are what a sponsor needs
+       whichever key the account was born on. */
+    assert.equal(custodyCircuitNames.length, 30);
+    assert.equal(arms.jubjub, arms.k256);
+    assert.equal(arms.shared, 2);
+    assert.equal(arms.jubjub + arms.k256 + arms.shared, custodyCircuitNames.length);
+    assert.equal(custodyCircuitArm('deposit_unshielded'), 'shared');
+    assert.equal(custodyCircuitArm('withdraw_shielded_to_contract_with_grant_jubjub'), 'jubjub');
+    assert.equal(custodyCircuitArm('activate_initial_device_with_k256'), 'k256');
+  });
+});
+
+describe('what a half-staged host publishes', () => {
+  it('counts a circuit staged only when all three of its files are there', () => {
+    const complete = hostWith(['append_inbox_with_jubjub']);
+    assert.equal(custodyCircuitStaged('/a', 'append_inbox_with_jubjub', complete), true);
+    /* A prover and a verifier with no bzkir is a half-finished rsync, and the
+       route refuses it in a millisecond rather than several seconds later in a
+       proof server's own words. */
+    const partial = (file: string) => complete(file) && !file.endsWith('.bzkir');
+    assert.equal(custodyCircuitStaged('/a', 'append_inbox_with_jubjub', partial), false);
+  });
+
+  it('names the arm that is missing, which is the whole question', () => {
+    /* THE DEPLOY GATE FOR THE PASSKEY ARM. The k256 set reached the droplet
+       weeks before the jubjub one was compiled, and a host in that state
+       answers `configured: true` and then refuses every passkey Passport at
+       the moment it proves. */
+    const k256Only = custodyCircuitNames.filter((name) => custodyCircuitArm(name) !== 'jubjub');
+    const staged = custodyStagedCircuits('/opt/custody', custodyCircuitNames, hostWith(k256Only));
+    assert.equal(staged.total, custodyCircuitNames.length);
+    assert.equal(staged.ready, k256Only.length);
+    assert.equal(staged.jubjub.ready, 0);
+    assert.ok(staged.jubjub.total > 0);
+    assert.equal(staged.k256.ready, staged.k256.total);
+    assert.equal(staged.shared.ready, staged.shared.total);
+    /* Bounded, because `/status` is a status page: five names are enough to
+       see WHICH arm is missing. */
+    assert.equal(staged.missing.length, 5);
+    assert.ok(staged.missing.every((name) => name.endsWith('jubjub')));
+  });
+
+  it('is complete for a host that has both arms', () => {
+    const staged = custodyStagedCircuits(
+      '/opt/custody',
+      custodyCircuitNames,
+      hostWith(custodyCircuitNames),
+    );
+    assert.equal(staged.ready, staged.total);
+    assert.deepEqual(staged.missing, []);
+  });
+
+  it('is empty, and says which circuits, for a host with nothing rsynced', () => {
+    const staged = custodyStagedCircuits('/opt/custody', custodyCircuitNames, () => false);
+    assert.equal(staged.ready, 0);
+    assert.equal(staged.missing.length, 5);
   });
 });
