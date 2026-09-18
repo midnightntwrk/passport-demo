@@ -47,9 +47,14 @@ vi.mock('./custodyContractPlan.js', async (importOriginal) => {
 
 import {
   bytesToHex,
+  jubjubChallenges,
+  K256_ENVELOPE_NONE,
   type CurvePoint,
   type CustodyPureCircuits,
+  type K1CallContext,
+  type K256DeviceIdentity,
 } from './custodyContractSigning.js';
+import { custodyEncPublicKey } from './custodyInbox.js';
 import {
   allCustodyCircuits,
   hexToBytes,
@@ -58,7 +63,10 @@ import {
 } from './custodyContractPlan.js';
 import { jubjubDeviceSigner } from './custodyJubjubSigner.js';
 import {
+  activateK1Device,
+  custodyUserKey,
   deployCustodyAccount,
+  k1Call,
   resetCustodySessionState,
   type CustodyContractModule,
   type CustodyDeps,
@@ -71,13 +79,30 @@ import {
 /* The real build                                                             */
 /* -------------------------------------------------------------------------- */
 
+interface JubjubPoint {
+  readonly x: bigint;
+  readonly y: bigint;
+}
+
+/** The three curve operations the circuit's own verification equation is made of. */
+interface FixtureRuntime {
+  ecAdd(a: JubjubPoint, b: JubjubPoint): JubjubPoint;
+  ecMul(a: JubjubPoint, b: bigint): JubjubPoint;
+  ecMulGenerator(b: bigint): JubjubPoint;
+}
+
 const requireFromTest = createRequire(import.meta.url);
-const compiled = requireFromTest(
+const contractPath = requireFromTest.resolve(
   '../../contracts/stagenet/account-custody/contract/index.js',
-) as { pureCircuits: CustodyPureCircuits };
+);
+const compiled = requireFromTest(contractPath) as { pureCircuits: CustodyPureCircuits };
 
 /** The real `pureCircuits`, which satisfies {@link CustodyPureCircuits} structurally. */
 const pure: CustodyPureCircuits = compiled.pureCircuits;
+
+/* By NODE, from the contract's own directory, so the contract and the runtime it
+   is decoded against are resolved by one resolver and cannot be two copies. */
+const runtime = createRequire(contractPath)('@midnight-ntwrk/compact-runtime') as FixtureRuntime;
 
 /* -------------------------------------------------------------------------- */
 /* Fixtures                                                                   */
@@ -90,6 +115,25 @@ const DEVICE_SCALAR = 0x51ee_2a3b_9c4d_7e18n;
 
 /** `derivePassportContractSecrets(...).maintenanceSecret`, as the passkey hands it down. */
 const MAINTENANCE_SECRET = 'c3'.repeat(32);
+
+/** `derivePassportContractSecrets(...).encSecret`, likewise. */
+const ENC_SECRET = '7a'.repeat(32);
+
+/** The salt the record carries, which is `randomBytes(32)` through the fake below. */
+const SALT = new Uint8Array(32).fill(7);
+
+/** An inbox entry, the one gated call this file drives. */
+const INBOX_ENTRY = new Uint8Array(192).fill(6);
+
+/**
+ * A Dynamic device, for the one drill that needs the OTHER arm: the guard that
+ * refuses a challenge builder where finished bytes belong.
+ */
+const k256Device: K256DeviceIdentity = {
+  arm: 'k256',
+  pk: { x: 11n, y: 22n, identity: false },
+  envelope: K256_ENVELOPE_NONE,
+};
 
 /**
  * The passkey's device, with whichever of the two derived secrets this drill
@@ -277,6 +321,10 @@ interface Harness {
   calls: { circuit: string; args: unknown[] }[];
   /** Every key written to the private-state provider. */
   storedKeys: unknown[];
+  /** The circuits wave 1 actually deployed. */
+  deployed: string[];
+  /** The constructor's arguments: the boot commitment and the viewing key. */
+  constructorArgs: unknown[][];
 }
 
 function harness(
@@ -297,6 +345,8 @@ function harness(
   const built: unknown[][] = [];
   const signed: unknown[] = [];
   const storedKeys: unknown[] = [];
+  const deployed: string[] = [];
+  const constructorArgs: unknown[][] = [];
   const calls: { circuit: string; args: unknown[] }[] = [];
   const state = { submits: 0, clock: 1_700_000_000_000 };
 
@@ -342,16 +392,26 @@ function harness(
           if (circuit.startsWith('activate_initial_device')) {
             /* The seam, as the contract runs it: the activation opens the boot
                commitment and inserts the real address-bound entry at epoch 0,
-               counter 0. Derived with the REAL circuit, so a client that
-               derived it any other way finds no device to use. */
+               counter 0. Derived with the REAL circuit OF THE ARM THAT WAS
+               ACTIVATED, so a client that derived its entry any other way finds
+               no device it can use. */
+            const self = { bytes: hexToBytes(ADDRESS) };
             chain.devices.add(
               bytesToHex(
-                pure.derive_device_entry_with_jubjub(
-                  { bytes: hexToBytes(ADDRESS) },
-                  args[0] as CurvePoint,
-                  chain.epoch,
-                  0n,
-                ),
+                circuit.endsWith('_with_jubjub')
+                  ? pure.derive_device_entry_with_jubjub(
+                      self,
+                      args[0] as CurvePoint,
+                      chain.epoch,
+                      0n,
+                    )
+                  : pure.derive_device_entry_with_k256(
+                      self,
+                      args[0] as CurvePoint,
+                      args[2] as bigint,
+                      chain.epoch,
+                      0n,
+                    ),
               ),
             );
           } else {
@@ -375,16 +435,19 @@ function harness(
     ledger: () => Promise.resolve(ledgerFake(chain, built, signed)),
     contracts: () =>
       Promise.resolve({
-        createUnprovenDeployTx: () =>
-          Promise.resolve({
+        createUnprovenDeployTx: (_providers: unknown, options: unknown) => {
+          constructorArgs.push((options as { args: unknown[] }).args);
+          return Promise.resolve({
             public: { initialContractState: { serialize: () => new Uint8Array([30]) } },
             private: { signingKey: 'the-sampled-key', initialPrivateState: {} },
-          }),
+          });
+        },
         submitTx: (_providers: unknown, options: unknown) => {
           state.submits += 1;
           const tx = (options as { unprovenTx: FakeTx }).unprovenTx;
           if (tx.deploys) {
             chain.deployed = true;
+            deployed.push(...tx.deploys);
             for (const circuit of tx.deploys) chain.operations.add(circuit);
           }
           if (tx.inserts) {
@@ -402,7 +465,7 @@ function harness(
     sleep: () => Promise.resolve(undefined),
   };
 
-  return { deps, storage, chain, built, signed, calls, storedKeys };
+  return { deps, storage, chain, built, signed, calls, storedKeys, deployed, constructorArgs };
 }
 
 /** Every maintenance authority this run built with a committee in it. */
@@ -479,5 +542,169 @@ describe('the maintenance authority a passkey Passport deploys with', () => {
     expect(storedKeys).toEqual(['the-sampled-key']);
     expect(loadCustodyAuthorityKey(storage, ADDRESS)).toBe('the-sampled-key');
     expect(signed).toEqual(['the-sampled-key', 'the-sampled-key']);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+
+describe('deploying a Passport a passkey made', () => {
+  it('files the account under the device’s own key, not a Dynamic address', () => {
+    const device = passkeyDevice();
+    expect(custodyUserKey(session, device)).toBe(`jubjub:${device.pk.x.toString(16)}`);
+    expect(custodyUserKey(session, k256Device)).toBe(session.address.toLowerCase());
+  });
+
+  it('carries the jubjub arm in wave 1, activation circuit and all', async () => {
+    const { deps, deployed } = harness();
+
+    await deployCustodyAccount(session, passkeyDevice(), undefined, deps);
+
+    /* The constructor's boot commitment binds the ARM, so an account deployed
+       by a passkey can only ever be opened by this circuit — and no later wave
+       can add it. Wave 1 is where it has to be. */
+    expect(deployed).toContain('activate_initial_device_with_jubjub');
+    expect(deployed).not.toContain('activate_initial_device_with_k256');
+    expect(deployed).toContain('append_inbox_with_jubjub');
+    expect(deployed).toHaveLength(10);
+  });
+
+  it('advertises the viewing key the passkey derived, not a fresh random one', async () => {
+    const { deps, storage, constructorArgs } = harness();
+
+    await deployCustodyAccount(
+      session,
+      passkeyDevice({ encSecretKeyHex: ENC_SECRET }),
+      undefined,
+      deps,
+    );
+
+    /* `enc_key` is what every depositor seals an inbox entry to. A passkey
+       Passport that came back on another phone with a random one would be
+       holding the key to nothing. */
+    const [boot, encryptionKey] = constructorArgs[0];
+    expect(boot).toEqual(pure.derive_boot_commitment_with_jubjub(SALT, passkeyDevice().pk));
+    expect(encryptionKey).toEqual(hexToBytes(custodyEncPublicKey(ENC_SECRET)));
+    /* And the secret half is kept, because an entry is opened with it or by
+       nobody. */
+    expect([...storage.data.values()].join(' ')).toContain(ENC_SECRET);
+  });
+
+  it('keeps the random viewing key for a device that derived none', async () => {
+    const { deps, constructorArgs } = harness();
+
+    await deployCustodyAccount(session, passkeyDevice(), undefined, deps);
+
+    const [, encryptionKey] = constructorArgs[0];
+    expect(encryptionKey).not.toEqual(hexToBytes(custodyEncPublicKey(ENC_SECRET)));
+    expect(encryptionKey).toEqual(hexToBytes(custodyEncPublicKey(bytesToHex(SALT))));
+  });
+});
+
+describe('opening the account the passkey deployed', () => {
+  it('activates with (pk, salt) and nothing standing in for an envelope', async () => {
+    const { deps, calls } = harness();
+    const device = passkeyDevice();
+
+    await deployCustodyAccount(session, device, undefined, deps);
+    const { record } = await activateK1Device(session, device, undefined, deps);
+
+    /* `(pk, salt, envelope)` is the k256 circuit's argument list. The jubjub
+       one has no envelope field at all — there is no vendor wrapping bytes
+       before they are signed — and a third argument fails before a transaction
+       exists. */
+    expect(calls).toHaveLength(1);
+    expect(calls[0].circuit).toBe('activate_initial_device_with_jubjub');
+    expect(calls[0].args).toEqual([device.pk, SALT]);
+    expect(record.activated).toBe(true);
+    expect(record.pkXHex).toBe(device.pk.x.toString(16));
+  });
+});
+
+describe('a gated call on the passkey arm', () => {
+  /** Deploy and activate, so the account is ready for a gated call. */
+  const readyAccount = async (): Promise<ReturnType<typeof harness>> => {
+    const run = harness();
+    const device = passkeyDevice();
+    await deployCustodyAccount(session, device, undefined, run.deps);
+    await activateK1Device(session, device, undefined, run.deps);
+    return run;
+  };
+
+  const appendInbox = (pureCircuits: CustodyPureCircuits, context: K1CallContext, pk: CurvePoint) =>
+    jubjubChallenges.appendInbox(pureCircuits, context, pk, INBOX_ENTRY);
+
+  it('calls the arm’s own circuit with the five-tuple the generated ABI takes', async () => {
+    const run = await readyAccount();
+    const device = passkeyDevice();
+
+    await k1Call(
+      session,
+      device,
+      { operation: 'append_inbox', args: [INBOX_ENTRY], challenge: appendInbox },
+      undefined,
+      run.deps,
+    );
+
+    const call = run.calls[run.calls.length - 1];
+    expect(call.circuit).toBe('append_inbox_with_jubjub');
+    /* The circuit's own arguments first, then `(pk, use_counter, sig_r, sig_s,
+       grind_nonce)` — five, and in that order. The k256 trailer is four and
+       ends with an envelope; getting them confused is a proof that never
+       verifies and a sponsored transaction to pay for it. */
+    const [entry, pk, useCounter, sigR, sigS, grindNonce] = call.args;
+    expect(call.args).toHaveLength(6);
+    expect(entry).toBe(INBOX_ENTRY);
+    expect(pk).toEqual(device.pk);
+    expect(useCounter).toBe(0n);
+    expect(typeof sigS).toBe('bigint');
+    expect(typeof grindNonce).toBe('bigint');
+
+    /* And the signature is the passkey's own, over the challenge the contract
+       would rebuild: `s·G == R + c·pk` is what the circuit checks. */
+    const context: K1CallContext = { contractAddress: hexToBytes(ADDRESS), authNonce: 0n };
+    const builder = appendInbox(pure, context, device.pk);
+    const challenge = builder(sigR as CurvePoint, grindNonce as bigint);
+    let c = 0n;
+    for (let i = challenge.length - 1; i >= 0; i--) c = (c << 8n) | BigInt(challenge[i]);
+    const left = runtime.ecMulGenerator(sigS as bigint);
+    const right = runtime.ecAdd(sigR as JubjubPoint, runtime.ecMul(device.pk, c));
+    expect([left.x, left.y]).toEqual([right.x, right.y]);
+  });
+
+  it('refuses to sign when the jubjub arm is handed finished bytes', async () => {
+    const run = await readyAccount();
+
+    await expect(
+      k1Call(
+        session,
+        passkeyDevice(),
+        {
+          operation: 'append_inbox',
+          args: [INBOX_ENTRY],
+          /* What a k256 caller hands over: a challenge already built. A Schnorr
+             preimage contains the signature's own nonce and the grind counter,
+             so there is nothing this arm could do with it. */
+          challenge: () => new Uint8Array(32).fill(1),
+        },
+        undefined,
+        run.deps,
+      ),
+    ).rejects.toThrow('challenge builder');
+  });
+
+  it('refuses to sign when the k256 arm is handed a builder', async () => {
+    const run = harness();
+    await deployCustodyAccount(session, k256Device, undefined, run.deps);
+    await activateK1Device(session, k256Device, undefined, run.deps);
+
+    await expect(
+      k1Call(
+        session,
+        k256Device,
+        { operation: 'append_inbox', args: [INBOX_ENTRY], challenge: appendInbox },
+        undefined,
+        run.deps,
+      ),
+    ).rejects.toThrow('finished challenge');
   });
 });
