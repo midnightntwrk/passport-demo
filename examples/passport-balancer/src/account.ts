@@ -324,6 +324,29 @@ export type AccountFundingErrorCode =
    */
   | 'prover-unavailable';
 
+/**
+ * The HTTP status a refusal made while READING an account answers with.
+ *
+ * Two questions, and a caller acts on the difference: is this about the account
+ * you named, or about this service? A `400` says the address is the problem and
+ * sending it again will not help. A `503` says we could not answer, which is
+ * ours to fix and sometimes fixes itself.
+ *
+ * `prover-unavailable` belongs on the second side and was on the first until
+ * 2026/09/18. It is thrown by the read path when the compiled account-custody
+ * build cannot be loaded on this host — artefacts not staged, a half-finished
+ * rsync — and answering `400` told a perfectly good Passport that it was not a
+ * Passport, in the one situation where the truth is that an operator has not
+ * finished staging a build.
+ *
+ * Every other code keeps the answer it had. This is the mapping both read paths
+ * use — `/fund-account`'s pre-flight and `/repoint-alias`'s device read — so
+ * they cannot drift into two taxonomies of the same errors.
+ */
+export function accountReadStatus(code: AccountFundingErrorCode): number {
+  return code === 'indexer-unreachable' || code === 'prover-unavailable' ? 503 : 400;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Rebuilding a transaction the node refused                                  */
 /* -------------------------------------------------------------------------- */

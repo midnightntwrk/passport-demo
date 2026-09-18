@@ -321,3 +321,41 @@ describe('the pre-flight, reading each account with the build it actually is', (
     assert.match(refusal.message, /account custody/);
   });
 });
+
+/* -------------------------------------------------------------------------- */
+/* What a refusal is a fact ABOUT                                             */
+/* -------------------------------------------------------------------------- */
+
+import { accountReadStatus } from '../src/account.js';
+
+describe('the status a read refusal answers with', () => {
+  it('is a 400 for the two things that are facts about the account', () => {
+    /* Send that address again and it will be refused again. */
+    assert.equal(accountReadStatus('not-an-account'), 400);
+    assert.equal(accountReadStatus('account-not-activated'), 400);
+  });
+
+  it('is a 503 when this service could not answer, including a build it has not got', () => {
+    assert.equal(accountReadStatus('indexer-unreachable'), 503);
+    /* THE AMBER. `prover-unavailable` is thrown by the read path when the
+       compiled account-custody build cannot be loaded on this host — not
+       staged, or a half-finished rsync. A 400 told a perfectly good Passport
+       that it was not one, in the single case where the truth is that an
+       operator has not finished staging a build. */
+    assert.equal(accountReadStatus('prover-unavailable'), 503);
+  });
+
+  it('leaves every other code answering exactly what it answered before', () => {
+    for (const code of [
+      'deposit-failed',
+      'confirmation-failed',
+      'asset-unsupported',
+      'mint-failed',
+      'mint-not-visible',
+      'asset-deposit-failed',
+      'asset-confirmation-failed',
+    ] as const) {
+      assert.equal(accountReadStatus(code), 400);
+    }
+  });
+});

@@ -137,6 +137,7 @@ import {
 
 import {
   AccountFundingError,
+  accountReadStatus,
   createAccountFunder,
   type AccountFunder,
 } from './account.js';
@@ -1831,7 +1832,10 @@ async function main(): Promise<void> {
         if (cause instanceof AccountFundingError) {
           return fail(
             refusal(
-              cause.code === 'indexer-unreachable' ? 503 : 400,
+              /* See `accountReadStatus`: "we could not ask" and "that is not
+                 one of our accounts" are different answers, and a host that has
+                 not finished staging a build belongs with the first. */
+              accountReadStatus(cause.code),
               cause.code,
               cause.message,
               cause.detail ? { detail: cause.detail } : undefined,
@@ -2995,7 +2999,7 @@ async function main(): Promise<void> {
            exactly as they do on `/fund-account`. */
         if (cause instanceof AccountFundingError) {
           throw new RepointReadFailure(
-            cause.code === 'indexer-unreachable' ? 503 : 400,
+            accountReadStatus(cause.code),
             cause.code,
             cause.message,
           );
