@@ -150,6 +150,7 @@ import {
 import { normalisedColourHex } from '../lib/colour.js';
 import {
   changeCoinFromResult,
+  custodyChangeBackfill,
   directSpendFromResult,
   spendPositionMayBeWrong,
   type CustodyChangeCoin,
@@ -1907,6 +1908,44 @@ async function settleShieldedChange(
     return { ...base, change, changePosition: settled.stored ? 'candidates' : 'awaiting' };
   }
   return { ...base, change, changePosition: 'awaiting' };
+}
+
+/**
+ * Put the change coin's description into this account's own inbox.
+ *
+ * THE TIDY-UP AFTER A SEND, AND NEVER PART OF IT. The recipient has their money
+ * the moment the send lands; this writes down what the account kept, so a
+ * second device — or this one after its storage is cleared — can find it. The
+ * description exists nowhere else: the chain carries the note and the circuit
+ * returned its description privately, to this tab and to nobody else.
+ *
+ * IT COSTS A SECOND APPROVAL, because `append_inbox` is gated like every other
+ * operation on this contract. That is why it runs after the send has been
+ * reported rather than inside it, and why a caller that cannot get one loses
+ * the record and not the money.
+ *
+ * Skipped rather than failed when there is nothing to describe — see
+ * {@link custodyChangeBackfill}, which decides, and returns null here.
+ */
+export async function appendChangeToInboxK1(
+  session: CustodyDynamicSession,
+  device: K256DeviceIdentity,
+  request: {
+    readonly change: CustodyChangeCoin;
+    /** This account's own advertised encryption key, read live by the caller. */
+    readonly ownEncKeyHex: string | null;
+  },
+  onPhase?: (phase: CustodyPhase) => void,
+  overrides: Partial<CustodyDeps> = {},
+): Promise<CustodyStepResult | null> {
+  const decided = custodyChangeBackfill(request.change, request.ownEncKeyHex);
+  if (decided.kind === 'skip') {
+    console.info(`[account-custody] no inbox entry for the change: ${decided.reason}`);
+    return null;
+  }
+  const { sealCustodyInboxEntry } = await import('./custodyInbox.js');
+  const entry = await sealCustodyInboxEntry(decided.ownEncKeyHex, decided.coin);
+  return appendInboxK1(session, device, entry, onPhase, overrides);
 }
 
 export async function appendInboxK1(

@@ -34,6 +34,7 @@ import {
 } from './k1CoinStore.js';
 import {
   activateK1Device,
+  appendChangeToInboxK1,
   appendInboxK1,
   deployCustodyAccount,
   custodyPrivateStateId,
@@ -1130,6 +1131,67 @@ describe('a gated call', () => {
  * by network and address — and a witness reading one while the store writes
  * the other is a Passport that can be paid and can never spend.
  */
+describe('the change, written into this account’s own inbox', () => {
+  async function readyPassport() {
+    const test = harness();
+    const fake = deviceFake();
+    await deployCustodyAccount(fake.session, fake.device, undefined, test.deps);
+    await activateK1Device(fake.session, fake.device, undefined, test.deps);
+    return { test, ...fake };
+  }
+
+  const ENC_KEY = 'ab'.repeat(32);
+
+  it('appends 192 bytes only the account itself can open', async () => {
+    const { test, session, device } = await readyPassport();
+    const step = await appendChangeToInboxK1(
+      session,
+      device,
+      {
+        change: { outcome: 'change', nonce: '7f'.repeat(32), colour: '1a'.repeat(32), value: 60n },
+        ownEncKeyHex: ENC_KEY,
+      },
+      undefined,
+      test.deps,
+    );
+
+    expect(step).not.toBeNull();
+    const call = test.calls.find((c) => c.circuit === 'append_inbox_with_k256');
+    /* The entry, then the four authorisation arguments: it is a gated call like
+       every other operation on this contract, which is why it costs a second
+       approval and why it runs after the payment rather than inside it. */
+    expect((call?.args[0] as Uint8Array).length).toBe(192);
+    expect(call?.args).toHaveLength(5);
+  });
+
+  it('writes nothing at all when there is no change to describe', async () => {
+    const { test, session, device } = await readyPassport();
+    const before = test.calls.length;
+    expect(
+      await appendChangeToInboxK1(
+        session,
+        device,
+        { change: { outcome: 'none' }, ownEncKeyHex: ENC_KEY },
+        undefined,
+        test.deps,
+      ),
+    ).toBeNull();
+    expect(
+      await appendChangeToInboxK1(
+        session,
+        device,
+        {
+          change: { outcome: 'change', nonce: '7f'.repeat(32), colour: '1a'.repeat(32), value: 60n },
+          ownEncKeyHex: null,
+        },
+        undefined,
+        test.deps,
+      ),
+    ).toBeNull();
+    expect(test.calls.length).toBe(before);
+  });
+});
+
 describe('the private state a connection is opened with', () => {
   async function readyPassport() {
     const test = harness();

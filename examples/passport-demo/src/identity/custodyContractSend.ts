@@ -619,6 +619,62 @@ export function spendPositionMayBeWrong(message: string): boolean {
 }
 
 /* -------------------------------------------------------------------------- */
+/* The change, written into this account's own inbox                          */
+/* -------------------------------------------------------------------------- */
+
+/** Whether the change a spend left is worth an inbox entry, and what goes in it. */
+export type CustodyChangeBackfill =
+  | { readonly kind: 'skip'; readonly reason: string }
+  | {
+      readonly kind: 'append';
+      readonly ownEncKeyHex: string;
+      readonly coin: { readonly colour: string; readonly nonce: string; readonly value: bigint };
+    };
+
+/**
+ * Whether to back the change coin up into this account's own inbox.
+ *
+ * WHY A SPEND'S CHANGE NEEDS ONE AT ALL (MIP-0012 §6.3, INV-4). The change
+ * comes back as the circuit's own return value, travelling privately in the
+ * transaction's communication commitment — so the only copy of its description
+ * in the world is the one this tab wrote to its own store. A second device, or
+ * this one after its storage is cleared, has nothing to walk: the chain carries
+ * the note, not what it is. `append_inbox` seals that description to the
+ * account's own encryption key and puts it where any device holding the
+ * viewing secret can find it.
+ *
+ * IT IS NEVER PART OF THE PAYMENT. The recipient has their money the moment
+ * the send lands; this is the sender tidying up after it, so it runs after the
+ * send has been reported and a failure costs the record, not the money.
+ *
+ * SKIPPED, NOT FAILED, when there is nothing to describe: a spend that consumed
+ * the coin exactly leaves no change, and one whose change this build could not
+ * read has nothing to seal. An account that publishes no usable encryption key
+ * is the third: sealing to a key that is not one produces an entry nobody can
+ * open, which is worse than no entry at all.
+ */
+export function custodyChangeBackfill(
+  change: CustodyChangeCoin,
+  ownEncKeyHex: string | null | undefined,
+): CustodyChangeBackfill {
+  if (change.outcome === 'none') {
+    return { kind: 'skip', reason: 'the payment consumed the whole coin, so there is no change' };
+  }
+  if (change.outcome === 'unreadable') {
+    return { kind: 'skip', reason: 'this build could not read the change to describe it' };
+  }
+  const key = normalisedEncKey(ownEncKeyHex);
+  if (key === null) {
+    return { kind: 'skip', reason: 'this account publishes no encryption key to seal it to' };
+  }
+  return {
+    kind: 'append',
+    ownEncKeyHex: key,
+    coin: { colour: change.colour, nonce: change.nonce, value: change.value },
+  };
+}
+
+/* -------------------------------------------------------------------------- */
 /* What the person is asked                                                   */
 /* -------------------------------------------------------------------------- */
 

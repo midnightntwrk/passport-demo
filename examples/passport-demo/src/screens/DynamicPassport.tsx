@@ -13,6 +13,7 @@ import {
   deployCustodyAccount,
   k1Call,
   recoverK1DevicePoint,
+  appendChangeToInboxK1,
   startCustodyAccountAgain,
   withdrawShieldedK1,
   withdrawShieldedToContractK1,
@@ -56,6 +57,7 @@ import {
   planCustodyShieldedAddressSend,
   planCustodyShieldedSend,
   saveCustodyShieldedSend,
+  type CustodyChangeCoin,
   type CustodyShieldedSendRecord,
   type CustodyUnshieldedLedger,
 } from '../identity/custodyContractSend.js'
@@ -691,6 +693,37 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
   )
 
   /**
+   * Write the change this account kept into its own inbox.
+   *
+   * AFTER THE SEND, NEVER INSIDE IT. The recipient has their money the moment
+   * the send lands. This is the sender tidying up: the change's description
+   * came back privately, to this tab and to nowhere else, so an entry sealed to
+   * this account's own key is what lets a second device ever find it. It costs
+   * a second approval, so it is offered after the payment is reported and a
+   * refusal loses the record rather than the money.
+   */
+  const backfillChange = useCallback(
+    async (params: {
+      wallet: LocalMidnightWallet
+      record: CustodyAccountRecord
+      identity: K256DeviceIdentity
+      change: CustodyChangeCoin
+    }): Promise<void> => {
+      const { readCustodyAccountView } = await import('../identity/accountCustody.js')
+      const view = await readCustodyAccountView(
+        { indexerHttpUrl: params.wallet.network.indexerHttpUrl },
+        params.record.address as string,
+      )
+      await appendChangeToInboxK1(
+        custodySession(session),
+        params.identity,
+        { change: params.change, ownEncKeyHex: view.encKeyHex },
+      )
+    },
+    [session],
+  )
+
+  /**
    * A token out of the account, in ONE transaction.
    *
    * THREE LEGS BECAME ONE (2026/09/18). The value used to leave the account to
@@ -771,7 +804,7 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
 
       setBusy(custodyApprovalPrompt(session.provider))
       const identity = await ensureDevice()
-      await withdrawShieldedToContractK1(
+      const sent = await withdrawShieldedToContractK1(
         custodySession(session),
         identity,
         {
@@ -782,6 +815,9 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
         },
         (phase) => setBusy(PHASE_LABELS[phase.step]),
       )
+      void backfillChange({ wallet, record, identity, change: sent.change }).catch((cause) => {
+        console.warn('[account-custody] the change was not written to the inbox', cause)
+      })
       clearCustodyShieldedSend(window.localStorage, {
         network: record.network,
         accountAddress: account.address,
@@ -789,7 +825,7 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
       setStopped(null)
       setNotice(custodyShieldedSendOutcome({ ...stoppedRecord, stage: 'done' }))
     },
-    [ensureDevice, session],
+    [backfillChange, ensureDevice, session],
   )
 
   /**
@@ -850,7 +886,7 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
         plan.recipientShieldedAddress,
         wallet.network.networkId,
       )
-      await withdrawShieldedK1(
+      const sent = await withdrawShieldedK1(
         custodySession(session),
         identity,
         {
@@ -861,6 +897,9 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
         },
         (phase) => setBusy(PHASE_LABELS[phase.step]),
       )
+      void backfillChange({ wallet, record, identity, change: sent.change }).catch((cause) => {
+        console.warn('[account-custody] the change was not written to the inbox', cause)
+      })
       clearCustodyShieldedSend(window.localStorage, {
         network: record.network,
         accountAddress: account.address,
@@ -868,7 +907,7 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
       setStopped(null)
       setNotice(custodyShieldedSendOutcome({ ...stoppedRecord, stage: 'done' }))
     },
-    [ensureDevice, session],
+    [backfillChange, ensureDevice, session],
   )
 
   /**

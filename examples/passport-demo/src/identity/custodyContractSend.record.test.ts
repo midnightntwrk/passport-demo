@@ -32,6 +32,7 @@ import {
   changeCoinFromResult,
   clearCustodyShieldedSend,
   custodyShieldedSendOutcome,
+  custodyChangeBackfill,
   custodyShieldedSendRefusal,
   directSpendFromResult,
   loadCustodyShieldedSend,
@@ -375,6 +376,47 @@ describe('a record nothing can read is no payment in flight, and never a throw',
 /* -------------------------------------------------------------------------- */
 /* What the circuit said about the change                                     */
 /* -------------------------------------------------------------------------- */
+
+describe('backing the change up into this account’s own inbox', () => {
+  const CHANGE = {
+    outcome: 'change' as const,
+    nonce: '7f'.repeat(32),
+    colour: '1a'.repeat(32),
+    value: 60n,
+  };
+
+  it('seals the change to this account’s own key when there is change to seal', () => {
+    expect(custodyChangeBackfill(CHANGE, ENC_KEY)).toEqual({
+      kind: 'append',
+      ownEncKeyHex: ENC_KEY,
+      coin: { colour: '1a'.repeat(32), nonce: '7f'.repeat(32), value: 60n },
+    });
+    /* However the key was published. */
+    expect(
+      custodyChangeBackfill(CHANGE, `0x${ENC_KEY.toUpperCase()}`),
+    ).toMatchObject({ ownEncKeyHex: ENC_KEY });
+  });
+
+  it('skips rather than fails when there is nothing to describe', () => {
+    /* A spend that consumed the coin exactly leaves no change, and there is
+       nothing wrong with that. */
+    expect(custodyChangeBackfill({ outcome: 'none' }, ENC_KEY)).toEqual({
+      kind: 'skip',
+      reason: 'the payment consumed the whole coin, so there is no change',
+    });
+    expect(
+      custodyChangeBackfill({ outcome: 'unreadable', reason: 'whatever' }, ENC_KEY),
+    ).toMatchObject({ kind: 'skip' });
+  });
+
+  it('skips an account whose published key is missing or is not one', () => {
+    /* Sealing to a key that is not one produces an entry nobody can open,
+       which is worse than no entry at all. */
+    for (const key of [null, undefined, '', 'nonsense', ENC_KEY.slice(0, 60)]) {
+      expect(custodyChangeBackfill(CHANGE, key)).toMatchObject({ kind: 'skip' });
+    }
+  });
+});
 
 describe('reading [sent, change] out of a direct transfer', () => {
   const COIN = (fill: number, value: bigint) => ({
