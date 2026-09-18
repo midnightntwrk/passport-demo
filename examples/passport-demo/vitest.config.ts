@@ -30,6 +30,21 @@
  * a profile in, a decision out, drilled directly in
  * `src/lib/accountOnPasskey.test.ts`.
  *
+ * `src/lib/addressSendPolicy.ts` went IN on 2026/09/18, the day it was written,
+ * and it is in the denominator because it is the only thing standing between a
+ * Passport and an account it can never spend from again. The account build every
+ * Passport is on today splits a shielded coin when it is asked for part of one,
+ * and the remainder it puts back is refused by the node for ever after — so one
+ * partial payment to a raw address costs that Passport every later shielded
+ * send, its `.night` name payments included. This module is the rule that
+ * refuses exactly that shape and NOTHING else, which is the half that needs the
+ * drilling: a branch too many here takes away a send that works — NIGHT, a name,
+ * a whole coin — and a branch too few lets the account be broken. It holds no
+ * DOM, no React, no network, and no clock: an asset, a recipient, a build, an
+ * amount, and a holding in; a sentence or `null` out. Every combination of the
+ * four is drilled in `src/lib/addressSendPolicy.test.ts`, and the sentence is
+ * asserted there too, because it is what somebody mid-payment is left holding.
+ *
  * `src/lib/appBusy.ts` went IN on 2026/08/26, the day it was written. It is the
  * counter that answers "is Passport in the middle of something?" for the
  * service-worker update path in `src/pwa.tsx`, and getting that answer wrong in
@@ -578,6 +593,7 @@ export default mergeConfig(
            in it and the reason it is not. */
         include: [
           'src/lib/accountOnPasskey.ts',
+          'src/lib/addressSendPolicy.ts',
           'src/lib/activation.ts',
           'src/lib/activationHold.ts',
           'src/lib/activityFeed.ts',

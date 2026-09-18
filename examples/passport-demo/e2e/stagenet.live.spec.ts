@@ -121,9 +121,23 @@ test.describe('@live the account model on stagenet', () => {
    * the sponsor's own published `assetGrant`.
    */
   const GRANT_MUSD = '100';
-  /** Ten units out, ninety left — a remainder the card can be read against. */
-  const SEND_MUSD = '10';
-  const REMAINING_MUSD = '90';
+  /**
+   * THE WHOLE COIN, and it is the only amount an address send may be today
+   * (2026/09/18).
+   *
+   * The deployed account splits a shielded coin when it is asked for part of
+   * one, and re-registers a remainder the node then refuses every later
+   * withdrawal against — so a partial payment to a raw address works once and
+   * costs that Passport every shielded send after it. The whole coin takes the
+   * branch that removes the entry instead, which is what the name path has
+   * always used. Passport pauses the partial one; {@link PARTIAL_MUSD} is what
+   * the pause is drilled with, and this is what a live address send now is.
+   */
+  const SEND_MUSD = GRANT_MUSD;
+  /** Nothing of that colour left in the account: all of it went. */
+  const REMAINING_MUSD = '0';
+  /** Less than is held — the one amount this account must not be asked for. */
+  const PARTIAL_MUSD = '10';
 
   let page: Page;
   const alias = uniqueAlias('walk');
@@ -399,6 +413,78 @@ test.describe('@live the account model on stagenet', () => {
   });
 
   /**
+   * THE SEND THIS PASSPORT MUST NOT BE ALLOWED TO MAKE (2026/09/18).
+   *
+   * Asked for PART of a shielded coin, the deployed account pays the recipient
+   * and re-registers the remainder — and the node refuses every later
+   * withdrawal against what it puts back (`1010 Invalid Transaction: Custom
+   * error: 239`, first hit here). One such payment therefore costs this account
+   * every shielded send after it, name payments included. Passport now stops
+   * that in the sheet, before anything is proved, signed, or spent.
+   *
+   * WHICH IS WHY THIS TEST SPENDS NOTHING. It goes as far as the disabled
+   * control and the sentence beneath the field and stops there — the account it
+   * runs against is the one the whole-coin send below needs, and a spec that
+   * proved the pause by breaking the account would have proved the defect
+   * instead. It runs BEFORE that send for the same reason: after it there is no
+   * coin left to ask for part of.
+   */
+  test('a partial amount to an address is refused before anything is built', async () => {
+    /* The grant has to have landed for there to be a part of anything. The
+       same poll the send below makes, and the first of the two to wait. */
+    await expect
+      .poll(async () => refreshedStablecoinValue(page), {
+        timeout: 12 * 60_000,
+        intervals: [10_000],
+        message:
+          'the mUSD activation grant never reached the account — check GET https://67-205-177-162.sslip.io/balancer/status for assetFunding and assetUnavailableReason',
+      })
+      .toBe(GRANT_MUSD);
+
+    const colour = await sponsorStablecoinColour();
+    await page.getByRole('button', { name: /^Send$/ }).first().click();
+    const picker = page.locator('.mnhome-send-asset');
+    await expect(picker).toBeVisible({ timeout: 3 * 60_000 });
+    await chooseStablecoin(picker, colour);
+    await page.locator('.mnhome-send-input-mono').fill(SHIELDED_RECIPIENT);
+    /* The ADDRESS is fine — this is not a refusal of where the money is going,
+       and a sentence under that field would send somebody looking for a better
+       address. */
+    await expect(page.locator('#mnhome-send-recipient-error')).toHaveCount(0);
+
+    await page.locator('.mnhome-send-amount input').fill(PARTIAL_MUSD);
+    const paused = page.locator('#mnhome-send-amount-error');
+    await expect(paused).toBeVisible();
+    /* Matched on what it PROMISES rather than word for word: this tier runs
+       against whatever is deployed, and the sentence is asserted exactly where
+       it is decided, in `src/lib/addressSendPolicy.test.ts`. */
+    const said = (await paused.innerText()).trim();
+    expect(said, 'the pause did not say what an address send does instead').toMatch(
+      /sends all of your mUSD/i,
+    );
+    expect(said, 'the pause did not name the route that still divides').toMatch(/\.night name/i);
+    // And none of the machinery reached the person it was paused in front of.
+    expect(said).not.toMatch(/contract|withdraw|nullifier|239|dust/i);
+
+    /* NOTHING CAN BE PRESSED, which is the whole of the fix: no proof, no
+       ceremony, no transaction, and an account still worth sending from. */
+    await expect(page.getByRole('button', { name: /^Review$/ })).toBeDisabled();
+    console.log(`[live] a partial address send was paused before anything was built: ${said}`);
+
+    await page
+      .getByRole('button', { name: /^Close$/ })
+      .click({ timeout: 10_000 })
+      .catch(() => undefined);
+    await page.keyboard.press('Escape');
+    /* The account is exactly as it was — the balance the send below spends. */
+    await expect.poll(async () => refreshedStablecoinValue(page), {
+      timeout: 60_000,
+      intervals: [5_000],
+      message: 'the paused send changed the account balance, which it must never do',
+    }).toBe(GRANT_MUSD);
+  });
+
+  /**
    * The shielded leg, and the one assertion the NIGHT send cannot make.
    *
    * `withdraw_night` and `withdraw_shielded` are different circuits over
@@ -414,12 +500,19 @@ test.describe('@live the account model on stagenet', () => {
    * minutes after the NIGHT half the activation test already saw. Waiting for
    * it here costs nothing the earlier tests were not already spending.
    *
-   * Two witnesses, because either alone would be weak. The CARD says the
-   * account holds ten fewer — which is what a user can see — and the INDEXER
+   * AND IT SENDS ALL OF IT (2026/09/18). An address send is the whole coin or
+   * nothing on the deployed account: asked for part of one it splits, and what
+   * it re-registers the node refuses every later withdrawal against. So this
+   * presses the control that fills in the whole balance rather than typing a
+   * figure — the send Passport now allows, made the way the sheet offers it —
+   * and the account is left holding none of that colour.
+   *
+   * Two witnesses, because either alone would be weak. The CARD says the colour
+   * has gone from the account — which is what a user can see — and the INDEXER
    * says a `withdraw_shielded` action now exists on this contract, which is
    * what makes the drop a withdrawal rather than a re-read.
    */
-  test('a shielded withdrawal pays mUSD out of the account, and the chain records withdraw_shielded', async () => {
+  test('sending all of it pays the whole mUSD balance out, and the chain records withdraw_shielded', async () => {
     /* THE ADDRESS THE REST OF THIS TEST IS ABOUT.
        Home only ever shows the account contract elided — nine characters and
        seven — and the indexer query below needs all sixty-four. So the whole
@@ -510,7 +603,13 @@ test.describe('@live the account model on stagenet', () => {
       await page.locator('.mnhome-send-input-mono').fill(SHIELDED_RECIPIENT);
       await expect(page.locator('#mnhome-send-recipient-error')).toHaveCount(0);
 
-      await page.locator('.mnhome-send-amount input').fill(SEND_MUSD);
+      /* THE WHOLE BALANCE, PRESSED RATHER THAN TYPED. `Max` is the control the
+         pause above points somebody at, so this is the send as the sheet now
+         offers it — and the field is read back, because a control that filled
+         in anything less would be a partial withdrawal made by the test. */
+      await page.getByRole('button', { name: `Send the whole ${MUSD_SYMBOL} balance` }).click();
+      await expect(page.locator('.mnhome-send-amount input')).toHaveValue(SEND_MUSD);
+      await expect(page.locator('#mnhome-send-amount-error')).toHaveCount(0);
       // The fee sentence still names who pays, never which token it costs.
       expect(await page.locator('body').innerText()).not.toMatch(/dust/i);
 
@@ -586,17 +685,24 @@ test.describe('@live the account model on stagenet', () => {
       await waitForSponsor();
     }
 
-    /* WITNESS ONE: the account holds ten fewer, on the surface the user reads. */
+    /* WITNESS ONE: the colour has left the account, on the surface the user
+       reads. A holding of none is not shown as a nought row — an asset the
+       account does not hold is not a thing to send — so either answer is the
+       same fact, and both are accepted rather than guessed between. */
     await expect
-      .poll(async () => refreshedStablecoinValue(page), {
-        timeout: 8 * 60_000,
-        intervals: [8_000],
-        message: 'the account mUSD balance did not fall after the shielded withdrawal',
-      })
-      .toBe(REMAINING_MUSD);
-    console.log(
-      `[live] mUSD fell from ${GRANT_MUSD} to ${REMAINING_MUSD} after sending ${SEND_MUSD} units`,
-    );
+      .poll(
+        async () => {
+          const shown = await refreshedStablecoinValue(page);
+          return shown === '' || shown === REMAINING_MUSD;
+        },
+        {
+          timeout: 8 * 60_000,
+          intervals: [8_000],
+          message: 'the account mUSD balance did not fall after the shielded withdrawal',
+        },
+      )
+      .toBe(true);
+    console.log(`[live] all ${SEND_MUSD} mUSD left the account in one withdrawal`);
 
     /* WITNESS TWO: the ledger names the circuit. A balance that fell is a
        withdrawal only if the chain recorded one, and `withdraw_shielded` is the
