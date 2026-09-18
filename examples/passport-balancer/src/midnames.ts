@@ -461,7 +461,10 @@ export interface MidnamesSponsor {
   readonly provingMode: ContractProvingMode;
   /** Is the label free right now? Reads the deployed registry, never a cache. */
   isAvailable(label: string): Promise<boolean>;
-  /** Does the indexer serve contract state at this address? */
+  /**
+   * Does the indexer serve contract state at this address? See
+   * {@link contractDeployedAt} for what this gate deliberately does NOT do.
+   */
   contractExists(address: string): Promise<boolean>;
   /** What the name resolves to right now, or null when it is not registered. */
   resolve(label: string): Promise<{ resolverAddress: string; target: ResolvedDomainTarget } | null>;
@@ -636,6 +639,28 @@ export interface DomainResolver {
  * has no business paying for any of that — so it builds this instead, which is
  * the contract module for its `ledger()` decoder and an indexer reader.
  */
+/**
+ * The `/register-alias` target gate: is ANYTHING deployed at this address?
+ *
+ * IT DECODES NOTHING, AND THAT IS THE DESIGN. The gate is a correctness one —
+ * a name bound to nothing is worse than no name — and an anti-spam one:
+ * deploying a contract costs a real transaction, so an abuser cannot mint free
+ * targets faster than the chain allows. Neither of those needs to know what
+ * KIND of contract it is, and a gate that decoded would have to be taught every
+ * build that has ever existed or start refusing names to Passports it did not
+ * recognise.
+ *
+ * This is the whole reason `.night` registration needed no change when the
+ * account custody contract arrived, where `/fund-account` needed a rewrite:
+ * the funding pre-flight has to know what it is depositing into, and this has
+ * to know only that there is something there. Named and tested so it stays
+ * that way — see `test/registerAliasTarget.test.ts`, which asks it with a
+ * custody account's real state.
+ */
+export function contractDeployedAt(state: unknown): boolean {
+  return Boolean(state);
+}
+
 export async function createDomainResolver(config: BalancerConfig): Promise<DomainResolver> {
   if (!config.midnamesTldAddress) {
     throw new Error(
@@ -879,7 +904,7 @@ export async function createMidnamesSponsor(
     isAvailable,
 
     async contractExists(address: string): Promise<boolean> {
-      return Boolean(await reader.queryContractState(rawContractAddress(address)));
+      return contractDeployedAt(await reader.queryContractState(rawContractAddress(address)));
     },
 
     resolve: resolveAlias,
