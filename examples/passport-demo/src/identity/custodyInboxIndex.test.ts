@@ -59,7 +59,9 @@ describe('custodyActionHistoryQuery', () => {
     expect(text).toContain('... on ContractCall { entryPoint }');
     /* And the ledger's apply result, which decides whether a call that names
        an appending entry point actually wrote a cell. */
-    expect(text).toContain('transaction { hash transactionResult { status } }');
+    expect(text).toContain(
+      'transaction { hash ... on RegularTransaction { transactionResult { status } } }',
+    );
     /* The one field that must NOT be selected: ~19 KB of hex per action, on a
        query that runs every time Home opens. */
     expect(text).not.toContain('state');

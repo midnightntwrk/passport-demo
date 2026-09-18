@@ -260,7 +260,9 @@ describe('the order the indexer answers in', () => {
   });
 
   it('reads the ledger result the query now asks for', () => {
-    expect(custodyActionHistoryQuery('ab'.repeat(32))).toContain('transactionResult { status }');
+    expect(custodyActionHistoryQuery('ab'.repeat(32))).toContain(
+      '... on RegularTransaction { transactionResult { status } }',
+    );
     const rows = custodyActionRowsFrom(
       answer([action('deposit_shielded', 'refused', 'FAILURE'), action('deposit_shielded', 'landed')]),
     );

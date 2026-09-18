@@ -119,6 +119,18 @@ export const CUSTODY_ACTION_HISTORY_LIMIT = 200;
  * The address is interpolated raw because the caller has already normalised it
  * (64 hex characters, nothing else can pass `normalisedColourHex`), so there is
  * no quote for a malformed address to smuggle in.
+ *
+ * `transactionResult` SITS INSIDE `... on RegularTransaction` and has to.
+ * `Transaction` is an interface and the apply result is declared on the regular
+ * member alone, so selecting it one level up is an unknown field — which
+ * GraphQL refuses for the WHOLE query rather than answering without it. Asked
+ * flat, this query answered `{"data":null,"errors":[…]}` against
+ * `indexer.stagenet.shielded.tools/api/v4` every time Home opened, so
+ * {@link custodyActionRowsFrom} read `null`, no delivery could be matched to
+ * the transaction that wrote it, and every one of them was counted as still
+ * arriving — a Passport saying a payment it had already spent was on its way
+ * (live, 2026/09/18). `src/verify/indexer.ts` and `src/lib/indexerTx.ts` both
+ * put the field inside the fragment; this is the same shape.
  */
 export function custodyActionHistoryQuery(
   address: string,
@@ -129,7 +141,7 @@ export function custodyActionHistoryQuery(
     actions(limit: ${limit}) {
       __typename
       ... on ContractCall { entryPoint }
-      transaction { hash transactionResult { status } }
+      transaction { hash ... on RegularTransaction { transactionResult { status } } }
     }
   }
 }`;
