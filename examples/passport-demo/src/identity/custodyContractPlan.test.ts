@@ -533,6 +533,21 @@ describe('what a screen is allowed to paint', () => {
     );
   });
 
+  /* THE WASM TRAP, which is the one this layer produces most often: a coin at
+     a position the contract's Zswap tree has moved past makes the on-chain
+     runtime trap, and all that reaches here is the bare word. Nine characters,
+     none of the vocabulary, and a screen full of "unreachable" in front of
+     somebody who pressed Send. A trap is no more ours than a `TypeError`. */
+  it('refuses the bare word a WebAssembly trap arrives as', () => {
+    const trap = new Error('unreachable');
+    trap.name = 'RuntimeError';
+    expect(custodyFailureSentence(trap)).toBe(CUSTODY_UNEXPECTED);
+
+    const outOfBounds = new Error('memory access out of bounds');
+    outOfBounds.name = 'RuntimeError';
+    expect(custodyFailureSentence(outOfBounds)).toBe(CUSTODY_UNEXPECTED);
+  });
+
   it('refuses an empty message, a stack-shaped one, and a thrown non-error', () => {
     expect(custodyFailureSentence(new Error('   '))).toBe(CUSTODY_UNEXPECTED);
     expect(custodyFailureSentence(new Error('x'.repeat(161)))).toBe(CUSTODY_UNEXPECTED);

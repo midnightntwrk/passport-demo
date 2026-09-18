@@ -903,6 +903,15 @@ const RUNTIME_ERROR_NAMES: ReadonlySet<string> = new Set([
   'SyntaxError',
   'EvalError',
   'URIError',
+  /* THE ONE A LEDGER TRAP ARRIVES UNDER, and the one that reached a screen.
+     A WebAssembly trap is `name: 'RuntimeError'`, `message: 'unreachable'` —
+     nine characters, no vocabulary in them, and therefore through both of the
+     checks above and painted verbatim. "unreachable", alone, on the screen of
+     somebody who pressed Send. It is the most likely of the lot to be raised
+     here, because this layer's position guesses are exactly what makes the
+     on-chain runtime trap (see `spendPositionMayBeWrong`), and it is no more
+     ours than a `TypeError` is. */
+  'RuntimeError',
 ]);
 
 /**
