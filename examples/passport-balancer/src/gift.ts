@@ -641,6 +641,13 @@ export function createColourPayer(deps: {
     /* The module, the verifier keys, and the v3 proof route, settled before a
        provider exists — because the providers are part of the answer. */
     const opening = await custodyOpening(opener);
+    /* WHICH PATH THIS GIFT TOOK, in the journal, before a coin exists. Two
+       recipients that look identical to a partner — an account address is an
+       account address — are two different deposits here, and an operator
+       reading a failure afterwards needs to know which one was attempted. */
+    console.log(
+      `[colour] ${name} into the custody account ${address}: inbox ${inboxBefore}, sealing to its live key, proving through ${opening.module}`,
+    );
 
     /* 2 and 3. mint_shielded to this wallet, and the wait for it to be
        spendable here. Identical to every other recipient. */
