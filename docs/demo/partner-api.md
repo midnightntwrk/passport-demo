@@ -277,7 +277,9 @@ Every error body is `{ "error": "<code>", "message": "<a sentence you may show a
 | 429 | `PENDING_TRANSACTION` | The sponsor is repairing its own fee bookkeeping. Short; retry. |
 | 400 | `recipient-not-sealable` | An account custody Passport that advertises no usable encryption key. The entry that carries the coin's description cannot be sealed for it, and a deposit without one would land with the coin unspendable for ever. Refused before the mint; nothing is spent. §6. |
 | 400 | `account-not-activated` | The account contract exists but no device has been activated on it yet, so nothing could ever spend what was deposited. Finish setting the Passport up and ask again. |
-| 501 | `account-custody-build-required` | The recipient is an account custody Passport and this sponsor has no account custody build, or no proof server that can prove its circuits. Operator-side; refused before the mint. |
+| 501 | `account-custody-build-required` | The recipient is an account custody Passport and this sponsor has no account funder at all — its wallet could not be opened, so `/fund-account` is off too. Operator-side; refused before the mint. |
+| 503 | `prover-unavailable` | The recipient is an account custody Passport and this sponsor has a funder but cannot open that build: the artefacts are not staged on the host, or no proof server it can reach proves ZKIR v3. Operator-side; refused before the mint. Retrying will not help until an operator acts. |
+| 503 | `indexer-unreachable` | The recipient's account state could not be read, so nothing can be said about it. Not a fact about the recipient; retry. |
 | 503 | `gift-unsupported` | No faucet is configured, so no colour can be minted at all. |
 | 503 | `shielded-transfer-unsupported` | The operator has disabled the shielded-transfer path. Not reachable on the deployment above. The refusal arrives *before* anything is minted, so nothing is spent. |
 | 503 | `name-resolution-unavailable` | The registry could not be read. Not the same as "not registered"; retry. |
@@ -374,9 +376,14 @@ delivery can produce those 192 bytes, so it is stronger evidence than a balance
 and not weaker; the consequence for you is that the response carries no `held`
 field for such a recipient, exactly as a shielded-address payout carries none.
 A recipient that is deployed but not yet activated is refused
-`400 account-not-activated`, and a sponsor with no account custody build or no
-proof server for it refuses `501 account-custody-build-required` — again before
-the mint, so nothing is spent.
+`400 account-not-activated`. A sponsor that cannot open the build at all
+refuses before the mint too, and which refusal you get says which half is
+missing: `503 prover-unavailable` when the artefacts are not staged on the host
+or no proof server it can reach proves those circuits, and
+`501 account-custody-build-required` in the narrower case where the sponsor has
+no account funder at all — its wallet could not be opened, which means
+`/fund-account` is off as well. Both are operator-side, and in both cases
+nothing is spent.
 
 A **shielded-address** recipient runs steps 1 and 2, and then an ordinary
 shielded transfer out of the sponsor's wallet — built, signed, proved, and
