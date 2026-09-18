@@ -4,13 +4,12 @@ import { ArrowRight, BadgeCheck, Copy, Loader2, RefreshCw, Search, ShieldCheck }
 import { normaliseNameForRecovery, type NameRecoveryOutcome } from '../lib/nameRecovery.js'
 import type { CustodyArm, CustodyIdentity } from '../lib/custodyArm.js'
 import { parseEndpointList } from '../lib/endpoints.js'
-import { k256Challenges, type K256DeviceIdentity } from '../identity/custodyContractSigning.js'
+import { type K256DeviceIdentity } from '../identity/custodyContractSigning.js'
 import {
   activateK1Device,
   appendChangeToInboxK1,
   defaultCustodyDeps,
   deployCustodyAccount,
-  k1Call,
   startCustodyAccountAgain,
   withdrawShieldedK1,
   withdrawShieldedToContractK1,
@@ -40,14 +39,12 @@ import {
 } from '../identity/custodyContractSession.js'
 import {
   clearCustodyShieldedSend,
-  custodySendRefusal,
   custodyShieldedAddressSendRefusal,
   custodyShieldedSendOutcome,
   custodyShieldedSendRefusal,
   custodyUnshieldedBalance,
   loadCustodyShieldedSend,
   newCustodyShieldedSend,
-  planCustodySend,
   planCustodyShieldedAddressSend,
   planCustodyShieldedSend,
   saveCustodyShieldedSend,
@@ -737,87 +734,29 @@ export default function CustodyPassport({ network, arm }: CustodyPassportProps) 
   /* Paying somebody                                                        */
   /* ---------------------------------------------------------------------- */
 
-  /** NIGHT out of the account, in the two legs every build takes. */
-  const sendNight = useCallback(
-    async (params: {
-      wallet: LocalMidnightWallet
-      record: CustodyAccountRecord
-      label: string
-      amount: bigint
-      recipientAccountAddress: string
-      recipientModule: PassportContractName
-    }): Promise<void> => {
-      const { wallet, record, label, amount } = params
-      /* THE ONE THING ON THIS SCREEN THE PASSKEY ARM STILL CANNOT DO, and the
-         sentence that used to stand in front of the shielded send. The account's
-         NIGHT still moves in the two legs below, and the second of them goes
-         through this Passport's own wallet — which is the shape the ruling of
-         2026/09/18 took out of the shielded path and has not yet taken out of
-         this one. The refusal is therefore about the ROUTE and not about the
-         arm's signatures: it is refused here, whole, rather than allowed to
-         reach a gated call whose challenge this arm cannot build. */
-      if (arm.session === null) {
-        throw new Error('Paying somebody from this Passport is coming. Everything else here works.')
-      }
-      const { nightColourBytes, nightColourHex, payCustodyAccount } = await import(
-        '../identity/accountCustody.js'
-      )
-      const input = {
-        record,
-        colourHex: nightColourHex(),
-        amount,
-        ownReceivingAddress: wallet.unshieldedAddress,
-        recipientAccountAddress: params.recipientAccountAddress,
-        recipientModule: params.recipientModule,
-        heldBalance: balance,
-      }
-      const refusal = custodySendRefusal(input)
-      if (refusal !== null) throw new Error(refusal)
-      const plan = planCustodySend(input)
-
-      /* LEG ONE — gated, and the only thing the holder approves. */
-      setBusy(arm.approvalPrompt)
-      const { device: identity } = await ensureIdentity()
-      const colour = nightColourBytes()
-      const recipientBytes = await unshieldedRecipientBytes(
-        plan.withdraw.recipientAddress,
-        wallet.network.networkId,
-      )
-      await k1Call(
-        arm.session,
-        identity,
-        {
-          operation: 'withdraw_unshielded',
-          args: [colour, plan.withdraw.amount, { bytes: recipientBytes }],
-          challenge: (pure, context, pk) =>
-            k256Challenges.withdrawUnshielded(
-              pure,
-              context,
-              pk,
-              colour,
-              plan.withdraw.amount,
-              recipientBytes,
-            ),
-        },
-        (phase) => setBusy(PHASE_LABELS[phase.step]),
-      )
-
-      /* LEG TWO — permissionless, and the same call whichever of the three
-         builds the recipient holds. `plan.deposit.circuit` says which circuit
-         that is and is deliberately not read here: the account is re-read at
-         the moment of the call, and a screen that named the circuit itself
-         would be a second place for that answer to be wrong. */
-      setBusy(`Paying ${label}`)
-      await payCustodyAccount(wallet, {
-        targetAddress: plan.deposit.contractAddress,
-        kind: 'night',
-        colourHex: plan.deposit.colourHex,
-        amount: plan.deposit.amount,
-      })
-      setNotice(`Sent. ${label} has it.`)
-    },
-    [arm, balance, ensureIdentity],
-  )
+  /**
+   * The account's NIGHT, out to a name — refused, on both arms.
+   *
+   * THE RULING OF 2026/09/18 IS ABOUT THE ROUTE, NOT ABOUT THE SIGNATURES. The
+   * shielded send became one transaction that pays the recipient directly, and
+   * no value passes through a wallet this app built. This leg never did: it
+   * took NIGHT out of the account into the Passport's OWN wallet and paid the
+   * recipient from there, so a tab closed between the two left somebody's money
+   * in a place neither party owned — which is exactly what the ruling forbids,
+   * and exactly where every stopped payment in this build's history got stuck.
+   *
+   * It was refused on the passkey arm already, for that reason. Refusing it on
+   * both is the same decision applied consistently: a route this repository has
+   * ruled out is not one a social sign-in may take either, and the arm that
+   * could still take it is parked rather than privileged. The sentence is the
+   * one the passkey arm already showed, and it is true of both: the shielded
+   * balance below sends today.
+   */
+  const sendNight = useCallback((): Promise<void> => {
+    return Promise.reject(
+      new Error('Paying somebody from this Passport is coming. Everything else here works.'),
+    )
+  }, [])
 
   /**
    * Write the change this account kept into its own inbox.
@@ -1086,6 +1025,15 @@ export default function CustodyPassport({ network, arm }: CustodyPassportProps) 
         const label = normaliseNameForRecovery(typed)
         if (label.length === 0) throw new Error('Type the name you want to pay.')
 
+        /* REFUSED BEFORE ANYTHING IS ASKED OF ANYBODY. The account's NIGHT
+           leaves by a route this repository has ruled out, on both arms — see
+           {@link sendNight} — so the name is not resolved, the recipient's
+           build is not read, and nothing is signed. */
+        if (asset.mode !== 'shielded') {
+          await sendNight()
+          return
+        }
+
         const [{ resolveAliasTarget }, { accountModuleFor }] = await Promise.all([
           import('../identity/midnames.js'),
           import('../identity/accountCustody.js'),
@@ -1099,19 +1047,16 @@ export default function CustodyPassport({ network, arm }: CustodyPassportProps) 
           { indexerHttpUrl: wallet.network.indexerHttpUrl },
           resolved.target.hex,
         )
-        const shared = {
+        await sendShielded({
           wallet,
           record,
+          account,
           label,
+          asset,
           amount,
           recipientAccountAddress: resolved.target.hex,
           recipientModule,
-        }
-        if (asset.mode === 'shielded') {
-          await sendShielded({ ...shared, account, asset })
-        } else {
-          await sendNight(shared)
-        }
+        })
         /* The figures are read by `run` AFTER this returns — see its `after`
            argument. A read from here reads nothing: the payment still holds
            the store. */
@@ -1803,14 +1748,3 @@ async function readCustodyActions(indexerHttpUrl: string, address: string) {
   }
 }
 
-/**
- * The 32 bytes `withdraw_unshielded` takes as its recipient.
- *
- * `unshieldedAddressBytes` checks the address really belongs to the network the
- * wallet is on, which is the check that stops a stagenet payment being sent to
- * a mainnet-shaped address and vanishing.
- */
-async function unshieldedRecipientBytes(address: string, networkId: string): Promise<Uint8Array> {
-  const { unshieldedAddressBytes } = await import('../identity/accountCustody.js')
-  return unshieldedAddressBytes(address, networkId)
-}

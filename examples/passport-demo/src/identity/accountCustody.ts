@@ -25,10 +25,10 @@
  * consumed unchanged at a pinned commit — whose deposits are the same
  * permissionless calls under different names, with a sealed delivery beside the
  * shielded one. So the deposits ask the chain which build they are paying and
- * call what it carries ({@link depositNight}, {@link depositShielded}), and
- * {@link payCustodyAccount} is the one entry point a surface needs for any of
- * them. Nothing here spends from one of those accounts: that is a signature the
- * Dynamic sign-in makes, and it lives in `./custodyContractClient.ts`.
+ * call what it carries ({@link depositNight}, {@link depositShielded}), which
+ * a surface reaches directly. Nothing here spends from one of those accounts:
+ * that is a signature the sign-in or the passkey makes, and it lives in
+ * `./custodyContractClient.ts`.
  *
  * IT IS A SIBLING OF `./passportContract.ts` AND `./midnames.ts`
  * -------------------------------------------------------------
@@ -2305,84 +2305,6 @@ export async function depositShielded(
     onPhase,
   );
   return { ...result, delivery };
-}
-
-/* -------------------------------------------------------------------------- */
-/* Paying a Passport — one call, whichever build the recipient holds           */
-/* -------------------------------------------------------------------------- */
-
-/** A payment into somebody's account, in the vocabulary a screen has. */
-export type PayAccountRequest =
-  | {
-      /** The recipient's account contract, raw 64-hex or prefixed. */
-      targetAddress: string;
-      kind: 'night';
-      colourHex: string;
-      amount: bigint;
-      prepared?: PreparedAccountCall | null;
-    }
-  | {
-      targetAddress: string;
-      kind: 'shielded';
-      /** The exact note to move, nonce and all — see {@link DepositShieldedRequest}. */
-      coin: AccountShieldedCoin;
-      prepared?: PreparedAccountCall | null;
-    };
-
-/**
- * PAYS ANOTHER PASSPORT'S ACCOUNT, WITHOUT THE CALLER KNOWING ANY OF THIS.
- *
- * THE CONTRACT THIS KEEPS
- * -----------------------
- *   - the caller names a recipient, an asset, and an amount, and nothing else.
- *     Which circuit that account carries, what arguments it takes, and whether
- *     a delivery has to be sealed for it are all read off the chain here;
- *   - it is PERMISSIONLESS on every build: no signature, no approval, nothing
- *     of the recipient's is spent. What moves is the CALLING wallet's own
- *     value, which its balancing covers, and the fee is the sponsor's as it is
- *     everywhere else in this module;
- *   - it either returns a transaction the chain accepted, or throws an
- *     {@link AccountCustodyError} whose message is one sentence a person can
- *     read. There is no path that reports a payment it did not submit;
- *   - `delivery` on the result is the honest extra: `delivered` where this
- *     payment's own bytes were found in the recipient's public list,
- *     `unconfirmed` where they have not appeared yet, and absent where the
- *     recipient's build keeps a balance a caller can simply read back.
- *
- * WHY IT EXISTS. Two surfaces pay a Passport — the passkey one through its name
- * send, and the Dynamic one paying another Dynamic Passport — and the second
- * must not grow its own copy of the first's circuit names. This is the one
- * copy. It adds no decision of its own: both branches are the deposits
- * immediately above, which is why a caller may also reach those directly when
- * it already holds a prepared connection or wants the deposit's own request
- * shape.
- */
-export async function payCustodyAccount(
-  handle: LocalMidnightWallet,
-  request: PayAccountRequest,
-  onPhase?: (progress: AccountCustodyProgress) => void,
-): Promise<DepositShieldedResult> {
-  if (request.kind === 'night') {
-    return depositNight(
-      handle,
-      {
-        contractAddress: request.targetAddress,
-        colourHex: request.colourHex,
-        amount: request.amount,
-        prepared: request.prepared ?? null,
-      },
-      onPhase,
-    );
-  }
-  return depositShielded(
-    handle,
-    {
-      contractAddress: request.targetAddress,
-      coin: request.coin,
-      prepared: request.prepared ?? null,
-    },
-    onPhase,
-  );
 }
 
 /* -------------------------------------------------------------------------- */
