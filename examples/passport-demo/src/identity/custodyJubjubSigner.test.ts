@@ -57,6 +57,7 @@ import {
 import {
   JUBJUB_DEVICE_LABEL,
   JUBJUB_R,
+  JUBJUB_REJECTION_ATTEMPTS,
   bytesToBigIntLE,
   deriveJubjubDeviceScalar,
   grindJubjubChallenge,
@@ -102,6 +103,65 @@ const pure: CustodyPureCircuits = compiled.pureCircuits;
 
 /** A fixed stand-in for the 32 bytes a passkey's PRF output is stretched into. */
 const ROOT = Uint8Array.from({ length: 32 }, (_, i) => (i * 7 + 11) & 0xff);
+
+/**
+ * The scalar {@link ROOT} derives to, pinned.
+ *
+ * Blocks 0 to 12 of this root all read at or above `r_J` and block 13 is the
+ * first one in range, so the vector exercises rejection thirteen times over
+ * rather than agreeing with `mod r_J` by accident on an accepted first block.
+ */
+const ROOT_SCALAR = BigInt('0x068b7d1aad6aa7adabb238a29e69075afe1cb03f7f90104816c2c3fd78eb52cb');
+
+/** Where {@link ROOT_SCALAR} is accepted. */
+const ROOT_COUNTER = 13;
+
+/**
+ * What the SAME root derived to before 2026/09/18, when the counter was one
+ * byte and the payload 65.
+ *
+ * It is the scalar recorded in `scratchpad/jj-stagenet/RESULT.md`, and it is
+ * here so the widening is drilled rather than described: it is a perfectly
+ * in-range scalar, and it is not the answer any more.
+ */
+const ROOT_SCALAR_ONE_BYTE = BigInt(
+  '0x030d8410bffec330ce47b05e50ab88c340dd4954145a243cf7123b3b1ab9f279',
+);
+
+/**
+ * `SHA-256(label32 ‖ root32 ‖ counter as four big-endian bytes)`, read
+ * big-endian: the derivation rule as the module's header states it, written
+ * out here from WebCrypto directly.
+ *
+ * WRITTEN OUT ON PURPOSE. The module's own `derivationHash` is private, and
+ * importing it would make every assertion below a tautology rather than
+ * evidence. The counter is four bytes because the module's is, and the payload
+ * is 68 for the same reason — a 65-byte payload produces a different digest
+ * for EVERY counter, including zero, which is what makes the widening visible
+ * at all.
+ */
+async function blockByHand(root: Uint8Array, counter: number): Promise<bigint> {
+  const payload = new Uint8Array(68);
+  payload.set(new TextEncoder().encode(JUBJUB_DEVICE_LABEL), 0);
+  payload.set(root, 32);
+  new DataView(payload.buffer).setUint32(64, counter, false);
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', payload));
+  let value = 0n;
+  for (const byte of digest) value = (value << 8n) | BigInt(byte);
+  return value;
+}
+
+/** The same rule with the ONE-byte counter this module used before 2026/09/18. */
+async function blockByHandOneByteCounter(root: Uint8Array, counter: number): Promise<bigint> {
+  const payload = new Uint8Array(65);
+  payload.set(new TextEncoder().encode(JUBJUB_DEVICE_LABEL), 0);
+  payload.set(root, 32);
+  payload[64] = counter;
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', payload));
+  let value = 0n;
+  for (const byte of digest) value = (value << 8n) | BigInt(byte);
+  return value;
+}
 
 const ADDRESS = new Uint8Array(32).fill(3);
 const AUTH_NONCE = 41n;
@@ -235,18 +295,7 @@ describe('deriving the device scalar from a passkey contract root', () => {
      makes the two rules tell each other apart — on a root accepted at counter
      0 they agree by accident. */
   it('rejects the first block and takes a later one, rather than reducing it', async () => {
-    const label = new TextEncoder().encode(JUBJUB_DEVICE_LABEL);
-    const block = async (counter: number): Promise<bigint> => {
-      const payload = new Uint8Array(65);
-      payload.set(label, 0);
-      payload.set(ROOT, 32);
-      payload[64] = counter;
-      const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', payload));
-      let value = 0n;
-      for (const byte of digest) value = (value << 8n) | BigInt(byte);
-      return value;
-    };
-    const first = await block(0);
+    const first = await blockByHand(ROOT, 0);
     /* The fixture's premise: block 0 really is out of range. */
     expect(first).toBeGreaterThanOrEqual(JUBJUB_R);
 
@@ -256,38 +305,66 @@ describe('deriving the device scalar from a passkey contract root', () => {
     /* What expand-and-reject produces: a later block, taken whole. */
     let accepted = -1;
     for (let counter = 1; counter < 256 && accepted < 0; counter++) {
-      const value = await block(counter);
+      const value = await blockByHand(ROOT, counter);
       if (value > 0n && value < JUBJUB_R) accepted = counter;
     }
-    expect(accepted).toBeGreaterThan(0);
-    expect(derived).toBe(await block(accepted));
+    expect(accepted).toBe(ROOT_COUNTER);
+    expect(derived).toBe(await blockByHand(ROOT, accepted));
   });
 
   it('reproduces the rule written down in the header, counter and all', async () => {
     /* The rule, computed here from WebCrypto directly: the first
-       SHA-256(label32 ‖ root ‖ counter) read big-endian that is in range. */
-    const label = new TextEncoder().encode(JUBJUB_DEVICE_LABEL);
+       SHA-256(label32 ‖ root ‖ u32be(counter)) read big-endian that is in
+       range. */
     let expected: bigint | null = null;
     let acceptedAt = -1;
     for (let counter = 0; counter < 256 && expected === null; counter++) {
-      const payload = new Uint8Array(65);
-      payload.set(label, 0);
-      payload.set(ROOT, 32);
-      payload[64] = counter;
-      const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', payload));
-      let value = 0n;
-      for (const byte of digest) value = (value << 8n) | BigInt(byte);
+      const value = await blockByHand(ROOT, counter);
       if (value > 0n && value < JUBJUB_R) {
         expected = value;
         acceptedAt = counter;
       }
     }
-    expect(expected).not.toBeNull();
+    expect(expected).toBe(ROOT_SCALAR);
     expect(await deriveJubjubDeviceScalar(ROOT)).toBe(expected);
     /* Rejection really happens: this root is not accepted at counter 0, so the
        loop's reject branch is exercised by the fixture rather than asserted
        about in the abstract. */
-    expect(acceptedAt).toBeGreaterThan(0);
+    expect(acceptedAt).toBe(ROOT_COUNTER);
+  });
+
+  /* THE COUNTER'S WIDTH, 2026/09/18. `payload[64] = counter` stored the counter
+     MOD 256: block 256 was block 0 again, the stream was 256 blocks long and
+     then repeated for ever, and a passkey whose root missed on all 256 had no
+     device key at all — on any device, for ever, because the derivation is a
+     pure function of that credential. Four bytes is the fix, and it changed
+     every derived key, which is why it was done before any passkey account
+     existed. */
+  it('counts the counter in four big-endian bytes, not the one byte that wrapped at 256', async () => {
+    const derived = await deriveJubjubDeviceScalar(ROOT);
+    expect(derived).toBe(ROOT_SCALAR);
+    expect(derived).toBe(await blockByHand(ROOT, ROOT_COUNTER));
+
+    /* The old payload's answer for this same root, which the stagenet run of
+       2026/09/18 recorded. It is a perfectly usable scalar — so it was not
+       dropped for being out of range, it is simply not this rule's answer. */
+    expect(await blockByHandOneByteCounter(ROOT, 4)).toBe(ROOT_SCALAR_ONE_BYTE);
+    expect(isJubjubScalar(ROOT_SCALAR_ONE_BYTE)).toBe(true);
+    expect(derived).not.toBe(ROOT_SCALAR_ONE_BYTE);
+  });
+
+  it('bounds the loop where missing every draw is astronomically unlikely, which 256 was not', () => {
+    expect(JUBJUB_REJECTION_ATTEMPTS).toBeGreaterThanOrEqual(1024);
+    /* Acceptance is r_J / 2^256, which is ~0.0566 — about one draw in 17.7,
+       and not the “1 in 16” the header used to claim. */
+    const accepts = Number(JUBJUB_R) / 2 ** 256;
+    expect(accepts).toBeGreaterThan(0.056);
+    expect(accepts).toBeLessThan(0.057);
+    /* What the bound that was here meant: one passkey in roughly three million
+       could not make a Passport at all. What this one means: it does not
+       happen. */
+    expect((1 - accepts) ** 256).toBeGreaterThan(1e-7);
+    expect((1 - accepts) ** JUBJUB_REJECTION_ATTEMPTS).toBeLessThan(1e-20);
   });
 
   it('gives different keys to different passkeys', async () => {
@@ -319,10 +396,14 @@ describe('sampling a nonce', () => {
     expect(randomJubjubScalar(scalarSource(0n, JUBJUB_R, 5n))).toBe(5n);
   });
 
-  it('gives up rather than looping for ever', () => {
-    expect(() => randomJubjubScalar(scalarSource(0n))).toThrow(
-      'could not sample a JubJub scalar in range',
-    );
+  it('gives up after the whole bound of draws rather than looping for ever', () => {
+    let draws = 0;
+    const never = (length: number): Uint8Array => {
+      draws += 1;
+      return new Uint8Array(length);
+    };
+    expect(() => randomJubjubScalar(never)).toThrow('could not sample a JubJub scalar in range');
+    expect(draws).toBe(JUBJUB_REJECTION_ATTEMPTS);
   });
 });
 
@@ -467,11 +548,16 @@ describe('the grind', () => {
     }
   });
 
-  it('gives up on a builder whose hash never reads below the order', () => {
-    const always = (): Uint8Array => new Uint8Array(32).fill(0xff);
+  it('gives up on a builder whose hash never reads below the order, after the whole bound', () => {
+    let tries = 0;
+    const always = (): Uint8Array => {
+      tries += 1;
+      return new Uint8Array(32).fill(0xff);
+    };
     expect(() => grindJubjubChallenge(always, { x: 1n, y: 2n, identity: false })).toThrow(
       'could not grind a JubJub challenge below the subgroup order',
     );
+    expect(tries).toBe(JUBJUB_REJECTION_ATTEMPTS);
   });
 });
 
