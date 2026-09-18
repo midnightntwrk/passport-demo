@@ -39,6 +39,7 @@
  */
 
 import assert from 'node:assert/strict';
+import { Buffer } from 'node:buffer';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
@@ -161,5 +162,162 @@ describe('which build a real served state is', () => {
     assert.ok(waveOne.includes('deposit_unshielded'));
     assert.ok(!waveOne.includes('withdraw_shielded_with_k256'));
     assert.equal(accountModuleForState({ operations: () => waveOne }), 'account-custody');
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The fix: the pre-flight reading through the account's own build             */
+/* -------------------------------------------------------------------------- */
+
+import {
+  AccountStateRefusal,
+  accountViewFrom,
+  type CustodyAccountLedger,
+  type PrototypeAccountLedger,
+} from '../src/accountState.js';
+
+const NATIVE_COLOUR = new Uint8Array(32);
+/* The colour the prototype fixture really holds 40 of, read off its own
+   `coins` map. Written down so a decode that started answering about some
+   other colour would fail here rather than at a partner's gift. */
+const PROTOTYPE_COIN_COLOUR = Uint8Array.from(
+  Buffer.from('1a2917fbed8b5ce44d12ebc7d337689045f6c96a6bbd39cf3d8691ab310ef6a6', 'hex'),
+);
+
+const prototypeLedger = (prototypeBuild as unknown as {
+  ledger: (data: unknown) => PrototypeAccountLedger;
+}).ledger;
+const custodyLedger = (custodyBuild as unknown as {
+  ledger: (data: unknown) => CustodyAccountLedger;
+}).ledger;
+
+/** The refusal a read threw, because `assert.throws` does not hand it back. */
+function refusalFrom(read: () => unknown): AccountStateRefusal {
+  try {
+    read();
+  } catch (cause) {
+    assert.ok(cause instanceof AccountStateRefusal, `expected a refusal, got ${String(cause)}`);
+    return cause;
+  }
+  throw new assert.AssertionError({ message: 'the read was expected to refuse and did not' });
+}
+
+const viewOf = (state: ContractState, address: string) =>
+  accountViewFrom<PrototypeAccountLedger, CustodyAccountLedger>({
+    state,
+    address,
+    module: accountModuleForState(state),
+    nativeColour: NATIVE_COLOUR,
+    prototypeLedger,
+    custodyLedger,
+  });
+
+describe('the pre-flight, reading each account with the build it actually is', () => {
+  it('opens the passkey Passport the sponsor refused', () => {
+    const view = viewOf(custodyJubjub, CUSTODY_JUBJUB_ADDRESS);
+    assert.equal(view.module, 'account-custody');
+    /* Nothing has been deposited yet — this is the account whose funding was
+       refused — so the mirror reads zero, which is a READING and is what makes
+       the NIGHT leg owed rather than already paid. */
+    assert.equal(view.unshielded(NATIVE_COLOUR), 0n);
+    /* Stateless shielded custody: null is "cannot be asked", never zero. */
+    assert.equal(view.shielded(NATIVE_COLOUR), null);
+    assert.equal(view.encKey()?.length, 32);
+    assert.equal(view.inboxCount(), 0n);
+    assert.equal(view.inboxEntry(0n), null);
+  });
+
+  it('opens the Dynamic-born account that has been spending, and walks its inbox', () => {
+    const view = viewOf(custodyK256, CUSTODY_K256_ADDRESS);
+    assert.equal(view.module, 'account-custody');
+    assert.equal(view.inboxCount(), 4n);
+    for (let index = 0n; index < 4n; index += 1n) {
+      /* 192 bytes, the InboxEntry v1 container — the only public trace a
+         shielded deposit into a custody account leaves, and what a
+         confirmation is built out of. */
+      assert.equal(view.inboxEntry(index)?.length, 192);
+    }
+    /* Out of range, either way, is a null rather than a throw: a confirmation
+       that cannot read a slot falls back, it does not fail an activation. */
+    assert.equal(view.inboxEntry(4n), null);
+    assert.equal(view.inboxEntry(-1n), null);
+  });
+
+  it('leaves the prototype account answering exactly what it answered before', () => {
+    /* THE SNAPSHOT. Every number here is what `/fund-account` read off this
+       account before any of this changed: 2,000 NIGHT mirrored, one coin of 40
+       in `coins`, and no inbox and no encryption key because this build has
+       neither. */
+    const view = viewOf(prototype, PROTOTYPE_ADDRESS);
+    assert.equal(view.module, 'account');
+    assert.equal(view.unshielded(NATIVE_COLOUR), 2000n);
+    assert.equal(view.shielded(PROTOTYPE_COIN_COLOUR), 40n);
+    assert.equal(view.shielded(NATIVE_COLOUR), 0n);
+    assert.equal(view.encKey(), null);
+    assert.equal(view.inboxCount(), null);
+    assert.equal(view.inboxEntry(0n), null);
+  });
+
+  it('refuses an unbooted account plainly, and not as a contract that is not a Passport', () => {
+    /* A Passport between its deploy and its activation is REAL. The
+       constructor leaves `booted = false` and `device_count = 0`, and
+       `activate_initial_device_with_<arm>` sets both; a deposit made in
+       between lands in a contract with no device that could ever move it out
+       again. So it is refused — under its own code, with its own sentence. */
+    const unbooted = { ...custodyLedger(custodyJubjub.data), booted: false, device_count: 0n };
+    const refusal = refusalFrom(() =>
+      accountViewFrom<PrototypeAccountLedger, CustodyAccountLedger>({
+        state: custodyJubjub,
+        address: CUSTODY_JUBJUB_ADDRESS,
+        module: 'account-custody',
+        nativeColour: NATIVE_COLOUR,
+        prototypeLedger,
+        custodyLedger: () => unbooted,
+      }),
+    );
+    assert.equal(refusal.code, 'account-not-activated');
+    assert.match(refusal.message, /not finished/);
+    assert.doesNotMatch(refusal.message, /is not a Passport/);
+  });
+
+  it('still refuses a contract that is not an account at all', () => {
+    /* The gate this whole fingerprint exists for. Compact decodes positionally,
+       so a foreign contract can look plausible; the balancer will not pay coins
+       into one. A state that declares no account circuit at all falls to the
+       prototype reader, whose decode of a stranger throws. */
+    const stranger = { operations: () => ['mint_shielded'], data: prototype.data };
+    const refusal = refusalFrom(() =>
+      accountViewFrom<PrototypeAccountLedger, CustodyAccountLedger>({
+        state: stranger,
+        address: 'ff'.repeat(32),
+        module: accountModuleForState(stranger),
+        nativeColour: NATIVE_COLOUR,
+        prototypeLedger: () => {
+            throw new Error('not this contract');
+          },
+        custodyLedger,
+      }),
+    );
+    assert.equal(refusal.code, 'not-an-account');
+  });
+
+  it('says which reader was wrong when a custody account reaches the prototype one', () => {
+    /* The sentence a Passport was given on 2026/09/18, corrected. It is not
+       "this is not a Passport"; it is "this reader is the wrong one", which is
+       the difference between an operator looking for a broken account and an
+       operator looking for a pre-flight that asked the wrong build. */
+    const refusal = refusalFrom(() =>
+      accountViewFrom<PrototypeAccountLedger, CustodyAccountLedger>({
+        state: custodyJubjub,
+        address: CUSTODY_JUBJUB_ADDRESS,
+        /* The module the OLD marker chose for a wave-1 jubjub account. */
+        module: 'account-custody',
+        nativeColour: NATIVE_COLOUR,
+        prototypeLedger,
+        custodyLedger: undefined,
+      }),
+    );
+    assert.equal(refusal.code, 'not-an-account');
+    assert.match(refusal.message, /account custody/);
   });
 });

@@ -74,12 +74,19 @@ import {
   accountModuleForState,
   proverForModule,
   type AccountModuleName,
-  accountEncKey,
   scanInboxForEntry,
   InboxEntryRequired,
   sealedShieldedDeposit,
   shieldedDepositConfirmed,
 } from './accountModule.js';
+import {
+  AccountStateRefusal,
+  accountViewFrom,
+  decodePrototypeAccount as decodePrototypeAccountState,
+  type AccountView,
+  type CustodyAccountLedger,
+} from './accountState.js';
+
 import { randomBytes } from 'node:crypto';
 
 import * as ledger from '@midnightntwrk/ledger-v9';
@@ -266,76 +273,16 @@ export const ONE_TX_TRANSFER_OPERATION = 'transfer_shielded_to_account';
  */
 interface AccountCustodyModule {
   Contract: new (witnesses: unknown) => unknown;
-  ledger: (state: unknown) => AccountCustodyLedger;
+  ledger: (state: unknown) => CustodyAccountLedger;
 }
 
-interface AccountCustodyLedger {
-  readonly round: bigint;
-  readonly device_count: bigint;
-  readonly device_epoch: bigint;
-  readonly booted: boolean;
-  readonly inbox_count: bigint;
-  /**
-   * The entries themselves, keyed by the index they were written at.
-   *
-   * PUBLIC, and the reason a custody deposit is confirmable at all. The 192 bytes
-   * are opaque to everybody but the owner, but a depositor that kept the bytes
-   * it sealed can find them here and know that its own deposit landed rather
-   * than merely that somebody's did.
-   */
-  inbox: { member(index: bigint): boolean; lookup(index: bigint): Uint8Array };
-  /** The account's advertised X25519 key. Every inbox entry is sealed to it. */
-  readonly enc_key: Uint8Array;
-  devices: { member(entry: Uint8Array): boolean; size(): bigint };
-  unshielded_balances: {
-    member(colour: Uint8Array): boolean;
-    lookup(colour: Uint8Array): bigint;
-  };
-}
-
-/**
- * What this service needs to know about an account it is about to pay, read off
- * the account's own state in one pass: which build it is, and what it already
- * holds of the colour being deposited.
- */
-interface AccountView {
-  readonly module: AccountModuleName;
-  /** The mirrored unshielded balance of `colour` — `night_balances` or `unshielded_balances`. */
-  unshielded(colour: Uint8Array): bigint;
-  /**
-   * The mirrored shielded balance of `colour`, or `null` on a build that keeps
-   * no such mirror. `null` is not "zero": it is "this cannot be asked".
-   */
-  shielded(colour: Uint8Array): bigint | null;
-  /**
-   * The account's advertised `enc_key`, or `null` on a build that has none.
-   *
-   * READ LIVE, EVERY TIME, and never cached: `rotate_enc_key_with_k256` is a
-   * circuit an owner may call at any moment, and a depositor sealing to a key
-   * the account has moved on from writes an entry the owner cannot open, with
-   * a coin inside it that is then unspendable for ever. The cost of asking
-   * again is one state read; the cost of not asking is the deposit.
-   */
-  encKey(): Uint8Array | null;
-  /**
-   * `inbox_count`, or `null` on a build that has no inbox.
-   *
-   * It is the ONLY public trace a shielded deposit into a custody account leaves —
-   * custody there is stateless by design, so there is no balance to read back
-   * and this is what a confirmation has to be built out of. It says how many
-   * entries there are and NOT whose they are: see {@link AccountView.inboxEntry}.
-   */
-  inboxCount(): bigint | null;
-  /**
-   * The entry at one index, or `null` when there is none, or when this build
-   * has no inbox at all.
-   *
-   * What turns "the inbox grew" into "our deposit landed". Never throws: a map
-   * this service cannot walk is a `null` and a weaker confirmation, not a
-   * failed activation.
-   */
-  inboxEntry(index: bigint): Uint8Array | null;
-}
+/* The custody ledger shape and `AccountView` moved to `./accountState.ts`, with
+   the decode and the fingerprints that go with them: they are what the funding
+   pre-flight is, and inside this closure the only way to test them was to build
+   a funder — which needs a wallet, a seed, and a node. See the note at the head
+   of that file, and `test/accountCustodyState.test.ts`, which asks them the
+   question this service got wrong with three real stagenet states. */
+export type { AccountView } from './accountState.js';
 
 /** Byte-for-byte, and length first so two keys of different lengths are not equal. */
 function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
@@ -347,6 +294,13 @@ function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
 export type AccountFundingErrorCode =
   /** No state at that address, or state that does not decode as an account. */
   | 'not-an-account'
+  /**
+   * It IS an account, and it has not been activated yet: deployed, with no
+   * device on it. A separate code from `not-an-account` because it is a
+   * separate thing to say to somebody — nothing is wrong, the setup is not
+   * finished — and because neither is worth this service retrying on its own.
+   */
+  | 'account-not-activated'
   /** The indexer could not be read, so nothing may be asserted about the account. */
   | 'indexer-unreachable'
   /** The deposit transaction was refused or failed; nothing was credited. */
@@ -833,10 +787,20 @@ export interface AssetFunding {
 
 /** Both balances an account holds, from ONE decode of ONE indexer read. */
 export interface AccountBalances {
-  /** Mirrored NIGHT for the native colour. */
+  /** Mirrored NIGHT for the native colour — `night_balances` or `unshielded_balances`. */
   night: bigint;
-  /** `coins[mUSD].value`, or zero when the account holds none. */
-  asset: bigint;
+  /**
+   * `coins[mUSD].value`, zero when the account holds none, and NULL on the
+   * account custody build, which mirrors nothing.
+   *
+   * Null is not zero and it is not a gap. Shielded custody there is stateless
+   * by design (MIP-0012 §6.1): no held coin's description ever reaches public
+   * state, so "how much mUSD does this account hold" has no answer anybody but
+   * the owner can read. A caller deciding whether the asset leg is still owed
+   * has to fall back on its own record of having paid it, which is what
+   * `./activationLegs.ts` does, rather than on a balance that was never there.
+   */
+  asset: bigint | null;
 }
 
 export interface AccountFunder {
@@ -1311,58 +1275,27 @@ export async function createAccountFunder(
    * balancer will not pay coins into it.
    */
   const readAccount = async (address: string): Promise<AccountLedger> => {
-    let state: unknown;
-    try {
-      state = await reader.queryContractState(address);
-    } catch (cause) {
-      throw new AccountFundingError(
-        'indexer-unreachable',
-        `The ${config.networkId} indexer could not be read, so nothing can be established about the contract at ${address}.`,
-        cause instanceof Error ? cause.message : String(cause),
-      );
-    }
-    if (!state) {
-      throw new AccountFundingError(
-        'not-an-account',
-        `No contract state is served at ${address} on ${config.networkId}, so there is no account to fund. Deploy the account-custody contract first.`,
-      );
-    }
-    return decodePrototypeAccount(state, address);
-  };
-
-  /** The prototype builds' decode and fingerprint, over a state already read. */
-  const decodePrototypeAccount = (state: unknown, address: string): AccountLedger => {
-    let decoded: AccountLedger | null = null;
-    try {
-      const candidate = account.ledger((state as { data: unknown }).data);
-      if (candidate.device_count >= 1n && candidate.recovery_shares.size() === 3n) {
-        candidate.night_balances.member(colour);
-        decoded = candidate;
-      }
-    } catch {
-      decoded = null;
-    }
-    if (!decoded) {
-      throw new AccountFundingError(
-        'not-an-account',
-        `The contract at ${address} is not a Passport account-custody contract — its state does not decode as one — so the balancer will not deposit into it.`,
-      );
-    }
-    return decoded;
+    const state = await readState(address);
+    return refusing(() =>
+      decodePrototypeAccountState(
+        account.ledger,
+        state,
+        address,
+        accountModuleForState(state),
+        colour,
+      ),
+    );
   };
 
   /**
-   * The same read as {@link readAccount}, for all THREE builds.
+   * The one indexer read every reader below is built on, with both of the ways
+   * it can fail already turned into this module's refusals.
    *
-   * One query, because the module and the balance come off the same state and
-   * asking twice would let them disagree. The fingerprint is per build and
-   * every one of them is structural for the reason `readAccount` gives: Compact
-   * decodes positionally, a foreign contract can look plausible, and the
-   * balancer will not pay coins into a contract it cannot recognise. The
-   * account custody fingerprint is `booted` with at least one device — the constructor sets
-   * both, and no gated circuit can take either away.
+   * "We could not ask" and "it is not ours" must never look alike to the caller
+   * deciding whether to spend, so they are separated here, once, rather than at
+   * each of the three call sites that used to carry a copy.
    */
-  const readAccountView = async (address: string): Promise<AccountView> => {
+  const readState = async (address: string): Promise<unknown> => {
     let state: unknown;
     try {
       state = await reader.queryContractState(address);
@@ -1379,73 +1312,62 @@ export async function createAccountFunder(
         `No contract state is served at ${address} on ${config.networkId}, so there is no account to fund. Deploy the account-custody contract first.`,
       );
     }
-    const module = accountModuleForState(state);
-    const data = (state as { data: unknown }).data;
-    if (module === 'account-custody') {
-      /* OUTSIDE the try below, deliberately. That try exists to turn a state
-         that does not decode into `not-an-account`, and a host that cannot load
-         the build at all has said nothing about this account — swallowing its
-         refusal there would tell a caller its Passport is not a Passport. */
-      const custody = await accountCustodyOnce();
-      let decoded: AccountCustodyLedger | null = null;
-      try {
-        const candidate = custody.ledger(data);
-        if (candidate.booted && candidate.device_count >= 1n) decoded = candidate;
-      } catch {
-        decoded = null;
-      }
-      if (!decoded) {
-        throw new AccountFundingError(
-          'not-an-account',
-          `The contract at ${address} declares the account custody circuits but its state does not decode as a custody account, so the balancer will not deposit into it.`,
-        );
-      }
-      const ledgerCustody = decoded;
-      return {
-        module,
-        unshielded: (c) =>
-          ledgerCustody.unshielded_balances.member(c) ? ledgerCustody.unshielded_balances.lookup(c) : 0n,
-        /* Stateless shielded custody: there is no mirror to read. NOT zero. */
-        shielded: () => null,
-        encKey: () => accountEncKey(ledgerCustody),
-        inboxCount: () => ledgerCustody.inbox_count,
-        inboxEntry: (index) => {
-          try {
-            if (index < 0n || index >= ledgerCustody.inbox_count) return null;
-            if (!ledgerCustody.inbox.member(index)) return null;
-            const entry = ledgerCustody.inbox.lookup(index);
-            return entry instanceof Uint8Array ? entry : null;
-          } catch {
-            /* An older build, or a map shape this decode does not know. The
-               confirmation falls back to the deposit's own inclusion. */
-            return null;
-          }
-        },
-      };
-    }
-    const decoded = decodePrototypeAccount(state, address);
-    return {
-      module,
-      unshielded: () => mirroredNight(decoded),
-      shielded: () => heldAsset(decoded),
-      /* The prototype builds have neither. They mirror their shielded holdings
-         instead, which is what `shielded` above reads. */
-      encKey: () => null,
-      inboxCount: () => null,
-      inboxEntry: () => null,
-    };
+    return state;
   };
 
-  /** The mirrored NIGHT balance, treating an absent colour as zero. */
-  const mirroredNight = (decoded: AccountLedger): bigint =>
-    decoded.night_balances.member(colour) ? decoded.night_balances.lookup(colour) : 0n;
+  /**
+   * A refusal from `./accountState.ts` in this module's own currency.
+   *
+   * The decode and the fingerprints live outside this closure so they can be
+   * asked without a wallet; the codes they refuse under are exactly the ones
+   * {@link AccountFundingErrorCode} carries, and the sentences are theirs
+   * unchanged.
+   */
+  const refusing = <T>(read: () => T): T => {
+    try {
+      return read();
+    } catch (cause) {
+      if (cause instanceof AccountStateRefusal) {
+        throw new AccountFundingError(cause.code, cause.message);
+      }
+      throw cause;
+    }
+  };
 
-  /** The shielded balance of the asset colour, treating an absent colour as zero. */
-  const heldAsset = (decoded: AccountLedger): bigint => {
-    if (!assetColourBytes) return 0n;
-    return decoded.coins.member(assetColourBytes)
-      ? decoded.coins.lookup(assetColourBytes).value
-      : 0n;
+  /**
+   * The same read as {@link readAccount}, for all THREE builds — and the read
+   * every pre-flight in this service goes through.
+   *
+   * One query, because the module and the balance come off the same state and
+   * asking twice would let them disagree. The decode, both fingerprints, and
+   * every sentence they refuse with live in `./accountState.ts`, where they can
+   * be asked without a wallet; what is left here is the read, the load of the
+   * third build, and the translation of a refusal into this module's currency.
+   *
+   * WHAT WAS WRONG UNTIL 2026/09/18. `balances()` did not come through this
+   * function at all: it read through `readAccount`, which is the PROTOTYPE
+   * decode, so `POST /fund-account` refused every account custody Passport with
+   * "is not a Passport account-custody contract" about an account that is one.
+   */
+  const readAccountView = async (address: string): Promise<AccountView> => {
+    const state = await readState(address);
+    const module = accountModuleForState(state);
+    /* Loaded OUTSIDE the decode, deliberately. A host that cannot load the
+       build at all has said nothing about this account, and the refusal for
+       that is `accountCustodyOnce`'s own `prover-unavailable` — swallowing it
+       into the decode would tell a caller its Passport is not a Passport. */
+    const custodyLedger =
+      module === 'account-custody' ? (await accountCustodyOnce()).ledger : undefined;
+    return refusing(() =>
+      accountViewFrom<AccountLedger, CustodyAccountLedger>({
+        state,
+        address,
+        module,
+        nativeColour: colour,
+        prototypeLedger: account.ledger,
+        custodyLedger,
+      }),
+    );
   };
 
   /**
@@ -1676,8 +1598,15 @@ export async function createAccountFunder(
     },
 
     async balances(contractAddress: string): Promise<AccountBalances> {
-      const decoded = await readAccount(rawContractAddress(contractAddress));
-      return { night: mirroredNight(decoded), asset: heldAsset(decoded) };
+      /* THROUGH THE VIEW, for all three builds. This used to read through
+         `readAccount` — the prototype decode — which is why `/fund-account`
+         answered `not-an-account` to every account custody Passport, including
+         one that had been activated and named on stagenet an hour earlier. */
+      const view = await readAccountView(rawContractAddress(contractAddress));
+      return {
+        night: view.unshielded(colour),
+        asset: assetColourBytes ? view.shielded(assetColourBytes) : 0n,
+      };
     },
 
     async activeDeviceCommitments(contractAddress: string): Promise<Set<string>> {

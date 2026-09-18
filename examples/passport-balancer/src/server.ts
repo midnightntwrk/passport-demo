@@ -1795,14 +1795,23 @@ async function main(): Promise<void> {
     }
     accountInFlight.add(contractAddress);
     try {
-      /* 3. It has to BE an account. One indexer read that must both find state
-            and decode it as an account-custody contract. This is the gate that
-            keeps the balancer from paying coins into a stranger's contract: a
-            contract that is not an ACC has no `deposit_night`, and the grant
-            would be spent into something the user cannot reach. BOTH balances
-            come out of that one decode, so the two legs cannot end up
-            disagreeing about what they are looking at. */
-      let held: { night: bigint; asset: bigint };
+      /* 3. It has to BE an account, and it has to be SET UP. One indexer read
+            that must find state, recognise which of the three builds it is, and
+            decode it with that build. This is the gate that keeps the balancer
+            from paying coins into a stranger's contract: a contract that is not
+            an account has no deposit circuit at all, and the grant would be
+            spent into something the user cannot reach. BOTH balances come out
+            of that one decode, so the two legs cannot end up disagreeing about
+            what they are looking at.
+
+            IT DECODES WITH THE ACCOUNT'S OWN BUILD SINCE 2026/09/18. It used to
+            decode with the prototype build whatever the account was, so every
+            account custody Passport was refused `not-an-account` — a passkey
+            Passport that had been activated and named on stagenet that morning
+            among them. `asset` is null for those accounts and that is the
+            honest answer: custody there is stateless, so there is no shielded
+            balance anybody but the owner can read. */
+      let held: { night: bigint; asset: bigint | null };
       try {
         held = await funder.balances(contractAddress);
       } catch (cause) {
@@ -1862,7 +1871,12 @@ async function main(): Promise<void> {
       const { nightNeeded, assetNeeded } = activationLegs({
         previous,
         heldNight: held.night,
-        heldAsset: held.asset,
+        /* NULL MEANS "cannot be asked", and the leg then rests on this
+           service's own record of having paid it. Treating it as zero is what
+           that comes to arithmetically — the account custody build mirrors no
+           shielded balance — but the reason matters: on a prototype account a
+           zero is a reading, and here it is an absence of one. */
+        heldAsset: held.asset ?? 0n,
         assetSupported,
         grantAtomic: funder.grantAtomic,
         assetGrant: funder.assetGrant,
@@ -1887,7 +1901,7 @@ async function main(): Promise<void> {
           refusal(
             409,
             'already-funded',
-            `That account already holds ${formatNight(held.night)} NIGHT${assetSupported ? ` and ${held.asset} ${funder.assetSymbol}` : ''} — at least one activation grant's worth — so it does not need funding.`,
+            `That account already holds ${formatNight(held.night)} NIGHT${assetSupported && held.asset !== null ? ` and ${held.asset} ${funder.assetSymbol}` : ''} — at least one activation grant's worth — so it does not need funding.`,
           ),
         );
       }
@@ -2200,7 +2214,7 @@ async function main(): Promise<void> {
              publishes no shielded holding, so the honest answer to "what does
              it hold now" is that nobody can say — and the pre-deposit reading
              is the one number guaranteed to be wrong. */
-          assetBalanceAfter: assetEntry ? assetEntry.balanceAfter ?? null : held.asset.toString(),
+          assetBalanceAfter: assetEntry ? assetEntry.balanceAfter ?? null : held.asset?.toString() ?? null,
           ...(assetError ? { assetError } : {}),
         },
       };
