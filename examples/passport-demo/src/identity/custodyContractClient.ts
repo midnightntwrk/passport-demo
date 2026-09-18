@@ -85,10 +85,15 @@ import {
   type CustodyPureCircuits,
   type K256Authorisation,
   type K256DeviceIdentity,
+  type JubjubDeviceIdentity,
+  type K1Arm,
+  type K1Authorisation,
+  type K1Challenge,
   k256Challenges,
   deviceEntry,
   bootCommitment,
 } from './custodyContractSigning.js';
+import { type JubjubSigner } from './custodyJubjubSigner.js';
 import {
   allCustodyCircuits,
   forgetCustodyAuthorityKey,
@@ -181,6 +186,66 @@ export function k1UserKey(session: Pick<CustodyDynamicSession, 'address'>): stri
   return session.address.toLowerCase();
 }
 
+/**
+ * A passkey Passport's device: the jubjub identity, and optionally the account's
+ * VIEWING secret derived from the same authenticator.
+ *
+ * The viewing secret rides along rather than being derived here because this
+ * module must never see a passkey: `passportContract.ts` does the assertion and
+ * the four derivations, and hands the results down. `runWaveOne` files it as
+ * the account's `enc_key` at deploy; see `PASSPORT_ENC_LABEL` for why a passkey
+ * Passport cannot afford the random one the Dynamic arm uses.
+ */
+export interface CustodyPasskeyDevice extends JubjubDeviceIdentity {
+  /** 32 bytes of hex, from `derivePassportContractSecrets(...).encSecret`. */
+  readonly encSecretKeyHex?: string;
+  /**
+   * 32 bytes of hex, from `derivePassportContractSecrets(...).maintenanceSecret`.
+   *
+   * Supplied ONLY when the account is meant to keep its maintenance authority.
+   * The wave plan retires it by default (`planCustodyWaves`'s third argument),
+   * in which case this is pointless rather than harmful — the authority it
+   * builds is replaced by the empty committee on the last wave. When the
+   * authority IS kept, a derived key is the only kind worth keeping: a sampled
+   * one lives in this browser's storage, and a Passport reinstalled elsewhere
+   * would hold an authority it cannot sign for. See `PASSPORT_MAINTENANCE_LABEL`
+   * for what each choice costs.
+   */
+  readonly maintenanceSecretHex?: string;
+}
+
+/** The device a deploy, an activation, or a roster read is taken with. */
+export type CustodyDeviceIdentity = K256DeviceIdentity | CustodyPasskeyDevice;
+
+/**
+ * The device a GATED call is taken with — the same union, except that the
+ * jubjub half has to be able to sign.
+ *
+ * The k256 arm's secret is Dynamic's and is reached through `session.signRaw`,
+ * so the identity is enough there. The jubjub arm's secret is the passkey's and
+ * is held by a {@link JubjubSigner} the caller built from the contract root; it
+ * never reaches this module as bytes.
+ */
+export type CustodyCallDevice = K256DeviceIdentity | (JubjubSigner & CustodyPasskeyDevice);
+
+/**
+ * The key a Passport's record, wallet seed, and viewing secret are filed under.
+ *
+ * A Dynamic Passport is named by its embedded address, as it always was. A
+ * PASSKEY Passport has no such address, and naming it by one would mean a
+ * passkey Passport and a Dynamic Passport could collide in storage or, worse,
+ * that a passkey account's record could not be found again at all. It is named
+ * by its own device point instead, which is derived from the passkey — so it is
+ * the same key before and after a reinstall, which is the property the whole
+ * arm exists for.
+ */
+export function custodyUserKey(
+  session: Pick<CustodyDynamicSession, 'address'>,
+  device: Pick<CustodyDeviceIdentity, 'arm' | 'pk'>,
+): string {
+  return device.arm === 'jubjub' ? `jubjub:${device.pk.x.toString(16)}` : k1UserKey(session);
+}
+
 /* -------------------------------------------------------------------------- */
 /* The seams                                                                  */
 /* -------------------------------------------------------------------------- */
@@ -268,6 +333,11 @@ export interface CustodyLedgerApi {
     counter: bigint,
   ) => unknown;
   ContractOperationVersionedVerifierKey: new (version: string, key: Uint8Array) => unknown;
+  /* A maintenance signing key from 32 bytes of BIP-340 secret, and its
+     verifying half — how a DERIVED authority is built instead of a sampled
+     one. See `PASSPORT_MAINTENANCE_LABEL`. */
+  signingKeyFromBip340: (data: Uint8Array) => unknown;
+  signatureVerifyingKey: (key: unknown) => unknown;
   Intent: { new: (ttl: Date) => CustodyIntent };
   MaintenanceUpdate: new (
     address: string,
@@ -643,12 +713,16 @@ function circuitResultOf(callResult: unknown): unknown {
  */
 export async function deployCustodyAccount(
   session: CustodyDynamicSession,
-  device: K256DeviceIdentity,
+  /* GENERALISATION 1 of 5 (2026/09/18, passkey arm): the wave plan's arm.
+     Either arm's device now, and the Passport is filed under the device's own
+     key — `custodyUserKey` — so a passkey account is not named by a Dynamic
+     address it does not have. */
+  device: CustodyDeviceIdentity,
   onPhase?: (phase: CustodyPhase) => void,
   overrides: Partial<CustodyDeps> = {},
 ): Promise<CustodyStepResult> {
   const deps = withDefaults(overrides);
-  const user = k1UserKey(session);
+  const user = custodyUserKey(session, device);
   onPhase?.({ step: 'wallet' });
   const wallet = await deps.wallet(user);
   const network = wallet.network.networkId;
@@ -679,9 +753,14 @@ export async function deployCustodyAccount(
     custodyPrivateStateId(record),
     custodyStoreAccount(record),
   );
-  const verifierKeys = await readVerifierKeys(providers, module);
+  const verifierKeys = await readVerifierKeys(providers, module, device.arm);
   const sizes = new Map([...verifierKeys].map(([id, key]) => [id, key.length]));
-  const waves = planCustodyWaves(sizes, 'k256');
+  /* GENERALISATION 2 of 5. The plan's FIRST arm is the device's: wave 1 must
+     carry `activate_initial_device_with_<arm>`, because the constructor's boot
+     commitment binds the arm and no later wave can repair a deploy that left
+     the activation circuit out. `planCustodyWaves` has taken the arm since it
+     was written; only the caller was hardcoded. */
+  const waves = planCustodyWaves(sizes, device.arm);
   record = { ...record, totalWaves: waves.length };
 
   /* What the chain already carries, read ONCE before any wave runs. Null means
@@ -738,12 +817,16 @@ export async function deployCustodyAccount(
 async function readVerifierKeys(
   providers: Record<string, unknown>,
   _module: CustodyContractModule,
+  /* GENERALISATION 3 of 5. `allCustodyCircuits` orders the roster by which arm
+     goes first; the sizes feed the wave plan, so reading them for the other arm
+     would plan the waves in the wrong order. */
+  firstArm: K1Arm,
 ): Promise<Map<string, Uint8Array>> {
   const zk = providers.zkConfigProvider as {
     getVerifierKey(circuit: string): Promise<Uint8Array | null>;
   };
   const keys = new Map<string, Uint8Array>();
-  for (const circuit of allCustodyCircuits('k256')) {
+  for (const circuit of allCustodyCircuits(firstArm)) {
     const key = await zk.getVerifierKey(circuit);
     if (!key) {
       throw new Error(
@@ -810,7 +893,7 @@ interface WaveContext {
  */
 async function runWaveOne(
   context: WaveContext & {
-    device: K256DeviceIdentity;
+    device: CustodyDeviceIdentity;
     wave: CustodyWave;
     module: CustodyContractModule;
     contracts: CustodyContractsApi;
@@ -838,6 +921,13 @@ async function runWaveOne(
        and receives the same key rather than advertising a second one. */
     { network: context.record.network, accountId: context.record.saltHex },
     { randomBytes: (length) => deps.randomBytes(length), subtle: () => globalThis.crypto.subtle },
+    /* PASSKEY SECRET (a). A PASSKEY account's viewing secret is derived
+       from the same authenticator as its device key, so a Passport reinstalled
+       on another phone re-derives the key its own inbox was sealed to. A
+       Dynamic account passes nothing here and keeps the random secret it has
+       always had, because Dynamic can hand that browser its storage back and a
+       passkey cannot. An existing slot always wins; see `custodyEncKeyPair`. */
+    'encSecretKeyHex' in context.device ? context.device.encSecretKeyHex : undefined,
   );
   const encryptionKey = hexToBytes(encKeys.publicKeyHex);
 
@@ -851,7 +941,30 @@ async function runWaveOne(
   const full = ledgerApi.ContractState.deserialize(
     deployData.public.initialContractState.serialize(),
   );
+  /* PASSKEY SECRET (b). The maintenance authority, DERIVED when the caller
+     asked for one it can still hold after a reinstall.
+
+     midnight-js sampled `deployData.private.signingKey` at random and this app
+     files it in `localStorage`; the wave plan then retires the authority on its
+     last wave, so today that key is spent by the time anybody could miss it.
+     The moment the plan is told NOT to retire (`planCustodyWaves`'s third
+     argument), a sampled key becomes an authority that dies with the browser —
+     so when the passkey hands one down, the deploy is built around that key
+     instead and nothing about the authority needs storing. Nicolas asked us to
+     decide rather than inherit; the default is unchanged (retire) and
+     `PASSPORT_MAINTENANCE_LABEL` says what each answer costs. */
+  const derivedMaintenance =
+    'maintenanceSecretHex' in context.device && context.device.maintenanceSecretHex !== undefined
+      ? ledgerApi.signingKeyFromBip340(hexToBytes(context.device.maintenanceSecretHex))
+      : null;
   const wave1 = buildWaveOneState(ledgerApi, full, wave);
+  if (derivedMaintenance !== null) {
+    wave1.maintenanceAuthority = new ledgerApi.ContractMaintenanceAuthority(
+      [ledgerApi.signatureVerifyingKey(derivedMaintenance)],
+      1,
+      0n,
+    ) as CustodyContractState['maintenanceAuthority'];
+  }
 
   const deploy = new ledgerApi.ContractDeploy(wave1);
   const address = String(deploy.address);
@@ -875,7 +988,7 @@ async function runWaveOne(
   const result = await contracts.submitTx(providers, { unprovenTx });
   const txHash = await resolveHash(context.providers, result);
 
-  const signingKey = deployData.private.signingKey;
+  const signingKey = derivedMaintenance ?? deployData.private.signingKey;
   const priv = providers.privateStateProvider as {
     setContractAddress?(address: string): void;
     setSigningKey(address: string, key: unknown): Promise<void>;
@@ -1095,12 +1208,12 @@ async function awaitAuthorityCounter(
  */
 export async function activateK1Device(
   session: CustodyDynamicSession,
-  device: K256DeviceIdentity,
+  device: CustodyDeviceIdentity,
   onPhase?: (phase: CustodyPhase) => void,
   overrides: Partial<CustodyDeps> = {},
 ): Promise<CustodyStepResult> {
   const deps = withDefaults(overrides);
-  const user = k1UserKey(session);
+  const user = custodyUserKey(session, device);
   const wallet = await deps.wallet(user);
   const network = wallet.network.networkId;
   const storage = deps.storage();
@@ -1111,13 +1224,20 @@ export async function activateK1Device(
   }
 
   onPhase?.({ step: 'activate' });
-  const { callTx } = await openCustodyAccount(deps, wallet, record, 'activate_initial_device_with_k256');
+  /* GENERALISATION 3 of 5: the activation circuit and ITS ARGUMENT LIST.
+     The two arms do not take the same arguments — `_with_jubjub` is
+     `(pk, salt)` and `_with_k256` is `(pk, salt, envelope)`, because an
+     envelope is a property of a vendor wrapping bytes before signing them and
+     there is no vendor on the passkey arm. The circuit is also not a free
+     choice: the constructor's boot commitment binds the arm, so an account
+     deployed with a passkey can only ever be opened by
+     `activate_initial_device_with_jubjub`. */
+  const circuit = `activate_initial_device_with_${device.arm}`;
+  const { callTx } = await openCustodyAccount(deps, wallet, record, circuit);
   const salt = hexToBytes(record.saltHex);
-  const result = await callTx.activate_initial_device_with_k256?.(
-    device.pk,
-    salt,
-    device.envelope,
-  );
+  const activationArgs =
+    device.arm === 'jubjub' ? [device.pk, salt] : [device.pk, salt, device.envelope];
+  const result = await callTx[circuit]?.(...activationArgs);
 
   onPhase?.({ step: 'confirm' });
   const providers = await deps.providers(
@@ -1152,7 +1272,7 @@ export interface CustodyCallRequest {
     pure: CustodyPureCircuits,
     context: K1CallContext,
     pk: CurvePoint,
-  ) => Uint8Array;
+  ) => K1Challenge;
   /**
    * The circuit's own return value, handed over the INSTANT the call resolves.
    *
@@ -1189,13 +1309,13 @@ export interface CustodyCallRequest {
  */
 export async function k1Call(
   session: CustodyDynamicSession,
-  device: K256DeviceIdentity,
+  device: CustodyCallDevice,
   request: CustodyCallRequest,
   onPhase?: (phase: CustodyPhase) => void,
   overrides: Partial<CustodyDeps> = {},
 ): Promise<CustodyStepResult> {
   const deps = withDefaults(overrides);
-  const user = k1UserKey(session);
+  const user = custodyUserKey(session, device);
   const wallet = await deps.wallet(user);
   const network = wallet.network.networkId;
   const storage = deps.storage();
@@ -1205,7 +1325,9 @@ export async function k1Call(
   }
 
   const module = await deps.contractModule();
-  const circuit = `${request.operation}_with_k256`;
+  /* GENERALISATION 4 of 5: the gated circuit's name. The arm IS the half of
+     every gated circuit's name that selects which proof gets made. */
+  const circuit = `${request.operation}_with_${device.arm}`;
   const { callTx, providers } = await openCustodyAccount(deps, wallet, record, circuit);
   const addressBytes = hexToBytes(record.address);
 
@@ -1222,20 +1344,41 @@ export async function k1Call(
 
   onPhase?.({ step: 'sign' });
   const challenge = request.challenge(module.pureCircuits, context, device.pk);
-  const signer = dynamicK256Signer({
-    accountAddress: session.address,
-    pk: device.pk,
-    signRawMessage: session.signRaw,
-    envelope: device.envelope,
-  });
-  const digest = await envelopeDigest(device.envelope, challenge);
-  const auth: K256Authorisation = {
-    arm: 'k256',
-    pk: device.pk,
-    use_counter: useCounter,
-    sig: await signer.signDigest(digest),
-    envelope: device.envelope,
-  };
+  /* GENERALISATION 5 of 5: how the authorisation is built.
+     The two arms diverge here and nowhere else. A k256 device is Dynamic's: the
+     challenge is finished bytes, they are hashed into the envelope digest, and
+     the vendor signs them over a socket — so the step is async and the secret
+     never comes near this module. A jubjub device is the PASSKEY's: the
+     challenge is a BUILDER, because a Schnorr preimage contains its own
+     signature nonce and the grind counter, and the signer holds the derived
+     scalar and closes the loop itself — so the step is synchronous and there is
+     no vendor to wait for. `authArgs` puts both back into the same call. */
+  let auth: K1Authorisation;
+  if (device.arm === 'jubjub') {
+    if (typeof challenge !== 'function') {
+      throw new Error('the jubjub arm needs a challenge builder, not finished bytes');
+    }
+    auth = device.sign(challenge, useCounter);
+  } else {
+    if (typeof challenge === 'function') {
+      throw new Error('the k256 arm needs a finished challenge, not a builder');
+    }
+    const signer = dynamicK256Signer({
+      accountAddress: session.address,
+      pk: device.pk,
+      signRawMessage: session.signRaw,
+      envelope: device.envelope,
+    });
+    const digest = await envelopeDigest(device.envelope, challenge);
+    const k256: K256Authorisation = {
+      arm: 'k256',
+      pk: device.pk,
+      use_counter: useCounter,
+      sig: await signer.signDigest(digest),
+      envelope: device.envelope,
+    };
+    auth = k256;
+  }
 
   onPhase?.({ step: 'submit' });
   const call = callTx[circuit];

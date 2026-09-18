@@ -263,6 +263,11 @@ function ledgerFake(chain: FakeChain, built: unknown[][]): CustodyLedgerApi {
     }
   }
   return {
+    /* A derived maintenance key is 32 bytes in, an opaque key out, and its
+       verifying half is a tagged copy — enough for the deploy to carry an
+       authority the caller can still sign for after a reinstall. */
+    signingKeyFromBip340: (data: Uint8Array) => ({ bip340: bytesToHex(data) }),
+    signatureVerifyingKey: (key: unknown) => ({ verifying: key }),
     ContractState: State,
     ContractDeploy: class {
       address = ADDRESS;
