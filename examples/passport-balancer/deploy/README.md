@@ -263,10 +263,13 @@ leave the three delegated-grant circuits behind on their own.
 `keys/<name>.verifier`, `zkir/<name>.bzkir`, checked before it proves — so the
 arm is live the moment the rsync finishes. This is the additive change the
 droplet rules allow: nothing under `/opt/passport-balancer` is touched, no unit
-file changes, and the running service is not stopped. Note that
-`accountCustodyProving.staged` is read at start-up and then once per proof, so
-`/status` will keep reporting the pre-rsync counts until the first proof asks —
-the files decide, not the counter.
+file changes, and the running service is not stopped.
+
+`accountCustodyProving.staged` follows straight away too: `/status` asks the
+filesystem for those three files per circuit on every request, and only the
+list of circuit NAMES is read from the build once and remembered. The one thing
+that does not follow is the start-up line in the journal, which was written
+before the rsync — see check 2 below.
 
 **The environment, unchanged.** The same two variables the k256 arm uses, and no
 third:
@@ -299,8 +302,9 @@ Three checks, in this order, and the third is the only one that proves anything.
 
    It reads `account-custody proving N/30 circuits staged (jubjub 11/14, k256
    14/14, shared 2/2), proving at http://127.0.0.1:6300`. It is written once at
-   start-up, so after an rsync with no restart it describes the host as it was —
-   which is why check 3 exists.
+   start-up and never again, so after an rsync with no restart it describes the
+   host as it WAS. `/status` in check 1 is the live answer; this line is what
+   the next restart will agree with.
 
 3. **A smoke proof of `activate_initial_device_with_jubjub`.** It is the
    smallest jubjub key (24.6 MB) and the first circuit a passkey Passport asks
