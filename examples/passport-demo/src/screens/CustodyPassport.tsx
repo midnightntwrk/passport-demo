@@ -951,6 +951,23 @@ export default function CustodyPassport({ network, arm }: CustodyPassportProps) 
       if (refusal !== null) throw new Error(refusal)
       const plan = planCustodyShieldedAddressSend(input)
 
+      /* BOTH KEYS COME OUT OF THE ADDRESS, and the decode is also the CHECK
+         that the address belongs to the network this Passport is on — a
+         payment to an address from another network lands somewhere nobody
+         here can reach.
+
+         IT HAPPENS BEFORE ANYTHING IS WRITTEN OR ASKED FOR. It used to run
+         after the stopped-send record was saved and after the approval: an
+         address from the wrong network therefore cost a fingerprint or a
+         sign-in prompt, and left a record on screen saying a payment was in
+         flight that had never been built. The decode asks nothing of anybody
+         and can only refuse, so it goes first, and the refusal arrives before
+         the person is interrupted. */
+      const keys = await accountModule.decodeShieldedRecipient(
+        plan.recipientShieldedAddress,
+        wallet.network.networkId,
+      )
+
       const label = shortHex(params.shieldedAddress)
       const stoppedRecord = newCustodyShieldedSend({
         network: record.network,
@@ -966,13 +983,6 @@ export default function CustodyPassport({ network, arm }: CustodyPassportProps) 
 
       setBusy(arm.approvalPrompt)
       const { device: identity } = await ensureIdentity()
-      /* BOTH KEYS COME OUT OF THE ADDRESS, and the decode is also the check
-         that stops a payment going to an address from another network and
-         vanishing. */
-      const keys = await accountModule.decodeShieldedRecipient(
-        plan.recipientShieldedAddress,
-        wallet.network.networkId,
-      )
       const sent = await withdrawShieldedK1(
         arm.session,
         identity,

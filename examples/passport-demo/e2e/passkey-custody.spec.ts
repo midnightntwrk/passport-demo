@@ -533,6 +533,34 @@ test.describe('a passkey Passport paying somebody', () => {
     await close();
   });
 
+  /* A7, 2026/09/18. The decode of a pasted address is also the check that it
+     belongs to this network, and it used to run AFTER the stopped-send record
+     was written and after the approval. So an address this Passport cannot pay
+     cost a touch of the authenticator and left a card on Home saying a payment
+     was in flight — for a payment that was never built. The check asks nothing
+     of anybody and can only refuse, so it goes first. */
+  test('refuses an address it cannot pay without writing a payment down', async ({ browser }) => {
+    const { page, close } = await passkeyPassportOnHome(browser);
+
+    /* Shaped like an address the field will accept and take the address door
+       for, and not one this Passport can pay. */
+    await page.getByLabel('Send to').fill('mn_shield-addr_stagenet1qqqqqqqqqqqqqqqqqqq');
+    await page.getByLabel('What to send').selectOption({ label: 'mUSD' });
+    await page.getByLabel('Amount').fill('5');
+    await page.getByRole('button', { name: /^Send/ }).click();
+
+    await expect(page.getByRole('alert')).toBeVisible({ timeout: 60_000 });
+    /* AND NO PAYMENT WAS WRITTEN DOWN. The card below is what a stopped
+       payment puts on Home, and nothing here was ever in flight. */
+    await expect(
+      page.getByText('Nothing was sent, and it is all still in your Passport.'),
+    ).toHaveCount(0);
+    await expect(page.locator('.mndyn-holding-figure')).toHaveText('250');
+    await expect(page.getByRole('button', { name: /^Send/ })).toBeEnabled();
+
+    await close();
+  });
+
   test('refuses the account’s NIGHT in one sentence, and says the rest works', async ({
     browser,
   }) => {
