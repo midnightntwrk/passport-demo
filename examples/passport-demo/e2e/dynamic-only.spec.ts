@@ -380,9 +380,7 @@ function stoppedSendRow(stage: string): Record<string, unknown> {
     amount: '10',
     recipientLabel: `${RESOLVABLE_NAME}.night`,
     recipientAccountAddress: PASSPORT_ACCOUNT_ADDRESS,
-    noteNonce: null,
-    withdrawTxId: 'ab'.repeat(32),
-    depositTxId: null,
+    sendTxId: 'ab'.repeat(32),
     startedAt: 1_789_600_000_000,
   };
 }
@@ -567,7 +565,7 @@ test.describe('a Passport opened again after a payment', () => {
     await context.close();
   });
 
-  test('says where a payment that stopped between its legs got to, and offers to finish it', async ({
+  test('says where a one-transaction payment got to, and offers no button to repeat it', async ({
     browser,
   }) => {
     const context = await browser.newContext(
@@ -580,49 +578,51 @@ test.describe('a Passport opened again after a payment', () => {
       name: 'walker',
       accountAddress: ACCOUNT_CUSTODY_ADDRESS,
       musd: '30',
-      stoppedSend: stoppedSendRow('awaiting-note'),
+      stoppedSend: stoppedSendRow('sending'),
     });
     await page.goto(WALK);
 
-    /* The value is out of the account and the last leg needs nobody's
-       approval, so the offer says both things and gives a button. */
+    /* THE WHOLE OF WHAT THE ONE-TRANSACTION SEND CHANGES HERE. Until
+       2026/09/18 a tab closed mid-payment left value in the sender's own
+       wallet with a leg still to run, so the offer was a sentence AND a
+       "Finish this payment" button. There is now no such leg: the transaction
+       either landed or it did not, so what is owed is the sentence and a way
+       to put it away. A button would be a button offering to pay twice. */
     const offer = page.locator('.mnob-unusable');
     await expect(offer).toBeVisible();
-    await expect(offer).toContainText('did not finish');
-    await expect(offer).toContainText('It has left your Passport and can still be delivered.');
-    await expect(page.getByRole('button', { name: 'Finish this payment' })).toBeVisible();
+    await expect(offer).toContainText('was sent as one payment');
+    await expect(offer).toContainText('Your balance below says which.');
+    await expect(page.getByRole('button', { name: 'Finish this payment' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Dismiss' })).toBeVisible();
+
+    /* And the sentence points at a balance that is really on the screen
+       beside it — the sentence is only the truth if the figure is there. */
+    await expect(page.locator('.mndyn-holding-figure')).toHaveText('30');
 
     await context.close();
   });
 
-  test('does not go quiet about a payment nothing here can see the far side of', async ({
-    browser,
-  }) => {
+  test('says nothing at all about a payment that landed', async ({ browser }) => {
     const context = await browser.newContext(
       walkContextOptions({ viewport: { width: 420, height: 900 } }),
     );
     const page = await context.newPage();
     await installNetworkBoundary(page);
     await serveAccountCustodyState(page, [ACCOUNT_CUSTODY_ADDRESS, PASSPORT_ACCOUNT_ADDRESS]);
-    /* THE DEFECT THIS CATCHES, fixed 2026/09/17: this stage was missing from
-       the reader's list of stages, so the record did not parse and a reopened
-       Passport said nothing at all about value that had demonstrably left it. */
     await seedDynamicPassport(page, {
       name: 'walker',
       accountAddress: ACCOUNT_CUSTODY_ADDRESS,
       musd: '30',
-      stoppedSend: stoppedSendRow('unconfirmed'),
+      stoppedSend: stoppedSendRow('done'),
     });
     await page.goto(WALK);
 
-    const offer = page.locator('.mnob-unusable');
-    await expect(offer).toBeVisible();
-    await expect(offer).toContainText('nothing here can see whether');
-    await expect(offer).toContainText(`Check with ${RESOLVABLE_NAME}.night before sending it again`);
-    /* Nothing to finish, so the only control is to put it away — pressing
-       "finish" on this would be a second payment. */
+    /* A payment that finished owes nobody an interruption on the next open.
+       The record is still there — it is cleared by the screen, not by the
+       reader — and the screen is quiet about it. */
+    await expect(page.getByRole('heading', { name: 'walker.night' })).toBeVisible();
+    await expect(page.locator('.mnob-unusable')).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Finish this payment' })).toHaveCount(0);
-    await expect(page.getByRole('button', { name: 'Dismiss' })).toBeVisible();
 
     await context.close();
   });
