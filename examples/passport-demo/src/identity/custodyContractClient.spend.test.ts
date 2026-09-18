@@ -212,6 +212,18 @@ interface ChainFake {
   /** A failure a different position could not fix. */
   otherFailure?: string;
   /**
+   * What a wrong position says when it fails. The default is the runtime naming
+   * the merkle path; the LIVE shape is a bare trap with no words in it at all
+   * (2026/09/18), which is why it is settable.
+   */
+  positionFailureMessage?: string;
+  /**
+   * A failure raised from inside `submitTx` AFTER the proof came back — a
+   * balancing or submission failure. The transaction may be away, so nothing
+   * may retry it however the failure is worded.
+   */
+  submitFailure?: string;
+  /**
    * What the indexer answers when a row still filed under an identifier is
    * asked about again — `settleK1AwaitingCoinByChainHash`'s second chance.
    */
@@ -222,6 +234,8 @@ interface ChainFake {
 interface FakeCallTx {
   readonly circuit: string;
   readonly args: readonly unknown[];
+  /** The proof provider serialises the transaction it is given. */
+  readonly serialize: () => Uint8Array;
   /** Every intent grafted onto this one — the direct transfer's claim. */
   readonly grafted: readonly unknown[];
   readonly intents: Map<number, unknown>;
@@ -281,6 +295,7 @@ function harness(
       circuit,
       args,
       grafted,
+      serialize: () => new Uint8Array([1, 2, 3]),
       intents: new Map([[0, { intentFor: circuit }]]),
       addIntent: (segment, intent) => {
         if (segment.tag !== 'random') throw new Error('a claim goes into a random segment');
@@ -304,7 +319,9 @@ function harness(
     if (circuitId.startsWith('withdraw_shielded')) {
       if ((chain.positionFailures ?? 0) > 0) {
         chain.positionFailures = (chain.positionFailures ?? 0) - 1;
-        return Promise.reject(new Error('could not build the merkle path for this coin'));
+        return Promise.reject(
+          new Error(chain.positionFailureMessage ?? 'could not build the merkle path for this coin'),
+        );
       }
       if (chain.otherFailure !== undefined) {
         return Promise.reject(new Error(chain.otherFailure));
@@ -319,11 +336,20 @@ function harness(
     });
   };
 
-  const submitTx = (_providers: unknown, submitOptions: unknown) => {
+  /* REAL `submitTx` PROVES, BALANCES, THEN SUBMITS, behind one call — which is
+     why the caller cannot tell those three apart from the outside and why the
+     proof provider reports the boundary. The fake does the same, so a test can
+     fail on either side of it. */
+  const submitTx = async (submitProviders: unknown, submitOptions: unknown) => {
     const { unprovenTx } = submitOptions as { unprovenTx: FakeCallTx };
+    const prover = (submitProviders as {
+      proofProvider?: { proveTx(tx: unknown): Promise<unknown> };
+    }).proofProvider;
+    if (prover) await prover.proveTx(unprovenTx);
     grafts.push(unprovenTx.grafted.length);
     submitted += 1;
-    return Promise.resolve({ txId: `id-${submitted}` });
+    if (chain.submitFailure !== undefined) throw new Error(chain.submitFailure);
+    return { txId: `id-${submitted}` };
   };
 
   const providers: Record<string, unknown> = {
@@ -434,9 +460,29 @@ async function until(condition: () => boolean, what: string): Promise<void> {
   throw new Error(`the run never reached: ${what}`);
 }
 
+/** What the stubbed proving service answers next. Set by the phase tests. */
+let proveAnswer: () => Promise<Response> = () =>
+  Promise.resolve({
+    ok: true,
+    status: 200,
+    text: () => Promise.resolve(JSON.stringify({ provenTx: 'ab' })),
+  } as Response);
+
 beforeEach(() => {
   resetCustodySessionState();
   resolveHashWith = (_indexer, identifier) => Promise.resolve(chainHashOf(identifier));
+  /* THE PROVING SERVICE, STUBBED. `custodyProviders` builds the real
+     `custodyProofProvider` around `globalThis.fetch`, and the whole point of
+     these drills is that the provider's `onProved` is what tells a spend which
+     side of the proof it failed on — so the provider is exercised rather than
+     replaced. */
+  proveAnswer = () =>
+    Promise.resolve({
+      ok: true,
+      status: 200,
+      text: () => Promise.resolve(JSON.stringify({ provenTx: 'ab' })),
+    } as Response);
+  vi.stubGlobal('fetch', () => proveAnswer());
   const coins = new Map<string, string>();
   Object.defineProperty(globalThis, 'window', {
     configurable: true,
@@ -858,6 +904,126 @@ describe('a spend against a position that may be the wrong one', () => {
     /* The guess, the list, and the coin are all exactly as they were. */
     expect(heldK1Coin(ACCOUNT, COLOUR)?.mtIndex).toBe(5n);
     expect(k1CoinCandidates(ACCOUNT, COLOUR)).toEqual([5n, 6n]);
+    expect(isK1NonceSpent(ACCOUNT, NONCE)).toBe(false);
+  });
+
+  /* ---------------------------------------------------------------------- */
+  /* THE PROOF BOUNDARY (defect 19, fixed 2026/09/18)                        */
+  /*                                                                         */
+  /* A spend may be retried while it is still in this tab's own hands and    */
+  /* never once a proof has come back, because `submitTx` goes on from there */
+  /* to balance and submit. The three drills below fix that line in place.   */
+  /* Note what the first two have in common: the SAME words, `RuntimeError:  */
+  /* unreachable`, on either side of the proof — one retried, one not. That  */
+  /* is the whole point. The old code decided this on the wording and got it */
+  /* exactly backwards, so a stale position could not be retried at all.     */
+  /* ---------------------------------------------------------------------- */
+
+  it('retries the bare runtime trap a stale position really produces', async () => {
+    const test = harness({
+      circuitResult: changeResult(60n),
+      positionFailures: 1,
+      /* NO MERKLE, NO WITNESS, NO WORDS AT ALL — what D1 produced live against
+         a coin the chain had moved on from. */
+      positionFailureMessage: 'RuntimeError: unreachable',
+    });
+    const { session, device, signed } = deviceFake();
+    putK1CoinCandidates(ACCOUNT, { colour: COLOUR, nonce: NONCE, value: 100n }, [5n, 6n]);
+
+    await withdrawShieldedK1(
+      session,
+      device,
+      {
+        recipientCoinPublicKey: new Uint8Array(32),
+        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+        colourHex: COLOUR,
+        amount: 40n,
+      },
+      undefined,
+      test.deps,
+    );
+
+    /* Two candidates tried, and ONE approval each — not one per failure. */
+    expect(test.calls.filter((call) => call.circuit === 'withdraw_shielded_with_k256')).toHaveLength(
+      2,
+    );
+    expect(signed).toHaveLength(2);
+    expect(heldK1Coin(ACCOUNT, COLOUR)?.nonce).toBe(CHANGE_NONCE);
+  });
+
+  it('never retries a failure raised after the proof came back, whatever it says', async () => {
+    const test = harness({
+      circuitResult: changeResult(60n),
+      /* THE SAME WORDS as the drill above, on the far side of the proof. */
+      submitFailure: 'RuntimeError: unreachable',
+    });
+    const { session, device, signed } = deviceFake();
+    putK1CoinCandidates(ACCOUNT, { colour: COLOUR, nonce: NONCE, value: 100n }, [5n, 6n]);
+
+    await expect(
+      withdrawShieldedK1(
+        session,
+        device,
+        {
+          recipientCoinPublicKey: new Uint8Array(32),
+          recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+          colourHex: COLOUR,
+          amount: 40n,
+        },
+        undefined,
+        test.deps,
+      ),
+    ).rejects.toThrow('unreachable');
+
+    /* ONE build and ONE approval. The transaction was proved, so it may be on
+       its way; building it again would be a second payment. */
+    expect(test.calls.filter((call) => call.circuit === 'withdraw_shielded_with_k256')).toHaveLength(
+      1,
+    );
+    expect(signed).toHaveLength(1);
+    /* And the store is left canonical rather than mid-rotation. */
+    expect(heldK1Coin(ACCOUNT, COLOUR)?.mtIndex).toBe(5n);
+    expect(k1CoinCandidates(ACCOUNT, COLOUR)).toEqual([5n, 6n]);
+  });
+
+  it('restores the head and keeps the list when every candidate has been tried', async () => {
+    const test = harness({
+      circuitResult: changeResult(60n),
+      positionFailures: 99,
+      positionFailureMessage: 'RuntimeError: unreachable',
+    });
+    const { session, device } = deviceFake();
+    putK1CoinCandidates(ACCOUNT, { colour: COLOUR, nonce: NONCE, value: 100n }, [5n, 6n]);
+
+    await expect(
+      withdrawShieldedK1(
+        session,
+        device,
+        {
+          recipientCoinPublicKey: new Uint8Array(32),
+          recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+          colourHex: COLOUR,
+          amount: 40n,
+        },
+        undefined,
+        test.deps,
+      ),
+    ).rejects.toThrow('unreachable');
+
+    /* THE HEAD IS THE FIRST POSITION THE CHAIN OFFERED, again. A coin left on
+       the last candidate is a coin whose next press starts at the end of the
+       list and runs it out after one approval, never trying the position the
+       window reported first.
+
+       THE LIST SURVIVES, AND IT IS LONGER THAN IT WAS: exhausting the reported
+       window appends the ±4 sweep once, so the next press still has somewhere
+       to go. What must NOT have happened is the list being cleared or the head
+       being left at the end of it. */
+    const candidates = k1CoinCandidates(ACCOUNT, COLOUR);
+    expect(heldK1Coin(ACCOUNT, COLOUR)?.mtIndex).toBe(5n);
+    expect(candidates[0]).toBe(5n);
+    expect(candidates).toContain(6n);
+    expect(candidates.length).toBeGreaterThan(2);
     expect(isK1NonceSpent(ACCOUNT, NONCE)).toBe(false);
   });
 

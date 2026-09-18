@@ -604,18 +604,23 @@ export function spendPositionMayBeWrong(message: string): boolean {
      about positions. A position past the leaves the contract's own Zswap state
      retains does not produce a wrong Merkle path — it makes the on-chain
      runtime trap while EXECUTING the call, and all that reaches here is
-     `Unexpected error executing scoped transaction '<unnamed>': RuntimeError:
-     unreachable` (live, 2026/09/18, position 3804 against a tree whose last
-     leaf for this contract was 3803).
-     `RuntimeError` ALONE IS NOT ENOUGH (review, 2026/09/18). It is the marker
-     for every WebAssembly trap in the stack — the wallet's own proving and the
-     runtime's serialisation included — and a retry is not free: it asks for a
-     second approval and, on a coin whose list has run out, used to leave the
-     store on the wrong guess. What makes this trap a position's trap is WHERE
-     it happened: inside the execution of the call being retried, which the
-     runtime's own wrapper names. A trap from anywhere else is somebody else's
-     problem and the next candidate will not fix it. */
-  return text.includes('runtimeerror') && text.includes('executing scoped transaction');
+     `RuntimeError: unreachable` out of the ledger WASM (live, 2026/09/18:
+     D1 at stored position 3813 against a coin the chain had moved to 3814).
+
+     IT USED TO REQUIRE `executing scoped transaction` BESIDE IT, which was
+     midnight-js's `scoped()` wrapper talking. This build composes its own
+     transaction and never calls `scoped()`, so that text is never present and
+     the clause made the predicate always false — the retry could not fire at
+     all (defect 19). The clause is gone.
+
+     WHAT MAKES THE BARE MATCH SAFE is not this function. The review of
+     2026/09/18 was right that `RuntimeError` marks every WebAssembly trap in
+     the stack, submission included, and that a retry costs an approval. The
+     caller no longer asks this question at all once a proof has come back:
+     `spendShieldedK1` tracks the proof boundary and only consults the wording
+     while the transaction is still provably in its own hands. Phase decides
+     whether a retry is SAFE; this decides whether it is WORTH it. */
+  return text.includes('runtimeerror');
 }
 
 /* -------------------------------------------------------------------------- */

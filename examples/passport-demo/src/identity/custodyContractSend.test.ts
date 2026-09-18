@@ -488,10 +488,14 @@ describe('spendPositionMayBeWrong', () => {
     expect(spendPositionMayBeWrong('unsatisfiable')).toBe(true);
   });
 
-  /* THE SCENARIO: a position past the last leaf the contract's own Zswap state
-     retains. The runtime does not build a wrong path for it, it traps, and the
-     trap names nothing about positions (live, 2026/09/18). */
-  it('retries a runtime trap from inside the call, which names nothing', () => {
+  /* THE SHAPE THE LIVE FAILURE ACTUALLY HAS (2026/09/18, defect 19). A position
+     past the last leaf the contract's own Zswap state retains does not produce a
+     wrong Merkle path — the runtime traps, and all that reaches the caller is
+     the bare trap. This assertion was `false` until the phase guard went in, and
+     that is precisely why a Passport whose stored position was stale could not
+     send at all. */
+  it('retries the bare runtime trap a stale position really produces', () => {
+    expect(spendPositionMayBeWrong('RuntimeError: unreachable')).toBe(true);
     expect(
       spendPositionMayBeWrong(
         `Unexpected error executing scoped transaction '<unnamed>': RuntimeError: unreachable`,
@@ -506,17 +510,21 @@ describe('spendPositionMayBeWrong', () => {
     expect(spendPositionMayBeWrong('1010: Invalid Transaction: Custom error: 239')).toBe(false);
   });
 
-  /* A TRAP FROM SOMEWHERE ELSE IN THE STACK IS NOT A POSITION'S TRAP.
-     `RuntimeError` is the marker for every WebAssembly trap there is, and the
-     one this retry is armed for happened inside the execution of the call
-     being retried. Reading the rest of them as position failures asks for an
-     approval a different position cannot earn back. */
-  it('does not retry a runtime trap from outside the call being retried', () => {
-    expect(spendPositionMayBeWrong('RuntimeError: memory access out of bounds')).toBe(false);
-    expect(spendPositionMayBeWrong('RuntimeError: unreachable')).toBe(false);
+  /* WHERE THE OLD DISCRIMINATOR WENT. This predicate no longer tries to tell a
+     trap raised while executing the call from a trap raised while submitting
+     it: it cannot, because the wording is the same, and pretending otherwise is
+     what produced defect 19. `spendShieldedK1` answers that question from the
+     proof boundary instead and never asks this one after a proof has come
+     back — so a trap from the submission half is unreachable here rather than
+     mis-sorted here. */
+  it('leaves WHETHER a retry is safe to the caller, and answers only whether it is worth it', () => {
+    expect(spendPositionMayBeWrong('RuntimeError: memory access out of bounds')).toBe(true);
     expect(
       spendPositionMayBeWrong('proving failed: RuntimeError: table index is out of bounds'),
-    ).toBe(false);
+    ).toBe(true);
+    /* And a submission refusal is still not a position's problem, whatever
+       phase it arrives in. */
+    expect(spendPositionMayBeWrong('1010: Invalid Transaction: Custom error: 217')).toBe(false);
   });
 });
 

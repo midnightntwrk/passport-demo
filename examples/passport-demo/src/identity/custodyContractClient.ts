@@ -384,6 +384,16 @@ export interface CustodyProofProviderOptions {
   readonly fetchFn?: typeof fetch;
   /** Overridable so a drill does not wait four minutes to watch one expire. */
   readonly timeoutMs?: number;
+  /**
+   * Called the moment a proof comes back, and never if one does not.
+   *
+   * THE PHASE LINE A SPEND RETRIES ON. `submitTx` proves, balances and submits
+   * behind one call, so a caller that catches its failure cannot otherwise tell
+   * a proof that was refused — nothing submitted, safe to try another candidate
+   * position — from a submission that failed after the transaction was already
+   * away. This fires between the two, so `spendShieldedK1` can.
+   */
+  readonly onProved?: () => void;
 }
 
 /**
@@ -451,7 +461,12 @@ export function custodyProofProvider(options: CustodyProofProviderOptions): {
         if (proveAccountCustodyRefused(parsed)) throw custodyProofNotBuilt();
         throw new Error(CUSTODY_PROVER_UNAVAILABLE);
       }
-      return options.deserialise(parseProveCustodyResponse(parsed));
+      const proven = options.deserialise(parseProveCustodyResponse(parsed));
+      /* AFTER the response is known good and rehydrated, so a parse failure is
+         still a pre-proof failure. Everything past this line is balancing and
+         submission, which nothing may retry. */
+      options.onProved?.();
+      return proven;
     },
   };
 }
@@ -1490,18 +1505,35 @@ export async function spendShieldedK1(
 
   const module = await deps.contractModule();
   const contracts = await deps.contracts();
+  /* WHERE THIS ATTEMPT GOT TO, which is the whole of what decides a retry.
+     `building` covers executing the circuit and grafting the second call —
+     nothing has been handed to anybody. `submitting` covers `submitTx`, which
+     proves, balances and submits behind one call; `proved` is set from inside
+     it the moment a proof comes back, so the one line that matters — is this
+     transaction possibly away? — is `proved`, not the error's wording. */
+  let phase: 'building' | 'submitting' = 'building';
+  let proved = false;
+  /* Only OUR proof provider reports that line. If the transaction were small
+     enough to prove on the ordinary route we could not see it, so a failure
+     from inside `submitTx` would be unattributable and must not be retried. */
+  const provingIsOurs = custodyNeedsBigKeyProver(circuits);
   const providers = await custodyProviders(deps, wallet, {
     address: record.address,
     privateStateId: custodyPrivateStateId(record),
     account: { network: record.network, address: record.address },
     initialPrivateState: custodyPrivateState(record),
     circuits,
+    onProved: () => {
+      proved = true;
+    },
   });
   const addressBytes = hexToBytes(record.address);
   const privateStateId = custodyPrivateStateId(record);
 
   let attempt = 0;
   for (;;) {
+    phase = 'building';
+    proved = false;
     const held = heldK1Coin(account, colour);
     if (held === null) {
       throw new Error('There is nothing of that kind in this Passport to send.');
@@ -1629,6 +1661,7 @@ export async function spendShieldedK1(
          words). So the graft above is made at the ledger level and this is
          handed the finished transaction. The circuit names still travel,
          because the proof provider is what names them to the service. */
+      phase = 'submitting';
       const finalized = await contracts.submitTx(providers, {
         unprovenTx,
         circuitId: [...circuits],
@@ -1668,15 +1701,29 @@ export async function spendShieldedK1(
       };
     } catch (cause) {
       const message = messageOf(cause);
-      /* EITHER TELL, AND ONE MORE THAN BEFORE. The runtime that could not build
-         the merkle path names it in words; the proving service, where an
-         unsatisfiable witness actually surfaces for these circuits, says only
-         that it declined to prove. The third is a WebAssembly trap while the
-         circuit is EXECUTED — which now happens inside this function's own
-         `createUnprovenCallTx` rather than inside midnight-js's scoped wrapper,
-         so the wrapper's wording is no longer there to recognise it by. At that
-         point nothing has been submitted and nothing can have been spent, so
-         the only cost of retrying is a second approval. */
+      /* THE ONE QUESTION THAT DECIDES A RETRY: could this transaction already
+         be away? A proof that came back means `submitTx` went on to balance and
+         submit, and a transaction that may be on its way must NEVER be built a
+         second time — a retry there would be a second payment, not a second
+         attempt. Everything before that line is this tab talking to itself:
+         executing the circuit, grafting, asking for a proof. Nothing has been
+         handed to anybody, so the only cost of trying the next candidate
+         position is a second approval.
+
+         THIS REPLACES A TEST ON THE ERROR'S WORDING (fixed 2026/09/18). The
+         predicate used to look for midnight-js's `scoped()` wrapper text, which
+         this build removed when it started composing the transaction itself —
+         so the trap a wrong position really produces, a bare `RuntimeError:
+         unreachable` out of the ledger WASM, matched nothing and the retry the
+         whole mechanism exists for could not fire. Phase is the honest
+         discriminator and the wording never was. */
+      const mayRetry = phase === 'building' || (!proved && provingIsOurs);
+      if (!mayRetry) {
+        /* PAST THE PROOF. Leave the store where the chain can be reconciled
+           with it rather than mid-rotation. */
+        restartK1CoinCandidates(account, colour);
+        throw cause;
+      }
       if (!spendPositionMayBeWrong(message) && !isCustodyProofNotBuilt(cause)) {
         /* NOT THE POSITION, so this run is over — and the store must not be
            left mid-rotation. A coin persisted at the second candidate is a coin
@@ -2121,6 +2168,8 @@ interface CustodyConnectionTarget {
   readonly initialPrivateState: unknown;
   /** Every circuit the transaction this connection builds will call. */
   readonly circuits: readonly string[];
+  /** Forwarded to {@link custodyProofProvider}; see its `onProved`. */
+  readonly onProved?: () => void;
 }
 
 /**
@@ -2148,6 +2197,7 @@ async function custodyProviders(
           network: wallet.network.networkId,
           circuits: target.circuits,
           deserialise: (providers.deserialiseUnbound as (b: Uint8Array) => unknown) ?? identity,
+          onProved: target.onProved,
         }),
       }
     : providers;
