@@ -191,6 +191,16 @@ export function k1UserKey(session: Pick<CustodyDynamicSession, 'address'>): stri
 export interface CustodyPhase {
   readonly step: 'wallet' | 'deploy' | 'waves' | 'activate' | 'sign' | 'submit' | 'confirm';
   readonly detail?: string;
+  /**
+   * The transaction's id, on the `confirm` of a spend and nowhere else.
+   *
+   * IT IS THE LINE BETWEEN TWO DIFFERENT TRUTHS a person can be told. Before it
+   * there is no transaction and "nothing was sent" is a fact; after it there is
+   * one and the honest answer is "it landed or it did not". The screen writes
+   * it into the stored record the moment it arrives, so a tab closed a second
+   * later still knows which of the two it is owed.
+   */
+  readonly txId?: string;
 }
 
 /** Everything this module reaches for that a drill wants to replace. */
@@ -1676,7 +1686,10 @@ export async function spendShieldedK1(
       const chainHash = finalizedTxHash(finalized);
       const written = writeShieldedChange(account, colour, change, chainHash ?? identifier);
 
-      onPhase?.({ step: 'confirm' });
+      /* CARRIED OUT THE MOMENT THE TRANSACTION EXISTS, and before the two slow
+         indexer questions below — a tab closed during those has a transaction
+         away and must not be told that nothing was sent. */
+      onPhase?.({ step: 'confirm', txId: chainHash ?? identifier ?? undefined });
       /* THE CHAIN'S OWN HASH, when the finalised data carried one. It is what
          the indexer answers a commitment window at, and asking for it again
          would be a second question with a worse answer. */

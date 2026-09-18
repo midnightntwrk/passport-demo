@@ -263,6 +263,31 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
   }, [session])
 
   /**
+   * The busy line, and the one write that changes what a stopped payment is
+   * told.
+   *
+   * WHY THE RECORD IS NOT WRITTEN WITH AN ID FROM THE START. A record saved
+   * before the approval says a payment is in flight from the moment the button
+   * is pressed, and most of what can go wrong goes wrong before anything is
+   * submitted — the approval is dismissed, the proving service is down, the
+   * position cannot be proved. Telling those people "either it arrived or it
+   * did not" hedges about money that never moved. So the id is written on the
+   * `confirm` phase, the first moment a transaction exists, and
+   * {@link custodyShieldedSendOutcome} reads its absence as the stronger, truer
+   * sentence.
+   */
+  const sendPhase = useCallback(
+    (record: CustodyShieldedSendRecord) => (phase: CustodyPhase) => {
+      setBusy(PHASE_LABELS[phase.step])
+      if (phase.txId === undefined) return
+      const away: CustodyShieldedSendRecord = { ...record, sendTxId: phase.txId }
+      saveCustodyShieldedSend(window.localStorage, away)
+      setStopped(away)
+    },
+    [],
+  )
+
+  /**
    * Runs one piece of work with the single busy line and the single sentence.
    *
    * THE SENTENCE IS NOT THE CAUSE. Every refusal this path throws on purpose is
@@ -813,7 +838,7 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
           colourHex: plan.transfer.colourHex,
           amount: plan.transfer.amount,
         },
-        (phase) => setBusy(PHASE_LABELS[phase.step]),
+        sendPhase(stoppedRecord),
       )
       void backfillChange({ wallet, record, identity, change: sent.change }).catch((cause) => {
         console.warn('[account-custody] the change was not written to the inbox', cause)
@@ -825,7 +850,7 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
       setStopped(null)
       setNotice(custodyShieldedSendOutcome({ ...stoppedRecord, stage: 'done' }))
     },
-    [backfillChange, ensureDevice, session],
+    [backfillChange, ensureDevice, sendPhase, session],
   )
 
   /**
@@ -895,7 +920,7 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
           colourHex: plan.colourHex,
           amount: plan.amount,
         },
-        (phase) => setBusy(PHASE_LABELS[phase.step]),
+        sendPhase(stoppedRecord),
       )
       void backfillChange({ wallet, record, identity, change: sent.change }).catch((cause) => {
         console.warn('[account-custody] the change was not written to the inbox', cause)
@@ -907,7 +932,7 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
       setStopped(null)
       setNotice(custodyShieldedSendOutcome({ ...stoppedRecord, stage: 'done' }))
     },
-    [backfillChange, ensureDevice, session],
+    [backfillChange, ensureDevice, sendPhase, session],
   )
 
   /**

@@ -182,17 +182,34 @@ describe('the holdings a Passport shows', () => {
 
 describe('what a Passport says about a payment it did not see land', () => {
   const expectations: {
+    name: string;
     stage: CustodyShieldedSendStage;
+    patch?: { sendTxId?: string | null };
     kind: 'none' | 'report';
     says?: RegExp;
   }[] = [
-    { stage: 'sending', kind: 'report', says: /either it reached alice\.night or nothing left/ },
-    { stage: 'done', kind: 'none' },
+    {
+      name: 'sending with a transaction away',
+      stage: 'sending',
+      patch: { sendTxId: 'cc'.repeat(32) },
+      kind: 'report',
+      says: /either it reached alice\.night or nothing left/,
+    },
+    /* NOTHING WAS EVER SUBMITTED, so the offer is still a report — there is
+       something to say — but what it says is the stronger sentence. */
+    {
+      name: 'sending with nothing ever submitted',
+      stage: 'sending',
+      patch: { sendTxId: null },
+      kind: 'report',
+      says: /Nothing was sent, and it is all still in your Passport\./,
+    },
+    { name: 'done', stage: 'done', kind: 'none' },
   ];
 
   for (const expectation of expectations) {
-    it(`offers ${expectation.kind} at ${expectation.stage}`, () => {
-      const offer = custodyResumeOffer(record({ stage: expectation.stage }));
+    it(`offers ${expectation.kind} at ${expectation.name}`, () => {
+      const offer = custodyResumeOffer(record({ stage: expectation.stage, ...expectation.patch }));
       expect(offer.kind).toBe(expectation.kind);
       if (expectation.says !== undefined && 'sentence' in offer) {
         expect(offer.sentence).toMatch(expectation.says);
@@ -212,7 +229,9 @@ describe('what a Passport says about a payment it did not see land', () => {
   });
 
   it('still reads as a sentence when there is no name to use', () => {
-    const offer = custodyResumeOffer(record({ stage: 'sending', recipientLabel: '  ' }));
+    const offer = custodyResumeOffer(
+      record({ stage: 'sending', recipientLabel: '  ', sendTxId: 'cc'.repeat(32) }),
+    );
     if (offer.kind !== 'report') throw new Error('unreachable');
     expect(offer.sentence).toContain('them');
   });

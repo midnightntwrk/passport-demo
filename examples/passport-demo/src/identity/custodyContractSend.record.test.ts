@@ -258,16 +258,41 @@ function send(patch: Partial<CustodyShieldedSendRecord> = {}): CustodyShieldedSe
   };
 }
 
-/** Every stage, what a resumed run does with it, and what it says. */
-const stages: { stage: CustodyShieldedSendStage; step: 'report' | 'nothing'; says: RegExp }[] = [
-  { stage: 'sending', step: 'report', says: /either it reached alice\.night or nothing left/ },
-  { stage: 'done', step: 'nothing', says: /alice\.night has it/ },
+/**
+ * Every stage, what a resumed run does with it, and what it says.
+ *
+ * `sending` APPEARS TWICE because the stage alone does not decide the sentence:
+ * a record that never got a transaction id never had a transaction, and is owed
+ * the stronger answer. See {@link custodyShieldedSendOutcome}.
+ */
+const stages: {
+  name: string;
+  stage: CustodyShieldedSendStage;
+  patch?: Partial<CustodyShieldedSendRecord>;
+  step: 'report' | 'nothing';
+  says: RegExp;
+}[] = [
+  {
+    name: 'sending, with a transaction away',
+    stage: 'sending',
+    patch: { sendTxId: 'cc'.repeat(32) },
+    step: 'report',
+    says: /either it reached alice\.night or nothing left/,
+  },
+  {
+    name: 'sending, with nothing ever submitted',
+    stage: 'sending',
+    patch: { sendTxId: null },
+    step: 'report',
+    says: /Nothing was sent, and it is all still in your Passport\./,
+  },
+  { name: 'done', stage: 'done', step: 'nothing', says: /alice\.night has it/ },
 ];
 
 describe('a payment at every stage it can be in', () => {
   for (const row of stages) {
-    it(`knows what to do with it, and where the money is, at ${row.stage}`, () => {
-      const record = send({ stage: row.stage });
+    it(`knows what to do with it, and where the money is, at ${row.name}`, () => {
+      const record = send({ stage: row.stage, ...row.patch });
       expect(nextCustodyShieldedSendStep(record)).toBe(row.step);
       const sentence = custodyShieldedSendOutcome(record);
       expect(sentence).toMatch(row.says);
@@ -278,13 +303,16 @@ describe('a payment at every stage it can be in', () => {
       expect(sentence).not.toMatch(/back in your Passport/);
     });
 
-    it(`survives being written down and read back at ${row.stage}`, () => {
+    it(`survives being written down and read back at ${row.name}`, () => {
       /* THE DEFECT THIS CATCHES was a stage missing from the reader's list:
          the record was written, the tab was reloaded, and the screen read "no
          payment in flight" over value that had demonstrably left the
          Passport. */
       const { storage } = storageFake();
-      const record = send({ stage: row.stage });
+      /* THE PATCH TRAVELS TOO, so `sendTxId` is proved to survive the round
+         trip — a transaction id that did not would turn a payment that is away
+         back into one that never left on the next open. */
+      const record = send({ stage: row.stage, ...row.patch });
       saveCustodyShieldedSend(storage, record);
       const reloaded = loadCustodyShieldedSend(storage, ACCOUNT);
       expect(reloaded, `stage ${row.stage} did not survive a reload`).toEqual(record);

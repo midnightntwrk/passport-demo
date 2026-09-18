@@ -676,7 +676,7 @@ describe('the record a stopped send leaves behind', () => {
 
   it('says where the value is, and never claims more than it can see', () => {
     expect(custodyShieldedSendOutcome(send({ stage: 'done' }))).toMatch(/alice\.night has it/);
-    const inFlight = custodyShieldedSendOutcome(send());
+    const inFlight = custodyShieldedSendOutcome(send({ sendTxId: 'cc'.repeat(32) }));
     expect(inFlight).toMatch(/one payment/);
     expect(inFlight).toMatch(/either it reached alice\.night or nothing left your Passport/);
     /* AND IT PROMISES NOTHING NOBODY WROTE: no resume, no button, no wait. */
@@ -685,7 +685,31 @@ describe('the record a stopped send leaves behind', () => {
     expect(custodyShieldedSendOutcome(send({ stage: 'done', recipientLabel: '  ' }))).toMatch(
       /them has it/,
     );
-    expect(custodyShieldedSendOutcome(send({ recipientLabel: '' }))).toMatch(/reached them/);
+    expect(
+      custodyShieldedSendOutcome(send({ recipientLabel: '', sendTxId: 'cc'.repeat(32) })),
+    ).toMatch(/reached them/);
+  });
+
+  /* THE STRONGER SENTENCE, AND WHEN IT IS EARNED (defect 18, fixed
+     2026/09/18). Most of what can go wrong with a payment goes wrong before a
+     transaction exists: the approval is dismissed, the proving service does not
+     answer, the position cannot be proved. A record still holding no id was
+     abandoned in one of those, the coin is untouched, and hedging about it
+     ("either it reached them or nothing left") is a worse answer than the truth.
+     The live run of 2026/09/18 showed the hedge on screen beside a balance that
+     had not moved. */
+  it('says nothing was sent when no transaction was ever submitted', () => {
+    const untouched = custodyShieldedSendOutcome(send({ sendTxId: null }));
+    expect(untouched).toBe('Nothing was sent, and it is all still in your Passport.');
+    /* It must NOT hedge, and it must not offer a resume. */
+    expect(untouched).not.toMatch(/either it reached|one payment|Finish|by itself/);
+  });
+
+  it('hedges only once there is a transaction that could have landed', () => {
+    /* The SAME stage, the only difference being that a transaction exists. */
+    const away = custodyShieldedSendOutcome(send({ sendTxId: 'cc'.repeat(32) }));
+    expect(away).toMatch(/either it reached alice\.night or nothing left your Passport/);
+    expect(away).not.toMatch(/Nothing was sent/);
   });
 });
 

@@ -950,6 +950,14 @@ export function nextCustodyShieldedSendStep(
 export function custodyShieldedSendOutcome(record: CustodyShieldedSendRecord): string {
   const who = record.recipientLabel.trim().length > 0 ? record.recipientLabel.trim() : 'them';
   if (record.stage === 'done') return `Sent. ${who} has it.`;
+  /* NO TRANSACTION EVER EXISTED, so there is a stronger thing to say than the
+     one below, and saying the weaker one would be hedging about money that
+     demonstrably never moved. `sendTxId` is written on the `confirm` phase, the
+     moment the transaction has an id; a record still holding `null` was
+     abandoned before that — the approval was dismissed, the proving service did
+     not answer, the position could not be proved — and in every one of those
+     the coin is untouched in the account. */
+  if (record.sendTxId === null) return 'Nothing was sent, and it is all still in your Passport.';
   /* ONE TRANSACTION, SO ONE OF TWO THINGS. Either the chain took it and ${who}
      has the money, or it did not and the money never left — there is no third
      place for it to be, which is the whole of what the one-transaction send
