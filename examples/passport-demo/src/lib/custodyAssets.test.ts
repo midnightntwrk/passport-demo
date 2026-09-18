@@ -18,7 +18,6 @@ import {
   custodyAssetRow,
   custodyAssetRows,
   custodyResumeOffer,
-  custodyReturnedSentence,
   custodyStablecoinColour,
   formatCustodyAmount,
   parseCustodyAmount,
@@ -33,14 +32,12 @@ function sendRecord(
   return {
     network: 'stagenet',
     accountAddress: 'ab'.repeat(32),
-    stage: 'depositing',
+    stage: 'sending',
     colourHex: MUSD_COLOUR_HEX,
     amount: '40',
     recipientLabel: 'alice',
     recipientAccountAddress: 'dd'.repeat(32),
-    noteNonce: 'ee'.repeat(32),
-    withdrawTxId: 'ff',
-    depositTxId: null,
+    sendTxId: 'ff',
     startedAt: 0,
     ...over,
   };
@@ -189,52 +186,29 @@ describe('custodyArrivingSentence', () => {
 });
 
 describe('custodyResumeOffer', () => {
-  it('offers to finish a payment whose last leg needs no approval', () => {
-    const offer = custodyResumeOffer(sendRecord());
-    expect(offer).toEqual({
-      kind: 'finish',
+  it('reports a payment nobody saw land, in the sentence that says where it is', () => {
+    expect(custodyResumeOffer(sendRecord())).toEqual({
+      kind: 'report',
       sentence:
-        'Your payment of 40 mUSD to alice did not finish. It has left your Passport and can still be delivered.',
-      action: 'Finish this payment',
+        'Your payment to alice was sent as one payment: either it reached alice or nothing left your Passport. Your balance below says which.',
     });
   });
 
-  it('offers the same when the note still has to be identified', () => {
-    expect(custodyResumeOffer(sendRecord({ stage: 'awaiting-note' })).kind).toBe('finish');
-    expect(
-      custodyResumeOffer(sendRecord({ stage: 'depositing', noteNonce: null })).kind,
-    ).toBe('finish');
-  });
-
-  it('names somebody when the record kept no name', () => {
+  it('names them when the record kept no name', () => {
     const offer = custodyResumeOffer(sendRecord({ recipientLabel: '  ' }));
-    expect(offer.kind === 'finish' && offer.sentence).toContain('to somebody');
+    expect(offer.kind === 'report' && offer.sentence).toContain('reached them');
   });
 
-  it('quotes the figure in the asset own scale', () => {
-    const offer = custodyResumeOffer(sendRecord({ amount: '2500000', colourHex: NIGHT_COLOUR_HEX }));
-    expect(offer.kind === 'finish' && offer.sentence).toContain('2.5 NIGHT');
-  });
-
-  it('reports rather than offers where there is no leg left to run', () => {
-    for (const stage of ['returning', 'stranded', 'withdrawing'] as const) {
-      const offer = custodyResumeOffer(sendRecord({ stage }));
-      expect(offer.kind).toBe('report');
-    }
+  it('offers no button, because a send is one transaction', () => {
+    /* "Finish this payment" used to be here, for a send whose last leg had not
+       run. There is no last leg: an offer to finish would be an offer to send
+       the money twice. */
+    expect(Object.keys(custodyResumeOffer(sendRecord())).sort()).toEqual(['kind', 'sentence']);
   });
 
   it('says nothing about a payment that finished, or one that was never made', () => {
     expect(custodyResumeOffer(sendRecord({ stage: 'done' }))).toEqual({ kind: 'none' });
     expect(custodyResumeOffer(null)).toEqual({ kind: 'none' });
-  });
-
-  it('says a returned payment is back, not on its way back', () => {
-    expect(custodyReturnedSentence('alice')).toBe(
-      'It did not reach alice, so it is back in your Passport.',
-    );
-    expect(custodyReturnedSentence('  ')).toBe(
-      'It did not reach them, so it is back in your Passport.',
-    );
   });
 
   it('says none of the words a person has never chosen to meet', () => {
@@ -243,24 +217,14 @@ describe('custodyResumeOffer', () => {
       custodyArrivingSentence(1),
       custodyArrivingSentence(4),
       custodyResumeOffer(sendRecord()),
-      custodyResumeOffer(sendRecord({ stage: 'returning' })),
-      custodyResumeOffer(sendRecord({ stage: 'stranded' })),
-      custodyResumeOffer(sendRecord({ stage: 'withdrawing' })),
-      custodyReturnedSentence('alice'),
-      custodyReturnedSentence(' '),
+      custodyResumeOffer(sendRecord({ recipientLabel: ' ' })),
+      custodyResumeOffer(sendRecord({ stage: 'done' })),
     ]
       .flatMap((value) =>
-        typeof value === 'string'
-          ? [value]
-          : value === null
-            ? []
-            : [
-                'sentence' in value ? value.sentence : '',
-                'action' in value ? value.action : '',
-              ],
+        typeof value === 'string' ? [value] : value === null ? [] : ['sentence' in value ? value.sentence : ''],
       )
       .filter((sentence) => sentence.length > 0);
-    expect(sentences.length).toBeGreaterThan(5);
+    expect(sentences.length).toBeGreaterThan(3);
     for (const sentence of sentences) {
       expect(sentence, sentence).not.toMatch(forbidden);
     }

@@ -129,7 +129,6 @@ import {
   resolveTransactionHash,
   resolveTxCommitmentWindowByHashOnce,
   resolveTxHashOnce,
-  transactionId,
 } from './contractRuntime.js';
 import {
   advanceK1CoinCandidate,
@@ -150,6 +149,7 @@ import {
 import { normalisedColourHex } from '../lib/colour.js';
 import {
   changeCoinFromResult,
+  directSpendFromResult,
   spendPositionMayBeWrong,
   type CustodyChangeCoin,
 } from './custodyContractSend.js';
@@ -305,6 +305,16 @@ interface CustodyIntent {
 /** midnight-js's two entry points, as this module calls them. */
 export interface CustodyContractsApi {
   createUnprovenDeployTx(providers: unknown, options: unknown): Promise<CustodyDeployTxData>;
+  /**
+   * One call, executed and turned into an unproven transaction, and NOT sent.
+   *
+   * The seam a composed transaction is built through: the sender's spend and
+   * the recipient's claim are each created here, the claim's intent is grafted
+   * onto the spend, and the pair goes to {@link CustodyContractsApi.submitTx}
+   * once. It is also how a spend reads `[sent, change]` before anything leaves
+   * the tab.
+   */
+  createUnprovenCallTx(providers: unknown, options: unknown): Promise<unknown>;
   submitTx(providers: unknown, options: unknown): Promise<unknown>;
   findDeployedContract(providers: unknown, options: unknown): Promise<{ callTx: CustodyCallTx }>;
 }
@@ -359,8 +369,14 @@ export interface CustodyProofProviderOptions {
   /** `POST` target. From `custodyContractPlan.ts`'s {@link custodyProvingEndpoint}. */
   readonly endpoint: string;
   readonly network: string;
-  /** The circuit being proved, for the service to pick the right key. */
-  readonly circuit: string;
+  /**
+   * Every circuit the transaction calls, for the service to stage the keys.
+   *
+   * A LIST because a transaction may have two calls in it — a direct transfer
+   * is one. The service proves the transaction, not a named circuit; the names
+   * are what let it refuse an unstaged one by name.
+   */
+  readonly circuits: readonly string[];
   /** Rehydrates the proven bytes. Injected so a drill needs no ledger WASM. */
   readonly deserialise: (bytes: Uint8Array) => unknown;
   readonly fetchFn?: typeof fetch;
@@ -398,7 +414,11 @@ export function custodyProofProvider(options: CustodyProofProviderOptions): {
   const timeoutMs = options.timeoutMs ?? CUSTODY_PROOF_TIMEOUT_MS;
   return {
     async proveTx(unprovenTx: { serialize(): Uint8Array }): Promise<unknown> {
-      const body = proveAccountCustodyRequest(options.circuit, unprovenTx.serialize(), options.network);
+      const body = proveAccountCustodyRequest(
+        options.circuits,
+        unprovenTx.serialize(),
+        options.network,
+      );
       let response: Response;
       try {
         response = await fetchFn(options.endpoint, {
@@ -409,7 +429,7 @@ export function custodyProofProvider(options: CustodyProofProviderOptions): {
         });
       } catch (cause) {
         console.warn(
-          `[account-custody] could not reach the proving service at ${options.endpoint} for ${options.circuit}`,
+          `[account-custody] could not reach the proving service at ${options.endpoint} for ${options.circuits.join(' + ')}`,
           cause,
         );
         throw new Error(CUSTODY_PROVER_UNAVAILABLE);
@@ -1111,7 +1131,7 @@ export async function activateK1Device(
   }
 
   onPhase?.({ step: 'activate' });
-  const { callTx } = await openCustodyAccount(deps, wallet, record, 'activate_initial_device_with_k256');
+  const { callTx } = await openCustodyAccount(deps, wallet, record, ['activate_initial_device_with_k256']);
   const salt = hexToBytes(record.saltHex);
   const result = await callTx.activate_initial_device_with_k256?.(
     device.pk,
@@ -1206,7 +1226,7 @@ export async function k1Call(
 
   const module = await deps.contractModule();
   const circuit = `${request.operation}_with_k256`;
-  const { callTx, providers } = await openCustodyAccount(deps, wallet, record, circuit);
+  const { callTx, providers } = await openCustodyAccount(deps, wallet, record, [circuit]);
   const addressBytes = hexToBytes(record.address);
 
   const state = module.ledger(await queryStateData(providers, record.address));
@@ -1293,7 +1313,7 @@ export async function custodyPermissionlessCall(
   if (!record || record.address === null || nextCustodyStep(record) !== 'ready') {
     throw new Error('This Passport is not finished being set up yet.');
   }
-  const { callTx, providers } = await openCustodyAccount(deps, wallet, record, request.operation);
+  const { callTx, providers } = await openCustodyAccount(deps, wallet, record, [request.operation]);
   onPhase?.({ step: 'submit' });
   const call = callTx[request.operation];
   if (!call) throw new Error('This Passport cannot do that yet.');
@@ -1309,69 +1329,143 @@ export async function custodyPermissionlessCall(
 }
 
 /* -------------------------------------------------------------------------- */
-/* Leg one of a shielded payment                                              */
+/* A shielded payment, in ONE transaction                                     */
 /* -------------------------------------------------------------------------- */
 
-/** What the gated shielded withdrawal needs beyond the session. */
-export interface CustodyShieldedWithdrawRequest {
-  /**
-   * Where the note is paid: 32 bytes of coin public key.
-   *
-   * THIS WALLET'S OWN, on the send path. The circuit pays a user key by type
-   * and the person being paid holds an account, so the only key this leg can
-   * name that leads anywhere is the sender's, and leg three carries it the
-   * rest of the way — the same shape, and the same reason, as the NIGHT
-   * withdrawal in `./custodyContractSend.ts`.
-   */
-  readonly recipientCoinPublicKey: Uint8Array;
+/**
+ * Where a shielded amount is paid.
+ *
+ * TWO SHAPES BECAUSE THE CONTRACT HAS TWO CIRCUITS, and MIP-0012 §6.6 is the
+ * reason there are two. `withdraw_shielded` pays a person's Zswap key and the
+ * transaction names nobody but the sender's account; `withdraw_shielded_to_
+ * contract` pays another ACCOUNT, and a contract-addressed output carries that
+ * address in cleartext, so the transaction publishes the pair. The second is
+ * therefore a deliberate per-payment choice and not a default, which is why the
+ * caller states which one it means rather than this inferring it from a string.
+ */
+export type CustodyShieldedTarget =
+  | {
+      readonly kind: 'address';
+      /** 32 bytes, from inside the pasted `mn_shield-addr…`. */
+      readonly coinPublicKey: Uint8Array;
+      /**
+       * The OTHER 32 bytes of the same address.
+       *
+       * The circuit never sees it. midnight-js does: it builds the output's
+       * note ciphertext client-side and refuses a third-party shielded output
+       * at construction time without the recipient's encryption key ("Provide a
+       * mapping via the encryptionPublicKeyResolver", hit live 2026/08/24).
+       * Neither key can be derived from the other, which is why the whole
+       * address travels and this takes both.
+       */
+      readonly encryptionPublicKey: Uint8Array;
+    }
+  | {
+      readonly kind: 'account';
+      /** The recipient's account contract, raw 64-hex. */
+      readonly contractAddress: string;
+      /**
+       * The recipient's advertised encryption key, READ LIVE by the caller.
+       *
+       * The sender seals the coin it is about to send into the 192-byte inbox
+       * entry the recipient's own claim carries, because the chain carries the
+       * note and not its description: a coin deposited into one of these
+       * accounts with no readable entry has demonstrably arrived and nobody can
+       * ever move it again. An account rotates this key, so a value read
+       * yesterday is the same defect.
+       */
+      readonly recipientEncKeyHex: string;
+    };
+
+/** What a shielded spend needs beyond the session and the device. */
+export interface CustodyShieldedSpendRequest {
+  readonly target: CustodyShieldedTarget;
   readonly colourHex: string;
   readonly amount: bigint;
 }
 
-/** What a shielded withdrawal did, including what it left behind. */
-export interface CustodyShieldedWithdrawResult extends CustodyStepResult {
+/** The coin the recipient's account was handed, read off the circuit's result. */
+export interface CustodySentCoin {
+  readonly nonce: string;
+  readonly colour: string;
+  readonly value: bigint;
+}
+
+/** What a shielded spend did, including what it left behind. */
+export interface CustodyShieldedSpendResult extends CustodyStepResult {
   /** The change coin, read out of the circuit's own result. */
   readonly change: CustodyChangeCoin;
   /** Whether the change's position is settled, still being asked about, or absent. */
   readonly changePosition: 'settled' | 'candidates' | 'awaiting' | 'none';
+  /** The coin the recipient's account claimed. Null for a payment to an address. */
+  readonly sent: CustodySentCoin | null;
+  /** The block the transaction landed in, when the chain told us. */
+  readonly blockHeight: number | null;
+  /** Which candidate position proved, counting from zero. */
+  readonly candidate: number;
 }
 
+/** Kept for the name every caller already uses. */
+export type CustodyShieldedWithdrawResult = CustodyShieldedSpendResult;
+
 /**
- * Leg one: move a shielded amount out of this Passport to a coin public key.
+ * Pay a shielded amount out of this Passport — ONE transaction, and no wallet
+ * anywhere in it.
  *
- * THE COIN IS READ ONCE AND USED TWICE, which is the thing this function
- * exists to guarantee. The challenge the device signs BINDS the qualified coin
- * (AUTH-10), and the proof is built from whatever the `held_coin` witness
- * returns; if those two were read at different moments from different places
- * the signature would be over a coin the proof does not spend, and the call
- * would fail in a way that names none of that. Both come from the store, and
- * the witness reads the same store this reads.
+ * WHAT CHANGED ON 2026/09/18, AND WHY. This used to be the first of three legs:
+ * the account paid the sender's OWN wallet, the wallet waited for the note, and
+ * a third transaction deposited it into the recipient. Value therefore sat in
+ * an app-built wallet between legs — which is the thing the ruling of
+ * 2026/09/18 forbids, and which is also where every stopped payment in this
+ * build's history got stuck. A Passport's value lives in its account and
+ * nowhere else. The only wallet left is the one midnight-js needs to assemble a
+ * transaction; it holds nothing and relays nothing, and the fees come from the
+ * sponsor.
  *
- * THE POSITION MAY BE A GUESS, AND A WRONG GUESS IS CHEAP. A change coin from
- * an earlier spend is stored with the candidate positions the chain's
- * two-output window allowed. An incorrect one cannot be proved, so nothing is
- * submitted and nothing is spent (MIP-0012 INV-5) — so this retries with the
- * next candidate rather than refusing, and the candidate that proves is
- * settled as the coin's position from then on. Only the failures a different
- * position could fix are retried ({@link spendPositionMayBeWrong}); everything
- * else is somebody's proving service or somebody's node, and a retry would ask
- * the person to approve again for nothing.
+ * SO THERE ARE TWO SHAPES AND BOTH ARE ONE TRANSACTION:
  *
- * THE CHANGE IS RECORDED BEFORE ANYTHING ELSE HAPPENS. See
- * {@link rememberK1ChangeCoin}: its description exists nowhere but in the
- * value this call returned.
+ *   to an ADDRESS  `withdraw_shielded_with_k256(their coin public key, colour,
+ *                  amount, …auth)`. The stdlib routes the change back to the
+ *                  contract and returns its description privately; the client
+ *                  persists it.
+ *
+ *   to an ACCOUNT  `withdraw_shielded_to_contract_with_k256(their contract,
+ *                  colour, amount, …auth)` with the recipient's own
+ *                  permissionless `deposit_shielded(coin, entry)` GRAFTED onto
+ *                  the same transaction. The sender reads `[sent, change]` off
+ *                  the unproven call, seals `sent` to the recipient's live
+ *                  encryption key, builds their claim, and grafts the intent —
+ *                  `addIntent`, never a merge: a merged transaction
+ *                  materialises a second copy of the claimed output and fails
+ *                  balancing (MIP-0012 §6.6, and the reference client's own
+ *                  conformance test says so in as many words).
+ *
+ * THE COIN IS READ ONCE AND USED TWICE. The challenge the device signs BINDS
+ * the qualified coin (AUTH-10) and the proof is built from whatever the
+ * `held_coin` witness returns; both come from the same store, read in the same
+ * pass, so the signature cannot be over a coin the proof does not spend.
+ *
+ * THE POSITION MAY BE A GUESS, AND A WRONG GUESS IS CHEAP. A change coin is
+ * stored with the candidate positions its transaction's window allowed. An
+ * incorrect one cannot be built or proved, so nothing is submitted and nothing
+ * is spent (MIP-0012 INV-5) — so this retries with the next candidate rather
+ * than refusing, and the candidate that works is settled as the coin's position
+ * from then on.
  */
-export async function withdrawShieldedK1(
+export async function spendShieldedK1(
   session: CustodyDynamicSession,
   device: K256DeviceIdentity,
-  request: CustodyShieldedWithdrawRequest,
+  request: CustodyShieldedSpendRequest,
   onPhase?: (phase: CustodyPhase) => void,
   overrides: Partial<CustodyDeps> = {},
-): Promise<CustodyShieldedWithdrawResult> {
+): Promise<CustodyShieldedSpendResult> {
   const deps = withDefaults(overrides);
-  const wallet = await deps.wallet(k1UserKey(session));
-  const record = loadCustodyRecord(deps.storage(), k1UserKey(session), wallet.network.networkId);
-  if (!record || record.address === null) {
+  const user = k1UserKey(session);
+  const wallet = await deps.wallet(user);
+  const network = wallet.network.networkId;
+  const storage = deps.storage();
+  const record = loadCustodyRecord(storage, user, network);
+  if (!record || record.address === null || nextCustodyStep(record) !== 'ready') {
     throw new Error('This Passport is not finished being set up yet.');
   }
   const account: K1Account = { network: record.network, address: record.address };
@@ -1379,60 +1473,200 @@ export async function withdrawShieldedK1(
   if (colour === null) throw new Error('That is not something this Passport can send.');
   const colourBytes = hexToBytes(colour);
 
+  const target = request.target;
+  /* Narrowed ONCE, here, because the branch that needs it is several `await`s
+     away and TypeScript cannot carry a discriminant across them. */
+  const payee = target.kind === 'account' ? target : null;
+  /* THE WHOLE TRANSACTION'S CIRCUITS, named before the connection is opened:
+     the proving service is told what to stage, and a composed transaction
+     whose claim is not staged is refused by name rather than in a prover's own
+     words several seconds later. */
+  const circuits =
+    target.kind === 'address'
+      ? (['withdraw_shielded_with_k256'] as const)
+      : (['withdraw_shielded_to_contract_with_k256', 'deposit_shielded'] as const);
+
+  const module = await deps.contractModule();
+  const contracts = await deps.contracts();
+  const providers = await custodyProviders(deps, wallet, {
+    address: record.address,
+    privateStateId: custodyPrivateStateId(record),
+    account: { network: record.network, address: record.address },
+    initialPrivateState: custodyPrivateState(record),
+    circuits,
+  });
+  const addressBytes = hexToBytes(record.address);
+  const privateStateId = custodyPrivateStateId(record);
+
   let attempt = 0;
   for (;;) {
     const held = heldK1Coin(account, colour);
     if (held === null) {
       throw new Error('There is nothing of that kind in this Passport to send.');
     }
-    const coin = {
+    const coin: CustodyHeldCoin = {
       nonce: hexToBytes(held.nonce),
       color: hexToBytes(held.colour),
       value: held.value,
       mt_index: held.mtIndex,
     };
-    /* WHAT THE SPEND WROTE, BEFORE ANYTHING WAS ASKED OF THE CHAIN. See
-       `CustodyCallRequest.onSubmitted`: the change coin's description is the
-       circuit's return value and exists nowhere else, so it is written the
-       instant the call resolves rather than after `resolveHash` has polled the
-       indexer for the chain's own hash. What is recorded here is what the run
-       stands on if the tab is closed a moment later. */
-    let written: ShieldedChangeWrite | null = null;
     try {
-      const step = await k1Call(
-        session,
-        device,
-        {
-          operation: 'withdraw_shielded',
-          args: [{ bytes: request.recipientCoinPublicKey }, colourBytes, request.amount],
-          challenge: (pure, context, pk) =>
-            k256Challenges.withdrawShielded(
-              pure,
+      const state = module.ledger(await queryStateData(providers, record.address));
+      const context: K1CallContext = {
+        contractAddress: addressBytes,
+        authNonce: state.auth_nonce,
+      };
+      const useCounter = resolveCustodyUseCounter({
+        entryAt: (counter) =>
+          deviceEntry(module.pureCircuits, device, addressBytes, state.device_epoch, counter),
+        isMember: (entry) => state.devices.member(entry),
+      });
+
+      onPhase?.({ step: 'sign' });
+      const recipientBytes =
+        target.kind === 'address' ? target.coinPublicKey : hexToBytes(target.contractAddress);
+      const challenge =
+        target.kind === 'address'
+          ? k256Challenges.withdrawShielded(
+              module.pureCircuits,
               context,
-              pk,
-              request.recipientCoinPublicKey,
+              device.pk,
+              recipientBytes,
               colourBytes,
               request.amount,
               coin,
-            ),
-          onSubmitted: (result, identifier) => {
-            /* It proved against this position, which is the only evidence there
-               is that the position is the right one. */
-            settleK1Coin(account, colour);
-            written = writeShieldedChange(account, colour, result, identifier);
-          },
-        },
-        onPhase,
-        overrides,
-      );
-      return await settleShieldedChange(deps, wallet, account, colour, step, written);
+            )
+          : k256Challenges.withdrawShieldedToContract(
+              module.pureCircuits,
+              context,
+              device.pk,
+              recipientBytes,
+              colourBytes,
+              request.amount,
+              coin,
+            );
+      const signer = dynamicK256Signer({
+        accountAddress: session.address,
+        pk: device.pk,
+        signRawMessage: session.signRaw,
+        envelope: device.envelope,
+      });
+      const auth: K256Authorisation = {
+        arm: 'k256',
+        pk: device.pk,
+        use_counter: useCounter,
+        sig: await signer.signDigest(await envelopeDigest(device.envelope, challenge)),
+        envelope: device.envelope,
+      };
+
+      onPhase?.({ step: 'submit' });
+      /* THE SPEND, UNPROVEN AND UNSUBMITTED. Built rather than called so that
+         `[sent, change]` can be read before anything leaves this tab: the
+         recipient's claim is built FROM the coin this call produces, and a
+         description read after submission would be a description read too
+         late. */
+      const spend = (await contracts.createUnprovenCallTx(providers, {
+        compiledContract: providers.compiledContract,
+        circuitId: circuits[0],
+        contractAddress: record.address,
+        args: [{ bytes: recipientBytes }, colourBytes, request.amount, ...authArgs(auth)],
+        privateStateId,
+        ...(target.kind === 'address'
+          ? {
+              /* The coin-pk → encryption-pk mapping midnight-js needs to build
+                 a THIRD PARTY's note ciphertext. Absent for a payment to an
+                 account: the output is addressed to a contract, which has no
+                 encryption key and whose claim carries the description
+                 instead. */
+              additionalCoinEncPublicKeyMappings: new Map([
+                [bytesToHex(target.coinPublicKey), bytesToHex(target.encryptionPublicKey)],
+              ]),
+            }
+          : {}),
+      })) as CustodyUnprovenCall;
+
+      const spendResult = spend.private.result;
+      const direct = payee === null ? null : directSpendFromResult(spendResult);
+      const change = direct === null ? changeCoinFromResult(spendResult) : direct.change;
+
+      let unprovenTx = spend.private.unprovenTx;
+      let sent: CustodySentCoin | null = null;
+      if (payee !== null && direct !== null) {
+        if (direct.sent === null) {
+          /* NOTHING HAS BEEN SUBMITTED. The coin the recipient would claim is
+             the only thing that can be put in their inbox, and this build
+             could not read it — so the payment does not go out at all, which
+             is the one outcome here that costs nobody anything. */
+          throw new Error('This Passport could not prepare that payment. Nothing was sent.');
+        }
+        sent = direct.sent;
+        const { depositShieldedCustody } = await import('./custodyInbox.js');
+        const sealed = await depositShieldedCustody(payee.recipientEncKeyHex, {
+          colour: direct.sent.colour,
+          nonce: direct.sent.nonce,
+          value: direct.sent.value,
+        });
+        const claim = (await contracts.createUnprovenCallTx(providers, {
+          compiledContract: providers.compiledContract,
+          circuitId: 'deposit_shielded',
+          contractAddress: payee.contractAddress,
+          args: [sealed.coin, sealed.entry],
+          /* NO PRIVATE STATE. `deposit_shielded` declares no witness, so there
+             is nothing for one to answer — and serving this Passport's own
+             coin store to a connection addressed at somebody else's account
+             would put our coins in the one place a mix-up is expensive. */
+        })) as CustodyUnprovenCall;
+        unprovenTx = graftIntent(unprovenTx, claim.private.unprovenTx);
+      }
+
+      const finalized = await contracts.submitTx(providers, {
+        unprovenTx,
+        circuitId: [...circuits],
+      });
+
+      /* BEFORE ANYTHING IS ASKED OF ANYBODY. The change coin's description is
+         the circuit's return value and exists nowhere else in the world; the
+         write happens the instant the transaction is known to be on chain,
+         rather than after the indexer has been polled for a window. */
+      settleK1Coin(account, colour);
+      const identifier = finalizedTxId(finalized);
+      const chainHash = finalizedTxHash(finalized);
+      const written = writeShieldedChange(account, colour, change, chainHash ?? identifier);
+
+      onPhase?.({ step: 'confirm' });
+      /* THE CHAIN'S OWN HASH, when the finalised data carried one. It is what
+         the indexer answers a commitment window at, and asking for it again
+         would be a second question with a worse answer. */
+      const txHash = chainHash ?? (await resolveHash(providers, finalized));
+      const next: CustodyAccountRecord = {
+        ...record,
+        txHashes: txHash ? [...record.txHashes, txHash] : record.txHashes,
+      };
+      saveCustodyRecord(storage, next);
+      const step: CustodyStepResult = {
+        record: next,
+        txHash,
+        explorerUrl: txHash ? custodyExplorerLink(txHash, network) : null,
+        result: spendResult,
+      };
+      const settled = await settleShieldedChange(deps, wallet, account, colour, step, written);
+      return {
+        ...settled,
+        sent,
+        blockHeight: finalizedBlockHeight(finalized),
+        candidate: attempt,
+      };
     } catch (cause) {
       const message = messageOf(cause);
-      /* EITHER TELL. The runtime that could not build the merkle path names it
-         in words; the proving service, which is where an unsatisfiable witness
-         actually surfaces for these circuits, says only that it declined to
-         prove — and that arrives as the error's NAME so the sentence a person
-         reads stays plain. */
+      /* EITHER TELL, AND ONE MORE THAN BEFORE. The runtime that could not build
+         the merkle path names it in words; the proving service, where an
+         unsatisfiable witness actually surfaces for these circuits, says only
+         that it declined to prove. The third is a WebAssembly trap while the
+         circuit is EXECUTED — which now happens inside this function's own
+         `createUnprovenCallTx` rather than inside midnight-js's scoped wrapper,
+         so the wrapper's wording is no longer there to recognise it by. At that
+         point nothing has been submitted and nothing can have been spent, so
+         the only cost of retrying is a second approval. */
       if (!spendPositionMayBeWrong(message) && !isCustodyProofNotBuilt(cause)) {
         /* NOT THE POSITION, so this run is over — and the store must not be
            left mid-rotation. A coin persisted at the second candidate is a coin
@@ -1441,14 +1675,132 @@ export async function withdrawShieldedK1(
         restartK1CoinCandidates(account, colour);
         throw cause;
       }
-      const next = advanceK1CoinCandidate(account, colour);
-      if (next === null) throw cause;
+      const nextCandidate = advanceK1CoinCandidate(account, colour);
+      if (nextCandidate === null) throw cause;
       attempt += 1;
       console.info(
         `[account-custody] retrying the spend against candidate position ${attempt} of this coin`,
       );
     }
   }
+}
+
+/**
+ * The gated spend to somebody's shielded address — the name every caller of
+ * the three-leg build used, now one transaction and paying the RECIPIENT.
+ */
+export async function withdrawShieldedK1(
+  session: CustodyDynamicSession,
+  device: K256DeviceIdentity,
+  request: {
+    readonly recipientCoinPublicKey: Uint8Array;
+    readonly recipientEncryptionPublicKey: Uint8Array;
+    readonly colourHex: string;
+    readonly amount: bigint;
+  },
+  onPhase?: (phase: CustodyPhase) => void,
+  overrides: Partial<CustodyDeps> = {},
+): Promise<CustodyShieldedSpendResult> {
+  return spendShieldedK1(
+    session,
+    device,
+    {
+      target: {
+        kind: 'address',
+        coinPublicKey: request.recipientCoinPublicKey,
+        encryptionPublicKey: request.recipientEncryptionPublicKey,
+      },
+      colourHex: request.colourHex,
+      amount: request.amount,
+    },
+    onPhase,
+    overrides,
+  );
+}
+
+/** The direct transfer: this account pays another one, in one transaction. */
+export async function withdrawShieldedToContractK1(
+  session: CustodyDynamicSession,
+  device: K256DeviceIdentity,
+  request: {
+    readonly recipientAccountAddress: string;
+    readonly recipientEncKeyHex: string;
+    readonly colourHex: string;
+    readonly amount: bigint;
+  },
+  onPhase?: (phase: CustodyPhase) => void,
+  overrides: Partial<CustodyDeps> = {},
+): Promise<CustodyShieldedSpendResult> {
+  return spendShieldedK1(
+    session,
+    device,
+    {
+      target: {
+        kind: 'account',
+        contractAddress: request.recipientAccountAddress,
+        recipientEncKeyHex: request.recipientEncKeyHex,
+      },
+      colourHex: request.colourHex,
+      amount: request.amount,
+    },
+    onPhase,
+    overrides,
+  );
+}
+
+/** What `createUnprovenCallTx` hands back, narrowed to what is used here. */
+interface CustodyUnprovenCall {
+  readonly private: { readonly result: unknown; readonly unprovenTx: CustodyUnprovenTx };
+}
+
+/** An unproven transaction, narrowed to the two members grafting needs. */
+interface CustodyUnprovenTx {
+  readonly intents?: Map<number, unknown>;
+  addIntent(segment: { tag: string }, intent: unknown): CustodyUnprovenTx | undefined;
+}
+
+/**
+ * Graft the recipient's claim onto the sender's transaction.
+ *
+ * GRAFT, DO NOT MERGE, and the difference is the whole of MIP-0012 §6.6's
+ * client recipe. A merged transaction duplicates the claimed output — the
+ * recipient's call materialises its own funding copy — and fails balancing.
+ * `addIntent` puts the claim into the sender's already-balanced offer, in a
+ * random segment, which is what the reference client's conformance test
+ * submits and what the node accepts.
+ *
+ * `addIntent` returns the new transaction; a build that returns nothing leaves
+ * the original, which is the same defensive read the deploy waves make of
+ * `addDeploy` after three live deploys landed carrying nothing.
+ */
+function graftIntent(sender: CustodyUnprovenTx, claim: CustodyUnprovenTx): CustodyUnprovenTx {
+  const intents = claim.intents;
+  const first = intents === undefined ? undefined : [...intents.values()][0];
+  if (first === undefined) {
+    throw new Error('This Passport could not prepare that payment. Nothing was sent.');
+  }
+  return sender.addIntent({ tag: 'random' }, first) ?? sender;
+}
+
+/** midnight-js's own transaction id, off either shape of finalised data. */
+function finalizedTxId(result: unknown): string | null {
+  const view = result as { txId?: unknown; public?: { txId?: unknown } } | null;
+  const value = view?.txId ?? view?.public?.txId;
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+/** The chain's own hash, when the finalised data carried one. */
+function finalizedTxHash(result: unknown): string | null {
+  const view = result as { txHash?: unknown; public?: { txHash?: unknown } } | null;
+  const value = view?.txHash ?? view?.public?.txHash;
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+/** The block it landed in, for the record and for nothing on screen. */
+function finalizedBlockHeight(result: unknown): number | null {
+  const view = result as { blockHeight?: unknown; public?: { blockHeight?: unknown } } | null;
+  const value = view?.blockHeight ?? view?.public?.blockHeight;
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
 /** What the spend wrote down at submission time, for the settle that follows. */
@@ -1460,17 +1812,14 @@ interface ShieldedChangeWrite {
 
 /**
  * File what the withdrawal returned, in ONE write, asking nothing of anybody.
- *
- * Called from `onSubmitted`, which is to say before `resolveHash` — so this
- * runs while the only thing that has happened is that the call resolved.
  */
 function writeShieldedChange(
   account: K1Account,
   colour: string,
-  result: unknown,
+  change: CustodyChangeCoin,
   identifier: string | null,
 ): ShieldedChangeWrite {
-  const change = changeCoinFromResult(result);
+  const txId = identifier ?? 'unknown';
   if (change.outcome === 'unreadable') {
     /* THE VALUE HAS MOVED and this build could not read the description of what
        came back. The coin is not dropped: a dropped coin is a colour this
@@ -1479,20 +1828,20 @@ function writeShieldedChange(
        change could not be described, and a later run has the hash to go and
        look. */
     console.warn('[account-custody] the withdrawal succeeded and its change could not be read');
-    rememberK1ChangeCoin(account, colour, 'unreadable', identifier ?? 'unknown');
-    return { change, txId: identifier ?? 'unknown' };
+    rememberK1ChangeCoin(account, colour, 'unreadable', txId);
+    return { change, txId };
   }
   if (change.outcome === 'none') {
-    rememberK1ChangeCoin(account, colour, null, identifier ?? 'unknown');
-    return { change, txId: identifier ?? 'unknown' };
+    rememberK1ChangeCoin(account, colour, null, txId);
+    return { change, txId };
   }
   rememberK1ChangeCoin(
     account,
     colour,
     { colour: change.colour, nonce: change.nonce, value: change.value },
-    identifier ?? 'unknown',
+    txId,
   );
-  return { change, txId: identifier ?? 'unknown' };
+  return { change, txId };
 }
 
 /**
@@ -1509,33 +1858,26 @@ async function settleShieldedChange(
   account: K1Account,
   colour: string,
   step: CustodyStepResult,
-  written: ShieldedChangeWrite | null,
+  written: ShieldedChangeWrite,
 ): Promise<CustodyShieldedWithdrawResult> {
-  const change = written?.change ?? changeCoinFromResult(step.result);
-  if (change.outcome !== 'change') return { ...step, change, changePosition: 'none' };
+  const base = { ...step, sent: null, blockHeight: null, candidate: 0 };
+  const change = written.change;
+  if (change.outcome !== 'change') return { ...base, change, changePosition: 'none' };
   if (step.txHash === null) {
     console.warn('[account-custody] the change coin has no transaction to look its position up by');
-    return { ...step, change, changePosition: 'awaiting' };
+    return { ...base, change, changePosition: 'awaiting' };
   }
   /* THE HASH REPLACES THE IDENTIFIER the coin was filed under. The indexer
      answers commitment windows by the chain's hash, and a sponsored
      transaction is superseded, so the id midnight-js returned is not a key it
      can answer — which is exactly how a change coin used to stay "arriving"
      for ever. */
-  if (written !== null && written.txId !== step.txHash) {
+  if (written.txId !== step.txHash) {
     renameK1AwaitingTx(account, change.colour, written.txId, step.txHash);
   }
-  /* AND `step.txHash` MAY STILL BE THE IDENTIFIER. `resolveTransactionHash`
-     polls for ten seconds and then hands back what it was given, which is not
-     a failure and reads as an answer — so an indexer more than ten seconds
-     behind left the row filed under a name it will never answer for, with
-     every later read asking the same unanswerable question (review,
-     2026/09/18). The settle below resolves it again when that is what the row
-     is holding, which is also what Home's walk does with the same helper.
-
-     THE HASH NAMES THE ROW, not the colour. A colour can have a second coin in
-     flight — an earlier spend's change, or a delivery this walk has not placed
-     — and settling "the colour" would file one of them and drop the rest. */
+  /* THE HASH NAMES THE ROW, not the colour. A colour can have a second coin in
+     flight — an earlier spend's change this walk has not placed — and settling
+     "the colour" would file one of them and drop the rest. */
   const settled = await settleK1AwaitingCoinByChainHash(
     account,
     change.colour,
@@ -1543,126 +1885,11 @@ async function settleShieldedChange(
     (txId) => deps.resolveChainHash(wallet.network.indexerHttpUrl, txId),
     (txId) => deps.commitmentWindow(wallet.network.indexerHttpUrl, txId),
   );
-  if (settled.outcome === 'learned') return { ...step, change, changePosition: 'settled' };
+  if (settled.outcome === 'learned') return { ...base, change, changePosition: 'settled' };
   if (settled.outcome === 'ambiguous') {
-    return { ...step, change, changePosition: settled.stored ? 'candidates' : 'awaiting' };
+    return { ...base, change, changePosition: settled.stored ? 'candidates' : 'awaiting' };
   }
-  return { ...step, change, changePosition: 'awaiting' };
-}
-
-/**
- * A permissionless call on SOMEBODY ELSE's custody account — paying one.
- *
- * The same circuits as {@link custodyPermissionlessCall} and a different
- * contract at the other end, which is the whole of the difference and is worth
- * the separate entry point: `deposit_shielded(coin, entry)` on the recipient's
- * account is how a shielded payment lands, and everything about that call is
- * the SENDER's except the address — the sender's own wallet builds the
- * transaction, the sender's own fees pay for it, and the note being deposited
- * is one the sender holds.
- *
- * THIS PASSPORT'S COIN STORE IS NOT SERVED TO IT. The connection is opened
- * with `account: null`, so the private state is a session-only one under an id
- * of the recipient's address. That is not caution for its own sake: the
- * deposits declare no witness, so there is nothing for a private state to
- * answer, and serving our own store to a connection addressed at somebody
- * else's account would put our coins in the one place a mix-up is expensive.
- *
- * The recipient's record is not ours and is not written. What comes back is
- * the sender's own record, untouched apart from the transaction hash, because
- * that hash is the only thing the sender learned.
- */
-export async function custodyPermissionlessCallAt(
-  session: CustodyDynamicSession,
-  targetAddress: string,
-  request: { operation: string; args: readonly unknown[] },
-  onPhase?: (phase: CustodyPhase) => void,
-  overrides: Partial<CustodyDeps> = {},
-): Promise<CustodyStepResult> {
-  const deps = withDefaults(overrides);
-  const user = k1UserKey(session);
-  const wallet = await deps.wallet(user);
-  const network = wallet.network.networkId;
-  const storage = deps.storage();
-  const record = loadCustodyRecord(storage, user, network);
-  if (!record || record.address === null || nextCustodyStep(record) !== 'ready') {
-    throw new Error('This Passport is not finished being set up yet.');
-  }
-  if (normalisedColourHex(targetAddress) === null) {
-    throw new Error('That Passport cannot be paid from here.');
-  }
-  const { callTx, providers } = await openCustodyContract(deps, wallet, {
-    address: targetAddress,
-    /* An id of the RECIPIENT's address, served by the session half of the
-       provider rather than by the store — see the header above. */
-    privateStateId: `passport-account-custody-peer-${network}-${targetAddress}`,
-    account: null,
-    initialPrivateState: emptyK1CoinStoreState(),
-    circuit: request.operation,
-  });
-  onPhase?.({ step: 'submit' });
-  const call = callTx[request.operation];
-  if (!call) throw new Error('That Passport cannot be paid this way.');
-  const result = await call(...request.args);
-  onPhase?.({ step: 'confirm' });
-  const txHash = await resolveHash(providers, result);
-  const next: CustodyAccountRecord = {
-    ...record,
-    txHashes: txHash ? [...record.txHashes, txHash] : record.txHashes,
-  };
-  saveCustodyRecord(storage, next);
-  return {
-    record: next,
-    txHash,
-    explorerUrl: txHash ? custodyExplorerLink(txHash, network) : null,
-    result: circuitResultOf(result),
-  };
-}
-
-/**
- * Leg three into another one of these accounts: the note, and a description of
- * it the recipient can open.
- *
- * TWO ARGUMENTS AND BOTH ARE LOAD-BEARING. `deposit_shielded(coin, entry)`
- * takes the note into the recipient's balance and 192 opaque bytes into its
- * inbox, and the second is the only thing that will ever tell the recipient
- * what it was sent: the chain carries the note, not its description, so a
- * deposit made without a readable entry is a coin that has demonstrably
- * arrived and that nobody can ever move again.
- *
- * THE KEY IS READ LIVE BY THE CALLER AND PASSED IN. An account rotates its
- * encryption key, and an entry sealed to a key it has rotated away from is
- * exactly the coin described above. Callers pass the value they have just
- * read; they must not pass one they read yesterday.
- *
- * This is also the DEPOSIT-BACK: a leg three that failed puts the note into
- * the SENDER's own account by calling this with the sender's own address and
- * the sender's own key, which is one more permissionless deposit and no
- * approval from anybody.
- */
-export async function depositShieldedIntoCustody(
-  session: CustodyDynamicSession,
-  request: {
-    readonly targetAddress: string;
-    readonly recipientEncKeyHex: string;
-    readonly coin: { readonly colour: string; readonly nonce: string; readonly value: bigint };
-  },
-  onPhase?: (phase: CustodyPhase) => void,
-  overrides: Partial<CustodyDeps> = {},
-): Promise<CustodyStepResult> {
-  const { depositShieldedCustody } = await import('./custodyInbox.js');
-  const sealed = await depositShieldedCustody(request.recipientEncKeyHex, {
-    colour: request.coin.colour,
-    nonce: request.coin.nonce,
-    value: request.coin.value,
-  });
-  return custodyPermissionlessCallAt(
-    session,
-    request.targetAddress,
-    { operation: 'deposit_shielded', args: [sealed.coin, sealed.entry] },
-    onPhase,
-    overrides,
-  );
+  return { ...base, change, changePosition: 'awaiting' };
 }
 
 export async function appendInboxK1(
@@ -1813,39 +2040,66 @@ function custodyPrivateState(record: Pick<CustodyAccountRecord, 'network' | 'add
  * big-key service would work and would put a queue for 235 MB proofs in front
  * of a payment that does not need one.
  */
-function custodyNeedsBigKeyProver(circuit: string): boolean {
-  return circuit.endsWith('_with_k256') || circuit.endsWith('_with_jubjub');
+function custodyNeedsBigKeyProver(circuits: readonly string[]): boolean {
+  /* ANY of them. A composed transaction pairs a gated spend with a
+     permissionless claim, and one 224 MB key in it is enough to put the whole
+     transaction where the keys are. */
+  return circuits.some(
+    (circuit) => circuit.endsWith('_with_k256') || circuit.endsWith('_with_jubjub'),
+  );
+}
+
+/** What a connection is opened against. */
+interface CustodyConnectionTarget {
+  readonly address: string;
+  readonly privateStateId: string;
+  readonly account: K1Account | null;
+  readonly initialPrivateState: unknown;
+  /** Every circuit the transaction this connection builds will call. */
+  readonly circuits: readonly string[];
+}
+
+/**
+ * The providers for one transaction, with its proof route already chosen.
+ *
+ * SEPARATE FROM {@link openCustodyContract} because a composed transaction has
+ * no deployed-contract handle to make: it builds each call itself, grafts one
+ * onto the other, and submits the pair. Asking `findDeployedContract` for a
+ * `callTx` it would never use would be a verifier-key round trip per attempt,
+ * and a spend retries.
+ */
+async function custodyProviders(
+  deps: CustodyDeps,
+  wallet: LocalMidnightWallet,
+  target: CustodyConnectionTarget,
+): Promise<Record<string, unknown>> {
+  const providers = await deps.providers(wallet, target.privateStateId, target.account);
+  /* The proof provider is per-TRANSACTION, because the service is told which
+     keys to stage. Everything else in the set is shared. */
+  const scoped = custodyNeedsBigKeyProver(target.circuits)
+    ? {
+        ...providers,
+        proofProvider: custodyProofProvider({
+          endpoint: custodyProvingEndpoint(sponsorConfig()?.url ?? null),
+          network: wallet.network.networkId,
+          circuits: target.circuits,
+          deserialise: (providers.deserialiseUnbound as (b: Uint8Array) => unknown) ?? identity,
+        }),
+      }
+    : providers;
+  return scoped;
 }
 
 /** Open a deployed custody account for one circuit's proof route. */
 async function openCustodyContract(
   deps: CustodyDeps,
   wallet: LocalMidnightWallet,
-  target: {
-    readonly address: string;
-    readonly privateStateId: string;
-    readonly account: K1Account | null;
-    readonly initialPrivateState: unknown;
-    readonly circuit: string;
-  },
+  target: CustodyConnectionTarget,
 ): Promise<{ callTx: CustodyCallTx; providers: Record<string, unknown> }> {
-  const providers = await deps.providers(wallet, target.privateStateId, target.account);
-  /* The proof provider is per-CIRCUIT, because the service is told which key to
-     use. Everything else in the set is shared. */
-  const scoped = custodyNeedsBigKeyProver(target.circuit)
-    ? {
-        ...providers,
-        proofProvider: custodyProofProvider({
-          endpoint: custodyProvingEndpoint(sponsorConfig()?.url ?? null),
-          network: wallet.network.networkId,
-          circuit: target.circuit,
-          deserialise: (providers.deserialiseUnbound as (b: Uint8Array) => unknown) ?? identity,
-        }),
-      }
-    : providers;
+  const scoped = await custodyProviders(deps, wallet, target);
   const contracts = await deps.contracts();
   const deployed = await contracts.findDeployedContract(scoped, {
-    compiledContract: providers.compiledContract,
+    compiledContract: scoped.compiledContract,
     contractAddress: target.address,
     privateStateId: target.privateStateId,
     initialPrivateState: target.initialPrivateState,
@@ -1858,14 +2112,14 @@ async function openCustodyAccount(
   deps: CustodyDeps,
   wallet: LocalMidnightWallet,
   record: CustodyAccountRecord,
-  circuit: string,
+  circuits: readonly string[],
 ): Promise<{ callTx: CustodyCallTx; providers: Record<string, unknown> }> {
   return openCustodyContract(deps, wallet, {
     address: record.address as string,
     privateStateId: custodyPrivateStateId(record),
     account: custodyStoreAccount(record),
     initialPrivateState: custodyPrivateState(record),
-    circuit,
+    circuits,
   });
 }
 
@@ -1907,23 +2161,18 @@ async function queryStateData(
  */
 /** midnight-js's own transaction id, or null when the result carries none. */
 function identifierOf(result: unknown): string | null {
-  try {
-    return transactionId(result);
-  } catch {
-    return null;
-  }
+  return finalizedTxId(result);
 }
 
 async function resolveHash(
   providers: Record<string, unknown>,
   result: unknown,
 ): Promise<string | null> {
-  let identifier: string;
-  try {
-    identifier = transactionId(result);
-  } catch {
-    return null;
-  }
+  /* EITHER SHAPE. A call made through `callTx` comes back wrapped in a
+     `public` half; one built and submitted by hand comes back as the finalised
+     transaction data itself. Both carry the same id under the same name. */
+  const identifier = finalizedTxId(result);
+  if (identifier === null) return null;
   const indexer = (providers.indexerHttpUrl as string | undefined) ?? '';
   if (indexer.length === 0) return identifier;
   try {

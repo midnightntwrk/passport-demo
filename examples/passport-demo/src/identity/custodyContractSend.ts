@@ -210,18 +210,17 @@ export function planCustodySend(input: CustodySendPlanInput): CustodySendPlan {
 }
 
 /* -------------------------------------------------------------------------- */
-/* A SHIELDED payment: three legs                                             */
+/* A SHIELDED payment: ONE transaction                                        */
 /* -------------------------------------------------------------------------- */
 
 /**
- * Where leg three puts the note, which depends on what the recipient is.
+ * Which shielded deposit a recipient's account takes, or null for neither.
  *
- * `'prototype'` is `deposit_shielded(coin)` on the two prototype builds, which
- * take the note and nothing else. `'custody'` is `deposit_shielded(coin, entry)`
- * on another one of these accounts, where the second argument is the sealed
- * description the recipient needs in order to ever spend what it was sent —
- * see `./custodyInbox.ts`. A deposit into a custody account WITHOUT an entry
- * is a coin that has demonstrably arrived and that nobody can move again.
+ * Kept because the ANSWER still decides whether a recipient can be paid at
+ * all: `'custody'` is another one of these accounts, whose claim is
+ * `deposit_shielded(coin, entry)` and which the direct transfer grafts onto
+ * the sender's own transaction. `'prototype'` is the passkey build, and
+ * {@link custodyShieldedSendRefusal} refuses it — see the refusal for why.
  */
 export type ShieldedDepositRoute = 'prototype' | 'custody';
 
@@ -241,26 +240,23 @@ export interface CustodyHeldCoinPlan {
   readonly mtIndex: bigint;
 }
 
-/** Leg one: the gated withdrawal, out to this Passport's own receiving address. */
-export interface CustodyShieldedWithdrawLeg {
-  readonly operation: 'withdraw_shielded';
+/**
+ * The direct transfer, whole: one gated spend to the recipient's account, with
+ * the recipient's own claim grafted onto the same transaction.
+ */
+export interface CustodyShieldedTransferLeg {
+  readonly operation: 'withdraw_shielded_to_contract';
+  /** The recipient's account contract, raw 64-hex. */
+  readonly contractAddress: string;
   readonly colourHex: string;
-  /** EXACTLY the amount being sent — see {@link planCustodyShieldedSend}. */
+  /** EXACTLY the amount being sent; the change comes back in the same transaction. */
   readonly amount: bigint;
   /**
-   * Where the withdrawal pays: this Passport's own shielded receiving address,
-   * whole, as `mn_shield-addr…`.
-   *
-   * The circuit takes only the coin public key inside it, and the caller is
-   * the one that decodes — that needs the address SDK and this module has no
-   * imports with sockets or WASM behind them. The whole address travels
-   * because half of it cannot be derived from the other half.
-   *
-   * No coin-to-encryption-key mapping is needed for this leg, unlike the
-   * passkey path's `withdrawShielded`: the payee is this wallet itself, and
-   * midnight-js already holds its own encryption key.
+   * The recipient's advertised encryption key, READ LIVE by the caller and
+   * never remembered: an account may rotate it, and an entry sealed to a key it
+   * has rotated away from is a coin the recipient cannot open.
    */
-  readonly ownShieldedAddress: string;
+  readonly recipientEncKeyHex: string;
   /**
    * The coin the spend will consume, bound into the challenge the device signs
    * (AUTH-10: the approver signs over the exact note, not over a colour and an
@@ -270,57 +266,9 @@ export interface CustodyShieldedWithdrawLeg {
   readonly coin: CustodyHeldCoinPlan;
 }
 
-/** Leg two: which note leg three is looking for, once the wallet holds it. */
-export interface CustodyShieldedAwaitLeg {
-  readonly colourHex: string;
-  /** The arriving note's value must equal this EXACTLY — `lib/shieldedNote.ts`. */
-  readonly amount: bigint;
-}
-
-/** Leg three: the permissionless deposit that makes the value the recipient's. */
-export type CustodyShieldedDepositLeg =
-  | {
-      readonly route: 'prototype';
-      readonly circuit: 'deposit_shielded';
-      readonly contractAddress: string;
-      readonly colourHex: string;
-      readonly amount: bigint;
-    }
-  | {
-      readonly route: 'custody';
-      readonly circuit: 'deposit_shielded';
-      readonly contractAddress: string;
-      readonly colourHex: string;
-      readonly amount: bigint;
-      /**
-       * The recipient's advertised encryption key, READ LIVE by the caller and
-       * never remembered: an account may rotate it, and an entry sealed to a
-       * key it has rotated away from is a coin the recipient cannot open.
-       */
-      readonly recipientEncKeyHex: string;
-    };
-
-/**
- * Where the note goes if leg three fails: back into the sender's own account.
- *
- * Null when this Passport cannot read its own encryption key, which does not
- * stop the send — it means a failed leg three leaves the value at the sender's
- * own receiving address instead, and {@link custodyShieldedSendOutcome} says
- * so rather than claiming it came back.
- */
-export interface CustodyShieldedReturnLeg {
-  readonly circuit: 'deposit_shielded';
-  readonly contractAddress: string;
-  readonly colourHex: string;
-  readonly ownEncKeyHex: string;
-}
-
-/** The whole shielded payment. */
+/** The whole shielded payment to another account. */
 export interface CustodyShieldedSendPlan {
-  readonly withdraw: CustodyShieldedWithdrawLeg;
-  readonly await: CustodyShieldedAwaitLeg;
-  readonly deposit: CustodyShieldedDepositLeg;
-  readonly returnToSender: CustodyShieldedReturnLeg | null;
+  readonly transfer: CustodyShieldedTransferLeg;
 }
 
 /** Everything a shielded plan is built from. */
@@ -329,8 +277,6 @@ export interface CustodyShieldedSendPlanInput {
   readonly record: CustodyAccountRecord | null;
   readonly colourHex: string;
   readonly amount: bigint;
-  /** This Passport's own shielded receiving address. */
-  readonly ownShieldedAddress: string;
   /** The recipient's account, resolved from the name. */
   readonly recipientAccountAddress: string;
   /** What the chain says the recipient's account is built from. */
@@ -339,10 +285,8 @@ export interface CustodyShieldedSendPlanInput {
   readonly heldCoin: CustodyHeldCoinPlan | null;
   /** The values of the FURTHER coins of this colour the store has queued. */
   readonly queuedValues: readonly bigint[];
-  /** The recipient's encryption key, read live. Only a custody recipient needs one. */
+  /** The recipient's encryption key, read live. */
   readonly recipientEncKeyHex?: string | null;
-  /** This Passport's own encryption key, read live, for the return leg. */
-  readonly ownEncKeyHex?: string | null;
 }
 
 function totalOf(values: readonly bigint[]): bigint {
@@ -363,22 +307,31 @@ function totalOf(values: readonly bigint[]): bigint {
  * total says what is actually true — that it arrived as separate payments —
  * and asks for a smaller amount.
  *
+ * THE PROTOTYPE RECIPIENT IS REFUSED, and it is the refusal worth arguing
+ * with. A passkey Passport's account is a DIFFERENT BUILD, compiled to a
+ * different intermediate representation (the account custody contract is ZKIR
+ * v3, the prototype v2) and proved by a different proof server. One
+ * transaction cannot hold a call of each, so the direct transfer cannot reach
+ * one — and the only other way to reach one is through a wallet the ruling of
+ * 2026/09/18 forbids in a value flow. Nothing here can mend that; a passkey
+ * Passport on the account custody build can be paid like any other.
+ *
  * None of these sentences names a wallet address, a fee token, a proving
- * service, a name registry, or the sign-in vendor. A refusal is the most
- * likely thing a person meets on this path, so it is the copy that most has to
- * be right.
+ * service, a name registry, or the sign-in vendor. A refusal is the most likely
+ * thing a person meets on this path, so it is the copy that most has to be
+ * right.
  */
 export function custodyShieldedSendRefusal(input: CustodyShieldedSendPlanInput): string | null {
   if (input.record === null || input.record.address === null || !input.record.activated) {
     return 'Your Passport is still being set up. Try again once it is ready.';
   }
   if (input.amount <= 0n) return 'Enter an amount greater than zero.';
-  if (input.ownShieldedAddress.trim().length === 0) {
-    return 'Your Passport is still opening. Try again in a moment.';
-  }
   const route = shieldedDepositRouteFor(input.recipientModule);
   if (route === null) {
     return 'That name does not belong to a Passport that can be paid.';
+  }
+  if (route === 'prototype') {
+    return 'That Passport is an older kind, and this version cannot pay it this way. Ask them to set their Passport up again.';
   }
   if (input.heldCoin === null) {
     return 'Your Passport holds none of that to send.';
@@ -389,7 +342,7 @@ export function custodyShieldedSendRefusal(input: CustodyShieldedSendPlanInput):
   if (input.amount > input.heldCoin.value) {
     return 'That much arrived as separate payments, and one payment can only draw on one of them. Send a smaller amount for now.';
   }
-  if (route === 'custody' && normalisedEncKey(input.recipientEncKeyHex) === null) {
+  if (normalisedEncKey(input.recipientEncKeyHex) === null) {
     return 'That Passport cannot be paid this kind of amount yet.';
   }
   return null;
@@ -399,10 +352,9 @@ export function custodyShieldedSendRefusal(input: CustodyShieldedSendPlanInput):
  * An encryption key as 64 lower-case hex characters, or null.
  *
  * Checked HERE, in the pure layer, because the failure it prevents is the
- * expensive one: a deposit whose entry was sealed to a key that was not one is
+ * expensive one: a payment whose entry was sealed to a key that was not one is
  * a coin the recipient cannot describe and therefore cannot ever spend.
- * `./custodyInbox.ts` refuses it too, one leg later, with the value already
- * out of the sender's account.
+ * `./custodyInbox.ts` refuses it too, by which time the transaction is built.
  */
 function normalisedEncKey(value: string | null | undefined): string | null {
   if (typeof value !== 'string') return null;
@@ -411,17 +363,16 @@ function normalisedEncKey(value: string | null | undefined): string | null {
 }
 
 /**
- * The three legs, or a throw carrying the refusal.
+ * The one transaction, or a throw carrying the refusal.
  *
  * EXACTLY THE AMOUNT LEAVES THE ACCOUNT, and the change comes back in the same
  * transaction. That is the opposite of the passkey path, which takes the whole
  * coin out and puts the difference back in a third transaction — a workaround
  * for `withdraw_shielded`'s split branch leaving behind a coin the node
  * refuses every later withdrawal against (node error 239, live 2026/09/03).
- * This contract's `withdraw_shielded_with_k256` RETURNS the change coin as the
- * circuit's value instead, so the change is described rather than re-derived,
- * and the description is what the store keeps. Asking for the whole coin here
- * would mean sending a stranger more than the amount.
+ * This contract RETURNS the change coin as the circuit's value instead, so the
+ * change is described rather than re-derived, and the description is what the
+ * store keeps.
  */
 export function planCustodyShieldedSend(
   input: CustodyShieldedSendPlanInput,
@@ -432,44 +383,87 @@ export function planCustodyShieldedSend(
      the refusal above has already answered every case in which either of these
      is absent, and inventing a value for one would be how a payment goes
      somewhere that cannot take it. */
-  const route = shieldedDepositRouteFor(input.recipientModule) as ShieldedDepositRoute;
-  const coin = input.heldCoin as CustodyHeldCoinPlan;
-  const ownEncKey = normalisedEncKey(input.ownEncKeyHex);
   return {
-    withdraw: {
-      operation: 'withdraw_shielded',
+    transfer: {
+      operation: 'withdraw_shielded_to_contract',
+      contractAddress: input.recipientAccountAddress,
       colourHex: input.colourHex,
       amount: input.amount,
-      ownShieldedAddress: input.ownShieldedAddress,
-      coin,
+      recipientEncKeyHex: normalisedEncKey(input.recipientEncKeyHex) as string,
+      coin: input.heldCoin as CustodyHeldCoinPlan,
     },
-    await: { colourHex: input.colourHex, amount: input.amount },
-    deposit:
-      route === 'custody'
-        ? {
-            route,
-            circuit: 'deposit_shielded',
-            contractAddress: input.recipientAccountAddress,
-            colourHex: input.colourHex,
-            amount: input.amount,
-            recipientEncKeyHex: normalisedEncKey(input.recipientEncKeyHex) as string,
-          }
-        : {
-            route,
-            circuit: 'deposit_shielded',
-            contractAddress: input.recipientAccountAddress,
-            colourHex: input.colourHex,
-            amount: input.amount,
-          },
-    returnToSender:
-      ownEncKey === null
-        ? null
-        : {
-            circuit: 'deposit_shielded',
-            contractAddress: input.record?.address as string,
-            colourHex: input.colourHex,
-            ownEncKeyHex: ownEncKey,
-          },
+  };
+}
+
+/* -------------------------------------------------------------------------- */
+/* A shielded payment to an ADDRESS somebody pasted                           */
+/* -------------------------------------------------------------------------- */
+
+/** The whole payment to a shielded address: one gated spend, no claim. */
+export interface CustodyShieldedAddressSendPlan {
+  readonly operation: 'withdraw_shielded';
+  readonly colourHex: string;
+  readonly amount: bigint;
+  /**
+   * The recipient's full `mn_shield-addr…`, whole.
+   *
+   * The circuit takes only the coin public key inside it, and midnight-js takes
+   * the encryption key beside it to build the recipient's note — so the whole
+   * address travels, because neither half can be derived from the other. The
+   * caller decodes; this module has no imports with sockets or WASM behind them.
+   */
+  readonly recipientShieldedAddress: string;
+  readonly coin: CustodyHeldCoinPlan;
+}
+
+/** Everything an address payment is planned from. */
+export interface CustodyShieldedAddressSendPlanInput {
+  readonly record: CustodyAccountRecord | null;
+  readonly colourHex: string;
+  readonly amount: bigint;
+  readonly recipientShieldedAddress: string;
+  readonly heldCoin: CustodyHeldCoinPlan | null;
+  readonly queuedValues: readonly bigint[];
+}
+
+/** Why a payment to an address cannot be planned, in one sentence, or null. */
+export function custodyShieldedAddressSendRefusal(
+  input: CustodyShieldedAddressSendPlanInput,
+): string | null {
+  if (input.record === null || input.record.address === null || !input.record.activated) {
+    return 'Your Passport is still being set up. Try again once it is ready.';
+  }
+  if (input.amount <= 0n) return 'Enter an amount greater than zero.';
+  /* SHAPE ONLY. Whether the address belongs to this network is decided by the
+     decode, which is the one place that can answer it — and it is the check
+     that stops a payment vanishing into an address from another chain. */
+  if (!/^mn_shield-addr[0-9a-z_-]*1[0-9a-z]{8,}$/i.test(input.recipientShieldedAddress.trim())) {
+    return 'That is not an address this Passport can pay.';
+  }
+  if (input.heldCoin === null) {
+    return 'Your Passport holds none of that to send.';
+  }
+  if (input.amount > input.heldCoin.value + totalOf(input.queuedValues)) {
+    return 'You do not hold enough to send that.';
+  }
+  if (input.amount > input.heldCoin.value) {
+    return 'That much arrived as separate payments, and one payment can only draw on one of them. Send a smaller amount for now.';
+  }
+  return null;
+}
+
+/** The one transaction, or a throw carrying the refusal. */
+export function planCustodyShieldedAddressSend(
+  input: CustodyShieldedAddressSendPlanInput,
+): CustodyShieldedAddressSendPlan {
+  const refusal = custodyShieldedAddressSendRefusal(input);
+  if (refusal !== null) throw new Error(refusal);
+  return {
+    operation: 'withdraw_shielded',
+    colourHex: input.colourHex,
+    amount: input.amount,
+    recipientShieldedAddress: input.recipientShieldedAddress.trim(),
+    coin: input.heldCoin as CustodyHeldCoinPlan,
   };
 }
 
@@ -526,6 +520,55 @@ export function changeCoinFromResult(result: unknown): CustodyChangeCoin {
     return { outcome: 'unreadable', reason: 'The payment went out and this Passport could not read what was left over.' };
   }
   return { outcome: 'change', nonce, colour, value: coin.value };
+}
+
+/** The coin a direct transfer handed the recipient's account. */
+export interface CustodySentCoinDescription {
+  readonly nonce: string;
+  readonly colour: string;
+  readonly value: bigint;
+}
+
+/** What `withdraw_shielded_to_contract_with_k256` returned. */
+export interface CustodyDirectSpend {
+  /** The coin the recipient's own claim must carry. Null when unreadable. */
+  readonly sent: CustodySentCoinDescription | null;
+  /** The change the account kept, read the same way the baseline spend's is. */
+  readonly change: CustodyChangeCoin;
+}
+
+/**
+ * Read `[sent, change]` off the direct transfer's own result.
+ *
+ * THE FIRST HALF IS NOT OPTIONAL AND THE SECOND HALF IS. `sent` is the stdlib's
+ * `SendResult.sent` — the coin now owned by the recipient's contract, whose
+ * nonce is the deterministic evolution of the input coin's — and it is the ONLY
+ * description of that coin that will ever exist: the chain carries the note,
+ * not what it is. The recipient's claim seals it into their inbox, so a `sent`
+ * this build cannot read is a payment that must not be sent at all. `change` is
+ * a `Maybe` for the ordinary reason: a spend that consumed the coin exactly
+ * leaves none.
+ *
+ * Read from the UNPROVEN call, before anything has left the tab, which is what
+ * makes "do not send it" an option rather than a regret.
+ */
+export function directSpendFromResult(result: unknown): CustodyDirectSpend {
+  const unreadable: CustodyChangeCoin = {
+    outcome: 'unreadable',
+    reason: 'The payment went out and this Passport could not read what was left over.',
+  };
+  if (!Array.isArray(result) || result.length < 2) {
+    return { sent: null, change: unreadable };
+  }
+  const first = result[0] as { nonce?: unknown; color?: unknown; value?: unknown } | null;
+  const nonce = hexOf(first?.nonce);
+  const colour = hexOf(first?.color);
+  const value = first?.value;
+  const sent =
+    nonce === null || colour === null || typeof value !== 'bigint' || value < 0n
+      ? null
+      : { nonce, colour, value };
+  return { sent, change: changeCoinFromResult(result[1]) };
 }
 
 /**
@@ -640,31 +683,22 @@ export function custodyUnshieldedBalance(
 /* A send that stopped between legs                                           */
 /* -------------------------------------------------------------------------- */
 
-/** Where a shielded send got to. */
+/**
+ * Where a shielded send got to.
+ *
+ * TWO, BECAUSE A SEND IS ONE TRANSACTION (2026/09/18). It used to be six: the
+ * value left the account into this Passport's own wallet, waited there to be
+ * identified, and a third transaction made it the recipient's — so there were
+ * four ways to stop with money in a place neither party owned, and each needed
+ * its own sentence. A Passport's value now lives in its account and moves in
+ * one transaction, so there is nothing in between to be in: it either landed or
+ * it did not.
+ */
 export type CustodyShieldedSendStage =
-  /** Leg one is out. Nothing has left the account that the account knows of. */
-  | 'withdrawing'
-  /** Leg one landed; the note has not been identified in the wallet yet. */
-  | 'awaiting-note'
-  /** The note is identified; leg three is running. */
-  | 'depositing'
-  /** Leg three failed; the note is being put back into the sender's account. */
-  | 'returning'
-  /** The recipient has it. */
-  | 'done'
-  /**
-   * Leg three threw AFTER the note had left this wallet.
-   *
-   * Which is a real outcome and not a tidy one: a transaction can be broadcast
-   * and its promise still reject — a socket dropping, a confirmation wait
-   * running out — and the recipient then has the money while this screen has an
-   * error. The note is demonstrably gone from the sender's wallet, so it cannot
-   * be put back, and nothing here can see the recipient's side. Saying "it is
-   * held for you" would be a lie in the direction that costs the most.
-   */
-  | 'unconfirmed'
-  /** The value is out of the account and in neither account. */
-  | 'stranded';
+  /** The transaction is out. Nothing has left the account unless it lands. */
+  | 'sending'
+  /** It landed. The recipient has it. */
+  | 'done';
 
 /**
  * The minimum a resumed shielded send needs to know, and no more.
@@ -692,13 +726,11 @@ export interface CustodyShieldedSendRecord {
   readonly colourHex: string;
   /** Decimal. */
   readonly amount: string;
-  /** What the person typed — a name, not an address. */
+  /** What the person typed — a name, or a shielded address they pasted. */
   readonly recipientLabel: string;
   readonly recipientAccountAddress: string;
-  /** The note leg one produced, once leg two has identified it. */
-  readonly noteNonce: string | null;
-  readonly withdrawTxId: string | null;
-  readonly depositTxId: string | null;
+  /** The one transaction, once there is an id for it. */
+  readonly sendTxId: string | null;
   readonly startedAt: number;
 }
 
@@ -722,14 +754,12 @@ export function newCustodyShieldedSend(input: {
   return {
     network: input.network,
     accountAddress: input.accountAddress,
-    stage: 'withdrawing',
+    stage: 'sending',
     colourHex: input.colourHex,
     amount: input.amount.toString(),
     recipientLabel: input.recipientLabel,
     recipientAccountAddress: input.recipientAccountAddress,
-    noteNonce: null,
-    withdrawTxId: null,
-    depositTxId: null,
+    sendTxId: null,
     startedAt: input.now,
   };
 }
@@ -738,22 +768,11 @@ export function newCustodyShieldedSend(input: {
  * Every stage a stored record may be in — the list a record is READ BACK
  * against, so a stage missing from it is a record that vanishes on reload.
  *
- * `'unconfirmed'` was missing until 2026/09/17, and it is the most expensive
- * one to lose: it is written exactly when value has left the Passport and
- * nothing here can see which side holds it (`../screens/DynamicPassport.tsx`
- * saves it before it throws). A record that will not parse is a record the
- * screen reads as "no payment in flight", so a reload replaced the one
- * sentence that says what happened with silence.
+ * A record that will not parse is a record the screen reads as "no payment in
+ * flight", so a reload replaces the one sentence that says what happened with
+ * silence. That is why the list is written down rather than inferred.
  */
-const SHIELDED_SEND_STAGES: readonly CustodyShieldedSendStage[] = [
-  'withdrawing',
-  'awaiting-note',
-  'depositing',
-  'returning',
-  'done',
-  'unconfirmed',
-  'stranded',
-];
+const SHIELDED_SEND_STAGES: readonly CustodyShieldedSendStage[] = ['sending', 'done'];
 
 function recordFromRow(row: unknown): CustodyShieldedSendRecord | null {
   if (!row || typeof row !== 'object') return null;
@@ -776,9 +795,7 @@ function recordFromRow(row: unknown): CustodyShieldedSendRecord | null {
       typeof candidate.recipientAccountAddress === 'string'
         ? candidate.recipientAccountAddress
         : '',
-    noteNonce: typeof candidate.noteNonce === 'string' ? candidate.noteNonce : null,
-    withdrawTxId: typeof candidate.withdrawTxId === 'string' ? candidate.withdrawTxId : null,
-    depositTxId: typeof candidate.depositTxId === 'string' ? candidate.depositTxId : null,
+    sendTxId: typeof candidate.sendTxId === 'string' ? candidate.sendTxId : null,
     startedAt: typeof candidate.startedAt === 'number' ? candidate.startedAt : 0,
   };
 }
@@ -845,33 +862,19 @@ export function clearCustodyShieldedSend(
 }
 
 /**
- * What a resumed run should do next with a record it found.
+ * What a run that found a record should do with it.
  *
- * `'deposit'` is the case worth having this for: the value is in the sender's
- * wallet as a note, the recipient has not been paid, and the remaining leg
- * needs no approval from anybody — so a resumed run can simply finish it.
- * `'find-note'` is the same position one step earlier, where the note still
- * has to be identified by nonce.
- *
- * `'nothing'` is a record that has either finished or cannot be finished from
- * here; `'report'` is a record whose value is out of the account with no leg
- * left to run, and the caller's job is to say where it is rather than to try
- * anything.
+ * `'nothing'` for a payment that landed, and `'report'` for one that was in
+ * flight when the tab went away. THERE IS NO `'finish'` ANY MORE, and its
+ * absence is the point: a send is one transaction, so there is no leg left for
+ * anybody to run and nothing for a button to do. What is owed is a sentence,
+ * and the sentence is the truth — the transaction either landed or it did not,
+ * and the balance on screen says which.
  */
 export function nextCustodyShieldedSendStep(
   record: CustodyShieldedSendRecord,
-): 'withdraw' | 'find-note' | 'deposit' | 'report' | 'nothing' {
-  if (record.stage === 'withdrawing') return 'withdraw';
-  if (record.stage === 'awaiting-note') return 'find-note';
-  if (record.stage === 'depositing') return record.noteNonce === null ? 'find-note' : 'deposit';
-  if (record.stage === 'returning') return 'report';
-  if (record.stage === 'stranded') return 'report';
-  /* Out of the account, in neither account as far as this build can see, and
-     with no leg left to run: the caller's job is to say so. `'nothing'` would
-     leave a person who reopened Passport with no sign of a payment that has
-     demonstrably left it. */
-  if (record.stage === 'unconfirmed') return 'report';
-  return 'nothing';
+): 'report' | 'nothing' {
+  return record.stage === 'sending' ? 'report' : 'nothing';
 }
 
 /**
@@ -885,25 +888,12 @@ export function nextCustodyShieldedSendStep(
  */
 export function custodyShieldedSendOutcome(record: CustodyShieldedSendRecord): string {
   const who = record.recipientLabel.trim().length > 0 ? record.recipientLabel.trim() : 'them';
-  switch (record.stage) {
-    case 'done':
-      return `Sent. ${who} has it.`;
-    case 'withdrawing':
-      return 'Nothing was sent, and it is all still in your Passport.';
-    case 'awaiting-note':
-    case 'depositing':
-      /* IT DOES NOT FINISH BY ITSELF, and the sentence used to say it would
-         (review, 2026/09/18). Nothing resumes a stopped payment on its own:
-         the last leg runs when somebody presses the button that runs it, and
-         telling a person to come back in a moment and wait left them waiting
-         for a thing that was never going to happen. The wording names the
-         button `../lib/custodyAssets.ts`'s resume offer puts on the screen. */
-      return `It has left your Passport and has not reached ${who} yet. It does not finish on its own: open Passport and press Finish this payment.`;
-    case 'returning':
-      return `It did not reach ${who}, so it is being put back into your Passport.`;
-    case 'unconfirmed':
-      return `It has left your Passport and nothing here can see whether ${who} has it yet. Check with ${who} before sending it again.`;
-    default:
-      return `It did not reach ${who}, and it could not be put back either. It is being held for you at your own receiving address, and the next version of Passport will sweep it up.`;
-  }
+  if (record.stage === 'done') return `Sent. ${who} has it.`;
+  /* ONE TRANSACTION, SO ONE OF TWO THINGS. Either the chain took it and ${who}
+     has the money, or it did not and the money never left — there is no third
+     place for it to be, which is the whole of what the one-transaction send
+     buys a person whose tab closed half-way. The balance is the answer and it
+     is on the screen this sentence is shown beside, so the sentence points at
+     it rather than offering a button that would have nothing to do. */
+  return `Your payment to ${who} was sent as one payment: either it reached ${who} or nothing left your Passport. Your balance below says which.`;
 }

@@ -61,11 +61,8 @@ import {
   rememberK1ChangeCoin,
   type K1Account,
 } from './k1CoinStore.js';
-import { openCustodyInboxEntry, generateCustodyEncKeyPair } from './custodyInbox.js';
 import {
-  custodyPermissionlessCallAt,
   custodyWitnesses,
-  depositShieldedIntoCustody,
   resetCustodySessionState,
   withdrawShieldedK1,
   type CustodyDeps,
@@ -101,7 +98,6 @@ vi.mock('./contractRuntime.js', async (importOriginal) => ({
 /* -------------------------------------------------------------------------- */
 
 const ADDRESS = 'ab'.repeat(32);
-const PEER = 'dd'.repeat(32);
 const COLOUR = '1a'.repeat(32);
 const OTHER_COLOUR = '2b'.repeat(32);
 const NONCE = '7f'.repeat(32);
@@ -222,10 +218,22 @@ interface ChainFake {
   chainHashLater?: (txId: string) => string | null;
 }
 
+/** An unproven CALL, as the fake `createUnprovenCallTx` hands it back. */
+interface FakeCallTx {
+  readonly circuit: string;
+  readonly args: readonly unknown[];
+  /** Every intent grafted onto this one — the direct transfer's claim. */
+  readonly grafted: readonly unknown[];
+  readonly intents: Map<number, unknown>;
+  addIntent(segment: { tag: string }, intent: unknown): FakeCallTx;
+}
+
 interface SpendHarness {
   deps: Partial<CustodyDeps>;
   storage: CustodyStorage & { data: Map<string, string> };
-  calls: { circuit: string; args: unknown[] }[];
+  calls: { circuit: string; args: unknown[]; options?: unknown }[];
+  /** How many intents each submitted transaction carried grafted onto it. */
+  grafts: number[];
   connections: { privateStateId: string; account: unknown }[];
   opened: string[];
   /** Every commitment-window question asked, by transaction. */
@@ -258,37 +266,65 @@ function harness(
   };
   saveCustodyRecord(storage, record);
 
-  const calls: { circuit: string; args: unknown[] }[] = [];
+  const calls: { circuit: string; args: unknown[]; options?: unknown }[] = [];
+  /** How many intents each submitted transaction carried grafted onto it. */
+  const grafts: number[] = [];
   const connections: { privateStateId: string; account: unknown }[] = [];
   const opened: string[] = [];
   const windowQuestions: string[] = [];
   const hashQuestions: string[] = [];
   let submitted = 0;
 
-  const callTx = new Proxy(
-    {},
-    {
-      get:
-        (_target, circuit: string) =>
-        (...args: unknown[]) => {
-          calls.push({ circuit, args });
-          if (circuit.startsWith('withdraw_shielded')) {
-            if ((chain.positionFailures ?? 0) > 0) {
-              chain.positionFailures = (chain.positionFailures ?? 0) - 1;
-              return Promise.reject(new Error('could not build the merkle path for this coin'));
-            }
-            if (chain.otherFailure !== undefined) {
-              return Promise.reject(new Error(chain.otherFailure));
-            }
-          }
-          submitted += 1;
-          return Promise.resolve({
-            public: { txId: `id-${submitted}` },
-            private: { result: chain.circuitResult, nextPrivateState: { coins: {} } },
-          });
-        },
-    },
-  );
+  /** An unproven call, with the two members a graft needs. */
+  const unprovenCall = (circuit: string, args: readonly unknown[]): FakeCallTx => {
+    const make = (grafted: readonly unknown[]): FakeCallTx => ({
+      circuit,
+      args,
+      grafted,
+      intents: new Map([[0, { intentFor: circuit }]]),
+      addIntent: (segment, intent) => {
+        if (segment.tag !== 'random') throw new Error('a claim goes into a random segment');
+        return make([...grafted, intent]);
+      },
+    });
+    return make([]);
+  };
+
+  /* THE SPEND IS BUILT HERE AND SENT BELOW. A wrong coin position traps while
+     the circuit is executed against the contract's own Zswap tree, which is
+     this step; the proving service's own refusal comes one step later. */
+  const createUnprovenCallTx = (_providers: unknown, callOptions: unknown) => {
+    const { circuitId, args, contractAddress } = callOptions as {
+      circuitId: string;
+      args: unknown[];
+      contractAddress: string;
+    };
+    calls.push({ circuit: circuitId, args, options: callOptions });
+    opened.push(contractAddress);
+    if (circuitId.startsWith('withdraw_shielded')) {
+      if ((chain.positionFailures ?? 0) > 0) {
+        chain.positionFailures = (chain.positionFailures ?? 0) - 1;
+        return Promise.reject(new Error('could not build the merkle path for this coin'));
+      }
+      if (chain.otherFailure !== undefined) {
+        return Promise.reject(new Error(chain.otherFailure));
+      }
+    }
+    return Promise.resolve({
+      private: {
+        result: circuitId === 'deposit_shielded' ? null : chain.circuitResult,
+        unprovenTx: unprovenCall(circuitId, args),
+        nextPrivateState: { coins: {} },
+      },
+    });
+  };
+
+  const submitTx = (_providers: unknown, submitOptions: unknown) => {
+    const { unprovenTx } = submitOptions as { unprovenTx: FakeCallTx };
+    grafts.push(unprovenTx.grafted.length);
+    submitted += 1;
+    return Promise.resolve({ txId: `id-${submitted}` });
+  };
 
   const providers: Record<string, unknown> = {
     publicDataProvider: {
@@ -310,6 +346,7 @@ function harness(
   return {
     storage,
     calls,
+    grafts,
     connections,
     opened,
     windowQuestions,
@@ -345,11 +382,9 @@ function harness(
       contracts: () =>
         Promise.resolve({
           createUnprovenDeployTx: () => Promise.reject(new Error('not used here')),
-          submitTx: () => Promise.reject(new Error('not used here')),
-          findDeployedContract: (_providers: unknown, callOptions: unknown) => {
-            opened.push((callOptions as { contractAddress: string }).contractAddress);
-            return Promise.resolve({ callTx });
-          },
+          createUnprovenCallTx,
+          submitTx,
+          findDeployedContract: () => Promise.reject(new Error('not used here')),
         } as never),
       resolveChainHash: (_indexer: string, txId: string) => {
         hashQuestions.push(txId);
@@ -435,7 +470,10 @@ describe('the change coin reaches storage before anything slow happens', () => {
     const pending = withdrawShieldedK1(
       session,
       device,
-      { recipientCoinPublicKey: new Uint8Array(32).fill(0x11), colourHex: COLOUR, amount: 40n },
+      {
+        recipientCoinPublicKey: new Uint8Array(32).fill(0x11),
+        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+        colourHex: COLOUR, amount: 40n },
       undefined,
       test.deps,
     );
@@ -466,7 +504,10 @@ describe('the change coin reaches storage before anything slow happens', () => {
     const result = await withdrawShieldedK1(
       session,
       device,
-      { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 40n },
+      {
+        recipientCoinPublicKey: new Uint8Array(32),
+        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+        colourHex: COLOUR, amount: 40n },
       undefined,
       test.deps,
     );
@@ -507,7 +548,10 @@ describe('the change coin reaches storage before anything slow happens', () => {
     const result = await withdrawShieldedK1(
       session,
       device,
-      { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 40n },
+      {
+        recipientCoinPublicKey: new Uint8Array(32),
+        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+        colourHex: COLOUR, amount: 40n },
       undefined,
       test.deps,
     );
@@ -530,7 +574,10 @@ describe('the change coin reaches storage before anything slow happens', () => {
     const result = await withdrawShieldedK1(
       session,
       device,
-      { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 40n },
+      {
+        recipientCoinPublicKey: new Uint8Array(32),
+        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+        colourHex: COLOUR, amount: 40n },
       undefined,
       test.deps,
     );
@@ -554,7 +601,10 @@ describe('the change coin reaches storage before anything slow happens', () => {
     const pending = withdrawShieldedK1(
       session,
       device,
-      { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 40n },
+      {
+        recipientCoinPublicKey: new Uint8Array(32),
+        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+        colourHex: COLOUR, amount: 40n },
       undefined,
       test.deps,
     );
@@ -584,7 +634,10 @@ describe('the change coin reaches storage before anything slow happens', () => {
     const result = await withdrawShieldedK1(
       session,
       device,
-      { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 40n },
+      {
+        recipientCoinPublicKey: new Uint8Array(32),
+        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+        colourHex: COLOUR, amount: 40n },
       undefined,
       test.deps,
     );
@@ -602,7 +655,10 @@ describe('the change coin reaches storage before anything slow happens', () => {
     const result = await withdrawShieldedK1(
       session,
       device,
-      { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 40n },
+      {
+        recipientCoinPublicKey: new Uint8Array(32),
+        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+        colourHex: COLOUR, amount: 40n },
       undefined,
       test.deps,
     );
@@ -624,7 +680,10 @@ describe('the change coin reaches storage before anything slow happens', () => {
     const result = await withdrawShieldedK1(
       session,
       device,
-      { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 100n },
+      {
+        recipientCoinPublicKey: new Uint8Array(32),
+        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+        colourHex: COLOUR, amount: 100n },
       undefined,
       test.deps,
     );
@@ -648,7 +707,10 @@ describe('a spend against a position that may be the wrong one', () => {
     await withdrawShieldedK1(
       session,
       device,
-      { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 40n },
+      {
+        recipientCoinPublicKey: new Uint8Array(32),
+        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+        colourHex: COLOUR, amount: 40n },
       undefined,
       test.deps,
     );
@@ -675,7 +737,10 @@ describe('a spend against a position that may be the wrong one', () => {
       withdrawShieldedK1(
         session,
         device,
-        { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 40n },
+        {
+        recipientCoinPublicKey: new Uint8Array(32),
+        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+        colourHex: COLOUR, amount: 40n },
         undefined,
         test.deps,
       ),
@@ -700,7 +765,10 @@ describe('a spend against a position that may be the wrong one', () => {
       withdrawShieldedK1(
         session,
         device,
-        { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 40n },
+        {
+        recipientCoinPublicKey: new Uint8Array(32),
+        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+        colourHex: COLOUR, amount: 40n },
         undefined,
         test.deps,
       ),
@@ -737,7 +805,10 @@ describe('a spend against a position that may be the wrong one', () => {
       withdrawShieldedK1(
         session,
         device,
-        { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 40n },
+        {
+        recipientCoinPublicKey: new Uint8Array(32),
+        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+        colourHex: COLOUR, amount: 40n },
         undefined,
         test.deps,
       ),
@@ -779,7 +850,10 @@ describe('a spend against a position that may be the wrong one', () => {
       withdrawShieldedK1(
         dismissing,
         device,
-        { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 40n },
+        {
+        recipientCoinPublicKey: new Uint8Array(32),
+        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+        colourHex: COLOUR, amount: 40n },
         undefined,
         test.deps,
       ),
@@ -802,7 +876,10 @@ describe('a spend against a position that may be the wrong one', () => {
       withdrawShieldedK1(
         session,
         device,
-        { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 40n },
+        {
+        recipientCoinPublicKey: new Uint8Array(32),
+        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+        colourHex: COLOUR, amount: 40n },
         undefined,
         test.deps,
       ),
@@ -819,7 +896,10 @@ describe('a spend against a position that may be the wrong one', () => {
       withdrawShieldedK1(
         session,
         device,
-        { recipientCoinPublicKey: new Uint8Array(32), colourHex: 'not-a-colour', amount: 40n },
+        {
+        recipientCoinPublicKey: new Uint8Array(32),
+        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+        colourHex: 'not-a-colour', amount: 40n },
         undefined,
         test.deps,
       ),
@@ -912,98 +992,3 @@ describe('held_coin, read out of the private state the connection serves', () =>
 
 /* -------------------------------------------------------------------------- */
 /* Paying another one of these accounts                                       */
-/* -------------------------------------------------------------------------- */
-
-describe('a deposit into somebody else’s account', () => {
-  it('seals a description only the recipient can open, and sends it with the note', async () => {
-    const test = harness();
-    const { session } = deviceFake();
-    const recipient = generateCustodyEncKeyPair();
-
-    await depositShieldedIntoCustody(
-      session,
-      {
-        targetAddress: PEER,
-        recipientEncKeyHex: recipient.publicKeyHex,
-        coin: { colour: COLOUR, nonce: NONCE, value: 250n },
-      },
-      undefined,
-      test.deps,
-    );
-
-    const call = test.calls.find((row) => row.circuit === 'deposit_shielded');
-    expect(call?.args).toHaveLength(2);
-    const entry = call?.args[1] as Uint8Array;
-    /* EXACTLY 192 BYTES, which is what the compiled ABI takes and what the
-       recipient's list of deliveries holds. */
-    expect(entry).toBeInstanceOf(Uint8Array);
-    expect(entry.length).toBe(192);
-    const opened = await openCustodyInboxEntry(recipient.secretKeyHex, entry);
-    expect(opened).toMatchObject({ colour: COLOUR, nonce: NONCE, value: 250n });
-
-    /* The call went to the RECIPIENT's address, and the connection was opened
-       without this Passport's own coin store behind it. */
-    expect(test.opened).toEqual([PEER]);
-    expect(test.connections.at(-1)?.account).toBeNull();
-    expect(test.connections.at(-1)?.privateStateId).toContain(PEER);
-  });
-
-  it('refuses a key that is not one before anything is submitted', async () => {
-    const test = harness();
-    const { session } = deviceFake();
-
-    await expect(
-      depositShieldedIntoCustody(
-        session,
-        {
-          targetAddress: PEER,
-          recipientEncKeyHex: 'not-a-key',
-          coin: { colour: COLOUR, nonce: NONCE, value: 250n },
-        },
-        undefined,
-        test.deps,
-      ),
-    ).rejects.toThrow();
-    expect(test.calls).toEqual([]);
-    expect(test.opened).toEqual([]);
-  });
-
-  it('refuses an address that is not one, and pays nobody', async () => {
-    const test = harness();
-    const { session } = deviceFake();
-
-    await expect(
-      custodyPermissionlessCallAt(
-        session,
-        'not-an-address',
-        { operation: 'deposit_unshielded', args: [] },
-        undefined,
-        test.deps,
-      ),
-    ).rejects.toThrow('That Passport cannot be paid from here.');
-    expect(test.calls).toEqual([]);
-  });
-
-  it('puts a note back into this Passport’s own account by the same route', async () => {
-    /* THE DEPOSIT-BACK. One more permissionless deposit, to the sender's own
-       address, sealed to the sender's own key — no approval from anybody. */
-    const test = harness();
-    const { session } = deviceFake();
-    const own = generateCustodyEncKeyPair();
-
-    await depositShieldedIntoCustody(
-      session,
-      {
-        targetAddress: ADDRESS,
-        recipientEncKeyHex: own.publicKeyHex,
-        coin: { colour: COLOUR, nonce: NONCE, value: 40n },
-      },
-      undefined,
-      test.deps,
-    );
-
-    expect(test.opened).toEqual([ADDRESS]);
-    const entry = test.calls.at(-1)?.args[1] as Uint8Array;
-    expect(await openCustodyInboxEntry(own.secretKeyHex, entry)).toMatchObject({ value: 40n });
-  });
-});

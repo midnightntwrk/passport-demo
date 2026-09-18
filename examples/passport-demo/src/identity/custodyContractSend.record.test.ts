@@ -33,6 +33,7 @@ import {
   clearCustodyShieldedSend,
   custodyShieldedSendOutcome,
   custodyShieldedSendRefusal,
+  directSpendFromResult,
   loadCustodyShieldedSend,
   newCustodyShieldedSend,
   nextCustodyShieldedSendStep,
@@ -54,7 +55,7 @@ const FORBIDDEN = /wallet address|DUST|contract|registry|indexer|resolver|sponso
 
 const NONCE = '7f'.repeat(32);
 const COLOUR = '1a'.repeat(32);
-const OWN_ENC_KEY = 'cc'.repeat(32);
+const ENC_KEY = 'ab'.repeat(32);
 const RECIPIENT_ENC_KEY = 'ee'.repeat(32);
 
 const RECORD: CustodyAccountRecord = {
@@ -78,12 +79,11 @@ function shieldedInput(
     record: RECORD,
     colourHex: COLOUR,
     amount: 40n,
-    ownShieldedAddress: 'mn_shield-addr_test1sender',
     recipientAccountAddress: 'dd'.repeat(32),
-    recipientModule: 'account',
+    recipientModule: 'account-custody',
     heldCoin: { nonce: NONCE, value: 100n, mtIndex: 7n },
     queuedValues: [],
-    ownEncKeyHex: OWN_ENC_KEY,
+    recipientEncKeyHex: ENC_KEY,
     ...patch,
   };
 }
@@ -120,14 +120,16 @@ const refusals: { name: string; input: Partial<CustodyShieldedSendPlanInput>; se
       sentence: 'Enter an amount greater than zero.',
     },
     {
-      name: 'this Passport has no receiving address yet',
-      input: { ownShieldedAddress: '' },
-      sentence: 'Your Passport is still opening. Try again in a moment.',
+      name: 'the recipient holds an older kind of Passport',
+      input: { recipientModule: 'account' },
+      sentence:
+        'That Passport is an older kind, and this version cannot pay it this way. Ask them to set their Passport up again.',
     },
     {
-      name: 'the receiving address is only whitespace',
-      input: { ownShieldedAddress: '   ' },
-      sentence: 'Your Passport is still opening. Try again in a moment.',
+      name: 'the recipient holds the first prototype build',
+      input: { recipientModule: 'account-v1' },
+      sentence:
+        'That Passport is an older kind, and this version cannot pay it this way. Ask them to set their Passport up again.',
     },
     {
       name: 'the name belongs to something that is not a Passport',
@@ -152,12 +154,12 @@ const refusals: { name: string; input: Partial<CustodyShieldedSendPlanInput>; se
     },
     {
       name: 'the recipient publishes no key to seal a description to',
-      input: { recipientModule: 'account-custody' },
+      input: { recipientEncKeyHex: null },
       sentence: 'That Passport cannot be paid this kind of amount yet.',
     },
     {
       name: 'the recipient publishes a key that is not one',
-      input: { recipientModule: 'account-custody', recipientEncKeyHex: 'short' },
+      input: { recipientEncKeyHex: 'short' },
       sentence: 'That Passport cannot be paid this kind of amount yet.',
     },
   ];
@@ -256,51 +258,32 @@ function send(patch: Partial<CustodyShieldedSendRecord> = {}): CustodyShieldedSe
 }
 
 /** Every stage, what a resumed run does with it, and what it says. */
-const stages: {
-  readonly stage: CustodyShieldedSendStage;
-  readonly noteNonce?: string | null;
-  readonly step: 'withdraw' | 'find-note' | 'deposit' | 'report' | 'nothing';
-  readonly says: RegExp;
-}[] = [
-  { stage: 'withdrawing', step: 'withdraw', says: /still in your Passport/ },
-  { stage: 'awaiting-note', step: 'find-note', says: /has not reached alice\.night yet/ },
-  { stage: 'depositing', noteNonce: null, step: 'find-note', says: /has not reached alice\.night yet/ },
-  { stage: 'depositing', noteNonce: NONCE, step: 'deposit', says: /has not reached alice\.night yet/ },
-  { stage: 'returning', step: 'report', says: /being put back/ },
-  { stage: 'unconfirmed', step: 'report', says: /nothing here can see whether/ },
-  { stage: 'stranded', step: 'report', says: /could not be put back/ },
+const stages: { stage: CustodyShieldedSendStage; step: 'report' | 'nothing'; says: RegExp }[] = [
+  { stage: 'sending', step: 'report', says: /either it reached alice\.night or nothing left/ },
   { stage: 'done', step: 'nothing', says: /alice\.night has it/ },
 ];
 
-describe('a stopped payment, at every stage it can stop at', () => {
+describe('a payment at every stage it can be in', () => {
   for (const row of stages) {
-    const label = row.noteNonce === undefined ? row.stage : `${row.stage} with no note identified`;
-
-    it(`knows what to do next, and where the money is, at ${label}`, () => {
-      const record = send({
-        stage: row.stage,
-        ...(row.noteNonce === undefined ? {} : { noteNonce: row.noteNonce }),
-      });
+    it(`knows what to do with it, and where the money is, at ${row.stage}`, () => {
+      const record = send({ stage: row.stage });
       expect(nextCustodyShieldedSendStep(record)).toBe(row.step);
       const sentence = custodyShieldedSendOutcome(record);
       expect(sentence).toMatch(row.says);
       expect(sentence).not.toMatch(FORBIDDEN);
-      /* Nothing claims the value came back unless it did. */
-      if (row.stage !== 'returning' && row.stage !== 'withdrawing') {
-        expect(sentence).not.toMatch(/back in your Passport/);
-      }
+      /* Nothing claims the value came back, because nothing can put it back:
+         a send is one transaction and there is no wallet in the middle of it
+         to hold anything. */
+      expect(sentence).not.toMatch(/back in your Passport/);
     });
 
-    it(`survives being written down and read back at ${label}`, () => {
+    it(`survives being written down and read back at ${row.stage}`, () => {
       /* THE DEFECT THIS CATCHES was a stage missing from the reader's list:
          the record was written, the tab was reloaded, and the screen read "no
          payment in flight" over value that had demonstrably left the
          Passport. */
       const { storage } = storageFake();
-      const record = send({
-        stage: row.stage,
-        ...(row.noteNonce === undefined ? {} : { noteNonce: row.noteNonce }),
-      });
+      const record = send({ stage: row.stage });
       saveCustodyShieldedSend(storage, record);
       const reloaded = loadCustodyShieldedSend(storage, ACCOUNT);
       expect(reloaded, `stage ${row.stage} did not survive a reload`).toEqual(record);
@@ -310,36 +293,29 @@ describe('a stopped payment, at every stage it can stop at', () => {
 
   it('keeps the latest write when the same stage is written twice', () => {
     const { storage } = storageFake();
-    saveCustodyShieldedSend(storage, send({ stage: 'depositing', noteNonce: null }));
-    saveCustodyShieldedSend(storage, send({ stage: 'depositing', noteNonce: NONCE }));
-    expect(loadCustodyShieldedSend(storage, ACCOUNT)?.noteNonce).toBe(NONCE);
-    expect(nextCustodyShieldedSendStep(loadCustodyShieldedSend(storage, ACCOUNT) as CustodyShieldedSendRecord)).toBe('deposit');
+    saveCustodyShieldedSend(storage, send({ sendTxId: null }));
+    saveCustodyShieldedSend(storage, send({ sendTxId: 'tx-send' }));
+    expect(loadCustodyShieldedSend(storage, ACCOUNT)?.sendTxId).toBe('tx-send');
   });
 
   it('takes the stages out of order without inventing a state between them', () => {
-    /* A resumed run can write a stage that is EARLIER than the stored one — a
-       retry after a reload — and the record is a fact about the last thing
-       that happened, not a ratchet. */
+    /* A record is a fact about the last thing that happened, not a ratchet. */
     const { storage } = storageFake();
     saveCustodyShieldedSend(storage, send({ stage: 'done' }));
-    saveCustodyShieldedSend(storage, send({ stage: 'withdrawing' }));
-    expect(loadCustodyShieldedSend(storage, ACCOUNT)?.stage).toBe('withdrawing');
-    saveCustodyShieldedSend(storage, send({ stage: 'unconfirmed' }));
-    expect(loadCustodyShieldedSend(storage, ACCOUNT)?.stage).toBe('unconfirmed');
+    saveCustodyShieldedSend(storage, send({ stage: 'sending' }));
+    expect(loadCustodyShieldedSend(storage, ACCOUNT)?.stage).toBe('sending');
   });
 
   it('forgets a payment the person has been told about, and only that one', () => {
     const { storage } = storageFake();
-    saveCustodyShieldedSend(storage, send({ stage: 'unconfirmed' }));
+    saveCustodyShieldedSend(storage, send({ stage: 'sending' }));
     saveCustodyShieldedSend(
       storage,
-      send({ network: 'preview', stage: 'stranded', recipientLabel: 'bob.night' }),
+      send({ network: 'preview', stage: 'done', recipientLabel: 'bob.night' }),
     );
     clearCustodyShieldedSend(storage, ACCOUNT);
     expect(loadCustodyShieldedSend(storage, ACCOUNT)).toBeNull();
-    expect(loadCustodyShieldedSend(storage, { ...ACCOUNT, network: 'preview' })?.stage).toBe(
-      'stranded',
-    );
+    expect(loadCustodyShieldedSend(storage, { ...ACCOUNT, network: 'preview' })?.stage).toBe('done');
   });
 });
 
@@ -371,8 +347,8 @@ describe('a record nothing can read is no payment in flight, and never a throw',
       expect(loadCustodyShieldedSend(storage, ACCOUNT)).toBeNull();
       /* And a write on top of it still leaves a readable record rather than
          carrying the damage forward. */
-      saveCustodyShieldedSend(storage, send({ stage: 'awaiting-note' }));
-      expect(loadCustodyShieldedSend(storage, ACCOUNT)?.stage).toBe('awaiting-note');
+      saveCustodyShieldedSend(storage, send({ stage: 'sending' }));
+      expect(loadCustodyShieldedSend(storage, ACCOUNT)?.stage).toBe('sending');
     });
   }
 
@@ -392,13 +368,64 @@ describe('a record nothing can read is no payment in flight, and never a throw',
     expect(loadCustodyShieldedSend(storage, ACCOUNT)).toBeNull();
     expect(
       loadCustodyShieldedSend(storage, { network: 'preview', accountAddress: 'aaaa' })?.stage,
-    ).toBe('withdrawing');
+    ).toBe('sending');
   });
 });
 
 /* -------------------------------------------------------------------------- */
 /* What the circuit said about the change                                     */
 /* -------------------------------------------------------------------------- */
+
+describe('reading [sent, change] out of a direct transfer', () => {
+  const COIN = (fill: number, value: bigint) => ({
+    nonce: new Uint8Array(32).fill(fill),
+    color: new Uint8Array(32).fill(0x1a),
+    value,
+  });
+
+  it('reads the coin the recipient will claim, and the change beside it', () => {
+    const read = directSpendFromResult([COIN(0x7f, 40n), { is_some: true, value: COIN(0x80, 60n) }]);
+    expect(read.sent).toEqual({ nonce: '7f'.repeat(32), colour: '1a'.repeat(32), value: 40n });
+    expect(read.change).toEqual({
+      outcome: 'change',
+      nonce: '80'.repeat(32),
+      colour: '1a'.repeat(32),
+      value: 60n,
+    });
+  });
+
+  it('reads a spend that consumed the coin exactly as no change at all', () => {
+    expect(directSpendFromResult([COIN(0x7f, 100n), { is_some: false }]).change).toEqual({
+      outcome: 'none',
+    });
+  });
+
+  it('refuses to describe a coin it cannot read, rather than inventing one', () => {
+    /* THE EXPENSIVE FAILURE. `sent` is the only description of the coin the
+       recipient is handed, and it is sealed into their inbox — so a shape this
+       build cannot read has to stop the payment, which it can, because nothing
+       has been submitted when this is read. */
+    for (const result of [
+      null,
+      'not an array',
+      [],
+      [COIN(0x7f, 40n)],
+      [{ nonce: 'not bytes', color: new Uint8Array(32), value: 40n }, { is_some: false }],
+      [{ nonce: new Uint8Array(32), color: new Uint8Array(31), value: 40n }, { is_some: false }],
+      [{ nonce: new Uint8Array(32), color: new Uint8Array(32), value: 40 }, { is_some: false }],
+      [{ nonce: new Uint8Array(32), color: new Uint8Array(32), value: -1n }, { is_some: false }],
+    ].entries()) {
+      expect(directSpendFromResult(result[1]).sent, `shape ${result[0]}`).toBeNull();
+    }
+  });
+
+  it('says the change is unreadable when the result is not a pair at all', () => {
+    expect(directSpendFromResult(null).change).toEqual({
+      outcome: 'unreadable',
+      reason: 'The payment went out and this Passport could not read what was left over.',
+    });
+  });
+});
 
 describe('reading the change coin out of a result', () => {
   const bytes = (fill: number): Uint8Array => new Uint8Array(32).fill(fill);

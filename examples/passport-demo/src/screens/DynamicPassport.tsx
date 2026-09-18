@@ -15,6 +15,7 @@ import {
   recoverK1DevicePoint,
   startCustodyAccountAgain,
   withdrawShieldedK1,
+  withdrawShieldedToContractK1,
   type CustodyDynamicSession,
   type CustodyPhase,
 } from '../identity/custodyContractClient.js'
@@ -45,13 +46,14 @@ import {
   clearCustodyShieldedSend,
   custodyApprovalPrompt,
   custodySendRefusal,
+  custodyShieldedAddressSendRefusal,
   custodyShieldedSendOutcome,
   custodyShieldedSendRefusal,
   custodyUnshieldedBalance,
   loadCustodyShieldedSend,
   newCustodyShieldedSend,
-  nextCustodyShieldedSendStep,
   planCustodySend,
+  planCustodyShieldedAddressSend,
   planCustodyShieldedSend,
   saveCustodyShieldedSend,
   type CustodyShieldedSendRecord,
@@ -68,24 +70,19 @@ import {
   custodyArrivingSentence,
   custodyAssetRows,
   custodyResumeOffer,
-  custodyReturnedSentence,
   custodyStablecoinColour,
   parseCustodyAmount,
   type CustodyAssetRow,
 } from '../lib/custodyAssets.js'
 import {
-  awaitCustodyStoppedNote,
   custodyArrivingCount,
-  custodyDeliveryFailure,
   custodyInFlightRefusal,
   custodyMayReadHoldings,
   custodyUnplacedDeliveries,
   runCustodyWork,
-  type CustodyStoppedNoteOutcome,
 } from '../lib/custodyScreenRules.js'
 import type { PassportContractName } from '../identity/contractRuntime.js'
 import type { LocalMidnightWallet } from '../lib/localWallet.js'
-import type { WalletShieldedNote } from '../lib/shieldedNote.js'
 import ThemeToggle from './ThemeToggle'
 import './onboarding.css'
 import './dynamic-passport.css'
@@ -170,14 +167,6 @@ const STABLECOIN_COLOUR = custodyStablecoinColour(
   (import.meta.env as Record<string, string | undefined>).VITE_MUSD_COLOUR_HEX,
 )
 
-/**
- * How often the wallet is asked whether leg one's note has arrived.
- *
- * A second, inside `SETTLE_WATCH_MS`. The read is local — it asks the wallet
- * for the notes its own sync has already applied, with no network in it — so
- * the interval is about how soon somebody is told rather than about load.
- */
-const NOTE_POLL_MS = 1_000
 
 /** What the screen is doing right now, for the one busy line it shows. */
 const PHASE_LABELS: Record<CustodyPhase['step'], string> = {
@@ -630,137 +619,6 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
   /* Paying somebody                                                        */
   /* ---------------------------------------------------------------------- */
 
-  /**
-   * The note leg one paid in, once this Passport's own wallet holds it, or null
-   * when the wait ran out.
-   *
-   * IDENTIFIED AGAINST WHAT WAS HELD BEFORE, never by colour and amount alone:
-   * `../lib/shieldedNote.ts` gives the reason at length, and it is that a note
-   * which was already there is not this payment's — depositing one that was
-   * would pay the recipient out of money nobody offered.
-   */
-  const waitForNote = useCallback(
-    async (
-      wallet: LocalMidnightWallet,
-      query: { colourHex: string; amount: bigint; heldBefore: ReadonlySet<string> },
-    ): Promise<WalletShieldedNote | null> => {
-      const [{ pollUntilTrue, SETTLE_WATCH_MS }, { findArrivedNote }, { walletShieldedNotes }] =
-        await Promise.all([
-          import('../lib/chainWait.js'),
-          import('../lib/shieldedNote.js'),
-          import('../identity/accountCustody.js'),
-        ])
-      const found: { note: WalletShieldedNote | null } = { note: null }
-      await pollUntilTrue(
-        async () => {
-          found.note = findArrivedNote(await walletShieldedNotes(wallet), {
-            tokenType: query.colourHex,
-            amount: query.amount,
-            heldBefore: query.heldBefore,
-          })
-          return found.note !== null
-        },
-        { windowMs: SETTLE_WATCH_MS, intervalMs: NOTE_POLL_MS },
-      )
-      return found.note
-    },
-    [],
-  )
-
-  /**
-   * The last leg: the note becomes the recipient's, or it comes back.
-   *
-   * ONE CALL FOR EVERY RECIPIENT. `payCustodyAccount` reads what the
-   * recipient's account is built from and seals a description to their own key
-   * where they hold one of these accounts — a coin deposited into one of them
-   * without a description is a coin that has demonstrably arrived and that
-   * nobody can ever move again. The screen does not choose the circuit, does
-   * not hold the key, and cannot get either wrong.
-   *
-   * THE DEPOSIT-BACK IS THE SAME CALL with this Passport's own account as the
-   * recipient. It is permissionless, so it needs no second approval, and it is
-   * the only thing that can be done for somebody whose payment failed after the
-   * value had left: Home has no card that sweeps up a shielded note, because a
-   * shielded note is invisible to the one that sweeps NIGHT.
-   */
-  const deliverNote = useCallback(
-    async (
-      wallet: LocalMidnightWallet,
-      record: CustodyShieldedSendRecord,
-      note: WalletShieldedNote,
-      label: string,
-    ): Promise<void> => {
-      const { payCustodyAccount, shieldedCoinFromNote } = await import(
-        '../identity/accountCustody.js'
-      )
-      const account = { network: record.network, accountAddress: record.accountAddress }
-      setBusy(`Paying ${label}`)
-      try {
-        await payCustodyAccount(wallet, {
-          targetAddress: record.recipientAccountAddress,
-          kind: 'shielded',
-          coin: shieldedCoinFromNote(note),
-        })
-      } catch (cause) {
-        console.warn('[account-custody] the last leg did not land', cause)
-
-        /* IS THE NOTE STILL HERE? A throw from the leg above is not evidence
-           that nothing happened: a transaction can be broadcast and then the
-           promise rejected — a socket dropping, a confirmation wait running
-           out — and the recipient has the money. Putting it "back" in that case
-           is a second spend of a note that is gone, which the node refuses,
-           after a screen has told somebody it is held for them. So the wallet
-           is asked what it holds before anything is sent anywhere. */
-        const { walletShieldedNotes } = await import('../identity/accountCustody.js')
-        const { shieldedNoteId } = await import('../lib/shieldedNote.js')
-        const wanted = shieldedNoteId(note)
-        const stillHeld = await walletShieldedNotes(wallet)
-          .then((notes) => notes.some((held) => shieldedNoteId(held) === wanted))
-          .catch(() => null)
-        /* THE DECISION IS `../lib/custodyScreenRules.ts`'s, not this
-           component's: three values of `stillHeld` mean three different things
-           about where somebody's money is, and each of them is drilled there. */
-        const decided = custodyDeliveryFailure({ stillHeld })
-        if (!decided.deposit) {
-          /* Gone from this wallet, and this screen cannot see whether the
-             recipient has it. It says that, rather than either receipt. */
-          const unseen: CustodyShieldedSendRecord = { ...record, stage: decided.stage }
-          saveCustodyShieldedSend(window.localStorage, unseen)
-          setStopped(unseen)
-          throw new Error(custodyShieldedSendOutcome(unseen))
-        }
-
-        const returning: CustodyShieldedSendRecord = { ...record, stage: decided.stage }
-        saveCustodyShieldedSend(window.localStorage, returning)
-        setStopped(returning)
-        setBusy('Putting it back in your Passport')
-        try {
-          await payCustodyAccount(wallet, {
-            targetAddress: record.accountAddress,
-            kind: 'shielded',
-            coin: shieldedCoinFromNote(note),
-          })
-        } catch (second) {
-          console.warn('[account-custody] and it could not be put back either', second)
-          const stranded: CustodyShieldedSendRecord = {
-            ...record,
-            stage: custodyDeliveryFailure({ stillHeld, returnFailed: true }).stage,
-          }
-          saveCustodyShieldedSend(window.localStorage, stranded)
-          setStopped(stranded)
-          throw new Error(custodyShieldedSendOutcome(stranded))
-        }
-        clearCustodyShieldedSend(window.localStorage, account)
-        setStopped(null)
-        throw new Error(custodyReturnedSentence(record.recipientLabel))
-      }
-      clearCustodyShieldedSend(window.localStorage, account)
-      setStopped(null)
-      setNotice(custodyShieldedSendOutcome({ ...record, stage: 'done' }))
-    },
-    [],
-  )
-
   /** NIGHT out of the account, in the two legs every build takes. */
   const sendNight = useCallback(
     async (params: {
@@ -832,7 +690,25 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
     [balance, ensureDevice, session],
   )
 
-  /** A token out of the account, in the three legs a shielded amount takes. */
+  /**
+   * A token out of the account, in ONE transaction.
+   *
+   * THREE LEGS BECAME ONE (2026/09/18). The value used to leave the account to
+   * this Passport's own wallet, wait there to be recognised, and go on in a
+   * third transaction — so a payment could stop with somebody's money in a
+   * place neither party owned, which is what the ruling of 2026/09/18 forbids
+   * and what every stopped payment in this build's history was. A Passport's
+   * value lives in its account; the only wallet left assembles the transaction,
+   * holds nothing, and relays nothing.
+   *
+   * WHICH ONE TRANSACTION IT IS depends on what the recipient is, and that is
+   * asked of the chain rather than assumed: another one of these accounts is
+   * paid by the direct transfer of MIP-0012 §6.6 — the gated spend to a
+   * contract recipient with the recipient's own claim grafted onto the same
+   * transaction — and a pasted shielded address is paid by the ordinary gated
+   * spend, with the recipient's encryption key attached so midnight-js can
+   * build their note.
+   */
   const sendShielded = useCallback(
     async (params: {
       wallet: LocalMidnightWallet
@@ -845,22 +721,15 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
       recipientModule: PassportContractName
     }): Promise<void> => {
       const { account, amount, asset, label, record, wallet } = params
-      const [store, accountModule, { shieldedNoteIds }] = await Promise.all([
+      const [store, accountModule] = await Promise.all([
         import('../identity/k1CoinStore.js'),
         import('../identity/accountCustody.js'),
-        import('../lib/shieldedNote.js'),
       ])
       const indexerHttpUrl = wallet.network.indexerHttpUrl
       const held = store.heldK1Coin(account, asset.colourHex)
-      /* BOTH KEYS ARE READ NOW, FROM THE CHAIN, and neither is remembered: an
-         account rotates its encryption key, and a description sealed to one it
-         has rotated away from is a coin its holder can never open. The
-         recipient's is only asked for where the recipient holds one of these
-         accounts; the prototype builds take the note alone. */
-      const ownView = await accountModule.readCustodyAccountView(
-        { indexerHttpUrl },
-        record.address as string,
-      )
+      /* READ NOW, FROM THE CHAIN, and not remembered: an account rotates its
+         encryption key, and a description sealed to one it has rotated away
+         from is a coin its holder can never open. */
       const recipientEncKeyHex =
         params.recipientModule === 'account-custody'
           ? (
@@ -874,24 +743,21 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
         record,
         colourHex: asset.colourHex,
         amount,
-        ownShieldedAddress: wallet.shieldedAddress,
         recipientAccountAddress: params.recipientAccountAddress,
         recipientModule: params.recipientModule,
         heldCoin:
           held === null ? null : { nonce: held.nonce, value: held.value, mtIndex: held.mtIndex },
         queuedValues: store.queuedK1Coins(account, asset.colourHex).map((coin) => coin.value),
         recipientEncKeyHex,
-        ownEncKeyHex: ownView.encKeyHex,
       }
       const refusal = custodyShieldedSendRefusal(input)
       if (refusal !== null) throw new Error(refusal)
       const plan = planCustodyShieldedSend(input)
 
-      /* WRITTEN DOWN BEFORE ANYTHING GOES OUT. Leg one takes the value into
-         this Passport's own hands and only the last leg makes it the
-         recipient's; a tab closed in between would otherwise leave a note with
-         nothing on any screen saying what it was for. */
-      let stoppedRecord = newCustodyShieldedSend({
+      /* WRITTEN DOWN BEFORE IT GOES OUT, and it is now the only thing a tab
+         closed mid-payment leaves behind: one transaction, which either landed
+         or did not. There is no leg for a later run to finish. */
+      const stoppedRecord = newCustodyShieldedSend({
         network: record.network,
         accountAddress: account.address,
         colourHex: asset.colourHex,
@@ -903,69 +769,146 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
       saveCustodyShieldedSend(window.localStorage, stoppedRecord)
       setStopped(stoppedRecord)
 
-      const heldBefore = shieldedNoteIds(await accountModule.walletShieldedNotes(wallet))
-
-      /* LEG ONE — gated, for EXACTLY the amount, with the change coin coming
-         back as the circuit's own value and going straight into the store. */
       setBusy(custodyApprovalPrompt(session.provider))
       const identity = await ensureDevice()
+      await withdrawShieldedToContractK1(
+        custodySession(session),
+        identity,
+        {
+          recipientAccountAddress: plan.transfer.contractAddress,
+          recipientEncKeyHex: plan.transfer.recipientEncKeyHex,
+          colourHex: plan.transfer.colourHex,
+          amount: plan.transfer.amount,
+        },
+        (phase) => setBusy(PHASE_LABELS[phase.step]),
+      )
+      clearCustodyShieldedSend(window.localStorage, {
+        network: record.network,
+        accountAddress: account.address,
+      })
+      setStopped(null)
+      setNotice(custodyShieldedSendOutcome({ ...stoppedRecord, stage: 'done' }))
+    },
+    [ensureDevice, session],
+  )
+
+  /**
+   * The same amount, out to a shielded address somebody pasted.
+   *
+   * ONE TRANSACTION AND ONE RECIPIENT: the circuit takes the coin public key
+   * inside the address and midnight-js takes the encryption key beside it, so
+   * the whole address is decoded and both halves are used. Nothing is paid to
+   * this Passport's own wallet on the way.
+   */
+  const sendShieldedToAddress = useCallback(
+    async (params: {
+      wallet: LocalMidnightWallet
+      record: CustodyAccountRecord
+      account: { network: string; address: string }
+      asset: CustodyAssetRow
+      amount: bigint
+      shieldedAddress: string
+    }): Promise<void> => {
+      const { account, amount, asset, record, wallet } = params
+      const [store, accountModule] = await Promise.all([
+        import('../identity/k1CoinStore.js'),
+        import('../identity/accountCustody.js'),
+      ])
+      const held = store.heldK1Coin(account, asset.colourHex)
+      const input = {
+        record,
+        colourHex: asset.colourHex,
+        amount,
+        recipientShieldedAddress: params.shieldedAddress,
+        heldCoin:
+          held === null ? null : { nonce: held.nonce, value: held.value, mtIndex: held.mtIndex },
+        queuedValues: store.queuedK1Coins(account, asset.colourHex).map((coin) => coin.value),
+      }
+      const refusal = custodyShieldedAddressSendRefusal(input)
+      if (refusal !== null) throw new Error(refusal)
+      const plan = planCustodyShieldedAddressSend(input)
+
+      const label = shortHex(params.shieldedAddress)
+      const stoppedRecord = newCustodyShieldedSend({
+        network: record.network,
+        accountAddress: account.address,
+        colourHex: asset.colourHex,
+        amount,
+        recipientLabel: label,
+        recipientAccountAddress: '',
+        now: Date.now(),
+      })
+      saveCustodyShieldedSend(window.localStorage, stoppedRecord)
+      setStopped(stoppedRecord)
+
+      setBusy(custodyApprovalPrompt(session.provider))
+      const identity = await ensureDevice()
+      /* BOTH KEYS COME OUT OF THE ADDRESS, and the decode is also the check
+         that stops a payment going to an address from another network and
+         vanishing. */
       const keys = await accountModule.decodeShieldedRecipient(
-        plan.withdraw.ownShieldedAddress,
+        plan.recipientShieldedAddress,
         wallet.network.networkId,
       )
-      const withdrawal = await withdrawShieldedK1(
+      await withdrawShieldedK1(
         custodySession(session),
         identity,
         {
           recipientCoinPublicKey: keys.coinPublicKey,
-          colourHex: plan.withdraw.colourHex,
-          amount: plan.withdraw.amount,
+          recipientEncryptionPublicKey: keys.encryptionPublicKey,
+          colourHex: plan.colourHex,
+          amount: plan.amount,
         },
         (phase) => setBusy(PHASE_LABELS[phase.step]),
       )
-      stoppedRecord = {
-        ...stoppedRecord,
-        stage: 'awaiting-note',
-        withdrawTxId: withdrawal.txHash,
-      }
-      saveCustodyShieldedSend(window.localStorage, stoppedRecord)
-      setStopped(stoppedRecord)
-
-      /* LEG TWO — no network of its own: the wallet's live sync applies the
-         arrival and this waits for it. */
-      setBusy('Waiting for it to settle')
-      const note = await waitForNote(wallet, {
-        colourHex: plan.await.colourHex,
-        amount: plan.await.amount,
-        heldBefore,
+      clearCustodyShieldedSend(window.localStorage, {
+        network: record.network,
+        accountAddress: account.address,
       })
-      /* The money is OUT and the wait ran out, which is not a failure of the
-         payment: the record stays where it is and the next open finishes it. */
-      if (note === null) throw new Error(custodyShieldedSendOutcome(stoppedRecord))
-
-      stoppedRecord = { ...stoppedRecord, stage: 'depositing', noteNonce: note.nonce }
-      saveCustodyShieldedSend(window.localStorage, stoppedRecord)
-      setStopped(stoppedRecord)
-      await deliverNote(wallet, stoppedRecord, note, label)
+      setStopped(null)
+      setNotice(custodyShieldedSendOutcome({ ...stoppedRecord, stage: 'done' }))
     },
-    [deliverNote, ensureDevice, session, waitForNote],
+    [ensureDevice, session],
   )
 
   /**
-   * Pays a name, in whichever asset the form is on.
+   * Pays whatever was typed, in whichever asset the form is on.
    *
-   * The name is resolved and the recipient's build read ONCE, here, so both
-   * halves below work from the same answer — and neither of them decides
-   * anything about a payment on a render's word.
+   * TWO THINGS CAN BE TYPED and the difference is decided here, once, on the
+   * shape of what was typed: a name belongs to a Passport and is resolved, and
+   * an `mn_shield-addr…` belongs to whoever holds it and is paid directly. A
+   * name is resolved and the recipient's build read ONCE so that every branch
+   * below works from the same answer, and none of them decides anything about
+   * a payment on a render's word.
    */
   const sendToName = useCallback(
     (typed: string, amountText: string, asset: CustodyAssetRow) => {
       void run('Checking that name', async () => {
         setNotice(null)
         const { account, record, wallet } = await custodyContext()
+        const typedTrimmed = typed.trim()
+        const amount = parseCustodyAmount(amountText, asset.decimals)
+
+        /* AN ADDRESS, NOT A NAME. Only a shielded amount can go to one: the
+           account's unshielded holdings are a mirror the contract keeps, and
+           nothing at a shielded address can write one. */
+        if (/^mn_shield-addr/i.test(typedTrimmed)) {
+          if (asset.mode !== 'shielded') {
+            throw new Error('That kind of amount can only be sent to a Passport name.')
+          }
+          await sendShieldedToAddress({
+            wallet,
+            record,
+            account,
+            asset,
+            amount,
+            shieldedAddress: typedTrimmed,
+          })
+          return
+        }
+
         const label = normaliseNameForRecovery(typed)
         if (label.length === 0) throw new Error('Type the name you want to pay.')
-        const amount = parseCustodyAmount(amountText, asset.decimals)
 
         const [{ resolveAliasTarget }, { accountModuleFor }] = await Promise.all([
           import('../identity/midnames.js'),
@@ -998,52 +941,8 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
            the store. */
       }, readHoldings)
     },
-    [custodyContext, network, readHoldings, run, sendNight, sendShielded],
+    [custodyContext, network, readHoldings, run, sendNight, sendShielded, sendShieldedToAddress],
   )
-
-  /**
-   * Finishes a payment that stopped between its legs.
-   *
-   * The remaining legs need no approval from anybody, so this is a button and
-   * not a ceremony: the note is in this Passport's own hands and the deposit
-   * that makes it the recipient's is permissionless.
-   */
-  const finishStoppedSend = useCallback(() => {
-    void run('Finishing your payment', async () => {
-      setNotice(null)
-      const { record, wallet } = await custodyContext()
-      const account = { network: record.network, accountAddress: record.address as string }
-      const pending = loadCustodyShieldedSend(window.localStorage, account)
-      if (pending === null) {
-        setStopped(null)
-        return
-      }
-      const step = nextCustodyShieldedSendStep(pending)
-      if (step !== 'find-note' && step !== 'deposit') {
-        /* Nothing left to run. The line on screen already says where the money
-           is; pressing again must not start a second payment. */
-        setStopped(pending)
-        return
-      }
-      /* THE SAME LINE THE SEND ITSELF SHOWS while it waits for this, because it
-         is the same wait: the value has left the account and the wallet's sync
-         has to apply the arrival before anything can be sent on. */
-      setBusy('Waiting for it to settle')
-      const found = await findStoppedNote(wallet, pending)
-      /* NOTHING WRITTEN AND NOTHING SENT when the window closes. The record is
-         left exactly as it was, so the next press is the same press. */
-      if (found.kind === 'not-yet') throw new Error(found.sentence)
-      const note = found.note
-      const withNote: CustodyShieldedSendRecord = {
-        ...pending,
-        stage: 'depositing',
-        noteNonce: note.nonce,
-      }
-      saveCustodyShieldedSend(window.localStorage, withNote)
-      await deliverNote(wallet, withNote, note, pending.recipientLabel)
-      /* Read once the store is free again, not from in here. */
-    }, readHoldings)
-  }, [custodyContext, deliverNote, readHoldings, run])
 
   /** Forgets a payment the person has been told about. */
   const dismissStoppedSend = useCallback(() => {
@@ -1217,7 +1116,6 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
         notice={notice}
         onRefresh={() => void readHoldings()}
         onSend={sendToName}
-        onFinish={finishStoppedSend}
         onDismissStopped={dismissStoppedSend}
         onDismissError={() => setError(null)}
       />
@@ -1335,7 +1233,7 @@ function NameStep(props: {
           autoCapitalize="none"
           autoCorrect="off"
           spellCheck={false}
-          placeholder="alice"
+          placeholder="alice, or an address they gave you"
           value={name}
           onChange={(event) => setName(event.target.value)}
           disabled={props.busy !== null}
@@ -1471,7 +1369,6 @@ function HomeStep(props: {
   notice: string | null
   onRefresh: () => void
   onSend: (name: string, amount: string, asset: CustodyAssetRow) => void
-  onFinish: () => void
   onDismissStopped: () => void
   onDismissError: () => void
 }) {
@@ -1521,22 +1418,14 @@ function HomeStep(props: {
       {arriving ? <p className="mnob-hint">{arriving}</p> : null}
 
       {props.offer.kind === 'none' ? null : (
+        /* A SENTENCE AND A DISMISS, and no third thing to press. A send is one
+           transaction: it landed or it did not, and a button offering to
+           "finish" it would be a button offering to send the money twice. */
         <div className="mnob-unusable" role="status">
           <p className="mnob-unusable-copy">{props.offer.sentence}</p>
-          {props.offer.kind === 'finish' ? (
-            <button
-              type="button"
-              className="mnob-alt"
-              onClick={props.onFinish}
-              disabled={props.busy !== null}
-            >
-              {props.offer.action}
-            </button>
-          ) : (
-            <button type="button" className="mnob-alt" onClick={props.onDismissStopped}>
-              Dismiss
-            </button>
-          )}
+          <button type="button" className="mnob-alt" onClick={props.onDismissStopped}>
+            Dismiss
+          </button>
         </div>
       )}
 
@@ -1709,51 +1598,6 @@ async function readCustodyActions(indexerHttpUrl: string, address: string) {
     console.info('[account-custody] the history of this Passport could not be read', cause)
     return null
   }
-}
-
-/**
- * The note a stopped payment left behind, WAITED FOR on a later open.
- *
- * BY ITS NONCE where the record kept one, which is exact: that nonce came out
- * of leg one's own result and names one note in the world. Where it did not —
- * a payment interrupted between leg one landing and the note being identified
- * — the fall-back is a note of exactly this colour and value, with nothing
- * excluded, because the snapshot of what was held before is gone with the tab
- * that took it. That is weaker and is safe here for a reason worth writing
- * down: these Passports hold their value in the ACCOUNT, their wallet is
- * unfunded by design, and a note of exactly that colour and size sitting in it
- * is this payment's note or is indistinguishable from it — and either way, the
- * amount reaches the person the holder chose.
- *
- * WAITED FOR, AND NOT READ ONCE (live re-run, 2026/09/18): the same button on
- * the same payment failed in under a second 45 seconds after a re-open, before
- * the wallet's sync had applied the arrival, and completed three minutes
- * later. The window and the interval are the send path's own, and the decision
- * — including the sentence for a window that closes — is
- * `../lib/custodyScreenRules.ts`'s.
- */
-async function findStoppedNote(
-  wallet: LocalMidnightWallet,
-  record: CustodyShieldedSendRecord,
-): Promise<CustodyStoppedNoteOutcome<WalletShieldedNote>> {
-  const [{ walletShieldedNotes }, { findArrivedNote }, { SETTLE_WATCH_MS }] = await Promise.all([
-    import('../identity/accountCustody.js'),
-    import('../lib/shieldedNote.js'),
-    import('../lib/chainWait.js'),
-  ])
-  return awaitCustodyStoppedNote(
-    record.noteNonce,
-    {
-      notes: () => walletShieldedNotes(wallet),
-      withoutNonce: (notes) =>
-        findArrivedNote(notes, {
-          tokenType: record.colourHex,
-          amount: BigInt(record.amount),
-          heldBefore: new Set<string>(),
-        }),
-    },
-    { windowMs: SETTLE_WATCH_MS, intervalMs: NOTE_POLL_MS },
-  )
 }
 
 /**
