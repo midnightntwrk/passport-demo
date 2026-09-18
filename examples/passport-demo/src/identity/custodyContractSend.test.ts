@@ -440,6 +440,17 @@ describe('spendPositionMayBeWrong', () => {
     expect(spendPositionMayBeWrong('unsatisfiable')).toBe(true);
   });
 
+  /* THE SCENARIO: a position past the last leaf the contract's own Zswap state
+     retains. The runtime does not build a wrong path for it, it traps, and the
+     trap names nothing about positions (live, 2026/09/18). */
+  it('retries a runtime trap from inside the call, which names nothing', () => {
+    expect(
+      spendPositionMayBeWrong(
+        `Unexpected error executing scoped transaction '<unnamed>': RuntimeError: unreachable`,
+      ),
+    ).toBe(true);
+  });
+
   it('does not retry anything else, because a retry costs another approval', () => {
     expect(spendPositionMayBeWrong('')).toBe(false);
     expect(spendPositionMayBeWrong(undefined as never)).toBe(false);

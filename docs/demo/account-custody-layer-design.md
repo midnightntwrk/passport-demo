@@ -348,6 +348,19 @@ the retry was fine: when the position is one the local runtime cannot build a
 path for, it says so before any proving happens, and the retry fired on the
 first try (live, D1's third spend).
 
+**A wrong position arrives in THREE shapes, and only two of them should retry.**
+Measured by seeding a wrong head deliberately and driving the same send:
+
+| The head is | What happens | Retried? |
+|---|---|---|
+| a leaf the contract's tree does not retain (3804, past the last one) | the on-chain runtime TRAPS while executing the call: `Unexpected error executing scoped transaction '<unnamed>': RuntimeError: unreachable`, naming nothing | yes — `spendPositionMayBeWrong` matches `RuntimeError`, the WebAssembly trap marker |
+| inside a collapsed range (3772, where the coin was at 3773) | a path is built, the proof server rebuilds a different root and declines: `400`, `Public transcript input mismatch` | yes — `isCustodyProofNotBuilt`, through midnight-js's wrapper |
+| another retained leaf of this contract (3800, a coin already spent) | the prover neither proves nor declines: the sponsor's 180-second deadline passes and the caller is told the service is not answering | **no**, deliberately — a timeout is not evidence about a position, and retrying one costs three minutes per candidate |
+
+The third is why the retry is a backstop and the contract's own Zswap state is
+the answer: a position that is wrong in that particular way costs three minutes
+and still tells nobody anything.
+
 **The mUSD send, end to end, three times.**
 
 | What | Result |

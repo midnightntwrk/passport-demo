@@ -553,7 +553,19 @@ export function spendPositionMayBeWrong(message: string): boolean {
     text.includes('membership') ||
     text.includes('witness') ||
     text.includes('unsatisfiable') ||
-    text.includes('constraint')
+    text.includes('constraint') ||
+    /* A WASM TRAP IS THE THIRD SHAPE THIS FAILURE COMES IN, and it names
+       nothing. A position past the leaves the contract's own Zswap state
+       retains does not produce a wrong Merkle path — it makes the on-chain
+       runtime trap while EXECUTING the call, and all that reaches here is
+       `Unexpected error executing scoped transaction '<unnamed>':
+       RuntimeError: unreachable` (live, 2026/09/18, position 3804 against a
+       tree whose last leaf for this contract was 3803). `RuntimeError` is the
+       WebAssembly trap marker rather than any word about positions, which is
+       why it is matched by name: a trap inside the call this function's one
+       caller is retrying is a trap the next candidate may not hit, and an
+       unnecessary retry costs one proof that is never submitted (INV-5). */
+    text.includes('runtimeerror')
   );
 }
 
