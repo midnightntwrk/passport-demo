@@ -264,7 +264,9 @@ export function randomJubjubScalar(randomBytes: (length: number) => Uint8Array):
     const candidate = bytesToBigIntBE(randomBytes(32));
     if (isJubjubScalar(candidate)) return candidate;
   }
-  throw new Error('could not sample a JubJub scalar in range');
+  throw new Error(
+    `Could not sample a JubJub nonce below the subgroup order in ${JUBJUB_REJECTION_ATTEMPTS} draws.`,
+  );
 }
 
 /** The big-endian integer a byte run encodes. */
@@ -352,7 +354,16 @@ export async function deriveJubjubDeviceScalar(
     const candidate = bytesToBigIntBE(await derivationHash(contractRoot, counter));
     if (isJubjubScalar(candidate)) return candidate;
   }
-  throw new Error('could not derive a JubJub device scalar in range');
+  /* THE ONE SENTENCE HERE A PERSON CAN REACH. It is on the onboarding path:
+     somebody has just been asked for their passkey and this is what they would
+     be shown. So it says what happened to them and what to do about it, in the
+     house style and without a word from the on-screen vocabulary list — and it
+     does not say “try again” on its own, because the derivation is a pure
+     function of the credential and the same passkey gives the same answer for
+     ever. A different passkey is the only thing that helps.
+     At ~1.2 x 10^-26 nobody will read it; that is not a reason for it to be a
+     fragment of somebody's debugging. */
+  throw new Error('This passkey cannot be used to make a Passport. Try again with a new passkey.');
 }
 
 /* -------------------------------------------------------------------------- */
@@ -372,7 +383,7 @@ export async function deriveJubjubDeviceScalar(
  */
 export function jubjubPublicPoint(pure: CustodyPureCircuits, secretScalar: bigint): CurvePoint {
   if (!isJubjubScalar(secretScalar)) {
-    throw new Error('a JubJub device scalar must be in [1, r_J)');
+    throw new Error('A JubJub device scalar must be in [1, r_J).');
   }
   const point = pure.compute_public_point_with_jubjub(secretScalar);
   return { x: point.x, y: point.y, identity: false };
@@ -435,7 +446,9 @@ export function grindJubjubChallenge(
     const value = bytesToBigIntLE(challenge(sigR, grindNonce));
     if (value < JUBJUB_R) return { c: value, grindNonce };
   }
-  throw new Error('could not grind a JubJub challenge below the subgroup order');
+  throw new Error(
+    `Could not grind a JubJub challenge below the subgroup order in ${JUBJUB_REJECTION_ATTEMPTS} tries.`,
+  );
 }
 
 /**

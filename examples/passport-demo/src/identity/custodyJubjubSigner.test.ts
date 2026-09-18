@@ -32,6 +32,23 @@
  *    imported from the WASM runtime; it is asserted equal to the runtime's
  *    `JUBJUB_SCALAR_MODULUS` here so the restatement cannot drift.
  *
+ * AND ONE THING THAT IS NOT HELD HERE, SAID PLAINLY SO NOBODY READS THIS FILE
+ * AS PROVING IT. THE OFFLINE SUITE CANNOT SEE AN ENDIANNESS SWAP IN THE GRIND.
+ * The grind reads its challenge LITTLE-endian because that is how the circuit
+ * casts a `Field` to a `JubjubScalar` — but {@link referenceJubjubSign},
+ * {@link challengeValue}, and the `c` handed to {@link schnorrVerifies} all read
+ * it the same way as the module does. Swap every one of them to big-endian and
+ * this suite still passes, because `s·G == R + c·pk` holds for whatever `c`
+ * both sides agreed on; what would not hold is the circuit's own
+ * recomputation. The same is true of the BIG-endian reading in the scalar
+ * derivation: a consistent mistake is invisible to a consistent test.
+ *
+ * So the load-bearing evidence for both endiannesses is the STAGENET RUN of
+ * 2026/09/18 (`scratchpad/jj-stagenet/RESULT.md`):
+ * `append_inbox_with_jubjub` was accepted on-node and `auth_nonce` moved 0 to
+ * 1, and that counter only advances when the in-circuit Schnorr verify passes.
+ * A change to either reading needs another live run, not a green suite.
+ *
  * `@midnight-ntwrk/compact-runtime` and the compiled contract are loaded
  * through `createRequire`, the way `accountCustody.test.ts` does it: by NODE,
  * from the contract's own directory, so the contract and the runtime it is
@@ -380,7 +397,7 @@ describe('deriving the device scalar from a passkey contract root', () => {
 
   it('gives up rather than looping for ever', async () => {
     await expect(deriveJubjubDeviceScalar(ROOT, 0)).rejects.toThrow(
-      'could not derive a JubJub device scalar in range',
+      'This passkey cannot be used to make a Passport. Try again with a new passkey.',
     );
   });
 });
@@ -402,7 +419,7 @@ describe('sampling a nonce', () => {
       draws += 1;
       return new Uint8Array(length);
     };
-    expect(() => randomJubjubScalar(never)).toThrow('could not sample a JubJub scalar in range');
+    expect(() => randomJubjubScalar(never)).toThrow('Could not sample a JubJub nonce');
     expect(draws).toBe(JUBJUB_REJECTION_ATTEMPTS);
   });
 });
@@ -555,7 +572,7 @@ describe('the grind', () => {
       return new Uint8Array(32).fill(0xff);
     };
     expect(() => grindJubjubChallenge(always, { x: 1n, y: 2n, identity: false })).toThrow(
-      'could not grind a JubJub challenge below the subgroup order',
+      'Could not grind a JubJub challenge below the subgroup order',
     );
     expect(tries).toBe(JUBJUB_REJECTION_ATTEMPTS);
   });
