@@ -347,11 +347,11 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
          fresh Passport rather than pressing the same broken step again. The
          account already on chain is left where it is: it is dormant, it holds
          nothing, and there is no transaction that would tidy it away. */
+      const identity = await ensureDevice()
       if (interrupted) {
-        await startCustodyAccountAgain(custodySession(session))
+        await startCustodyAccountAgain(custodySession(session), identity)
         setInterrupted(false)
       }
-      const identity = await ensureDevice()
       const onPhase = (phase: CustodyPhase) => {
         setBusy(phase.detail ? `${PHASE_LABELS[phase.step]}` : PHASE_LABELS[phase.step])
       }

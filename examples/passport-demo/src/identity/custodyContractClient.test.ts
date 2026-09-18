@@ -1176,12 +1176,13 @@ describe('a permissionless call on another account', () => {
   const PEER = 'cd'.repeat(32);
 
   it('calls the circuit on the target, with the circuit\'s own arguments only', async () => {
-    const { test, session } = await readyPassport();
+    const { test, session, device } = await readyPassport();
     const coin = { nonce: new Uint8Array(32), color: new Uint8Array(32), value: 40n };
     const entry = new Uint8Array(192).fill(3);
 
     const result = await custodyPermissionlessCallAt(
       session,
+      device,
       PEER,
       { operation: 'deposit_shielded', args: [coin, entry] },
       undefined,
@@ -1203,17 +1204,17 @@ describe('a permissionless call on another account', () => {
   });
 
   it('refuses an address that is not one', async () => {
-    const { test, session } = await readyPassport();
+    const { test, session, device } = await readyPassport();
     await expect(
-      custodyPermissionlessCallAt(session, 'not-an-address', { operation: 'deposit_shielded', args: [] }, undefined, test.deps),
+      custodyPermissionlessCallAt(session, device, 'not-an-address', { operation: 'deposit_shielded', args: [] }, undefined, test.deps),
     ).rejects.toThrow(/cannot be paid from here/);
   });
 
   it('refuses before this Passport is finished being set up', async () => {
     const test = harness();
-    const { session } = deviceFake();
+    const { session, device } = deviceFake();
     await expect(
-      custodyPermissionlessCallAt(session, PEER, { operation: 'deposit_shielded', args: [] }, undefined, test.deps),
+      custodyPermissionlessCallAt(session, device, PEER, { operation: 'deposit_shielded', args: [] }, undefined, test.deps),
     ).rejects.toThrow(/not finished being set up/);
   });
 });
@@ -1459,7 +1460,7 @@ describe('a setup that cannot be finished', () => {
     await deployCustodyAccount(session, device, undefined, test.deps);
     const address = loadCustodyRecord(test.storage, k1UserKey(session), 'stagenet')?.address as string;
 
-    await startCustodyAccountAgain(session, test.deps);
+    await startCustodyAccountAgain(session, device, test.deps);
     expect(loadCustodyRecord(test.storage, k1UserKey(session), 'stagenet')).toBeNull();
     expect(loadCustodyAuthorityKey(test.storage, address)).toBeNull();
 
@@ -1472,8 +1473,8 @@ describe('a setup that cannot be finished', () => {
 
   it('has nothing to throw away when there is no record', async () => {
     const test = harness();
-    const { session } = deviceFake();
-    await expect(startCustodyAccountAgain(session, test.deps)).resolves.toBeUndefined();
+    const { session, device } = deviceFake();
+    await expect(startCustodyAccountAgain(session, device, test.deps)).resolves.toBeUndefined();
   });
 });
 
@@ -1816,6 +1817,7 @@ describe('leg three into another one of these accounts', () => {
 
     await depositShieldedIntoCustody(
       fake.session,
+      fake.device,
       {
         targetAddress: peer,
         recipientEncKeyHex: 'ab'.repeat(32),
