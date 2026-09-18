@@ -11,14 +11,7 @@
  * has a wrong answer that costs a payment and none of them is visible while it
  * is being made:
  *
- *   1. WHETHER TO PUT A NOTE BACK. The last leg of a shielded payment can throw
- *      after the transaction was broadcast — a dropped socket, a confirmation
- *      wait running out — and the recipient has the money. Depositing it "back"
- *      in that case is a second spend of a note that is gone, which the node
- *      refuses, after a screen has told somebody it is held for them. So the
- *      decision is made on what the WALLET says it holds, re-read after the
- *      failure, and {@link custodyDeliveryFailure} is that decision alone.
- *   2. WHETHER A SECOND PIECE OF WORK MAY START. The screen's payments read and
+ *   1. WHETHER A SECOND PIECE OF WORK MAY START. The screen's payments read and
  *      write one coin store. Two at once file a delivery over a coin the other
  *      has just spent, or spend the same coin twice — and the store's own
  *      guards then refuse a proof for reasons no sentence on the screen could
@@ -27,12 +20,12 @@
  *      and {@link runCustodyWork} is the ORDER those two imply: the read that
  *      shows what a payment changed cannot run inside the payment that is
  *      holding the store, or it is refused and the figure stays stale.
- *   2b. WHETHER THE NOTE A STOPPED PAYMENT LEFT IS HERE YET. Finish read the
- *      wallet's notes once, so the same button on the same payment failed in
- *      under a second 45 seconds after a re-open and completed three minutes
- *      later (live re-run, 2026/09/18). {@link awaitCustodyStoppedNote} is the
- *      wait the send path already had, and the one sentence for a window that
- *      closed with nothing written and nothing sent.
+ *   2. WHETHER THE RECORD OF WHAT THE ACCOUNT KEPT IS PART OF THE PAYMENT. It
+ *      is a gated call of its own, so starting it beside the payment rather
+ *      than inside it let two gated calls sign against one `auth_nonce`.
+ *      {@link runCustodyKeepRecord} is that order, and the rule that its own
+ *      failure is never the payment's — the recipient has their money either
+ *      way.
  *   3. WHAT THE WALK'S OUTCOMES MEAN FOR THE FIGURE SHOWN. A delivery the chain
  *      could not place is money that has arrived and cannot be spent yet, which
  *      is neither a balance nor nothing. {@link custodyUnplacedDeliveries} and
@@ -42,8 +35,9 @@
  * screen already has by the time it decides, which is why this file is in the
  * coverage denominator (`../../vitest.config.ts`) at 100%.
  *
- * THE COPY RULE HOLDS HERE TOO. The one sentence in this file reaches somebody
- * who chose a sign-in, not a chain: it names no wallet address, fee token,
+ * THE COPY RULE HOLDS HERE TOO. Every sentence in this file reaches somebody
+ * who chose a sign-in or a fingerprint, not a chain: none names a wallet
+ * address, fee token,
  * contract, name registry, indexer, resolver, fee sponsor, SDK, or sign-in
  * vendor, and `custodyScreenRules.test.ts` asserts that rather than trusting
  * it.
