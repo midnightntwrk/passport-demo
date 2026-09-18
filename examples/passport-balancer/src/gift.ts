@@ -41,7 +41,16 @@
  * sUSD.
  */
 
-import { accountDeposits, accountModuleForState } from './accountModule.js';
+import {
+  accountDeposits,
+  accountModuleForState,
+  scanInboxForEntry,
+  sealedShieldedDeposit,
+  shieldedDepositConfirmed,
+  InboxEntryRequired,
+} from './accountModule.js';
+import type { AccountOpening } from './account.js';
+import type { AccountView } from './accountState.js';
 import { randomBytes } from 'node:crypto';
 
 import * as ledger from '@midnightntwrk/ledger-v9';
@@ -130,8 +139,18 @@ export interface ColourPayment {
   depositTx: string;
   depositBlock: number | null;
   amount: bigint;
-  /** The account's holding of this colour, read back off the chain. */
-  held: bigint;
+  /**
+   * The account's holding of this colour, read back off the chain — and NULL
+   * on the account custody build, which mirrors no shielded balance at all.
+   *
+   * Null is the honest answer rather than a gap. Custody there is stateless
+   * (MIP-0012 §6.1): the account holds the coin and no ledger entry says so.
+   * What stands in its place is not a smaller number, it is a different piece
+   * of evidence — the 192 bytes this service sealed, found in the account's
+   * public `inbox`. Nothing else can produce them, and the deposit is not
+   * reported until they are there.
+   */
+  held: bigint | null;
 }
 
 /** What landed, once the transfer to a plain shielded address was submitted. */
@@ -169,6 +188,34 @@ export interface ShieldedTransferRequest {
   to: string;
   /** What the journal calls this leg. */
   label: string;
+}
+
+/**
+ * The one thing a payout into an ACCOUNT CUSTODY account needs that this desk
+ * does not have, and deliberately does not build for itself.
+ *
+ * Every other recipient is paid through three compiled contracts this file
+ * prepares — the faucet and the two prototype account builds. None of them is
+ * `account-custody`, whose thirty circuits, verifier keys, and ZKIR v3 proof
+ * route are wired in `./account.ts` and nowhere else, so until 2026/09/18 a
+ * custody recipient was refused `501 account-custody-build-required` before a
+ * coin was minted.
+ *
+ * The answer is not a second copy of that wiring. It is THIS one, handed over:
+ * `AccountFunder.view` and `AccountFunder.opening`. Two readers that each
+ * fingerprint their own way to a build is how one of them ends up depositing
+ * through a module the account does not carry, and a deposit made through the
+ * wrong module is a transaction the node refuses AFTER the coin has been
+ * minted.
+ *
+ * Unwired — a host with no account custody artefacts, or no v3 proof server —
+ * the refusal stays exactly where it was: before the mint.
+ */
+export interface CustodyOpener {
+  /** The account's live state, decoded with the build it is. */
+  view(contractAddress: string): Promise<AccountView>;
+  /** The module, compiled contract, ZK config, and proof route for a build. */
+  opening(module: 'account-custody'): Promise<AccountOpening>;
 }
 
 export type ShieldedTransfer = (
@@ -383,6 +430,72 @@ export async function handToAddress(deps: {
 }
 
 /**
+ * The pre-flight for a gift into an account custody account: everything that
+ * can be refused without minting a coin.
+ *
+ * ONE QUESTION AND ONE READING. The question is whether the account advertises
+ * a usable `enc_key`, because the 192-byte entry that carries the coin's
+ * description is sealed to it and there is no other channel — a deposit made
+ * with a placeholder entry LANDS, the coin moves into the contract's Zswap
+ * balance, and the owner's `held_coin` witness walks the inbox and never finds
+ * it. Refusing costs a gift; guessing costs the gift and the coin.
+ *
+ * The reading is `inbox_count`, taken BEFORE anything is spent, because the
+ * confirmation afterwards is "our entry appeared in a slot that did not exist
+ * when we started" and it needs a baseline nothing else can have moved since.
+ *
+ * Separate from the deposit so it can be asked of a real account's state with
+ * no chain, no wallet, and no faucet — see `test/custodyGift.test.ts`.
+ */
+export function custodyGiftPlan(
+  view: AccountView,
+  address: string,
+  name: string,
+): { readonly inboxBefore: bigint } {
+  if (view.encKey() === null) {
+    throw new ColourPayFailure(
+      400,
+      'recipient-not-sealable',
+      `${name} cannot be paid into ${address}: the account advertises no usable encryption key, so the entry that carries the coin's description cannot be sealed for it. Nothing was minted and nothing was spent.`,
+    );
+  }
+  /* Zero for a build with no inbox, which cannot reach here — the caller has
+     already decided this is the custody build — and is the safe baseline
+     anyway: a scan from zero finds our entry wherever it landed. */
+  return { inboxBefore: view.inboxCount() ?? 0n };
+}
+
+/**
+ * An account funder refusal, in this desk's currency.
+ *
+ * The codes come straight across — `not-an-account`, `account-not-activated`,
+ * `indexer-unreachable`, `prover-unavailable` — because a partner reading a
+ * refusal needs to know whether the recipient is wrong or this service is.
+ * Flattening them into one sentence would tell somebody their recipient does
+ * not exist when what happened is that the chain could not be read.
+ */
+export function asColourPayFailure(
+  cause: unknown,
+  address: string | null,
+  name: string,
+): ColourPayFailure {
+  if (cause instanceof ColourPayFailure) return cause;
+  const code = (cause as { code?: unknown } | null)?.code;
+  const message = cause instanceof Error ? cause.message : String(cause);
+  if (code === 'not-an-account' || code === 'account-not-activated') {
+    return new ColourPayFailure(400, String(code), message);
+  }
+  if (code === 'indexer-unreachable' || code === 'prover-unavailable') {
+    return new ColourPayFailure(503, String(code), message);
+  }
+  return new ColourPayFailure(
+    503,
+    'gift-failed',
+    `${name} could not be paid${address ? ` into ${address}` : ''}: ${message}`,
+  );
+}
+
+/**
  * A desk that mints one colour and pays it into an account.
  *
  * `label` IS the colour: the faucet computes a coin's colour as
@@ -410,9 +523,18 @@ export function createColourPayer(deps: {
   amount: bigint;
   /** How a coin is handed to a plain shielded address. See {@link ShieldedTransfer}. */
   transferShielded?: ShieldedTransfer;
+  /**
+   * How a custody account is read and opened. See {@link CustodyOpener}.
+   *
+   * Unwired, a custody recipient is refused before a coin is minted, which is
+   * what this desk did for every one of them until now. Wired, the deposit goes
+   * through the account funder's own module, keys, and v3 proof route.
+   */
+  custody?: CustodyOpener;
 }): ColourPayer {
   const { config, wallet, label, name, amount } = deps;
   const transferShielded = deps.transferShielded ?? null;
+  const custody = deps.custody ?? null;
   const faucetAddress = config.assetFaucetAddress ?? null;
   const colourHex = faucetAddress ? giftColourHex(label, faucetAddress) : null;
   const unavailableReason = faucetAddress
@@ -483,6 +605,172 @@ export function createColourPayer(deps: {
     return { mintTx, coin, tokenType, colourBytes };
   };
 
+  /**
+   * The same two legs, into an account custody account.
+   *
+   * WHAT IS DIFFERENT, and both differences are the contract's design rather
+   * than this desk's convenience:
+   *
+   *   1. `deposit_shielded` takes `(coin, entry)`. The entry is 192 bytes of
+   *      InboxEntry v1 encrypted to the account's own `enc_key`, and it is the
+   *      ONLY channel the coin's description travels on. A deposit made with a
+   *      placeholder entry still LANDS — the coin moves into the contract's
+   *      Zswap balance, and the owner's `held_coin` witness walks the inbox and
+   *      never finds it — so a missing key is refused before anything is
+   *      minted, and the key that is sealed to is read in the same breath as
+   *      the sealing, minutes later, because `rotate_enc_key_with_<arm>` is a
+   *      circuit the owner may call in any of those minutes.
+   *   2. There is no `coins` map to read the credit back from. Custody there is
+   *      stateless (MIP-0012 §6.1), so what confirms the gift is this service's
+   *      OWN entry, found in the account's public `inbox`. The inbox GROWING is
+   *      not that confirmation — it grows for every other depositor, for the
+   *      change entry of every send the owner makes, and for every backfill —
+   *      and a `200` that meant "somebody wrote to this account" would report a
+   *      refused deposit as delivered.
+   */
+  const payIntoCustody = async (
+    opener: CustodyOpener,
+    address: string,
+    built: Prepared,
+    colourBytes: Uint8Array,
+  ): Promise<ColourPayment> => {
+    /* 1. The pre-flight, and everything it can refuse happens BEFORE the mint.
+          A refusal here costs a gift; the same refusal after the mint costs the
+          gift and the coin. */
+    const { inboxBefore } = custodyGiftPlan(await custodyView(opener, address), address, name);
+    /* The module, the verifier keys, and the v3 proof route, settled before a
+       provider exists — because the providers are part of the answer. */
+    const opening = await custodyOpening(opener);
+
+    /* 2 and 3. mint_shielded to this wallet, and the wait for it to be
+       spendable here. Identical to every other recipient. */
+    const { mintTx, coin } = await mintToSelf(built);
+
+    /* The bytes this service sealed, kept. `sealInboxEntry` throws its
+       ephemeral secret away, so this can never read back what it deposited; it
+       can still RECOGNISE it, and that is what turns "the inbox is one longer"
+       into "our entry is in the inbox". */
+    let sealedEntry: Uint8Array | null = null;
+    const privateStateId = `passport-balancer-account-${address}`;
+    let depositTx: string;
+    try {
+      depositTx = await wallet.exclusive(
+        async () => {
+          const providers = await contractProviders(config, {
+            privateStateId,
+            initialPrivateState: {},
+            zkConfigProvider: opening.zkConfigProvider as never,
+            proofProvider: opening.proofProvider,
+            walletProvider: wallet.contractWalletProvider(),
+          });
+          const { findDeployedContract } = await import('@midnight-ntwrk/midnight-js-contracts');
+          const found = await findDeployedContract(providers as never, {
+            compiledContract: opening.compiledContract,
+            contractAddress: address,
+            privateStateId,
+            initialPrivateState: {},
+          } as never);
+          const callTx = (
+            found as { callTx: Record<string, (...args: unknown[]) => Promise<unknown>> }
+          ).callTx;
+          const depositCoin = {
+            nonce: hexToBytes(coin.nonce),
+            color: colourBytes,
+            value: coin.value,
+          };
+          /* READ ONCE, HERE, AND SEALED TO THAT SAME VALUE — not the key read
+             in the pre-flight above, which was several minutes and one mint
+             ago. Not read twice either: a second read to "check" the first
+             would seal to one value and verify another. */
+          const sealKey = (await custodyView(opener, address)).encKey();
+          if (sealKey === null) throw new InboxEntryRequired();
+          const sealed = sealedShieldedDeposit(opening.module, depositCoin, sealKey);
+          sealedEntry = sealed.entry;
+          const deposit = await callTx[opening.deposits.shieldedCircuit](...sealed.args);
+          return transactionIdentifier(deposit);
+        },
+        { label: `${name} deposit_shielded into ${address}` },
+      );
+    } catch (cause) {
+      throw new ColourPayFailure(
+        503,
+        'gift-failed',
+        `The ${name} was minted (${mintTx}) but could not be deposited into ${address}; the coin stayed with this service. ${cause instanceof Error ? cause.message : String(cause)}`,
+      );
+    }
+    console.log(`[colour] deposited ${name} into the custody account (tx ${depositTx})`);
+
+    /* 4. OUR ENTRY, in the account's public inbox. */
+    let confirmed = false;
+    for (let attempt = 0; attempt < CONFIRM_ATTEMPTS && !confirmed; attempt += 1) {
+      try {
+        const after = await custodyView(opener, address);
+        const observed = after.inboxCount() ?? inboxBefore;
+        const scan = scanInboxForEntry(
+          (index) => after.inboxEntry(index),
+          inboxBefore,
+          observed,
+          sealedEntry,
+        );
+        confirmed = shieldedDepositConfirmed(opening.module, inboxBefore, observed, amount, {
+          entryFound: scan === 'found',
+          inboxUnreadable: scan === 'unreadable',
+          /* Asked only where the map could not be walked at all: a block is
+             where a transaction was PROCESSED and not proof it was accepted
+             there, so beside an inbox somebody else grew it would report a
+             refused deposit as delivered. */
+          included:
+            scan === 'unreadable' &&
+            observed > inboxBefore &&
+            (await resolveTransactionHash(config.indexerHttpUrls, depositTx)).block !== null,
+        });
+      } catch {
+        /* Indexer lag or a transient failure; asked again below. */
+      }
+      if (!confirmed) await wait(CONFIRM_INTERVAL_MS);
+    }
+    if (!confirmed) {
+      throw new ColourPayFailure(
+        504,
+        'credit-not-seen',
+        `The ${name} was submitted (mint ${mintTx}, deposit ${depositTx}) but the entry this service sealed has not appeared in the account's inbox yet.`,
+      );
+    }
+
+    const [mintResolved, depositResolved] = await Promise.all([
+      resolveTransactionHash(config.indexerHttpUrls, mintTx),
+      resolveTransactionHash(config.indexerHttpUrls, depositTx),
+    ]);
+    return {
+      mintTx: mintResolved.hash,
+      mintBlock: mintResolved.block,
+      depositTx: depositResolved.hash,
+      depositBlock: depositResolved.block,
+      amount,
+      /* Nothing to read: custody there is stateless. The entry found in the
+         inbox is the evidence, and it is why this line was reached. */
+      held: null,
+    };
+  };
+
+  /** The account funder's state read, in this desk's currency. */
+  const custodyView = async (opener: CustodyOpener, address: string): Promise<AccountView> => {
+    try {
+      return await opener.view(address);
+    } catch (cause) {
+      throw asColourPayFailure(cause, address, name);
+    }
+  };
+
+  /** The same, for the build and the proof route. */
+  const custodyOpening = async (opener: CustodyOpener): Promise<AccountOpening> => {
+    try {
+      return await opener.opening('account-custody');
+    } catch (cause) {
+      throw asColourPayFailure(cause, null, name);
+    }
+  };
+
   const payInto = async (address: string): Promise<ColourPayment> => {
     if (!faucetAddress || !colourHex || amount <= 0n) {
       throw new ColourPayFailure(503, 'asset-unsupported', unavailableReason ?? 'unavailable');
@@ -502,27 +790,19 @@ export function createColourPayer(deps: {
     const module = accountModuleForState(
       await built.reader.queryContractState(address).catch(() => null),
     );
-    /* A GIFT INTO A CUSTODY ACCOUNT IS STILL REFUSED, before a coin is minted,
-       and the reason has MOVED. It used to be the inbox entry: every gift is
-       shielded, `deposit_shielded` on the account custody contract pairs the coin
-       with a 192-byte InboxEntry v1 encrypted to the account's `enc_key`, and
-       nothing here could build one. `./custodyInbox.ts` now can, and `./account.ts`
-       uses it for the opening balance.
-
-       What this desk is short of is the BUILD. It prepares three compiled
-       contracts — the faucet and the two prototype account builds — and none of
-       them is `account-custody`, whose thirty circuits, verifier keys, and remote
-       proving are wired in `./account.ts` and nowhere else. Depositing through a
-       module the account does not carry is not a smaller version of this
-       working; it is a transaction the node refuses after the coin has been
-       minted. So the refusal stays, and it names what it is actually waiting
-       for. Refusing costs a gift; guessing costs the gift AND the coin. */
+    /* A GIFT INTO A CUSTODY ACCOUNT IS A DIFFERENT DEPOSIT, and it is made
+       through the account funder's own build rather than refused. See
+       {@link payIntoCustody} — and {@link CustodyOpener} for why the wiring is
+       borrowed and not copied. Unwired, the refusal is still before the mint. */
     if (!accountDeposits(module).mirrorsShieldedBalance) {
-      throw new ColourPayFailure(
-        501,
-        'account-custody-build-required',
-        `${name} cannot be paid into ${address}: it is a custody account, and this desk does not carry that build. The entry it needs can now be sealed, but the deposit cannot be proved from here. Nothing was minted and nothing was spent.`,
-      );
+      if (!custody) {
+        throw new ColourPayFailure(
+          501,
+          'account-custody-build-required',
+          `${name} cannot be paid into ${address}: it is a custody account, and this service has no account-custody build or no v3 proof server to deposit through. Nothing was minted and nothing was spent.`,
+        );
+      }
+      return payIntoCustody(custody, address, built, colourBytes);
     }
     const before = await held();
     const compiledForAccount =
@@ -1141,6 +1421,13 @@ export function createGiftDesk(deps: {
   resolve?: (label: string) => Promise<{ target: ResolvedDomainTarget } | null>;
   /** How a coin reaches a plain shielded address. See {@link ShieldedTransfer}. */
   transferShielded?: ShieldedTransfer;
+  /**
+   * How an account custody recipient is read and opened. See
+   * {@link CustodyOpener}: this desk borrows the account funder's build rather
+   * than preparing a second one, and without it a custody recipient is refused
+   * before anything is minted, as it was until 2026/09/18.
+   */
+  custody?: CustodyOpener;
 }): GiftDesk {
   const { config } = deps;
   const now = deps.now ?? (() => Date.now());
@@ -1157,6 +1444,7 @@ export function createGiftDesk(deps: {
             name: item.name,
             amount,
             transferShielded: deps.transferShielded,
+            custody: deps.custody,
           }));
 
   /* One payer per (item, amount), kept because a stock of five and a stock of
@@ -1436,7 +1724,10 @@ export function createGiftDesk(deps: {
             block: paid.depositBlock,
             mintBlock: paid.mintBlock,
             depositBlock: paid.depositBlock,
-            held: paid.held,
+            /* ABSENT rather than zero for a custody recipient. The field
+               claims to be a reading, and on that build there is nothing to
+               read; the deposit hash and the `200` say it was credited. */
+            held: paid.held ?? undefined,
           }),
         };
       }

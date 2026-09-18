@@ -803,6 +803,30 @@ export interface AccountBalances {
   asset: bigint | null;
 }
 
+/**
+ * How a deployed account is to be OPENED: its build, its compiled module, the
+ * artefacts its verifier keys come from, and the server that proves them.
+ *
+ * All four travel together because they have to. `findDeployedContract` refuses
+ * a module whose circuit set does not match the state, the ZK config provider
+ * has to be the one holding that build's keys, and the account custody build's
+ * circuits are ZKIR v3 and cannot be proved by the route the other two use.
+ * Picking the module and leaving the other three behind is how a deposit
+ * reaches a proof server that cannot answer it.
+ *
+ * EXPORTED so the gift desk can deposit into a custody account through exactly
+ * this answer rather than assembling a second one of its own. It used to
+ * prepare its own three compiled contracts, none of which was `account-custody`,
+ * and refuse every custody recipient `501 account-custody-build-required`.
+ */
+export interface AccountOpening {
+  readonly module: AccountModuleName;
+  readonly compiledContract: unknown;
+  readonly zkConfigProvider: unknown;
+  readonly proofProvider: unknown;
+  readonly deposits: ReturnType<typeof accountDeposits>;
+}
+
 export interface AccountFunder {
   /** Where the compiled build was found, for the start-up log. */
   readonly assetsPath: string;
@@ -879,6 +903,26 @@ export interface AccountFunder {
    * for the same reason (`passport-demo/src/identity/passportContract.ts`).
    */
   hasOneTxTransfer(contractAddress: string): Promise<boolean | null>;
+  /**
+   * The account's own state, read live and decoded with the build it is: which
+   * module, what it holds, its `enc_key`, and its inbox.
+   *
+   * The pre-flight of every deposit this service makes, and the reason it is on
+   * the interface rather than inside the closure: the gift desk needs the same
+   * answer about the same account, and two readers that fingerprint their own
+   * way to it is how one of them ends up depositing through a module the
+   * account does not carry.
+   *
+   * Throws `not-an-account`, `account-not-activated`, or `indexer-unreachable`.
+   */
+  view(contractAddress: string): Promise<AccountView>;
+  /**
+   * The module, compiled contract, ZK config, and proof route for a build. See
+   * {@link AccountOpening}; the custody build's pieces are loaded on first use
+   * and refuse with `prover-unavailable` where this host has neither the
+   * artefacts nor a v3 proof server.
+   */
+  opening(module: AccountModuleName): Promise<AccountOpening>;
   /**
    * Calls `deposit_night` on the account and reads the mirrored balance back.
    * Resolves only once the credit is really visible on chain.
@@ -1220,25 +1264,6 @@ export async function createAccountFunder(
     }
     return custodyProofProvider;
   };
-
-  /**
-   * How a deployed account is to be OPENED: its build, its compiled module, the
-   * artefacts its verifier keys come from, and the server that proves them.
-   *
-   * All four travel together because they have to. `findDeployedContract`
-   * refuses a module whose circuit set does not match the state, the ZK config
-   * provider has to be the one holding that build's keys, and the account custody build's
-   * circuits are ZKIR v3 and cannot be proved by the route the other two use.
-   * Picking the module and leaving the other three behind is how a deposit
-   * reaches a proof server that cannot answer it.
-   */
-  interface AccountOpening {
-    readonly module: AccountModuleName;
-    readonly compiledContract: unknown;
-    readonly zkConfigProvider: unknown;
-    readonly proofProvider: unknown;
-    readonly deposits: ReturnType<typeof accountDeposits>;
-  }
 
   const openingFor = async (module: AccountModuleName): Promise<AccountOpening> => {
     const deposits = accountDeposits(module);
@@ -1596,6 +1621,12 @@ export async function createAccountFunder(
     async nightBalance(contractAddress: string): Promise<bigint> {
       return (await readAccountView(rawContractAddress(contractAddress))).unshielded(colour);
     },
+
+    view(contractAddress: string): Promise<AccountView> {
+      return readAccountView(rawContractAddress(contractAddress));
+    },
+
+    opening: openingFor,
 
     async balances(contractAddress: string): Promise<AccountBalances> {
       /* THROUGH THE VIEW, for all three builds. This used to read through

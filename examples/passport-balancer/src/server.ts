@@ -214,6 +214,7 @@ import {
 import { activationLegs, GRANT_RETRY_DELAY_MS, shouldRetryGrant } from './activationLegs.js';
 import {
   GIFT_REQUEST_SHAPES,
+  ColourPayFailure,
   createColourPayer,
   createGiftDesk,
   giftLedgerOf,
@@ -2862,6 +2863,19 @@ async function main(): Promise<void> {
   }
 
   /**
+   * The account funder, for the gift desk's custody recipients, or a refusal.
+   *
+   * A `ColourPayFailure` rather than a plain throw so the route answers the
+   * `501` the partner API documents, with its own sentence, instead of a 500.
+   */
+  const custodyOpener = (): AccountFunder => {
+    if (!accountFunder) {
+      throw new ColourPayFailure(501, 'account-custody-build-required', accountFunderUnavailableReason);
+    }
+    return accountFunder;
+  };
+
+  /**
    * The gift desk. `../ops/gift-nft.ts` does the same two legs with the unit
    * stopped for five to ten minutes; this runs them in the process that owns
    * the wallet, under the same spend lock, so nothing has to be stopped.
@@ -2874,6 +2888,17 @@ async function main(): Promise<void> {
        desk already owns; a plain shielded address is an ordinary Zswap spend,
        and the only thing that can build one is the wallet. */
     transferShielded: (request) => wallet.transferShielded(request),
+    /* And the fourth kind of recipient: an account custody Passport, read and
+       opened through the ACCOUNT FUNDER'S build rather than a second copy of
+       it — see `CustodyOpener` in `./gift.ts` for why it is borrowed.
+
+       `accountFunder` is a `let` and is null where it could not be built, so
+       the lookup is per call rather than captured; a host without it refuses a
+       custody recipient exactly as it did before, before anything is minted. */
+    custody: {
+      view: (address) => custodyOpener().view(address),
+      opening: (module) => custodyOpener().opening(module),
+    },
   });
   if (giftDesk.available) {
     /* EVERY colour in the catalogue, at start-up, because a colour is the one

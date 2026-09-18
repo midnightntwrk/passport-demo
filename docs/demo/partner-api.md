@@ -213,7 +213,7 @@ Everything else is refused, on purpose:
 | `transferTx` | The shielded transfer. Present only for a shielded-address payout. |
 | `txHash` | **The transaction that actually delivered it** — the deposit, or the transfer. Read this one if you only read one. |
 | `block` | The block `txHash` landed in, or `null` if the indexer had not resolved it yet. |
-| `held` | The recipient account's holding of this colour, read back off the chain after the deposit. Absent for a shielded-address payout: a stranger's shielded balance is not public, so there is nothing to read back. |
+| `held` | The recipient account's holding of this colour, read back off the chain after the deposit. Absent for a shielded-address payout, and absent for a Passport on the account custody contract: a stranger's shielded balance is not public, and neither is a custody account's, so in both cases there is nothing to read back. §6. |
 | `alreadyGiven` | `true` when this recipient already had this item and nothing new was paid. Always `false` for an item that may be earned again, such as `otrix-loyalty`. `repeat` carries the same fact under its older name. |
 | `given`, `repeat` | The fields this route answered with before the three request shapes existed. Kept so existing callers do not break. |
 | `at` | When this delivery was made — for a once-only item, when it was first given to this recipient. |
@@ -275,12 +275,15 @@ Every error body is `{ "error": "<code>", "message": "<a sentence you may show a
 | 429 | `rate-limited` | Too many requests from this client. `Retry-After` is in seconds; `retryAfterMs` is in the body. |
 | 429 | `queue-full` | The service is already handling as many sponsorship requests as it admits at once. `retryAfterMs` is 5000. |
 | 429 | `PENDING_TRANSACTION` | The sponsor is repairing its own fee bookkeeping. Short; retry. |
+| 400 | `recipient-not-sealable` | An account custody Passport that advertises no usable encryption key. The entry that carries the coin's description cannot be sealed for it, and a deposit without one would land with the coin unspendable for ever. Refused before the mint; nothing is spent. §6. |
+| 400 | `account-not-activated` | The account contract exists but no device has been activated on it yet, so nothing could ever spend what was deposited. Finish setting the Passport up and ask again. |
+| 501 | `account-custody-build-required` | The recipient is an account custody Passport and this sponsor has no account custody build, or no proof server that can prove its circuits. Operator-side; refused before the mint. |
 | 503 | `gift-unsupported` | No faucet is configured, so no colour can be minted at all. |
 | 503 | `shielded-transfer-unsupported` | The operator has disabled the shielded-transfer path. Not reachable on the deployment above. The refusal arrives *before* anything is minted, so nothing is spent. |
 | 503 | `name-resolution-unavailable` | The registry could not be read. Not the same as "not registered"; retry. |
 | 503 | `gift-failed` | The mint or the delivery failed for a reason none of the above covers. The message carries it. |
 | 504 | `mint-not-spendable` | The item was minted but has not become spendable in the sponsor's wallet yet. **It is not lost** — ask again once the wallet has caught up, and the retry will use the coin already there. |
-| 504 | `credit-not-seen` | Both transactions were submitted but the account's `coins` map has not shown the credit yet. Also not lost; the mint and deposit hashes are in the message. |
+| 504 | `credit-not-seen` | Both transactions were submitted but the credit has not been seen yet — the account's `coins` map for a prototype Passport, the sealed entry in the account's inbox for one on the account custody contract. Also not lost; the mint and deposit hashes are in the message. |
 
 **Rate limits.** `/gift-nft` shares a bucket with `/fund-account` and `/swap`,
 keyed on the client address: **3 requests per minute, burst 3**, by default. A
@@ -355,6 +358,25 @@ In practice the two proofs and two submissions dominate; budget **one to three
 minutes** and set your client timeout well above it. The same two legs run by
 the older `ops/gift-nft.ts` tool needed the service stopped for five to ten
 minutes, which is exactly why they moved into the running process.
+
+A Passport made on the **account custody contract** — the build the newest
+Passports are set up on — takes the same four steps and the same one to three
+minutes, and `200` still means the item is really there. Two things differ, and
+neither changes what you send or how you read a success. Step 3 carries a second
+argument beside the coin: a 192-byte entry encrypted to the account's own
+published key, which is the only channel the coin's description travels on, so
+an account that advertises no usable key is refused `400 recipient-not-sealable`
+*before* anything is minted. And step 4 cannot read a balance back, because
+shielded custody on that contract is stateless by design — no held coin's
+description ever reaches public state — so what the sponsor waits for instead is
+the entry it sealed appearing in the account's public inbox. Nothing but this
+delivery can produce those 192 bytes, so it is stronger evidence than a balance
+and not weaker; the consequence for you is that the response carries no `held`
+field for such a recipient, exactly as a shielded-address payout carries none.
+A recipient that is deployed but not yet activated is refused
+`400 account-not-activated`, and a sponsor with no account custody build or no
+proof server for it refuses `501 account-custody-build-required` — again before
+the mint, so nothing is spent.
 
 A **shielded-address** recipient runs steps 1 and 2, and then an ordinary
 shielded transfer out of the sponsor's wallet — built, signed, proved, and
