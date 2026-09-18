@@ -632,6 +632,30 @@ Seven live two-output transactions in `RUN.md` split three-first / four-second,
 and this run adds more. **There is still no stable output order**, which is why
 the window is walked rather than indexed into.
 
+#### Known defect: the retry cannot recognise its own failure (RED, open)
+
+Removing midnight-js's `scoped()` wrapper removed the words
+`spendPositionMayBeWrong` matches on. It still ends
+
+```ts
+return text.includes('runtimeerror') && text.includes('executing scoped transaction');
+```
+
+while the retry site's own comment says the trap "now happens inside this
+function's own `createUnprovenCallTx` rather than inside midnight-js's scoped
+wrapper, so the wrapper's wording is no longer there to recognise it by". Both
+are in the tree; the matcher is the one that runs. A spend on a stale position
+therefore dies on the first candidate with the bare word `unreachable` on screen
+instead of retrying — observed live, 2026/09/18 (`RUN-direct.md`, defect 19).
+
+It must NOT be fixed by matching `RuntimeError` alone: the `try` around it spans
+`createUnprovenCallTx`, `submitTx` and `settleShieldedChange`, and retrying a
+trap raised during submission would ask for a second approval on a transaction
+that may already be away. The trap has to be attributed to the execution phase
+by the code that knows the phase — a `try` around the two `createUnprovenCallTx`
+calls that rethrows under a recognised name, as `CUSTODY_PROOF_NOT_BUILT_NAME`
+already does for the other tell.
+
 #### The change backfill
 
 After the send is reported — non-blocking, never in the payment's path — the
