@@ -137,6 +137,26 @@ function pureFake(): CustodyPureCircuits {
       tag('ch-ai', bytesToHex(self.bytes), pk.x, entry.length, nonce),
     challenge_add_device_with_k256: (self, pk, entry, nonce) =>
       tag('ch-ad', bytesToHex(self.bytes), pk.x, bytesToHex(entry), nonce),
+    /* The jubjub arm's circuits. `sig_r` second, `grind_nonce` last — the
+       generated order, which is the whole point of holding a fake to it. The
+       tag's bytes are effectively random in the top position, so the grind
+       loop lands below the subgroup order after a handful of turns exactly as
+       it does against the real build. */
+    compute_public_point_with_jubjub: (scalar) => ({ x: scalar, y: scalar + 1n }),
+    challenge_withdraw_unshielded_with_jubjub: (self, sigR, pk, color, amount, recipient, nonce, grind) =>
+      tag('jj-wu', bytesToHex(self.bytes), sigR.x, pk.x, color, amount, bytesToHex(recipient.bytes), nonce, grind),
+    challenge_withdraw_shielded_with_jubjub: (self, sigR, pk, recipient, color, amount, coin, nonce, grind) =>
+      tag('jj-ws', bytesToHex(self.bytes), sigR.x, pk.x, bytesToHex(recipient.bytes), color, amount, coin.value, nonce, grind),
+    challenge_withdraw_shielded_to_contract_with_jubjub: (self, sigR, pk, recipient, color, amount, coin, nonce, grind) =>
+      tag('jj-wsc', bytesToHex(self.bytes), sigR.x, pk.x, bytesToHex(recipient.bytes), color, amount, coin.value, nonce, grind),
+    challenge_append_inbox_with_jubjub: (self, sigR, pk, entry, nonce, grind) =>
+      tag('jj-ai', bytesToHex(self.bytes), sigR.x, pk.x, entry.length, nonce, grind),
+    challenge_rotate_enc_key_with_jubjub: (self, sigR, pk, newKey, nonce, grind) =>
+      tag('jj-rk', bytesToHex(self.bytes), sigR.x, pk.x, bytesToHex(newKey), nonce, grind),
+    challenge_add_device_with_jubjub: (self, sigR, pk, entry, nonce, grind) =>
+      tag('jj-ad', bytesToHex(self.bytes), sigR.x, pk.x, bytesToHex(entry), nonce, grind),
+    challenge_remove_device_with_jubjub: (self, sigR, pk, entry, nonce, grind) =>
+      tag('jj-rd', bytesToHex(self.bytes), sigR.x, pk.x, bytesToHex(entry), nonce, grind),
   };
 }
 
@@ -243,6 +263,11 @@ function ledgerFake(chain: FakeChain, built: unknown[][]): CustodyLedgerApi {
     }
   }
   return {
+    /* A derived maintenance key is 32 bytes in, an opaque key out, and its
+       verifying half is a tagged copy — enough for the deploy to carry an
+       authority the caller can still sign for after a reinstall. */
+    signingKeyFromBip340: (data: Uint8Array) => ({ bip340: bytesToHex(data) }),
+    signatureVerifyingKey: (key: unknown) => ({ verifying: key }),
     ContractState: State,
     ContractDeploy: class {
       address = ADDRESS;

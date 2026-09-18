@@ -121,6 +121,18 @@ function fakePureCircuits(): CustodyPureCircuits & { calls: unknown[][] } {
     challenge_withdraw_unshielded_with_k256: (...a) => record('ch_withdraw_unshielded', a),
     challenge_append_inbox_with_k256: (...a) => record('ch_append_inbox', a),
     challenge_add_device_with_k256: (...a) => record('ch_add_device', a),
+    compute_public_point_with_jubjub: (scalar) => {
+      calls.push(['compute_public_point_with_jubjub', scalar]);
+      return POINT;
+    },
+    challenge_withdraw_unshielded_with_jubjub: (...a) => record('jj_withdraw_unshielded', a),
+    challenge_withdraw_shielded_with_jubjub: (...a) => record('jj_withdraw_shielded', a),
+    challenge_withdraw_shielded_to_contract_with_jubjub: (...a) =>
+      record('jj_withdraw_shielded_to_contract', a),
+    challenge_append_inbox_with_jubjub: (...a) => record('jj_append_inbox', a),
+    challenge_rotate_enc_key_with_jubjub: (...a) => record('jj_rotate_enc_key', a),
+    challenge_add_device_with_jubjub: (...a) => record('jj_add_device', a),
+    challenge_remove_device_with_jubjub: (...a) => record('jj_remove_device', a),
   };
 }
 
