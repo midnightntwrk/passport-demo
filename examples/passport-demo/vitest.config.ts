@@ -490,6 +490,33 @@
  * makes it drillable at all — the real build is ~100 MB of prover keys that a
  * unit test cannot load. It is not wired into the app; `App.tsx` is untouched.
  *
+ * `src/identity/custodyJubjubSigner.ts` went IN on 2026/09/18, the day it was
+ * written, and it is in the denominator for the same reason as its neighbour
+ * one turn harder: it decides what the PASSKEY signs, and unlike the k256 arm
+ * there is no vendor between the rule and the key. Four rules live in it and
+ * each has exactly one right answer. The DERIVATION decides which key a
+ * reinstalled Passport comes back as — get the label, the counter byte, or the
+ * endianness wrong and the account is intact on chain with a device set nobody
+ * can sign for, which is not a bug anybody can repair afterwards. The
+ * REJECTION bound decides whether the scalar is uniform or quietly biased. The
+ * GRIND decides whether a challenge is in the subgroup at all, and it reads the
+ * hash LITTLE-endian while the derivation reads its own BIG-endian — two
+ * conventions one letter apart in the source and a universe apart in the
+ * result. The NONCE decides whether a second signature reveals the secret:
+ * Schnorr gives `sk` to anyone who sees two signatures under one `R`.
+ *
+ * None of that is visible from inside the app — every one of those failures is
+ * the same refused proof — so all of it is held against something other than
+ * itself in `custodyJubjubSigner.test.ts`: the seven challenge builders and the
+ * three derivations are compared with the COMPILED contract's own pure
+ * circuits, called directly in the generated argument order; the signature is
+ * compared with the reference signer's rule re-implemented from
+ * `nicolas-ref/contract/src/wallet/signer.ts`; and the result is put back
+ * through the curve — `s·G == R + c·pk`, the equation the circuit checks —
+ * using the runtime's own point arithmetic. The module holds no React, no DOM,
+ * no network, no storage, and no curve library: the pure circuits are injected,
+ * as next door.
+ *
  * `src/identity/custodyContractPlan.ts` went IN on 2026/09/16, beside it, and for the
  * same kind of reason one step further out: it holds the decisions a custody deploy
  * makes BEFORE anything is signed. Three of them cost a sponsored transaction
@@ -764,6 +791,7 @@ export default mergeConfig(
           'src/lib/waitingGame.ts',
           'src/lib/zkArtefactCache.ts',
           'src/identity/custodyContractSigning.ts',
+          'src/identity/custodyJubjubSigner.ts',
           'src/identity/custodyContractPlan.ts',
           'src/identity/custodyContractSend.ts',
           'src/identity/custodyContractSession.ts',
