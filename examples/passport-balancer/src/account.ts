@@ -81,7 +81,8 @@ import {
 } from './accountModule.js';
 import {
   AccountStateRefusal,
-  accountViewFrom,
+  accountBalancesFrom,
+  accountViewFor,
   decodePrototypeAccount as decodePrototypeAccountState,
   type AccountView,
   type CustodyAccountLedger,
@@ -1420,12 +1421,24 @@ export async function createAccountFunder(
     try {
       return read();
     } catch (cause) {
-      if (cause instanceof AccountStateRefusal) {
-        throw new AccountFundingError(cause.code, cause.message);
-      }
-      throw cause;
+      throw asFundingError(cause);
     }
   };
+
+  /** The same, for a read that has to load a build before it can decode. */
+  const refusingAsync = async <T>(read: () => Promise<T>): Promise<T> => {
+    try {
+      return await read();
+    } catch (cause) {
+      throw asFundingError(cause);
+    }
+  };
+
+  /** A `./accountState.ts` refusal in this module's currency, or the cause. */
+  const asFundingError = (cause: unknown): unknown =>
+    cause instanceof AccountStateRefusal
+      ? new AccountFundingError(cause.code, cause.message)
+      : cause;
 
   /**
    * The same read as {@link readAccount}, for all THREE builds — and the read
@@ -1444,21 +1457,13 @@ export async function createAccountFunder(
    */
   const readAccountView = async (address: string): Promise<AccountView> => {
     const state = await readState(address);
-    const module = accountModuleForState(state);
-    /* Loaded OUTSIDE the decode, deliberately. A host that cannot load the
-       build at all has said nothing about this account, and the refusal for
-       that is `accountCustodyOnce`'s own `prover-unavailable` — swallowing it
-       into the decode would tell a caller its Passport is not a Passport. */
-    const custodyLedger =
-      module === 'account-custody' ? (await accountCustodyOnce()).ledger : undefined;
-    return refusing(() =>
-      accountViewFrom<AccountLedger, CustodyAccountLedger>({
-        state,
+    return refusingAsync(() =>
+      accountViewFor<AccountLedger, CustodyAccountLedger>({
         address,
-        module,
+        state,
         nativeColour: colour,
         prototypeLedger: account.ledger,
-        custodyLedger,
+        custodyLedgerFor: async () => (await accountCustodyOnce()).ledger,
       }),
     );
   };
@@ -1702,10 +1707,7 @@ export async function createAccountFunder(
          answered `not-an-account` to every account custody Passport, including
          one that had been activated and named on stagenet an hour earlier. */
       const view = await readAccountView(rawContractAddress(contractAddress));
-      return {
-        night: view.unshielded(colour),
-        asset: assetColourBytes ? view.shielded(assetColourBytes) : 0n,
-      };
+      return accountBalancesFrom(view, colour, assetColourBytes ?? null);
     },
 
     async activeDeviceCommitments(contractAddress: string): Promise<Set<string>> {

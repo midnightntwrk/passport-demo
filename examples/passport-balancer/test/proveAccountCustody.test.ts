@@ -1066,7 +1066,7 @@ describe('which arm a circuit belongs to', () => {
   });
 
 
-  it('reads the arm off the circuit own name, for every circuit of the build', () => {
+  it("reads the arm off the circuit's own name, for every circuit of the build", () => {
     const arms = { jubjub: 0, k256: 0, shared: 0 };
     for (const name of custodyCircuitNames) arms[custodyCircuitArm(name)] += 1;
     /* Every gated operation is declared once per arm, and the two deposits are

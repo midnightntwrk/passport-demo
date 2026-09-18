@@ -15,6 +15,13 @@
  *     `0ffd70ad38ce81e8378c8269ef1b127d5f90a77dba4f7618bf48eeb836ad2746`, the
  *     Dynamic-born account behind `dynone1.night`, which has been spending: it
  *     is at round 14 with four inbox entries.
+ *   - `contract-state-not-an-account.json` —
+ *     `4fc92e152e8d854ef9337275504244e18bd6e3d7d41fd81ed2dabf62be78e92f`, the
+ *     mUSD faucet this sponsor mints from. One entry point, `mint_shielded`,
+ *     and a ledger shaped nothing like an account's. It is here so the refusal
+ *     the balancer exists to make — a contract that is not a Passport — is
+ *     asserted against a real contract rather than against a decoder somebody
+ *     told to throw.
  *   - `account-state-prototype.json` —
  *     `0f2ddd277102e73380dd6751e839fbfc0d017bbef89c01bc7dc70f03c6e30f93`, the
  *     twelve-circuit prototype Passport `pkmu66rhz9dvmc.night`, holding
@@ -47,6 +54,14 @@ import { describe, it } from 'node:test';
 import { ContractState } from '@midnight-ntwrk/compact-runtime';
 
 import { accountModuleForState } from '../src/accountModule.js';
+import {
+  AccountStateRefusal,
+  decodePrototypeAccount,
+  type PrototypeAccountLedger,
+} from '../src/accountState.js';
+
+const prototypeLedgerOf = (build: unknown): ((data: unknown) => PrototypeAccountLedger) =>
+  (build as { ledger: (data: unknown) => PrototypeAccountLedger }).ledger;
 
 /* LITERAL relative specifiers, for the reason `src/account.ts` gives at its own
    imports: `contracts-stagenet` carries its own `node_modules`, so a computed
@@ -76,29 +91,41 @@ export const CUSTODY_K256_ADDRESS =
   '0ffd70ad38ce81e8378c8269ef1b127d5f90a77dba4f7618bf48eeb836ad2746';
 export const PROTOTYPE_ADDRESS =
   '0f2ddd277102e73380dd6751e839fbfc0d017bbef89c01bc7dc70f03c6e30f93';
+export const FAUCET_ADDRESS =
+  '4fc92e152e8d854ef9337275504244e18bd6e3d7d41fd81ed2dabf62be78e92f';
 
 const custodyJubjub = stateFrom('account-state-custody-jubjub.json');
 const custodyK256 = stateFrom('account-state-custody-k256.json');
 const prototype = stateFrom('account-state-prototype.json');
+const notAnAccount = stateFrom('contract-state-not-an-account.json');
 
 const namesIn = (state: ContractState): string[] => state.operations().map(String);
 
-/** The prototype decode and fingerprint, exactly as the pre-flight ran it. */
-function prototypeFingerprint(state: ContractState): 'decoded' | 'refused' {
+/**
+ * The pre-flight's own decode, run the way the pre-flight runs it.
+ *
+ * NOT A COPY OF THE FINGERPRINT. `decodePrototypeAccount` is the function
+ * `/fund-account` reached through `readAccount`, and it is imported rather than
+ * re-implemented here for the reason this whole file exists: a test that
+ * restates the rule agrees with itself when the rule is wrong.
+ */
+function prototypeFingerprint(state: ContractState, address: string): 'decoded' | 'refused' {
   try {
-    const candidate = (prototypeBuild as unknown as { ledger: (data: unknown) => {
-      device_count: bigint;
-      recovery_shares: { size(): bigint };
-      night_balances: { member(colour: Uint8Array): boolean };
-    } }).ledger(state.data);
-    if (candidate.device_count >= 1n && candidate.recovery_shares.size() === 3n) {
-      candidate.night_balances.member(new Uint8Array(32));
-      return 'decoded';
-    }
-  } catch {
+    decodePrototypeAccount(
+      prototypeLedgerOf(prototypeBuild),
+      state,
+      address,
+      /* The module the OLD code passed, because it never asked: everything was
+         decoded as a prototype. */
+      'account',
+      new Uint8Array(32),
+    );
+    return 'decoded';
+  } catch (cause) {
+    assert.ok(cause instanceof AccountStateRefusal);
+    assert.equal(cause.code, 'not-an-account');
     return 'refused';
   }
-  return 'refused';
 }
 
 describe('the funding refusal a real passkey Passport met on 2026/09/18', () => {
@@ -106,12 +133,12 @@ describe('the funding refusal a real passkey Passport met on 2026/09/18', () => 
     /* Both arms, because the refusal is about the BUILD and not about which
        key deployed it: the k256-born account has been spending for a fortnight
        and is refused by the same line as the passkey account made that hour. */
-    assert.equal(prototypeFingerprint(custodyJubjub), 'refused');
-    assert.equal(prototypeFingerprint(custodyK256), 'refused');
+    assert.equal(prototypeFingerprint(custodyJubjub, CUSTODY_JUBJUB_ADDRESS), 'refused');
+    assert.equal(prototypeFingerprint(custodyK256, CUSTODY_K256_ADDRESS), 'refused');
   });
 
   it('is not what the prototype account it was written for gets, which is the point', () => {
-    assert.equal(prototypeFingerprint(prototype), 'decoded');
+    assert.equal(prototypeFingerprint(prototype, PROTOTYPE_ADDRESS), 'decoded');
   });
 
   it('happens although the state says plainly what it is', () => {
@@ -169,12 +196,7 @@ describe('which build a real served state is', () => {
 /* The fix: the pre-flight reading through the account's own build             */
 /* -------------------------------------------------------------------------- */
 
-import {
-  AccountStateRefusal,
-  accountViewFrom,
-  type CustodyAccountLedger,
-  type PrototypeAccountLedger,
-} from '../src/accountState.js';
+import { accountBalancesFrom, accountViewFor, accountViewFrom, type CustodyAccountLedger } from '../src/accountState.js';
 
 const NATIVE_COLOUR = new Uint8Array(32);
 /* The colour the prototype fixture really holds 40 of, read off its own
@@ -281,24 +303,24 @@ describe('the pre-flight, reading each account with the build it actually is', (
   });
 
   it('still refuses a contract that is not an account at all', () => {
-    /* The gate this whole fingerprint exists for. Compact decodes positionally,
-       so a foreign contract can look plausible; the balancer will not pay coins
-       into one. A state that declares no account circuit at all falls to the
-       prototype reader, whose decode of a stranger throws. */
-    const stranger = { operations: () => ['mint_shielded'], data: prototype.data };
-    const refusal = refusalFrom(() =>
-      accountViewFrom<PrototypeAccountLedger, CustodyAccountLedger>({
-        state: stranger,
-        address: 'ff'.repeat(32),
-        module: accountModuleForState(stranger),
-        nativeColour: NATIVE_COLOUR,
-        prototypeLedger: () => {
-            throw new Error('not this contract');
-          },
-        custodyLedger,
-      }),
-    );
+    /* THE GATE THIS WHOLE FINGERPRINT EXISTS FOR, asked of a real contract that
+       really is not an account: the mUSD faucet this sponsor mints from, one
+       entry point and a ledger shaped nothing like an account's. Compact
+       decodes positionally, so a foreign contract can look plausible; the
+       balancer will not pay coins into one.
+
+       Nothing is mocked into throwing here. The build's own `ledger` is handed
+       the faucet's own state, and what it does with it is the answer. */
+    assert.deepEqual(namesIn(notAnAccount), ['mint_shielded']);
+    const refusal = refusalFrom(() => viewOf(notAnAccount, FAUCET_ADDRESS));
     assert.equal(refusal.code, 'not-an-account');
+    /* The sentence, exactly as it has always read. It is what a caller is shown
+       and what the onboarding run quoted off the deployed sponsor, so it is
+       asserted in full rather than matched loosely. */
+    assert.equal(
+      refusal.message,
+      `The contract at ${FAUCET_ADDRESS} is not a Passport account-custody contract — its state does not decode as one — so the balancer will not deposit into it.`,
+    );
   });
 
   it('says which reader was wrong when a custody account reaches the prototype one', () => {
@@ -319,6 +341,107 @@ describe('the pre-flight, reading each account with the build it actually is', (
     );
     assert.equal(refusal.code, 'not-an-account');
     assert.match(refusal.message, /account custody/);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The pre-flight as `/fund-account` runs it                                  */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * `funder.balances()` is `readState` → {@link accountViewFor} →
+ * {@link accountBalancesFrom}, and the defect was in none of the decoding: it
+ * was the step ABOVE it, which reached for the prototype reader whatever the
+ * account was. So these cases drive the two functions that step is now made of,
+ * with a reader that serves the real states, rather than only the decode
+ * underneath them.
+ */
+const ASSET_COLOUR = PROTOTYPE_COIN_COLOUR;
+
+const balancesOf = async (state: ContractState, address: string) =>
+  accountBalancesFrom(
+    await accountViewFor<PrototypeAccountLedger, CustodyAccountLedger>({
+      address,
+      state,
+      nativeColour: NATIVE_COLOUR,
+      prototypeLedger,
+      custodyLedgerFor: () => Promise.resolve(custodyLedger),
+    }),
+    NATIVE_COLOUR,
+    ASSET_COLOUR,
+  );
+
+describe('what /fund-account reads before it spends', () => {
+  it('answers for the passkey Passport it used to refuse', async () => {
+    const held = await balancesOf(custodyJubjub, CUSTODY_JUBJUB_ADDRESS);
+    /* Nothing deposited yet: the NIGHT leg is owed, and that is a READING. */
+    assert.equal(held.night, 0n);
+    /* Null, not zero. Custody there is stateless, so no shielded holding is
+       public, and `./activationLegs.ts` falls back to this service's own
+       record — which is why `onDepositSubmitted` exists. */
+    assert.equal(held.asset, null);
+  });
+
+  it('answers for the Dynamic-born account on the same path', async () => {
+    const held = await balancesOf(custodyK256, CUSTODY_K256_ADDRESS);
+    assert.equal(held.asset, null);
+    assert.equal(typeof held.night, 'bigint');
+  });
+
+  it('leaves the prototype account answering exactly the two numbers it did', async () => {
+    /* THE SNAPSHOT, through the pre-flight rather than through the decode: 2,000
+       NIGHT mirrored and 40 of the asset colour in `coins`. */
+    assert.deepEqual(await balancesOf(prototype, PROTOTYPE_ADDRESS), {
+      night: 2000n,
+      asset: 40n,
+    });
+  });
+
+  it('refuses a contract that is not an account, before either leg', async () => {
+    await assert.rejects(
+      () => balancesOf(notAnAccount, FAUCET_ADDRESS),
+      (cause: unknown) =>
+        cause instanceof AccountStateRefusal && cause.code === 'not-an-account',
+    );
+  });
+
+  it('lets the load of a build this host has not got travel, rather than swallowing it', async () => {
+    /* The one thing `accountViewFor` deliberately does not catch. A host that
+       cannot load the account-custody build has said NOTHING about this
+       account, and turning that into `not-an-account` would tell a caller its
+       Passport is not a Passport — see `accountReadStatus`, which answers 503
+       for it. */
+    await assert.rejects(
+      () =>
+        accountViewFor<PrototypeAccountLedger, CustodyAccountLedger>({
+          address: CUSTODY_JUBJUB_ADDRESS,
+          state: custodyJubjub,
+          nativeColour: NATIVE_COLOUR,
+          prototypeLedger,
+          custodyLedgerFor: () =>
+            Promise.reject(
+              Object.assign(new Error('the compiled account-custody build is not readable'), {
+                code: 'prover-unavailable',
+              }),
+            ),
+        }),
+      (cause: unknown) =>
+        !(cause instanceof AccountStateRefusal) &&
+        (cause as { code?: string }).code === 'prover-unavailable',
+    );
+  });
+
+  it('reports no asset at all where this service has no colour configured', async () => {
+    /* `0n`, not null: it is the answer the prototype path gave before any of
+       this, and a null here would read as "a custody account" to every caller. */
+    const view = await accountViewFor<PrototypeAccountLedger, CustodyAccountLedger>({
+      address: PROTOTYPE_ADDRESS,
+      state: prototype,
+      nativeColour: NATIVE_COLOUR,
+      prototypeLedger,
+      custodyLedgerFor: () => Promise.resolve(custodyLedger),
+    });
+    assert.equal(accountBalancesFrom(view, NATIVE_COLOUR, null).asset, 0n);
   });
 });
 

@@ -97,7 +97,7 @@ describe('telling the account custody build apart from the two prototypes', () =
     assert.ok(!accountV1Names.includes(CUSTODY_DEPOSIT_OPERATION_NAME));
   });
 
-  it('finds the eleven-circuit build own marker in both prototypes and in neither custody arm', () => {
+  it("finds the eleven-circuit build's own marker in both prototypes and in neither custody arm", () => {
     /* The other half of asking positively: `withdraw_shielded` is bare on both
        prototypes and arm-suffixed on every custody withdrawal, so the older
        build is recognised by what it HAS. */
@@ -129,7 +129,7 @@ describe('telling the account custody build apart from the two prototypes', () =
     assert.equal(accountModuleForState(stateOf(waveOne)), 'account-custody');
   });
 
-  it('picks each of the three modules from that build own circuit set', () => {
+  it("picks each of the three modules from that build's own circuit set", () => {
     assert.equal(accountModuleForState(stateOf(accountNames)), 'account');
     assert.equal(accountModuleForState(stateOf(accountV1Names)), 'account-v1');
     assert.equal(accountModuleForState(stateOf(accountCustodyNames)), 'account-custody');
@@ -143,7 +143,7 @@ describe('telling the account custody build apart from the two prototypes', () =
     assert.equal(accountCustodyNames.includes(ONE_TX_TRANSFER_OPERATION_NAME), false);
     assert.equal(accountModuleFor(false, true), 'account-custody');
     assert.equal(accountModuleFor(null, true), 'account-custody');
-    /* And not even when the eleven-circuit build own marker is asked for too:
+    /* And not even when the eleven-circuit build's own marker is asked for too:
        the custody answer outranks both prototypes. */
     assert.equal(accountModuleFor(false, true, false), 'account-custody');
   });

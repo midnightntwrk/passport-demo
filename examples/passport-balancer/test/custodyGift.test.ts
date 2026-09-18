@@ -167,7 +167,7 @@ describe('what confirms a gift that cannot be read back off the chain', () => {
     assert.equal(scanInboxForEntry(inboxWith([somebodyElse, ours]), 4n, 6n, ours), 'found');
   });
 
-  it('falls back to the deposit own block only where the map cannot be walked at all', () => {
+  it("falls back to the deposit's own block only where the map cannot be walked at all", () => {
     assert.equal(scanInboxForEntry(() => null, 4n, 5n, ours), 'unreadable');
     assert.equal(
       shieldedDepositConfirmed('account-custody', 4n, 5n, 1n, {

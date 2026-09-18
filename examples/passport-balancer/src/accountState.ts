@@ -27,7 +27,11 @@
  * contract it cannot recognise.
  */
 
-import { accountEncKey, type AccountModuleName } from './accountModule.js';
+import {
+  accountEncKey,
+  accountModuleForState,
+  type AccountModuleName,
+} from './accountModule.js';
 
 /**
  * Why a state was refused, kept apart from the sentence.
@@ -296,5 +300,80 @@ export function accountViewFrom<
     encKey: () => null,
     inboxCount: () => null,
     inboxEntry: () => null,
+  };
+}
+
+/**
+ * The whole of what a funding pre-flight does with a state it has read: pick
+ * the build, load the reader for it, decode, fingerprint.
+ *
+ * ONE FUNCTION so that `balances()` in `./account.ts` has nothing of its own to
+ * get wrong. The defect this file exists for was not in the decode — it was in
+ * the closure ABOVE the decode calling the prototype reader whatever the
+ * account was, and a test that drilled only the decode would have passed
+ * throughout. What is left in the closure now is the indexer read and the
+ * translation of a refusal; everything that decides is here, and
+ * `test/accountCustodyState.test.ts` calls this with a fake reader and real
+ * served states.
+ */
+export async function accountViewFor<
+  Prototype extends PrototypeAccountLedger,
+  Custody extends CustodyAccountLedger,
+>(deps: {
+  readonly address: string;
+  /** The state, already read and already refused if there is none. */
+  readonly state: unknown;
+  readonly nativeColour: Uint8Array;
+  readonly prototypeLedger: (data: unknown) => Prototype;
+  /**
+   * The custody build's `ledger`, loaded ON DEMAND and OUTSIDE the decode.
+   *
+   * A host that cannot load the build at all has said nothing about this
+   * account, and its refusal — `prover-unavailable` — must travel rather than
+   * be swallowed into `not-an-account`, which would tell a caller its Passport
+   * is not a Passport. So this throws on its own terms and nothing here
+   * catches it.
+   */
+  readonly custodyLedgerFor: () => Promise<(data: unknown) => Custody>;
+}): Promise<AccountView> {
+  const module = accountModuleForState(deps.state);
+  const custodyLedger = module === 'account-custody' ? await deps.custodyLedgerFor() : undefined;
+  return accountViewFrom<Prototype, Custody>({
+    state: deps.state,
+    address: deps.address,
+    module,
+    nativeColour: deps.nativeColour,
+    prototypeLedger: deps.prototypeLedger,
+    custodyLedger,
+  });
+}
+
+/** Both balances an account holds, from one view. */
+export interface AccountBalancesRead {
+  readonly night: bigint;
+  /**
+   * `null` on the account custody build, which mirrors no shielded holding at
+   * all — and `0n`, not null, where this service has no asset colour
+   * configured, which is what the prototype path answered before any of this
+   * and must go on answering.
+   */
+  readonly asset: bigint | null;
+}
+
+/**
+ * What `/fund-account`'s pre-flight asks of a view.
+ *
+ * Here rather than in the closure for the reason {@link accountViewFor} gives:
+ * the two lines that turn a view into an answer are the two lines that were
+ * wrong, and they are worth a test of their own.
+ */
+export function accountBalancesFrom(
+  view: AccountView,
+  nativeColour: Uint8Array,
+  assetColour: Uint8Array | null,
+): AccountBalancesRead {
+  return {
+    night: view.unshielded(nativeColour),
+    asset: assetColour ? view.shielded(assetColour) : 0n,
   };
 }
