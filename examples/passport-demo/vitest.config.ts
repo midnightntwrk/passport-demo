@@ -488,17 +488,6 @@
  *                       either make the gate unmeetable or make it meaningless.
  *                       The moving half is drilled against stagenet by
  *                       `e2e/stagenet.live.spec.ts`.
- *   walletTransfer.ts   MIXED, and out on exactly the rule above. It is leg two
- *                       of a shielded send to an address — added 2026/09/17,
- *                       when that send stopped being the single partial
- *                       withdrawal that left an account unable to withdraw
- *                       anything again. Its pure half IS drilled, in
- *                       `src/identity/walletTransfer.test.ts`: the amount and
- *                       address refusals it makes before anything is built, and
- *                       the output shape it hands the facade. Its other half
- *                       balances, signs, proves, and submits a real transaction
- *                       through the fee sponsor, and is drilled against
- *                       stagenet by `e2e/stagenet.live.spec.ts`.
  *   midnames.ts         MIXED, on the same rule. The naming rules it used to
  *                       hold are now `./midnamesText.ts`, which IS in the
  *                       denominator above. The read-side helpers —
