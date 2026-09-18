@@ -18,6 +18,7 @@ import { describe, it } from 'node:test';
 import {
   MAX_UNPROVEN_TX_BYTES,
   PROVE_ACCOUNT_CUSTODY_ESTIMATE_MS,
+  PROVE_ACCOUNT_CUSTODY_MAX_CIRCUITS,
   PROVE_ACCOUNT_CUSTODY_PATH,
   bytesFromHex,
   createCustodyProver,
@@ -109,11 +110,110 @@ describe('a proof that works', () => {
     assert.equal(outcome.status, 200);
     assert.equal(outcome.body.provenTx, '010203');
     assert.equal(seen.length, 1);
-    assert.equal(seen[0]?.circuit, CIRCUIT);
+    assert.deepEqual(seen[0]?.circuits, [CIRCUIT]);
     assert.deepEqual([...(seen[0]?.unprovenTx ?? [])], [0x00, 0xff, 0x10]);
     assert.equal(seen[0]?.assetsPath, staged);
     assert.equal(seen[0]?.proverUrl, 'http://127.0.0.1:6300');
     rmSync(staged, { recursive: true, force: true });
+  });
+
+  /* ---------------------------------------------------------------------- */
+  /* A transaction with two calls in it                                       */
+  /* ---------------------------------------------------------------------- */
+
+  it('proves a transaction that names TWO circuits, and tells the engine both', async () => {
+    /* The direct transfer of MIP-0012 §6.6: the sender's gated spend to a
+       contract recipient, with the payee's own permissionless claim grafted
+       onto the same transaction. One request, one proof, two circuits. */
+    const seen: CustodyProofJob[] = [];
+    const staged = stageArtefacts([CIRCUIT, 'deposit_shielded']);
+    const prover = proverWith({
+      assetsPath: staged,
+      circuits: () => Promise.resolve([CIRCUIT, 'deposit_shielded']),
+      engine: (job) => {
+        seen.push(job);
+        return Promise.resolve(new Uint8Array([0x07]));
+      },
+    });
+    const outcome = await prover.prove(
+      JSON.stringify({
+        circuits: [CIRCUIT, 'deposit_shielded'],
+        unprovenTx: 'abcd',
+        network: 'stagenet',
+      }),
+    );
+    assert.equal(outcome.status, 200);
+    assert.equal(outcome.body.provenTx, '07');
+    assert.deepEqual(seen[0]?.circuits, [CIRCUIT, 'deposit_shielded']);
+    rmSync(staged, { recursive: true, force: true });
+  });
+
+  it('still answers the single-circuit shape every installed Passport sends', async () => {
+    const seen: CustodyProofJob[] = [];
+    const prover = proverWith({
+      engine: (job) => {
+        seen.push(job);
+        return Promise.resolve(new Uint8Array([0x01]));
+      },
+    });
+    const outcome = await prover.prove(request());
+    assert.equal(outcome.status, 200);
+    assert.deepEqual(seen[0]?.circuits, [CIRCUIT]);
+  });
+
+  it('refuses a list naming a circuit the build does not have, by name', async () => {
+    const prover = proverWith();
+    const outcome = await prover.prove(
+      JSON.stringify({ circuits: [CIRCUIT, NOT_A_CIRCUIT], unprovenTx: 'ab', network: 'stagenet' }),
+    );
+    assert.equal(outcome.status, 400);
+    assert.equal(outcome.body.error, 'unknown-circuit');
+  });
+
+  it('refuses a list whose SECOND circuit is not staged on this host', async () => {
+    /* The refusal this list buys. Without it the transaction would be sent to
+       the prover and fail there, seconds later, in the prover's own words. */
+    const staged = stageArtefacts([CIRCUIT]);
+    const prover = proverWith({
+      assetsPath: staged,
+      circuits: () => Promise.resolve([CIRCUIT, 'deposit_shielded']),
+    });
+    const outcome = await prover.prove(
+      JSON.stringify({
+        circuits: [CIRCUIT, 'deposit_shielded'],
+        unprovenTx: 'ab',
+        network: 'stagenet',
+      }),
+    );
+    assert.equal(outcome.status, 503);
+    assert.equal(outcome.body.error, 'prover-unavailable');
+    rmSync(staged, { recursive: true, force: true });
+  });
+
+  it('refuses more circuits than a transaction may name', async () => {
+    const prover = proverWith();
+    const outcome = await prover.prove(
+      JSON.stringify({
+        circuits: new Array(PROVE_ACCOUNT_CUSTODY_MAX_CIRCUITS + 1).fill(CIRCUIT),
+        unprovenTx: 'ab',
+        network: 'stagenet',
+      }),
+    );
+    assert.equal(outcome.status, 400);
+    assert.equal(outcome.body.error, 'too-many-circuits');
+  });
+
+  it('refuses an empty list, a non-string entry, and both keys at once', async () => {
+    const prover = proverWith();
+    for (const body of [
+      { circuits: [], unprovenTx: 'ab', network: 'stagenet' },
+      { circuits: [CIRCUIT, 7], unprovenTx: 'ab', network: 'stagenet' },
+      { circuit: CIRCUIT, circuits: [CIRCUIT], unprovenTx: 'ab', network: 'stagenet' },
+    ]) {
+      const outcome = await prover.prove(JSON.stringify(body));
+      assert.equal(outcome.status, 400);
+      assert.equal(outcome.body.error, 'invalid-request');
+    }
   });
 
   it('remembers how long it took, and says so on /status', async () => {
@@ -729,7 +829,7 @@ describe('the engine that would talk to a proof server', () => {
       },
     });
     const out = await engine({
-      circuit: CIRCUIT,
+      circuits: [CIRCUIT],
       unprovenTx: new Uint8Array([0x09]),
       assetsPath: '/opt/passport-account-custody-artefacts/managed/account-custody',
       proverUrl: 'http://127.0.0.1:6300',
@@ -764,7 +864,7 @@ describe('the engine that would talk to a proof server', () => {
         }),
     });
     const job: CustodyProofJob = {
-      circuit: CIRCUIT,
+      circuits: [CIRCUIT],
       unprovenTx: new Uint8Array([0x01]),
       assetsPath: '/opt/passport-account-custody-artefacts/managed/account-custody',
       proverUrl: 'http://127.0.0.1:6300',
