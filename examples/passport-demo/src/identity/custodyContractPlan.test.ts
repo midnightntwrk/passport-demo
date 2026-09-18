@@ -28,7 +28,9 @@ import {
   CUSTODY_PROOF_NOT_BUILT,
   CUSTODY_UNEXPECTED,
   custodyProofNotBuilt,
+  custodyProofNotBuiltDetail,
   isCustodyProofNotBuilt,
+  proveAccountCustodyDetail,
   proveAccountCustodyRefused,
   CUSTODY_VERIFIER_BYTE_BUDGET,
   loadCustodyAuthorityKey,
@@ -605,6 +607,56 @@ describe('a proving service that ran and declined to prove', () => {
     const looping = new Error('one');
     looping.cause = looping;
     expect(isCustodyProofNotBuilt(looping)).toBe(false);
+  });
+
+  /* ---------------------------------------------------------------------- */
+  /* WHAT THE SERVICE SAID, WHICH IS NOT WHAT THE PERSON READS (A2)          */
+  /*                                                                        */
+  /* The code `proving-failed` says the prover RAN and declined. A wrong     */
+  /* candidate position is one thing that reaches; a verifier key that does  */
+  /* not match is another. Rotating on the code alone cost up to ten         */
+  /* approvals for a failure no position could fix, so the retry judges the  */
+  /* service's own words — which travel on the error and reach no screen.    */
+  /* ---------------------------------------------------------------------- */
+
+  it('reads the detail off a refusal body, and nothing off one without it', () => {
+    expect(
+      proveAccountCustodyDetail({ error: 'proving-failed', detail: 'unsatisfiable constraints' }),
+    ).toBe('unsatisfiable constraints');
+    expect(proveAccountCustodyDetail({ error: 'proving-failed' })).toBeNull();
+    expect(proveAccountCustodyDetail({ error: 'proving-failed', detail: '   ' })).toBeNull();
+    expect(proveAccountCustodyDetail({ detail: 42 })).toBeNull();
+    expect(proveAccountCustodyDetail(null)).toBeNull();
+  });
+
+  it('carries the detail on the error, and keeps it out of the sentence', () => {
+    const error = custodyProofNotBuilt('The proof server could not prove it: unsatisfiable');
+    expect(custodyProofNotBuiltDetail(error)).toBe(
+      'The proof server could not prove it: unsatisfiable',
+    );
+    /* THE ONLY THING SOMEBODY READS is still the plain sentence. */
+    expect(error.message).toBe(CUSTODY_PROOF_NOT_BUILT);
+    expect(custodyFailureSentence(error)).toBe(CUSTODY_PROOF_NOT_BUILT);
+  });
+
+  it('says nothing for a refusal that carried no words, or no error at all', () => {
+    expect(custodyProofNotBuiltDetail(custodyProofNotBuilt())).toBeNull();
+    expect(custodyProofNotBuiltDetail(custodyProofNotBuilt(''))).toBeNull();
+    expect(custodyProofNotBuiltDetail(new Error('something else'))).toBeNull();
+    expect(custodyProofNotBuiltDetail('not an error')).toBeNull();
+  });
+
+  it('finds the detail through a wrapper that set a cause', () => {
+    const wrapped = new Error('Unexpected error submitting scoped transaction', {
+      cause: custodyProofNotBuilt('unsatisfiable constraint system'),
+    });
+    expect(custodyProofNotBuiltDetail(wrapped)).toBe('unsatisfiable constraint system');
+  });
+
+  it('gives up on a circular cause chain rather than following it for a detail', () => {
+    const looping = new Error('one');
+    looping.cause = looping;
+    expect(custodyProofNotBuiltDetail(looping)).toBeNull();
   });
 });
 

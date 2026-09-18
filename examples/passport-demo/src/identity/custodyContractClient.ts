@@ -108,6 +108,7 @@ import {
   CUSTODY_PROOF_TIMEOUT_MS,
   CUSTODY_PROVER_UNAVAILABLE,
   custodyProofNotBuilt,
+  custodyProofNotBuiltDetail,
   isCustodyProofNotBuilt,
   CUSTODY_SEND_FAILED,
   CUSTODY_SEND_UNCONFIRMED,
@@ -117,6 +118,7 @@ import {
   newCustodyRecord,
   nextCustodyStep,
   parseProveCustodyResponse,
+  proveAccountCustodyDetail,
   proveAccountCustodyRefused,
   describeProveAccountCustodyFailure,
   planCustodyWaves,
@@ -586,7 +588,14 @@ export function custodyProofProvider(options: CustodyProofProviderOptions): {
         /* THE SERVICE ANSWERED AND DECLINED TO PROVE, which is not the same as
            the service being down — and for a shielded spend it is the shape a
            WRONG CANDIDATE POSITION arrives in. See {@link CUSTODY_PROOF_NOT_BUILT}. */
-        if (proveAccountCustodyRefused(parsed)) throw custodyProofNotBuilt();
+        /* THE SERVICE'S OWN WORDS TRAVEL WITH IT. The refusal arms a retry
+           against the next candidate position and a retry costs an approval,
+           so the caller has to be able to ask whether this refusal was about a
+           position at all — and the message it throws is the sentence a person
+           reads, which cannot answer that. */
+        if (proveAccountCustodyRefused(parsed)) {
+          throw custodyProofNotBuilt(proveAccountCustodyDetail(parsed));
+        }
         throw new Error(CUSTODY_PROVER_UNAVAILABLE);
       }
       const proven = options.deserialise(parseProveCustodyResponse(parsed));
@@ -2110,7 +2119,22 @@ export async function spendShieldedK1(
         restartK1CoinCandidates(account, colour);
         throw cause;
       }
-      if (!spendPositionMayBeWrong(message) && !isCustodyProofNotBuilt(cause)) {
+      /* A REFUSAL IS NOT BY ITSELF EVIDENCE ABOUT A POSITION (fixed
+         2026/09/18). `proving-failed` is the service's code for "the prover
+         ran and declined", which is the shape a wrong candidate position
+         arrives in — and is equally the shape of a verifier key that does not
+         match, a circuit that is not staged the way the transaction expects,
+         and every other verdict the proof server can reach about a
+         transaction. Rotating on the CODE alone spent up to ten approvals, one
+         per candidate, on a failure no position could fix, and then reported
+         the same sentence it would have reported after one. So the service's
+         own `detail` is what is judged, by the same predicate the local
+         failures are judged by; a refusal that says nothing about a position
+         is over after the first attempt. */
+      const refusalMayBePosition =
+        isCustodyProofNotBuilt(cause) &&
+        spendPositionMayBeWrong(custodyProofNotBuiltDetail(cause) ?? '');
+      if (!spendPositionMayBeWrong(message) && !refusalMayBePosition) {
         /* NOT THE POSITION, so this run is over — and the store must not be
            left mid-rotation. A coin persisted at the second candidate is a coin
            whose next press starts there and runs the list out after ONE

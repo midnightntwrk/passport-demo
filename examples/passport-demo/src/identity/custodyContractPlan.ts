@@ -298,11 +298,39 @@ export const CUSTODY_SEND_UNCONFIRMED =
 /** The `name` on the error carrying {@link CUSTODY_PROOF_NOT_BUILT}. */
 export const CUSTODY_PROOF_NOT_BUILT_NAME = 'CustodyProofNotBuilt';
 
-/** The error the proving provider throws when the prover declined to prove. */
-export function custodyProofNotBuilt(): Error {
-  const error = new Error(CUSTODY_PROOF_NOT_BUILT);
+/**
+ * The error the proving provider throws when the prover declined to prove.
+ *
+ * `detail` IS THE SERVICE'S OWN WORDS AND IS NEVER SHOWN. A refusal arms a
+ * retry against the next candidate position, and a retry costs the holder an
+ * approval — so the retry has to be able to ask whether this refusal was about
+ * a position at all. The message cannot answer that: it is the one sentence
+ * written for the person reading it. The service says what the proof server
+ * said in `detail`, so that is what travels, for
+ * {@link custodyProofNotBuiltDetail} to hand to `spendPositionMayBeWrong`.
+ */
+export function custodyProofNotBuilt(detail: string | null = null): Error {
+  const error = new Error(CUSTODY_PROOF_NOT_BUILT) as Error & { detail: string | null };
   error.name = CUSTODY_PROOF_NOT_BUILT_NAME;
+  error.detail = detail;
   return error;
+}
+
+/**
+ * The service's `detail` off that error, or null.
+ *
+ * Walked exactly as {@link isCustodyProofNotBuilt} walks, and for the same
+ * reason: the error may arrive wrapped. Null is "nothing said", and a caller
+ * that rotates a position on nothing said is a caller asking for up to ten
+ * approvals for a failure that was never about a position.
+ */
+export function custodyProofNotBuiltDetail(cause: unknown): string | null {
+  for (let step: unknown = cause, depth = 0; step instanceof Error && depth < 8; depth += 1) {
+    const detail = (step as { detail?: unknown }).detail;
+    if (typeof detail === 'string' && detail.length > 0) return detail;
+    step = step.cause;
+  }
+  return null;
 }
 
 /**
@@ -456,6 +484,21 @@ export function parseProveCustodyResponse(body: unknown): Uint8Array {
  */
 export function proveAccountCustodyRefused(body: unknown): boolean {
   return (body as { error?: unknown } | null)?.error === 'proving-failed';
+}
+
+/**
+ * What the service said about the refusal, verbatim, or null.
+ *
+ * FOR THE RETRY TO JUDGE, AND FOR NO SCREEN. The sponsor's `detail` carries the
+ * proof server's own message — "The proof server could not prove
+ * withdraw_shielded_with_k256: …" — and the only question asked of it is
+ * whether it reads like a coin at the wrong position. It is never painted:
+ * {@link custodyFailureSentence} would refuse most of it anyway, and the
+ * sentence somebody reads is {@link CUSTODY_PROOF_NOT_BUILT}.
+ */
+export function proveAccountCustodyDetail(body: unknown): string | null {
+  const detail = (body as { detail?: unknown } | null)?.detail;
+  return typeof detail === 'string' && detail.trim().length > 0 ? detail : null;
 }
 
 /**

@@ -232,7 +232,20 @@ interface FakeChain {
    * service declining to prove rather than as a runtime naming a merkle path.
    */
   proofRefusals?: number;
+  /**
+   * What the service said about the refusal, as it carries it on the error.
+   *
+   * THE DEFAULT READS LIKE A POSITION, because that is what the retry exists
+   * for: an unsatisfiable witness is how a wrong `mt_index` reaches a prover.
+   * Set it to something that does not and the same code arms nothing, which is
+   * the whole of A2.
+   */
+  proofRefusalDetail?: string | null;
 }
+
+/** The sponsor's `detail` for a refusal a different position could fix. */
+const POSITION_DETAIL =
+  'The proof server could not prove withdraw_shielded_with_k256: unsatisfiable constraint system';
 
 function moduleFake(chain: FakeChain): CustodyContractModule {
   const pure = pureFake();
@@ -521,7 +534,13 @@ function harness(
               /* What the proving service's refusal reaches the caller as: a
                  plain sentence, and the signal on the error's NAME. */
               chain.proofRefusals = (chain.proofRefusals ?? 0) - 1;
-              return Promise.reject(custodyProofNotBuilt());
+              return Promise.reject(
+                custodyProofNotBuilt(
+                  chain.proofRefusalDetail === undefined
+                    ? POSITION_DETAIL
+                    : chain.proofRefusalDetail,
+                ),
+              );
             }
             if (circuit.startsWith('withdraw_shielded') && (chain.spendFailures ?? 0) > 0) {
               /* The failure a wrong position gives: no transaction is
@@ -617,7 +636,13 @@ function harness(
                sent away to be proved — lands here. */
             if (call.circuit.startsWith('withdraw_shielded') && (chain.proofRefusals ?? 0) > 0) {
               chain.proofRefusals = (chain.proofRefusals ?? 0) - 1;
-              return Promise.reject(custodyProofNotBuilt());
+              return Promise.reject(
+                custodyProofNotBuilt(
+                  chain.proofRefusalDetail === undefined
+                    ? POSITION_DETAIL
+                    : chain.proofRefusalDetail,
+                ),
+              );
             }
             chain.authNonce += 1n;
             return Promise.resolve(finalisedCall(`id-${calls.length}`));
@@ -1927,6 +1952,69 @@ describe('the shielded withdrawal', () => {
     /* The two reported positions, then the eight the sweep adds around them,
        and not one attempt more. */
     expect(test.calls.filter((c) => c.circuit === 'withdraw_shielded_with_k256')).toHaveLength(10);
+  });
+
+  /* A2, 2026/09/18. `proving-failed` is the service's code for "the prover ran
+     and declined", and a wrong candidate position is only ONE of the things
+     that reaches. A verifier key that does not match reaches it too, and
+     rotating on the code alone asked the holder to approve ten times for a
+     failure no position could fix — and then reported the same sentence it
+     would have reported after the first. The service's own words are what
+     decide it now. */
+  it('stops after one attempt when the refusal says nothing about a position', async () => {
+    const { test, account, session, device } = await readyPassport({
+      circuitResult: changeResult(60n),
+      proofRefusals: 50,
+      proofRefusalDetail:
+        'The proof server could not prove withdraw_shielded_with_k256: verifier key mismatch',
+    });
+    putK1CoinCandidates(account, { colour: COLOUR, nonce: NONCE, value: 100n }, [5n, 6n]);
+
+    await expect(
+      withdrawShieldedK1(
+        session,
+        device,
+        {
+          recipientCoinPublicKey: new Uint8Array(32),
+          recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+          colourHex: COLOUR,
+          amount: 40n,
+        },
+        undefined,
+        test.deps,
+      ),
+    ).rejects.toThrow('That payment could not be completed just now. Try again in a moment.');
+
+    expect(test.calls.filter((c) => c.circuit === 'withdraw_shielded_with_k256')).toHaveLength(1);
+    /* And the store is left canonical: the head is the position the chain
+       offered first, and the list is intact for the next press. */
+    expect(k1CoinCandidates(account, COLOUR)).toEqual([5n, 6n]);
+  });
+
+  it('stops after one attempt when the refusal carried no words at all', async () => {
+    const { test, account, session, device } = await readyPassport({
+      circuitResult: changeResult(60n),
+      proofRefusals: 50,
+      proofRefusalDetail: null,
+    });
+    putK1CoinCandidates(account, { colour: COLOUR, nonce: NONCE, value: 100n }, [5n, 6n]);
+
+    await expect(
+      withdrawShieldedK1(
+        session,
+        device,
+        {
+          recipientCoinPublicKey: new Uint8Array(32),
+          recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+          colourHex: COLOUR,
+          amount: 40n,
+        },
+        undefined,
+        test.deps,
+      ),
+    ).rejects.toThrow('That payment could not be completed just now. Try again in a moment.');
+
+    expect(test.calls.filter((c) => c.circuit === 'withdraw_shielded_with_k256')).toHaveLength(1);
   });
 
   it('gives up rather than looping when the candidates run out', async () => {
