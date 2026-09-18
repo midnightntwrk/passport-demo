@@ -92,17 +92,39 @@
  * below r_J, not a bare reduction", under a label distinct from the enc
  * secret's and from the prototype's `.dev`/`.rec`.
  *
- *   expand:  block(i) = SHA-256(label32 ‖ root32 ‖ i)   for i = 0, 1, 2, …
+ *   expand:  block(i) = SHA-256(label32 ‖ root32 ‖ u32be(i))  for i = 0, 1, 2, …
  *   read:    v(i)     = the BIG-ENDIAN integer of block(i)
  *   reject:  take the first v(i) with 0 < v(i) < r_J; otherwise try i + 1
  *
  * with `label32` the ASCII of {@link JUBJUB_DEVICE_LABEL} zero-padded to 32
  * bytes — the shape `derivePassportContractSecrets` and `deriveMidnamesOwnerKey`
- * already use — and `r_J` the JubJub prime-order subgroup order. That is
- * counter-mode expansion of an already-HKDF-extracted root: the passkey's PRF
- * output is stretched into the 32-byte contract root upstream, and the counter
- * byte is what turns a single 32-byte block into an unbounded stream so
- * rejection has somewhere to go.
+ * already use — `u32be(i)` the counter in FOUR big-endian bytes, and `r_J` the
+ * JubJub prime-order subgroup order. That is counter-mode expansion of an
+ * already-HKDF-extracted root: the passkey's PRF output is stretched into the
+ * 32-byte contract root upstream, and the counter is what turns a single
+ * 32-byte block into an unbounded stream so rejection has somewhere to go.
+ *
+ * THE COUNTER IS FOUR BYTES BECAUSE ONE BYTE IS NOT A STREAM. It was one byte
+ * until 2026/09/18 — `payload[64] = counter` into a `Uint8Array`, which stores
+ * the counter MOD 256 and says nothing about it. Block 256 was block 0 again,
+ * the “unbounded stream” was 256 blocks repeating for ever, and a passkey
+ * whose root missed on all 256 of them could never make a Passport: not on a
+ * retry, not on another phone, not ever, because the derivation is a pure
+ * function of that credential. At one acceptance in ~17.7 that is one passkey
+ * in three million rather than none — {@link JUBJUB_REJECTION_ATTEMPTS} has the
+ * arithmetic, which is also where the bound of 256 came from.
+ *
+ * WIDENING THE COUNTER CHANGED EVERY DERIVED KEY, and it was done on
+ * 2026/09/18, BEFORE ANY PASSKEY ACCOUNT EXISTED. No passkey Passport had been
+ * deployed, so no device key, no account, and no sealed inbox anywhere depends
+ * on the old rule. The one artefact that does is the stagenet run written up in
+ * `scratchpad/jj-stagenet/RESULT.md`: the scalar recorded there, `030d8410…`,
+ * is the ONE-BYTE-counter answer for that root and is not what this file
+ * derives now. That run proved the ARM — that a derived JubJub key deploys,
+ * activates, and has a gated call verified on-node — and the arm is not changed
+ * by the width of a counter. From the first live passkey account onwards this
+ * payload is frozen: changing it again is an account whose device nobody can
+ * sign for.
  *
  * NEVER `mod r_J`. That is the whole of the rule and it is not a style
  * preference. `r_J` is a shade over 2^251 while a block is 2^256 wide, so a
@@ -111,14 +133,15 @@
  * reference's own `randomJubjubScalar` does not have, because its rule is "draw
  * 32 bytes, read them as an integer, keep it ONLY if it is in `[1, r_J)`". This
  * is that rule with a counter in place of the CSPRNG, so the distribution is
- * the reference's and only the source of entropy differs. Acceptance is ~1 in
- * 16, so the loop runs ~16 times; the bound is 256 attempts, which has never
- * been reached. `custodyJubjubSigner.test.ts` drills it on a root that is
- * REJECTED at least once and asserts the answer is not the reduction of the
- * rejected block, so "expand and reject" and "reduce" cannot be confused for
- * one another by anybody reading the diff.
+ * the reference's and only the source of entropy differs. Acceptance is
+ * `r_J / 2^256 ≈ 0.0566`, about one draw in 17.7, and the bound is
+ * {@link JUBJUB_REJECTION_ATTEMPTS}. `custodyJubjubSigner.test.ts` drills it on
+ * a root that is REJECTED thirteen times over, and asserts the answer is
+ * neither the reduction of a rejected block nor the block the one-byte counter
+ * would have stopped at — so "expand and reject", "reduce", and the old
+ * payload cannot be confused for one another by anybody reading the diff.
  *
- * The 65-byte payload also domain-separates this label from the 64-byte
+ * The 68-byte payload also domain-separates this label from the 64-byte
  * payloads `derivePassportContractSecrets` hashes, so even an identical label
  * could not collide with the device, recovery, viewing, or maintenance secret.
  *
@@ -180,14 +203,30 @@ export const JUBJUB_R = BigInt(
 export const JUBJUB_DEVICE_LABEL = 'midnight.passport.jj';
 
 /**
- * How many counter values the derivation will try before giving up.
+ * How many draws each of the three rejection loops in this file makes before
+ * giving up: the scalar derivation, the nonce sampler, and the grind.
  *
- * ~1 in 16 lands in range, so reaching even 32 is a one-in-10^37 event and
- * reaching 256 does not happen; the bound is here so that a caller who somehow
- * hands in a root that hashes pathologically gets a sentence rather than a
- * spinning tab.
+ * THE ARITHMETIC, WRITTEN OUT, BECAUSE THE SENTENCE THAT WAS HERE HAD IT WRONG
+ * IN BOTH DIRECTIONS. All three loops keep a 32-byte value only when it reads
+ * below `r_J`, and `r_J` is a shade over 2^251 against a range 2^256 wide, so
+ * one draw in `2^256 / r_J ≈ 17.7` is accepted: `p ≈ 0.0566`, not the “1 in
+ * 16” that was written next door, and ~17.7 expected draws rather than ~16.
+ *
+ * The bound was 256, and the comment beside it called reaching 32 draws a
+ * “one-in-10^37 event”. Thirty-two draws all miss with probability
+ * `(1 - p)^32 ≈ 0.15` — about one derivation in six gets that far, on ordinary
+ * roots, every day. Two hundred and fifty-six all miss with probability
+ * `(1 - p)^256 ≈ 3.3 × 10^-7`: one passkey in three million, which is not a
+ * number to stake “this reader can never make a Passport” on. At 1024 it is
+ * `(1 - p)^1024 ≈ 1.2 × 10^-26`, which is the “does not happen” the old
+ * sentence was claiming.
+ *
+ * A generous bound costs nothing — it is reached only once every draw before
+ * it has already failed — and what it buys is that the give-up path stays a
+ * real sentence for a caller who hands in something pathological, rather than
+ * a spinning tab.
  */
-const DERIVATION_ATTEMPTS = 256;
+export const JUBJUB_REJECTION_ATTEMPTS = 1024;
 
 /* -------------------------------------------------------------------------- */
 /* Scalars                                                                    */
@@ -221,11 +260,13 @@ export function isJubjubScalar(value: bigint): boolean {
  * Nothing in the app passes anything but the real CSPRNG.
  */
 export function randomJubjubScalar(randomBytes: (length: number) => Uint8Array): bigint {
-  for (let attempt = 0; attempt < DERIVATION_ATTEMPTS; attempt++) {
+  for (let attempt = 0; attempt < JUBJUB_REJECTION_ATTEMPTS; attempt++) {
     const candidate = bytesToBigIntBE(randomBytes(32));
     if (isJubjubScalar(candidate)) return candidate;
   }
-  throw new Error('could not sample a JubJub scalar in range');
+  throw new Error(
+    `Could not sample a JubJub nonce below the subgroup order in ${JUBJUB_REJECTION_ATTEMPTS} draws.`,
+  );
 }
 
 /** The big-endian integer a byte run encodes. */
@@ -267,17 +308,22 @@ export function jubjubScalarToBytes(value: bigint): Uint8Array {
 const LABEL_BYTES = new TextEncoder().encode(JUBJUB_DEVICE_LABEL);
 
 /**
- * `SHA-256(label padded to 32 bytes ‖ root ‖ counter)`.
+ * `SHA-256(label padded to 32 bytes ‖ root ‖ counter in four big-endian bytes)`.
  *
  * The same shape as `derivePassportContractSecrets` and `deriveMidnamesOwnerKey`,
- * plus the counter byte that makes rejection sampling possible. Async because
- * WebCrypto is.
+ * plus the four counter bytes that make rejection sampling possible. Async
+ * because WebCrypto is.
  */
 async function derivationHash(root: Uint8Array, counter: number): Promise<Uint8Array> {
-  const payload = new Uint8Array(65);
+  const payload = new Uint8Array(68);
   payload.set(LABEL_BYTES, 0);
   payload.set(root, 32);
-  payload[64] = counter;
+  /* FOUR BYTES, BIG-ENDIAN, AND NOT `payload[64] = counter`. One byte takes the
+     counter mod 256 in silence, which made block 256 block 0 again and put a
+     ceiling on a stream that is supposed to have none; the header says what
+     that cost. `setUint32`'s third argument is `littleEndian`, and it is false
+     here because the block this payload produces is read big-endian too. */
+  new DataView(payload.buffer).setUint32(64, counter, false);
   const digest = await crypto.subtle.digest('SHA-256', payload);
   return new Uint8Array(digest);
 }
@@ -297,7 +343,7 @@ export async function deriveJubjubDeviceScalar(
   /* A parameter rather than a constant so the give-up path is drillable: at
      ~1-in-16 acceptance the default bound is never reached, and a `throw` no
      test can reach is a `throw` nobody has read. */
-  attempts: number = DERIVATION_ATTEMPTS,
+  attempts: number = JUBJUB_REJECTION_ATTEMPTS,
 ): Promise<bigint> {
   if (contractRoot.length !== 32) {
     throw new Error(
@@ -308,7 +354,16 @@ export async function deriveJubjubDeviceScalar(
     const candidate = bytesToBigIntBE(await derivationHash(contractRoot, counter));
     if (isJubjubScalar(candidate)) return candidate;
   }
-  throw new Error('could not derive a JubJub device scalar in range');
+  /* THE ONE SENTENCE HERE A PERSON CAN REACH. It is on the onboarding path:
+     somebody has just been asked for their passkey and this is what they would
+     be shown. So it says what happened to them and what to do about it, in the
+     house style and without a word from the on-screen vocabulary list — and it
+     does not say “try again” on its own, because the derivation is a pure
+     function of the credential and the same passkey gives the same answer for
+     ever. A different passkey is the only thing that helps.
+     At ~1.2 x 10^-26 nobody will read it; that is not a reason for it to be a
+     fragment of somebody's debugging. */
+  throw new Error('This passkey cannot be used to make a Passport. Try again with a new passkey.');
 }
 
 /* -------------------------------------------------------------------------- */
@@ -328,7 +383,7 @@ export async function deriveJubjubDeviceScalar(
  */
 export function jubjubPublicPoint(pure: CustodyPureCircuits, secretScalar: bigint): CurvePoint {
   if (!isJubjubScalar(secretScalar)) {
-    throw new Error('a JubJub device scalar must be in [1, r_J)');
+    throw new Error('A JubJub device scalar must be in [1, r_J).');
   }
   const point = pure.compute_public_point_with_jubjub(secretScalar);
   return { x: point.x, y: point.y, identity: false };
@@ -377,19 +432,23 @@ export interface JubjubSigner extends JubjubDeviceIdentity {
  * The grind loop, on its own so a drill can watch it.
  *
  * Returns the challenge value `c` — the little-endian reading of the first hash
- * that lands below `r_J` — and the `grind_nonce` that produced it. ~17.5
- * expected attempts (MIP-0013 §5.2); the bound is generous, and reaching it
- * means the challenge builder is not the contract's.
+ * that lands below `r_J` — and the `grind_nonce` that produced it. ~17.7
+ * expected attempts (MIP-0013 §5.2 rounds it to 17.5), and the bound is
+ * {@link JUBJUB_REJECTION_ATTEMPTS}, which a builder that really is the
+ * contract's misses with probability ~1.2 × 10^-26 — so reaching it means the
+ * challenge builder is not the contract's.
  */
 export function grindJubjubChallenge(
   challenge: JubjubChallengeBuilder,
   sigR: CurvePoint,
 ): { readonly c: bigint; readonly grindNonce: bigint } {
-  for (let grindNonce = 0n; grindNonce < BigInt(DERIVATION_ATTEMPTS); grindNonce++) {
+  for (let grindNonce = 0n; grindNonce < BigInt(JUBJUB_REJECTION_ATTEMPTS); grindNonce++) {
     const value = bytesToBigIntLE(challenge(sigR, grindNonce));
     if (value < JUBJUB_R) return { c: value, grindNonce };
   }
-  throw new Error('could not grind a JubJub challenge below the subgroup order');
+  throw new Error(
+    `Could not grind a JubJub challenge below the subgroup order in ${JUBJUB_REJECTION_ATTEMPTS} tries.`,
+  );
 }
 
 /**

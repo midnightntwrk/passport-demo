@@ -203,14 +203,15 @@ export interface CustodyPasskeyDevice extends JubjubDeviceIdentity {
   /**
    * 32 bytes of hex, from `derivePassportContractSecrets(...).maintenanceSecret`.
    *
-   * Supplied ONLY when the account is meant to keep its maintenance authority.
-   * The wave plan retires it by default (`planCustodyWaves`'s third argument),
-   * in which case this is pointless rather than harmful — the authority it
-   * builds is replaced by the empty committee on the last wave. When the
-   * authority IS kept, a derived key is the only kind worth keeping: a sampled
-   * one lives in this browser's storage, and a Passport reinstalled elsewhere
-   * would hold an authority it cannot sign for. See `PASSPORT_MAINTENANCE_LABEL`
-   * for what each choice costs.
+   * Supplied ONLY when the account is meant to keep its maintenance authority,
+   * and IGNORED unless the wave plan says the same (`planCustodyWaves`'s third
+   * argument, which is `true` for every account this app deploys today). An
+   * authority built from this and then replaced by the empty committee on the
+   * last wave is a derived secret with nothing left to authorise, and it used
+   * to be built anyway. When the authority IS kept, a derived key is the only
+   * kind worth keeping: a sampled one lives in this browser's storage, and a
+   * Passport reinstalled elsewhere would hold an authority it cannot sign for.
+   * See `PASSPORT_MAINTENANCE_LABEL` for what each choice costs.
    */
   readonly maintenanceSecretHex?: string;
 }
@@ -795,6 +796,10 @@ export async function deployCustodyAccount(
      was written; only the caller was hardcoded. */
   const waves = planCustodyWaves(sizes, device.arm);
   record = { ...record, totalWaves: waves.length };
+  /* Decided ONCE, from the plan this deploy will actually run, and handed to
+     both wave runners: the one that builds the authority and the one that has
+     to sign with it. See {@link derivedMaintenanceAuthority}. */
+  const derivedAuthority = derivedMaintenanceAuthority(ledgerApi, device, waves);
 
   /* What the chain already carries, read ONCE before any wave runs. Null means
      there is nothing at that address — either no deploy yet, or a deploy that
@@ -810,6 +815,7 @@ export async function deployCustodyAccount(
       deps,
       record,
       device,
+      derivedAuthority,
       wave: waves[0],
       module,
       ledgerApi,
@@ -834,6 +840,7 @@ export async function deployCustodyAccount(
     record = await runMaintenanceWave({
       deps,
       record,
+      derivedAuthority,
       wave,
       verifierKeys,
       ledgerApi,
@@ -912,6 +919,41 @@ interface WaveContext {
   ledgerApi: CustodyLedgerApi;
   providers: Record<string, unknown>;
   storage: CustodyStorage;
+  /**
+   * The passkey's own maintenance signing key, re-derived on demand, or null
+   * when this account's authority is the sampled one the plan retires.
+   *
+   * A FUNCTION RATHER THAN A KEY, because a derived authority is never written
+   * down: every wave that needs it asks the passkey's secret for it again.
+   */
+  derivedAuthority: (() => unknown) | null;
+}
+
+/**
+ * The maintenance signing key the passkey hands down — or null, which is the
+ * answer for every account this app deploys today.
+ *
+ * TWO CONDITIONS, AND THE SECOND ONE WAS MISSING. A device that carries a
+ * `maintenanceSecretHex` was enough to take this branch, so a passkey Passport
+ * got an authority built from a secret derived from somebody's authenticator
+ * ON A PLAN THAT RETIRES THE AUTHORITY TWO WAVES LATER. That is a derived
+ * upgrade secret created, stored, and made worthless in the same setup.
+ * `planCustodyWaves` retires by default and nothing here asks it not to, so
+ * the honest reading of the plan is the gate: the key is derived only for an
+ * account that is going to KEEP the authority it is the key to.
+ *
+ * It hands back a function because nothing persists a derived key; see
+ * {@link signingKeyFor} for the other half of that rule.
+ */
+function derivedMaintenanceAuthority(
+  ledgerApi: CustodyLedgerApi,
+  device: CustodyDeviceIdentity,
+  waves: readonly CustodyWave[],
+): (() => unknown) | null {
+  const secretHex = 'maintenanceSecretHex' in device ? device.maintenanceSecretHex : undefined;
+  if (secretHex === undefined) return null;
+  if (waves.some((wave) => wave.retiresAuthority)) return null;
+  return () => ledgerApi.signingKeyFromBip340(hexToBytes(secretHex));
 }
 
 /**
@@ -975,21 +1017,20 @@ async function runWaveOne(
     deployData.public.initialContractState.serialize(),
   );
   /* PASSKEY SECRET (b). The maintenance authority, DERIVED when the caller
-     asked for one it can still hold after a reinstall.
+     asked for one it can still hold after a reinstall AND the plan is keeping
+     it — {@link derivedMaintenanceAuthority} is where both halves of that are
+     decided, and null is the answer for every account deployed today.
 
-     midnight-js sampled `deployData.private.signingKey` at random and this app
+     midnight-js samples `deployData.private.signingKey` at random and this app
      files it in `localStorage`; the wave plan then retires the authority on its
-     last wave, so today that key is spent by the time anybody could miss it.
-     The moment the plan is told NOT to retire (`planCustodyWaves`'s third
+     last wave, so that key is spent by the time anybody could miss it. The
+     moment the plan is told NOT to retire (`planCustodyWaves`'s third
      argument), a sampled key becomes an authority that dies with the browser —
      so when the passkey hands one down, the deploy is built around that key
-     instead and nothing about the authority needs storing. Nicolas asked us to
-     decide rather than inherit; the default is unchanged (retire) and
+     instead and nothing about the authority is stored at all. Nicolas asked us
+     to decide rather than inherit; the default is unchanged (retire) and
      `PASSPORT_MAINTENANCE_LABEL` says what each answer costs. */
-  const derivedMaintenance =
-    'maintenanceSecretHex' in context.device && context.device.maintenanceSecretHex !== undefined
-      ? ledgerApi.signingKeyFromBip340(hexToBytes(context.device.maintenanceSecretHex))
-      : null;
+  const derivedMaintenance = context.derivedAuthority?.() ?? null;
   const wave1 = buildWaveOneState(ledgerApi, full, wave);
   if (derivedMaintenance !== null) {
     wave1.maintenanceAuthority = new ledgerApi.ContractMaintenanceAuthority(
@@ -1021,16 +1062,29 @@ async function runWaveOne(
   const result = await contracts.submitTx(providers, { unprovenTx });
   const txHash = await resolveHash(context.providers, result);
 
-  const signingKey = derivedMaintenance ?? deployData.private.signingKey;
   const priv = providers.privateStateProvider as {
     setContractAddress?(address: string): void;
     setSigningKey(address: string, key: unknown): Promise<void>;
     set(id: string, state: unknown): Promise<void>;
   };
   priv.setContractAddress?.(address);
-  await priv.setSigningKey(address, signingKey);
   await priv.set(custodyPrivateStateId(context.record), deployData.private.initialPrivateState);
-  rememberSigningKey(storage, address, signingKey);
+  /* A DERIVED AUTHORITY IS NEVER WRITTEN DOWN, and that is the whole of what
+     makes deriving it worth doing. `PASSPORT_MAINTENANCE_LABEL` says the
+     maintenance secret is not stored; this function stored it — into the
+     private-state provider and then, through `rememberSigningKey`, into
+     `localStorage`, where the app's own backup and every script with access to
+     this origin can read it. A key that survives a reinstall does not need to
+     survive a reload: the waves ask the passkey for it again.
+
+     The SAMPLED key still goes to both places, unchanged. It exists nowhere
+     else, the last wave throws away the authority it drives, and a reload
+     between wave 1 and wave 3 with nothing stored is a live account nobody can
+     finish. See {@link signingKeyFor}. */
+  if (derivedMaintenance === null) {
+    await priv.setSigningKey(address, deployData.private.signingKey);
+    rememberSigningKey(storage, address, deployData.private.signingKey);
+  }
 
   /* The coin store keeps the viewing secret beside the coins it will decrypt,
      because that is the shape the `held_coin` witness's private state has and
@@ -1130,7 +1184,7 @@ async function runMaintenanceWave(
     );
   }
 
-  const signingKey = await signingKeyFor(providers, storage, address);
+  const signingKey = await signingKeyFor(providers, storage, address, context.derivedAuthority);
   if (signingKey === null) {
     /* The account exists, its authority is live, and the key that drives it is
        gone. Nothing later can finish it, so the record says so ONCE and every
@@ -2135,14 +2189,21 @@ async function resolveHash(
 /**
  * The maintenance signing key, for the waves that follow the deploy.
  *
- * THREE PLACES, AND THE ORDER IS THE POINT. This tab's own map is first because
- * it is free. The private-state provider is second, because that is where
- * midnight-js's own deploy puts it and a durable one would answer here. And
- * `localStorage` is third and is the one that actually survives a reload today,
- * because the provider this app builds is `inMemoryPrivateStateProvider` — so
- * without it a reload between wave 1 and wave 3 left a live account nobody
- * could finish. See {@link CUSTODY_AUTHORITY_STORAGE_KEY} for what that costs and
- * why it is paid.
+ * THE PASSKEY FIRST, WHEN THERE IS ONE, AND IT IS ASKED RATHER THAN READ. A
+ * derived authority is written nowhere — not into this map, not into the
+ * private-state provider, not into `localStorage` — so the only place it can
+ * come from is the secret the passkey derived it from, and re-deriving costs a
+ * hash. That is what lets the key survive a reinstall without also sitting in
+ * this origin's storage until somebody reads it.
+ *
+ * THEN THREE PLACES FOR A SAMPLED ONE, AND THE ORDER IS THE POINT. This tab's
+ * own map is first because it is free. The private-state provider is second,
+ * because that is where midnight-js's own deploy puts it and a durable one
+ * would answer here. And `localStorage` is third and is the one that actually
+ * survives a reload today, because the provider this app builds is
+ * `inMemoryPrivateStateProvider` — so without it a reload between wave 1 and
+ * wave 3 left a live account nobody could finish. See
+ * {@link CUSTODY_AUTHORITY_STORAGE_KEY} for what that costs and why it is paid.
  */
 const signingKeys = new Map<string, unknown>();
 
@@ -2156,7 +2217,9 @@ async function signingKeyFor(
   providers: Record<string, unknown>,
   storage: CustodyStorage,
   address: string,
+  derivedAuthority: (() => unknown) | null,
 ): Promise<unknown> {
+  if (derivedAuthority !== null) return derivedAuthority();
   const held = signingKeys.get(address);
   if (held !== undefined) return held;
   const priv = providers.privateStateProvider as {
