@@ -230,6 +230,39 @@ describe('deriving the device scalar from a passkey contract root', () => {
     expect(isJubjubScalar(first)).toBe(true);
   });
 
+  /* NICOLAS'S RULE, 2026/09/18: expand and reject below r_J, never a bare
+     reduction. ROOT is chosen so the first block is REJECTED, which is what
+     makes the two rules tell each other apart — on a root accepted at counter
+     0 they agree by accident. */
+  it('rejects the first block and takes a later one, rather than reducing it', async () => {
+    const label = new TextEncoder().encode(JUBJUB_DEVICE_LABEL);
+    const block = async (counter: number): Promise<bigint> => {
+      const payload = new Uint8Array(65);
+      payload.set(label, 0);
+      payload.set(ROOT, 32);
+      payload[64] = counter;
+      const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', payload));
+      let value = 0n;
+      for (const byte of digest) value = (value << 8n) | BigInt(byte);
+      return value;
+    };
+    const first = await block(0);
+    /* The fixture's premise: block 0 really is out of range. */
+    expect(first).toBeGreaterThanOrEqual(JUBJUB_R);
+
+    const derived = await deriveJubjubDeviceScalar(ROOT);
+    /* What a bare reduction would have produced, and did not. */
+    expect(derived).not.toBe(first % JUBJUB_R);
+    /* What expand-and-reject produces: a later block, taken whole. */
+    let accepted = -1;
+    for (let counter = 1; counter < 256 && accepted < 0; counter++) {
+      const value = await block(counter);
+      if (value > 0n && value < JUBJUB_R) accepted = counter;
+    }
+    expect(accepted).toBeGreaterThan(0);
+    expect(derived).toBe(await block(accepted));
+  });
+
   it('reproduces the rule written down in the header, counter and all', async () => {
     /* The rule, computed here from WebCrypto directly: the first
        SHA-256(label32 ‖ root ‖ counter) read big-endian that is in range. */

@@ -34,6 +34,12 @@
  * 3. NOTHING WITH A SOCKET ON IT. No provider, no proving, no submission, no
  *    storage. `custodyContractClient.ts` has those.
  *
+ * AND ONE THING THAT IS TRUE OF THE WHOLE ARM: THERE IS NO IN-BROWSER PROVER
+ * FOR ZKIR v3. Every account-custody proof goes to the droplet's proof server —
+ * directly through `/prover-v3` for the small keys, and through the sponsor's
+ * own proving route for the big ones. Signing is what happens locally; proving
+ * is not, on either arm, and nothing here should be read as saying otherwise.
+ *
  * THE DEVICE KEY IS DERIVED FROM THE PASSKEY, AND THAT IS A CHOICE
  * ---------------------------------------------------------------
  * Nicolas's reference signer says of both arms: "keys are never derived from
@@ -63,29 +69,58 @@
  * Nicolas (see the questions list in the delivery note) because AUTH-7 is his
  * invariant, not ours.
  *
+ * ONE PASSKEY CREDENTIAL, ONE DEVICE KEY
+ * --------------------------------------
+ * Nicolas's second rule (2026/09/18): "a second physical passkey enrols through
+ * `add_device` rather than re-deriving". The scalar below is derived from the
+ * PRF output of THIS CREDENTIAL, so it is per credential and not per person.
+ * There is no cross-credential derivation anywhere in this module and there must
+ * not be one: a second phone's passkey is a different credential with a
+ * different PRF output, and the contract already has the right answer for it —
+ * the first device signs `add_device_with_jubjub` over the second device's
+ * derived ENTRY, which is 32 opaque bytes and carries no curve and no key.
+ *
+ * TODO(passkey-arm, add-device flow): the "add this device" screen and the
+ * `add_device_with_jubjub` call that backs it. `jubjubChallenges.addDevice` and
+ * `enrolmentEntry` are the two pieces it needs and both are here; what is not
+ * here is the pairing surface that gets the new credential's public point to
+ * the old device. It is its own PR.
+ *
  * THE DERIVATION, EXACTLY
  * -----------------------
- *   scalar = the first `SHA-256(label32 ‖ root32 ‖ counter)`, counter = 0, 1, 2,
- *            …, read BIG-ENDIAN, that lands strictly inside `[1, r_J)`
+ * Nicolas's first rule (2026/09/18): "derive the scalar by expand-and-reject
+ * below r_J, not a bare reduction", under a label distinct from the enc
+ * secret's and from the prototype's `.dev`/`.rec`.
+ *
+ *   expand:  block(i) = SHA-256(label32 ‖ root32 ‖ i)   for i = 0, 1, 2, …
+ *   read:    v(i)     = the BIG-ENDIAN integer of block(i)
+ *   reject:  take the first v(i) with 0 < v(i) < r_J; otherwise try i + 1
  *
  * with `label32` the ASCII of {@link JUBJUB_DEVICE_LABEL} zero-padded to 32
  * bytes — the shape `derivePassportContractSecrets` and `deriveMidnamesOwnerKey`
- * already use — and `r_J` the JubJub prime-order subgroup order.
+ * already use — and `r_J` the JubJub prime-order subgroup order. That is
+ * counter-mode expansion of an already-HKDF-extracted root: the passkey's PRF
+ * output is stretched into the 32-byte contract root upstream, and the counter
+ * byte is what turns a single 32-byte block into an unbounded stream so
+ * rejection has somewhere to go.
  *
- * REJECTION, NOT REDUCTION, and the counter byte is what makes rejection
- * possible at all. `r_J` is a shade over 2^251 while the hash is 2^256 wide, so
- * reducing mod `r_J` would make the low ~2^251 of the range twice as likely as
- * the high part — a 1-bit bias, which is not an attack on Schnorr but is a
- * gratuitous difference from the reference's `randomJubjubScalar`, whose rule is
- * "draw 32 bytes, read them as an integer, keep it only if it is in `[1, r_J)`".
- * This is that rule with a counter in place of the CSPRNG, so the distribution
- * is the reference's and only the source of entropy differs. Acceptance is
- * ~1 in 16, so the loop runs ~16 times; the bound is 256 attempts, which fails
- * with probability under 2^-16 per byte of counter and has never been reached.
+ * NEVER `mod r_J`. That is the whole of the rule and it is not a style
+ * preference. `r_J` is a shade over 2^251 while a block is 2^256 wide, so a
+ * bare reduction folds the top of the range onto the bottom and makes the low
+ * ~2^251 of the scalar space roughly twice as likely as the rest — a bias the
+ * reference's own `randomJubjubScalar` does not have, because its rule is "draw
+ * 32 bytes, read them as an integer, keep it ONLY if it is in `[1, r_J)`". This
+ * is that rule with a counter in place of the CSPRNG, so the distribution is
+ * the reference's and only the source of entropy differs. Acceptance is ~1 in
+ * 16, so the loop runs ~16 times; the bound is 256 attempts, which has never
+ * been reached. `custodyJubjubSigner.test.ts` drills it on a root that is
+ * REJECTED at least once and asserts the answer is not the reduction of the
+ * rejected block, so "expand and reject" and "reduce" cannot be confused for
+ * one another by anybody reading the diff.
  *
  * The 65-byte payload also domain-separates this label from the 64-byte
  * payloads `derivePassportContractSecrets` hashes, so even an identical label
- * could not collide with the device or recovery secret.
+ * could not collide with the device, recovery, viewing, or maintenance secret.
  *
  * THE SIGNATURE, EXACTLY AS THE REFERENCE MAKES IT
  * ------------------------------------------------
@@ -243,7 +278,7 @@ async function derivationHash(root: Uint8Array, counter: number): Promise<Uint8A
   payload.set(LABEL_BYTES, 0);
   payload.set(root, 32);
   payload[64] = counter;
-  const digest = await crypto.subtle.digest('SHA-256', payload as BufferSource);
+  const digest = await crypto.subtle.digest('SHA-256', payload);
   return new Uint8Array(digest);
 }
 
