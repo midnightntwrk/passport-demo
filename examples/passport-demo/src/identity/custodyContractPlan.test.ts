@@ -25,7 +25,11 @@ import {
   CUSTODY_RESCAN_LIMIT,
   CUSTODY_SHARED_CIRCUITS,
   CUSTODY_STORAGE_KEY,
+  CUSTODY_PROOF_NOT_BUILT,
   CUSTODY_UNEXPECTED,
+  custodyProofNotBuilt,
+  isCustodyProofNotBuilt,
+  proveAccountCustodyRefused,
   CUSTODY_VERIFIER_BYTE_BUDGET,
   loadCustodyAuthorityKey,
   loadCustodyRecord,
@@ -523,6 +527,39 @@ describe('the proving deadline', () => {
      the service's answer rather than as a browser giving up first. */
   it('is longer than the deadline the service keeps', () => {
     expect(CUSTODY_PROOF_TIMEOUT_MS).toBeGreaterThan(180_000);
+  });
+});
+
+describe('a proving service that ran and declined to prove', () => {
+  /* THE DEFECT THIS CATCHES stopped the first live spend of a change coin.
+     A wrong candidate position is an unsatisfiable constraint system, and the
+     only place that shows itself is the prover declining — which the client
+     collapsed into "the service is not answering", telling the retry the
+     position was fine and the network was not. The second candidate was never
+     tried (2026/09/18, the service answered 400 while being up). */
+  it('is told apart from a service that is not answering', () => {
+    expect(proveAccountCustodyRefused({ error: 'proving-failed', detail: '…' })).toBe(true);
+    expect(proveAccountCustodyRefused({ error: 'prover-unavailable' })).toBe(false);
+    expect(proveAccountCustodyRefused({ error: 'busy' })).toBe(false);
+    expect(proveAccountCustodyRefused(null)).toBe(false);
+    expect(proveAccountCustodyRefused('not an object')).toBe(false);
+  });
+
+  /* The signal is the error's NAME, so the sentence a person reads stays the
+     plain one — no talk of witnesses or constraints on a screen somebody
+     reached by choosing Google. */
+  it('carries the signal on the name and a plain sentence in the message', () => {
+    const error = custodyProofNotBuilt();
+    expect(isCustodyProofNotBuilt(error)).toBe(true);
+    expect(error.message).toBe(CUSTODY_PROOF_NOT_BUILT);
+    expect(error.message).not.toMatch(/witness|constraint|merkle/i);
+    expect(custodyFailureSentence(error)).toBe(CUSTODY_PROOF_NOT_BUILT);
+  });
+
+  it('is not confused with any other error', () => {
+    expect(isCustodyProofNotBuilt(new Error(CUSTODY_PROOF_NOT_BUILT))).toBe(false);
+    expect(isCustodyProofNotBuilt('a string')).toBe(false);
+    expect(isCustodyProofNotBuilt(null)).toBe(false);
   });
 });
 

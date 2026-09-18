@@ -16,6 +16,7 @@ import {
   K1_ENROLMENT_UNCONFIRMED,
   CUSTODY_PROVER_UNAVAILABLE,
   CUSTODY_SETUP_INTERRUPTED,
+  custodyProofNotBuilt,
   hexToBytes,
   loadCustodyAuthorityKey,
   loadCustodyRecord,
@@ -166,6 +167,14 @@ interface FakeChain {
   window?: { startIndex: number; endIndex: number } | null;
   /** How many more spends fail the way a wrong coin POSITION fails. */
   spendFailures?: number;
+  /**
+   * How many more spends fail the way the PROVING SERVICE reports one.
+   *
+   * The same defect, arriving differently: for these circuits the proof is made
+   * on a service, so an unsatisfiable witness reaches the client as that
+   * service declining to prove rather than as a runtime naming a merkle path.
+   */
+  proofRefusals?: number;
 }
 
 function moduleFake(chain: FakeChain): CustodyContractModule {
@@ -390,6 +399,12 @@ function harness(
               0n,
             )));
           } else {
+            if (circuit.startsWith('withdraw_shielded') && (chain.proofRefusals ?? 0) > 0) {
+              /* What the proving service's refusal reaches the caller as: a
+                 plain sentence, and the signal on the error's NAME. */
+              chain.proofRefusals = (chain.proofRefusals ?? 0) - 1;
+              return Promise.reject(custodyProofNotBuilt());
+            }
             if (circuit.startsWith('withdraw_shielded') && (chain.spendFailures ?? 0) > 0) {
               /* The failure a wrong position gives: no transaction is
                  submitted, nothing is spent, and the words name the merkle
@@ -1643,6 +1658,51 @@ describe('the shielded withdrawal', () => {
     expect(test.calls.filter((c) => c.circuit === 'withdraw_shielded_with_k256')).toHaveLength(2);
     expect(result.changePosition).toBe('settled');
     expect(k1CoinCandidates(account, COLOUR)).toEqual([]);
+  });
+
+  /* THE DEFECT THIS CATCHES stopped the first live spend of a change coin on
+     2026/09/18. A wrong position is an unsatisfiable witness, and for these
+     circuits the proof is made on a SERVICE — so it arrives as that service
+     declining, not as a runtime naming a merkle path. Collapsed into "the
+     service is not answering", it told this retry the position was fine, and
+     the second candidate was never tried. */
+  it('retries the next candidate when the proving service declines to prove', async () => {
+    const { test, account, session, device } = await readyPassport({
+      circuitResult: changeResult(60n),
+      window: { startIndex: 20, endIndex: 21 },
+      proofRefusals: 1,
+    });
+    putK1CoinCandidates(account, { colour: COLOUR, nonce: NONCE, value: 100n }, [5n, 6n]);
+
+    const result = await withdrawShieldedK1(
+      session,
+      device,
+      { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 40n },
+      undefined,
+      test.deps,
+    );
+
+    expect(test.calls.filter((c) => c.circuit === 'withdraw_shielded_with_k256')).toHaveLength(2);
+    expect(result.changePosition).toBe('settled');
+    expect(k1CoinCandidates(account, COLOUR)).toEqual([]);
+  });
+
+  /* And when they run out, the sentence is the plain one — not a word about
+     witnesses in front of somebody who chose Google. */
+  it('gives up in the plain sentence when the service declines every candidate', async () => {
+    const { test, account, session, device } = await readyPassport({ proofRefusals: 5 });
+    putK1CoinCandidates(account, { colour: COLOUR, nonce: NONCE, value: 100n }, [5n, 6n]);
+
+    await expect(
+      withdrawShieldedK1(
+        session,
+        device,
+        { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 40n },
+        undefined,
+        test.deps,
+      ),
+    ).rejects.toThrow('That payment could not be completed just now. Try again in a moment.');
+    expect(test.calls.filter((c) => c.circuit === 'withdraw_shielded_with_k256')).toHaveLength(2);
   });
 
   it('gives up rather than looping when the candidates run out', async () => {

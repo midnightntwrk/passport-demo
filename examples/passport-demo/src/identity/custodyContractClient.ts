@@ -101,12 +101,15 @@ import {
   K1_ENROLMENT_UNCONFIRMED,
   CUSTODY_PROOF_TIMEOUT_MS,
   CUSTODY_PROVER_UNAVAILABLE,
+  custodyProofNotBuilt,
+  isCustodyProofNotBuilt,
   CUSTODY_SETUP_INTERRUPTED,
   loadCustodyAuthorityKey,
   loadCustodyRecord,
   newCustodyRecord,
   nextCustodyStep,
   parseProveCustodyResponse,
+  proveAccountCustodyRefused,
   describeProveAccountCustodyFailure,
   planCustodyWaves,
   proveAccountCustodyRequest,
@@ -409,6 +412,10 @@ export function custodyProofProvider(options: CustodyProofProviderOptions): {
       }
       if (!response.ok) {
         console.warn(describeProveAccountCustodyFailure(response.status, parsed), text.slice(0, 400));
+        /* THE SERVICE ANSWERED AND DECLINED TO PROVE, which is not the same as
+           the service being down — and for a shielded spend it is the shape a
+           WRONG CANDIDATE POSITION arrives in. See {@link CUSTODY_PROOF_NOT_BUILT}. */
+        if (proveAccountCustodyRefused(parsed)) throw custodyProofNotBuilt();
         throw new Error(CUSTODY_PROVER_UNAVAILABLE);
       }
       return options.deserialise(parseProveCustodyResponse(parsed));
@@ -1410,7 +1417,12 @@ export async function withdrawShieldedK1(
       return await settleShieldedChange(deps, wallet, account, colour, step, written);
     } catch (cause) {
       const message = messageOf(cause);
-      if (!spendPositionMayBeWrong(message)) throw cause;
+      /* EITHER TELL. The runtime that could not build the merkle path names it
+         in words; the proving service, which is where an unsatisfiable witness
+         actually surfaces for these circuits, says only that it declined to
+         prove — and that arrives as the error's NAME so the sentence a person
+         reads stays plain. */
+      if (!spendPositionMayBeWrong(message) && !isCustodyProofNotBuilt(cause)) throw cause;
       const next = advanceK1CoinCandidate(account, colour);
       if (next === null) throw cause;
       attempt += 1;

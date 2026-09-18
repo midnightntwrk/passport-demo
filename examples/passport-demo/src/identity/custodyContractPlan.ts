@@ -240,6 +240,42 @@ export const CUSTODY_PROVER_UNAVAILABLE =
   'The service that finishes this step is not answering right now. Try again in a moment.';
 
 /**
+ * The refusal when the proving service RAN and could not produce a proof.
+ *
+ * A DIFFERENT THING FROM NOT ANSWERING, and the difference is what makes a
+ * spend work. An incorrect `mt_index` on the coin the witness names is an
+ * unsatisfiable constraint system, and the only way that shows itself is the
+ * prover declining to prove — so this refusal is exactly the shape a wrong
+ * candidate position arrives in. Collapsing it into "not answering" told the
+ * retry in `withdrawShieldedK1` that the position was fine and the network was
+ * not, and the second candidate was never tried: seen live on 2026/09/18,
+ * where the proof server answered 400 and the payment stopped with a sentence
+ * about a service that was in fact up.
+ *
+ * THE SIGNAL IS THE ERROR'S NAME, NOT ITS WORDS. The retry used to be armed by
+ * matching the message, which would put "unsatisfiable constraint" in front of
+ * somebody who chose Google — so the sentence here is the one they should read,
+ * and {@link CUSTODY_PROOF_NOT_BUILT_NAME} is what the retry looks at.
+ */
+export const CUSTODY_PROOF_NOT_BUILT =
+  'That payment could not be completed just now. Try again in a moment.';
+
+/** The `name` on the error carrying {@link CUSTODY_PROOF_NOT_BUILT}. */
+export const CUSTODY_PROOF_NOT_BUILT_NAME = 'CustodyProofNotBuilt';
+
+/** The error the proving provider throws when the prover declined to prove. */
+export function custodyProofNotBuilt(): Error {
+  const error = new Error(CUSTODY_PROOF_NOT_BUILT);
+  error.name = CUSTODY_PROOF_NOT_BUILT_NAME;
+  return error;
+}
+
+/** Whether a cause is that error — the one a different position can fix. */
+export function isCustodyProofNotBuilt(cause: unknown): boolean {
+  return cause instanceof Error && cause.name === CUSTODY_PROOF_NOT_BUILT_NAME;
+}
+
+/**
  * How long a single `POST /prove-account-custody` is given before the browser abandons it.
  *
  * ABOVE THE SERVICE'S OWN DEADLINE, DELIBERATELY. The proving service holds a
@@ -332,6 +368,18 @@ export function parseProveCustodyResponse(body: unknown): Uint8Array {
     throw new Error('the proving service answered without a proven transaction');
   }
   return hexToBytes(provenTx);
+}
+
+/**
+ * Whether a refusal body says the prover RAN and could not build a proof.
+ *
+ * `proving-failed` is the service's own code for it, and it is the one refusal
+ * a different candidate position can fix. Everything else — the artefacts are
+ * not staged, the queue is full, the request was malformed, a gateway answered
+ * instead of the service — is unimproved by trying again with another number.
+ */
+export function proveAccountCustodyRefused(body: unknown): boolean {
+  return (body as { error?: unknown } | null)?.error === 'proving-failed';
 }
 
 /**
