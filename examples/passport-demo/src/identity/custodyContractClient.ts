@@ -132,7 +132,6 @@ import {
 } from './contractRuntime.js';
 import {
   advanceK1CoinCandidate,
-  dropK1Coin,
   emptyK1CoinStoreState,
   heldK1Coin,
   k1PrivateStateId,

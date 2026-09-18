@@ -226,9 +226,63 @@ order the window gives them (`mtIndexCandidates`, head = the current guess); the
 spend tries the head; a failure naming the merkle path, a witness, or an unsatisfiable
 constraint retries with the next candidate; the one that proves is settled. An incorrect
 position cannot be proved, so nothing is submitted and nothing is spent (INV-5), which is
-what makes the retry free. **The actual output order is not yet established** — it needs a
-live stagenet run, and until then candidate 0 is tried first because it is the first, not
+what makes the retry free. **The actual output order is STILL not established** — see
+§3b — and until then candidate 0 is tried first because it is the first, not
 because anything says it is the change. Nothing stores a guess as a fact.
+
+### 3b. What the live stagenet run of 2026/09/18 settled, and what it did not
+
+Recorded in full in `scratchpad/live-proxy/RUN.md`.
+
+**A two-output delivery is the ORDINARY case, not an edge one.** A passkey Passport
+paid a Dynamic Passport 60 mUSD by name (tx
+`8f68bef238d1ea91d7315d99e91e3e8da090286ca905532ffdccc6c3c60c254b`, block 508123) and
+the indexer's window for it was `[3772, 3774)` — two outputs, because the payer sent
+part of what it held and its own change rides in the same transaction. So the inbox
+walk had to keep candidates rather than report them: with `'report'` the recipient's
+mUSD row read **0** for money that had demonstrably arrived. The walk now reconciles
+with `candidates: 'store'`, and a colour that already holds something keeps it —
+candidates go in the held slot or nowhere, which the reconciliation says with `stored`.
+
+**What the indexer answers, exactly.** `indexer.stagenet.shielded.tools/api/v4`
+answers a commitment window at `offset: { hash: … }` — the CHAIN hash. It does not
+answer at `offset: { identifier: … }`, which is what midnight-js returns and what a
+sponsored transaction's identifier is superseded away from, so a coin filed under an
+identifier can never settle; the client renames the row to the hash once
+`resolveHash` has it. BOTH field spellings work — `startIndex`/`endIndex` and
+`zswapStartIndex`/`zswapEndIndex` both return `3772 / 3774` — so the unprefixed pair
+the client asks for first is enough and the fallback was not needed.
+
+**The change-coin output order is NOT established.** Every attempt at
+`withdraw_shielded_with_k256` was refused by the proof server with `400`, for BOTH
+candidate positions, so no candidate ever proved and nothing was learned about which
+output is the change. The default order stays "candidates in the order the window gave
+them, head first", which is what it was, and it remains a guess the store does not
+record as a fact. Establishing it needs the blocker below cleared.
+
+**The blocker, which is not the contract's.** The account custody proving route
+proves the gated k256 arm for every circuit whose prover key is under about
+128 MiB and refuses the one above it:
+
+| Circuit | Prover key | Through the droplet's `/prover-v3` |
+|---|---|---|
+| `activate_initial_device_with_k256` | 28 MB | proved, 12.7 s and 14.9 s |
+| `withdraw_unshielded_with_k256` | 112 MB | proved, 54.1 s |
+| `withdraw_shielded_with_k256` | 224 MB | `400 Bad Request`, every time |
+
+The sponsor uploads the prover key with every request
+(`httpClientProofProvider`), so the one circuit an order of magnitude larger than
+the rest is the one that cannot be proved. The gateway is not the limit — a
+250 MB body uploads and is answered — and the key on disk is not truncated. This
+is for whoever owns the proof server: a server that loads its keys from disk
+rather than by upload, which is the same conclusion §7a.1 reached for the browser
+and for the same reason.
+
+**What DID work end to end.** Setup and activation for two Dynamic Passports, a
+`.night` name for each, being paid mUSD by a passkey Passport and showing it as
+balance, being paid NIGHT, and paying another Dynamic Passport NIGHT
+(`withdraw_unshielded_with_k256` + `deposit_unshielded`, tx
+`c60fd191cc11881379a5b28098affd71e97a569a13f497bc677e99687f823873`, block 508648).
 
 **A state the design did not name: described, held, unspendable.** The change coin arrives
 as the circuit's JS return value (`callResult.private.result`, extracted by that name and
