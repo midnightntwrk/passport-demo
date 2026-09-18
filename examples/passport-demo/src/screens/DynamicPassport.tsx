@@ -73,6 +73,13 @@ import {
   parseCustodyAmount,
   type CustodyAssetRow,
 } from '../lib/custodyAssets.js'
+import {
+  custodyArrivingCount,
+  custodyDeliveryFailure,
+  custodyInFlightRefusal,
+  custodyMayReadHoldings,
+  custodyUnplacedDeliveries,
+} from '../lib/custodyScreenRules.js'
 import type { PassportContractName } from '../identity/contractRuntime.js'
 import type { LocalMidnightWallet } from '../lib/localWallet.js'
 import type { WalletShieldedNote } from '../lib/shieldedNote.js'
@@ -281,6 +288,18 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
          the payment had just spent, or re-place one it had just moved. A ref
          rather than `busy`, because the guard has to be true from the first
          line of the payment and a state update is not. */
+      /* ONE AT A TIME, AND THE SECOND PRESS IS TOLD SO. Two of these at once
+         read and write one coin store: the second would file a delivery over
+         the coin the first has just spent, or sign against a coin the first is
+         spending — and what a person would then see is a proof refused for a
+         reason no sentence on this screen could explain. The refusal is
+         `../lib/custodyScreenRules.ts`'s one sentence, and nothing has gone
+         wrong: the press was early. */
+      const refusal = custodyInFlightRefusal(inFlight.current)
+      if (refusal !== null) {
+        setError(refusal)
+        return
+      }
       inFlight.current = true
       setBusy(label)
       setError(null)
@@ -454,11 +473,7 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
          already holding something, is demonstrably delivered and not yet
          spendable — which is what "arriving" means. Counting only the store's
          own awaiting rows made those coins vanish off the screen entirely. */
-      const unplaced = walked.outcomes.filter(
-        (entry) =>
-          entry.reconciliation.outcome === 'unavailable' ||
-          (entry.reconciliation.outcome === 'ambiguous' && !entry.reconciliation.stored),
-      ).length
+      const unplaced = custodyUnplacedDeliveries(walked.outcomes)
       console.info(
         `[account-custody] read ${walked.coins.length} of this Passport's own deliveries`,
       )
@@ -474,7 +489,7 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
     /* A payment is running and it owns the store until it is finished. What is
        already on the screen stays on it; this read happens again when the
        payment does finish, which is the moment the figures change anyway. */
-    if (inFlight.current) return
+    if (!custodyMayReadHoldings(inFlight.current)) return
     const account = { network: record.network, address: record.address }
     const deps = defaultCustodyDeps()
     let opened: Awaited<ReturnType<typeof deps.wallet>> | null = null
@@ -504,7 +519,10 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
       setBalanceFailed(true)
     }
 
-    let unplaced = 0
+    /* NULL, NOT ZERO, UNTIL THE WALK HAS ANSWERED. A walk that could not be
+       made says nothing about whether a delivery is waiting, and the count then
+       falls back to the store's own rows rather than claiming none. */
+    let unplaced: number | null = null
     if (opened !== null) {
       /* EVERY AWAITING COIN IS ASKED ABOUT AGAIN, on every read. A spend files
          its change with a description and no position, and the one question
@@ -558,7 +576,9 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
       )
       /* The store's own waiting rows PLUS the deliveries this walk could not
          place. Both are coins that are here and cannot be spent yet. */
-      setArriving(awaitingK1Coins(account).length + unplaced)
+      setArriving(
+        custodyArrivingCount({ awaitingRows: awaitingK1Coins(account).length, unplaced }),
+      )
     } catch (cause) {
       console.warn('[account-custody] could not read what this Passport was paid', cause)
     }
@@ -667,16 +687,20 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
         const stillHeld = await walletShieldedNotes(wallet)
           .then((notes) => notes.some((held) => shieldedNoteId(held) === wanted))
           .catch(() => null)
-        if (stillHeld === false) {
+        /* THE DECISION IS `../lib/custodyScreenRules.ts`'s, not this
+           component's: three values of `stillHeld` mean three different things
+           about where somebody's money is, and each of them is drilled there. */
+        const decided = custodyDeliveryFailure({ stillHeld })
+        if (!decided.deposit) {
           /* Gone from this wallet, and this screen cannot see whether the
              recipient has it. It says that, rather than either receipt. */
-          const unseen: CustodyShieldedSendRecord = { ...record, stage: 'unconfirmed' }
+          const unseen: CustodyShieldedSendRecord = { ...record, stage: decided.stage }
           saveCustodyShieldedSend(window.localStorage, unseen)
           setStopped(unseen)
           throw new Error(custodyShieldedSendOutcome(unseen))
         }
 
-        const returning: CustodyShieldedSendRecord = { ...record, stage: 'returning' }
+        const returning: CustodyShieldedSendRecord = { ...record, stage: decided.stage }
         saveCustodyShieldedSend(window.localStorage, returning)
         setStopped(returning)
         setBusy('Putting it back in your Passport')
@@ -688,7 +712,10 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
           })
         } catch (second) {
           console.warn('[account-custody] and it could not be put back either', second)
-          const stranded: CustodyShieldedSendRecord = { ...record, stage: 'stranded' }
+          const stranded: CustodyShieldedSendRecord = {
+            ...record,
+            stage: custodyDeliveryFailure({ stillHeld, returnFailed: true }).stage,
+          }
           saveCustodyShieldedSend(window.localStorage, stranded)
           setStopped(stranded)
           throw new Error(custodyShieldedSendOutcome(stranded))

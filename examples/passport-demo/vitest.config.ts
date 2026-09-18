@@ -656,6 +656,18 @@
  * into either. It holds no network, no clock, and no contract: an injected
  * reader, two positions, and the bytes.
  *
+ * `src/lib/custodyScreenRules.ts` went IN on 2026/09/17 with the module itself.
+ * It holds the three decisions `src/screens/DynamicPassport.tsx` makes about
+ * somebody's money that are invisible while they are being made, which is why
+ * they are not left in a `.tsx` the denominator excludes: whether to put a note
+ * back after the last leg of a payment threw (a note that is GONE must never be
+ * re-sent — the node refuses the double spend, after the screen has said it is
+ * coming home), whether a second piece of work may start while one is running
+ * (two of them read and write one coin store), and what a walk's unplaceable
+ * deliveries mean for the figure of payments still arriving (arriving, not
+ * balance, and not nothing). No React, no storage, no network, no wallet: the
+ * values the screen already holds go in and a decision comes out.
+ *
  * `src/identity/timestamps.ts` went IN on 2026/08/26 with the module itself: it
  * is the ISO-8601 reader `backup.ts` and `incentiveStore.ts` now share, it is
  * four lines of pure decision, and both of its answers are drilled by
@@ -724,6 +736,7 @@ export default mergeConfig(
           'src/lib/colour.ts',
           'src/lib/custodyAssets.ts',
           'src/lib/custodyDelivery.ts',
+          'src/lib/custodyScreenRules.ts',
           'src/lib/dynamicSession.ts',
           'src/lib/endpoints.ts',
           'src/lib/feeReadinessPoll.ts',
