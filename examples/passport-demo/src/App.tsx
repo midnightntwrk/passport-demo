@@ -798,6 +798,29 @@ const MIDNAMES_OWNER_SCOPE = { appId: APP_ID, accountId: 'midnames-owner-v1' };
 const PASSPORT_CONTRACT_SCOPE = { appId: APP_ID, accountId: 'passport-contract-v1' };
 
 /**
+ * Whether a PASSKEY's next Passport is made on the account custody contract.
+ *
+ * READ ONCE, AT MODULE SCOPE, AND NOT PER RENDER. It was per render for an
+ * afternoon and the mocked walk caught what that costs: the answer depends on
+ * `window.location.search`, and a URL is a thing an app mutates — one
+ * `replaceState` that tidies the query away and the route silently changes
+ * under a Passport that is half made. Which contract a build makes Passports on
+ * is a property of the build and of the page it was opened with, so it is
+ * settled when the module loads and cannot move afterwards.
+ *
+ * WRITTEN OUT RATHER THAN CALLED for the second half of it. Vite substitutes
+ * `import.meta.env.VITE_*` with a literal at build time, so with neither
+ * variable set this folds to `false` and every branch below it is dead code the
+ * bundler can see through. No build shipped today sets either, so this file
+ * routes exactly as it routed yesterday.
+ */
+const ACCOUNT_CUSTODY_ON = accountCustodyEnabled({
+  productFlag: import.meta.env.VITE_PASSPORT_ACCOUNT_CUSTODY as string | undefined,
+  walkFlag: import.meta.env.VITE_PASSPORT_ACC_WALK as string | undefined,
+  search: window.location.search,
+});
+
+/**
  * The onboarding steps that follow a successful passkey + wallet open.
  *
  * 2026/08/06: only 'alias' is ever SCHEDULED. Backup and Ecosystem left the
@@ -6050,17 +6073,6 @@ export default function PassportDemo() {
    * record and the pointer are both per network and asking earlier would read
    * "no Passport" for a Passport that is simply not addressable yet.
    */
-  /* WRITTEN OUT RATHER THAN CALLED, and that is the whole point of it. Vite
-     substitutes `import.meta.env.VITE_*` with a literal at build time, so with
-     neither variable set this reads `accountCustodyEnabled({ productFlag:
-     undefined, walkFlag: undefined, … })` — constant false — and every branch
-     below it is dead code the bundler can see through. No build shipped today
-     sets either, so this file routes exactly as it routed yesterday. */
-  const accountCustodyOn = accountCustodyEnabled({
-    productFlag: import.meta.env.VITE_PASSPORT_ACCOUNT_CUSTODY as string | undefined,
-    walkFlag: import.meta.env.VITE_PASSPORT_ACC_WALK as string | undefined,
-    search: window.location.search,
-  });
   const passkeyCustodyUser =
     profile && localWalletNetworkId
       ? loadCustodyPasskeyPointer(
@@ -6070,7 +6082,7 @@ export default function PassportDemo() {
         )
       : null;
   const passkeyRoute =
-    profile && localWalletNetworkId && accountCustodyOn
+    profile && localWalletNetworkId && ACCOUNT_CUSTODY_ON
       ? passkeyPassportRoute({
           hasPrototypeAccount: activeContractRecord !== null,
           custodyUser: passkeyCustodyUser,
