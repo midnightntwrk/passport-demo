@@ -224,7 +224,7 @@ measured on 2026/09/18:
 | `withdraw_shielded_to_contract_with_jubjub` | 98,576,566 | 2,313 | 5,654 |
 | `withdraw_shielded_with_jubjub` | 98,576,060 | 2,313 | 5,148 |
 | `withdraw_unshielded_with_jubjub` | 49,292,320 | 2,313 | 4,480 |
-| **total** | **714,704,928** | **25,443** | **45,936** |
+| **total** | **714,703,928** | **25,443** | **46,936** |
 
 **714,776,307 bytes — 0.715 GB, or 0.67 GiB — beside the 2.261 GB of the k256
 arm already there.** Check `df -h /opt` first: the whole build is 3.48 GB
