@@ -1167,35 +1167,14 @@ export default function SendSheet(props: SendSheetProps) {
     hostSteps: hostNameLegSteps ?? null,
     held: mode === 'shielded' ? asset.available : null,
     amount,
-    toAddress: sendRoute === 'shielded-address',
   })
-  /* A SHIELDED ADDRESS SEND IS COUNTED TOO, SINCE 2026/09/17. It used to be one
-     transaction — a partial withdrawal straight out of the account — and that
-     is exactly the transaction that left the account unable to withdraw
-     anything again. It now takes the same legs a name send takes, so it is
-     reviewed and narrated the same way: the whole coin out, the amount paid to
-     the address, the change back afterwards.
-
-     NIGHT to an address is untouched. Its withdrawal has no split branch and no
-     defect, so it is still the single transaction it has always been and the
-     rows below say nothing about steps over it. */
-  const addressLegs = sendRoute === 'shielded-address'
-  /* Who the lines name. A name or an account is called by its own name; an
-     address is called by the shortened form the Recipient row already shows. */
-  const legRecipient =
-    resolvedName !== null
-      ? resolvedName.domain
-      : addressLegs
-        ? shortAddress(recipient.trim())
-        : null
   const nameLegLine =
-    legRecipient === null || nameLeg == null || nameLeg === undefined
+    resolvedName === null || nameLeg == null || nameLeg === undefined
       ? null
       : sendStepLine({
           step: nameLeg,
           steps: nameLegSteps,
-          recipient: legRecipient,
-          toAddress: addressLegs,
+          recipient: resolvedName.domain,
           attemptSuffix,
         })
 
@@ -1852,12 +1831,10 @@ export default function SendSheet(props: SendSheetProps) {
                   )}
                 </dd>
               </div>
-              {legRecipient !== null ? (
+              {resolvedName !== null ? (
                 /* Said before the confirm, not after it: paying a name is two
                    transactions, and somebody who is about to wait through both
-                   should know that is what they are waiting for. Since
-                   2026/09/17 a shielded send to an ADDRESS is counted here for
-                   the same reason and by the same rule. */
+                   should know that is what they are waiting for. */
                 <div className="mnhome-send-row">
                   <dt>How it goes</dt>
                   <dd>
@@ -1878,29 +1855,11 @@ export default function SendSheet(props: SendSheetProps) {
                         exactly what the older build does. */}
                     <strong>{nameLegSteps === 1 ? 'Transferring' : 'Two steps'}</strong>
                     <small>
-                      {/* AN ADDRESS IS NOT "THEIRS" AND HAS NO ACCOUNT BEHIND
-                          IT, so it gets its own two sentences rather than the
-                          name path's with a word swapped. Neither of them
-                          compares itself to "sending to an address" any more on
-                          this branch, which would be comparing this send to
-                          itself. */}
-                      {addressLegs
-                        ? nameLegSteps === 3
-                          ? 'The whole of what your account holds of this comes out, then the amount goes to that address. Both are network transactions. Your change comes back to you on its own afterwards — you do not have to wait for it.'
-                          : 'The amount leaves your account, then it goes to that address. Both are network transactions.'
-                        : nameLegSteps === 1
-                          ? 'The amount goes straight from your account into theirs, in one network transaction. Your balance keeps the rest.'
-                          : nameLegSteps === 3
-                            ? /* NO LONGER "LONGER THAN SENDING TO AN ADDRESS"
-                                 (2026/09/17). That clause was true while a
-                                 shielded send to an address was one
-                                 transaction; it is the same three this is now,
-                                 so the comparison would be with nothing. The
-                                 NIGHT branch below keeps it, where a NIGHT send
-                                 to an address really is the one transaction it
-                                 has always been. */
-                              'The whole of what your account holds of this comes out, then they are paid. Both are network transactions. Your change comes back to you on its own afterwards — you do not have to wait for it.'
-                            : 'The amount leaves your account, then it is paid into theirs. Both are network transactions, so this takes longer than sending to an address.'}
+                      {nameLegSteps === 1
+                        ? 'The amount goes straight from your account into theirs, in one network transaction. Your balance keeps the rest.'
+                        : nameLegSteps === 3
+                          ? 'The whole of what your account holds of this comes out, then they are paid. Both are network transactions, so this takes longer than sending to an address. Your change comes back to you on its own afterwards — you do not have to wait for it.'
+                          : 'The amount leaves your account, then it is paid into theirs. Both are network transactions, so this takes longer than sending to an address.'}
                     </small>
                   </dd>
                 </div>
