@@ -68,10 +68,31 @@ export interface CustodyArm {
   ensureIdentity(): Promise<CustodyIdentity>;
   /** The busy line while an approval is outstanding. */
   readonly approvalPrompt: string;
-  /** Who this Passport belongs to, as the reader would name themselves. */
-  readonly who: string;
-  /** How they got in, as the reader would name it. Never a vendor's name. */
-  readonly via: string;
+  /**
+   * THE FIVE SENTENCES THAT ARE ABOUT HOW THE READER GOT IN, and therefore the
+   * arm's rather than the screen's.
+   *
+   * They are whole strings and not fragments the screen interpolates, which is
+   * the lesson of the first passkey render: `Signed in with {via}` and
+   * `{who} is all Passport needs` were written for a sign-in that has a
+   * provider and a handle, and with a passkey's words poured into them they
+   * came out as "SIGNED IN WITH THIS DEVICE" and "your Passport is all Passport
+   * needs". A template that reads well for one arm is not a template; it is one
+   * arm's sentence with a hole in it.
+   */
+  /** The small line above the title. */
+  readonly kicker: string;
+  /** The paragraph under the title on the setup screen. */
+  readonly lede: string;
+  /** The line above the title on Home, naming who is signed in. */
+  readonly badge: string;
+  /**
+   * The noun phrase for the thing that proves this Passport is the reader's,
+   * as it reads mid-sentence: "…that {keyPhrase} is part of it".
+   */
+  readonly keyPhrase: string;
+  /** What to try when a name turns out to belong to somebody else's Passport. */
+  readonly otherKeyHint: string;
 }
 
 /**
@@ -85,12 +106,21 @@ export interface CustodyArm {
 export const PASSKEY_APPROVAL_PROMPT = 'Confirm it is you';
 
 /**
- * How a passkey Passport's holder is named on screen.
+ * Everything a passkey Passport's screens say about how its reader got in.
  *
- * A social sign-in has a handle to show. A passkey has nothing: it is a secret
- * on this device, and the honest second person is the only name there is.
+ * A social sign-in has a provider and a handle to show. A passkey has neither:
+ * there is no vendor, no account name, and nothing to be signed in TO. What
+ * there is is a key this device holds, and every sentence here says that and
+ * stops — no "sign-in", because there was none, and no "passkey" where the
+ * reader would have to know the word for a thing they experienced as a
+ * fingerprint.
  */
-export const PASSKEY_WHO = 'your Passport';
-
-/** And how they got in. */
-export const PASSKEY_VIA = 'this device';
+export const PASSKEY_COPY = {
+  kicker: 'Your key is on this device',
+  lede:
+    'The key on this device is all Passport needs. Nothing else to remember, and nothing to ' +
+    'install — the same key brings your Passport back on any device it is on.',
+  badge: 'Held on this device',
+  keyPhrase: 'the key on this device',
+  otherKeyHint: 'If you set this Passport up with a different key, use the device that holds it.',
+} as const;

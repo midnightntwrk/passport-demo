@@ -180,6 +180,7 @@ import { choosePassportIdentity } from './lib/dynamicSession.js';
 import { useDynamicSession } from './lib/dynamic.js';
 import { useDynamicCustodyArm, usePasskeyCustodyArm } from './lib/custodyArms.js';
 import {
+  accountCustodyEnabled,
   loadCustodyPasskeyPointer,
   passkeyPassportRoute,
   saveCustodyPasskeyPointer,
@@ -6049,6 +6050,17 @@ export default function PassportDemo() {
    * record and the pointer are both per network and asking earlier would read
    * "no Passport" for a Passport that is simply not addressable yet.
    */
+  /* WRITTEN OUT RATHER THAN CALLED, and that is the whole point of it. Vite
+     substitutes `import.meta.env.VITE_*` with a literal at build time, so with
+     neither variable set this reads `accountCustodyEnabled({ productFlag:
+     undefined, walkFlag: undefined, … })` — constant false — and every branch
+     below it is dead code the bundler can see through. No build shipped today
+     sets either, so this file routes exactly as it routed yesterday. */
+  const accountCustodyOn = accountCustodyEnabled({
+    productFlag: import.meta.env.VITE_PASSPORT_ACCOUNT_CUSTODY as string | undefined,
+    walkFlag: import.meta.env.VITE_PASSPORT_ACC_WALK as string | undefined,
+    search: window.location.search,
+  });
   const passkeyCustodyUser =
     profile && localWalletNetworkId
       ? loadCustodyPasskeyPointer(
@@ -6058,7 +6070,7 @@ export default function PassportDemo() {
         )
       : null;
   const passkeyRoute =
-    profile && localWalletNetworkId
+    profile && localWalletNetworkId && accountCustodyOn
       ? passkeyPassportRoute({
           hasPrototypeAccount: activeContractRecord !== null,
           custodyUser: passkeyCustodyUser,

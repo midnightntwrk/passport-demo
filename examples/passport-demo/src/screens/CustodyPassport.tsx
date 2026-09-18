@@ -1217,13 +1217,13 @@ export default function CustodyPassport({ network, arm }: CustodyPassportProps) 
     )
   }
 
-  const who = arm.who
-  const via = arm.via
+
 
   if (screen === 'recover') {
     return (
       <RecoverStep
-        provider={via}
+        keyPhrase={arm.keyPhrase}
+        otherKeyHint={arm.otherKeyHint}
         onFind={findByName}
         onBack={() => setScreen(view?.stage === 'home' ? 'home' : 'create')}
       />
@@ -1244,8 +1244,7 @@ export default function CustodyPassport({ network, arm }: CustodyPassportProps) 
   if (screen === 'home') {
     return (
       <HomeStep
-        provider={via}
-        handle={who}
+        badge={arm.badge}
         name={view?.name ?? null}
         address={view?.address ?? null}
         receivingAddress={receivingAddress}
@@ -1272,15 +1271,12 @@ export default function CustodyPassport({ network, arm }: CustodyPassportProps) 
   const phase = dynamicSetupPhase(view?.record ?? null)
   return (
     <Shell label="Passport">
-      <p className="mnob-kicker">Signed in with {via}</p>
+      <p className="mnob-kicker">{arm.kicker}</p>
       <h1 className="mnob-title">
         <span>Set up</span>
         <span>your Passport</span>
       </h1>
-      <p className="mnob-lede">
-        {who} is all Passport needs. Nothing else to remember, and nothing to install — the same
-        sign-in brings your Passport back on any device.
-      </p>
+      <p className="mnob-lede">{arm.lede}</p>
 
       <div className="mndyn-actions">
         <button
@@ -1416,7 +1412,10 @@ function NameStep(props: {
 }
 
 function RecoverStep(props: {
-  provider: string
+  /** "…that {keyPhrase} is part of it". See `../lib/custodyArm.ts`. */
+  keyPhrase: string
+  /** What to try when the name turns out to be somebody else's. */
+  otherKeyHint: string
   onFind: (name: string) => Promise<NameRecoveryOutcome>
   onBack: () => void
 }) {
@@ -1433,7 +1432,7 @@ function RecoverStep(props: {
       </h1>
       <p className="mnob-lede">
         Type the <code>.night</code> name you already hold. Passport will check with Midnight that
-        your {props.provider} sign-in is part of it before bringing anything back.
+        {' '}{props.keyPhrase} is part of it before bringing anything back.
       </p>
       <form
         className="mnob-stage"
@@ -1444,7 +1443,9 @@ function RecoverStep(props: {
           setMessage(null)
           void props
             .onFind(trimmed)
-            .then((outcome) => setMessage(recoveryMessage(outcome, props.provider)))
+            .then((outcome) =>
+              setMessage(recoveryMessage(outcome, props.keyPhrase, props.otherKeyHint)),
+            )
             .catch((cause: unknown) =>
               setMessage(
                 cause instanceof Error
@@ -1499,8 +1500,7 @@ function RecoverStep(props: {
 }
 
 function HomeStep(props: {
-  provider: string
-  handle: string
+  badge: string
   name: string | null
   address: string | null
   receivingAddress: string | null
@@ -1534,7 +1534,7 @@ function HomeStep(props: {
   return (
     <Shell label="Passport">
       <p className="mnob-kicker">
-        <BadgeCheck size={13} aria-hidden="true" /> {props.provider} · {props.handle}
+        <BadgeCheck size={13} aria-hidden="true" /> {props.badge}
       </p>
       <h1 className="mnob-title">
         <span>{props.name ? `${props.name}.night` : 'Your Passport'}</span>
@@ -1689,13 +1689,17 @@ function HomeStep(props: {
 /* -------------------------------------------------------------------------- */
 
 /** The one place the recovery answers become sentences on this path. */
-function recoveryMessage(outcome: NameRecoveryOutcome, provider: string): string | null {
+function recoveryMessage(
+  outcome: NameRecoveryOutcome,
+  keyPhrase: string,
+  otherKeyHint: string,
+): string | null {
   if (outcome.kind === 'found') return null
   if (outcome.kind === 'unknown') {
     return 'No Passport is registered under that name. Check the spelling, or go back and set a new one up.'
   }
   if (outcome.kind === 'not-yours') {
-    return `That name belongs to a Passport your ${provider} sign-in is not part of. If you have more than one sign-in, go back and use the other one.`
+    return `That name belongs to a Passport ${keyPhrase} is not part of. ${otherKeyHint}`
   }
   return outcome.detail
 }

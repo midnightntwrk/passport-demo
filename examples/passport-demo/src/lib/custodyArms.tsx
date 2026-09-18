@@ -16,8 +16,7 @@ import { useCallback, useMemo, useRef } from 'react'
 
 import {
   PASSKEY_APPROVAL_PROMPT,
-  PASSKEY_VIA,
-  PASSKEY_WHO,
+  PASSKEY_COPY,
   type CustodyArm,
   type CustodyIdentity,
 } from './custodyArm.js'
@@ -91,8 +90,7 @@ export function usePasskeyCustodyArm(input: PasskeyArmInput): CustodyArm {
       ready,
       ensureIdentity,
       approvalPrompt: PASSKEY_APPROVAL_PROMPT,
-      who: PASSKEY_WHO,
-      via: PASSKEY_VIA,
+      ...PASSKEY_COPY,
     }),
     [ensureIdentity, knownUserKey, ready],
   )
@@ -170,8 +168,13 @@ export function useDynamicCustodyArm(session: DynamicArmInput): CustodyArm {
         provider === null || provider.trim().length === 0
           ? 'Approve with the account you signed in with'
           : `Approve with your ${provider.trim()} account`,
-      who: handle ?? 'your account',
-      via: provider ?? 'your sign-in',
+      kicker: `Signed in with ${provider ?? 'your sign-in'}`,
+      lede:
+        `${handle ?? 'your account'} is all Passport needs. Nothing else to remember, and ` +
+        'nothing to install — the same sign-in brings your Passport back on any device.',
+      badge: `${provider ?? 'your sign-in'} · ${handle ?? 'your account'}`,
+      keyPhrase: `your ${provider ?? 'sign-in'} sign-in`,
+      otherKeyHint: 'If you have more than one sign-in, go back and use the other one.',
     }),
     [custodySession, ensureIdentity, evmAddress, handle, provider, status],
   )

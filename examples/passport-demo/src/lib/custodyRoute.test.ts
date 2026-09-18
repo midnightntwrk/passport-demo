@@ -11,6 +11,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  accountCustodyEnabled,
   CUSTODY_PASSKEY_KEY,
   custodyPasskeyKey,
   loadCustodyPasskeyPointer,
@@ -135,5 +136,62 @@ describe('passkeyPassportRoute', () => {
     expect(
       passkeyPassportRoute({ hasPrototypeAccount: true, custodyUser: 'jubjub:2a1f' }),
     ).toBe('legacy');
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* Whether this build makes new Passports on the account custody contract      */
+/* -------------------------------------------------------------------------- */
+
+describe('accountCustodyEnabled', () => {
+  it('is false in a build that sets neither flag, which is every build shipped today', () => {
+    expect(
+      accountCustodyEnabled({ productFlag: undefined, walkFlag: undefined, search: '' }),
+    ).toBe(false);
+  });
+
+  it('is true wherever the product flag is set, whatever the URL says', () => {
+    expect(
+      accountCustodyEnabled({ productFlag: '1', walkFlag: undefined, search: '' }),
+    ).toBe(true);
+  });
+
+  it('is false for a walk build until a URL asks for it', () => {
+    /* THE PROPERTY EVERY OTHER SPEC RESTS ON. One preview build serves the
+       whole mocked tier, so the flag's mere presence must change nothing. */
+    expect(accountCustodyEnabled({ productFlag: undefined, walkFlag: '1', search: '' })).toBe(
+      false,
+    );
+    expect(
+      accountCustodyEnabled({ productFlag: undefined, walkFlag: '1', search: '?dynamicwalk=1' }),
+    ).toBe(false);
+  });
+
+  it('is true for a walk build whose URL asks for it', () => {
+    expect(
+      accountCustodyEnabled({ productFlag: undefined, walkFlag: '1', search: '?accwalk=1' }),
+    ).toBe(true);
+    /* The value is not read: asking is the whole of it, exactly as
+       `?dynamicwalk=` is asked for. */
+    expect(
+      accountCustodyEnabled({ productFlag: undefined, walkFlag: '1', search: '?accwalk' }),
+    ).toBe(true);
+  });
+
+  it('ignores the URL where the walk flag is not set', () => {
+    /* A deployed build cannot be talked into the new route by a query string,
+       which is the difference between a harness switch and a back door. */
+    expect(
+      accountCustodyEnabled({ productFlag: undefined, walkFlag: undefined, search: '?accwalk=1' }),
+    ).toBe(false);
+    expect(
+      accountCustodyEnabled({ productFlag: '0', walkFlag: '0', search: '?accwalk=1' }),
+    ).toBe(false);
+  });
+
+  it('reads a search string with other things in it', () => {
+    expect(
+      accountCustodyEnabled({ productFlag: undefined, walkFlag: '1', search: '?a=b&accwalk=1' }),
+    ).toBe(true);
   });
 });

@@ -134,3 +134,54 @@ export function passkeyPassportRoute(input: {
   return input.custodyUser === null ? 'new' : 'custody';
 }
 
+
+/* -------------------------------------------------------------------------- */
+/* Whether this build makes new Passports on the account custody contract      */
+/* -------------------------------------------------------------------------- */
+
+/** The URL a walk uses to take the account custody path in a build that has it. */
+export const ACCOUNT_CUSTODY_WALK_PARAM = 'accwalk';
+
+/**
+ * Whether a PASSKEY's next Passport is made on the account custody contract.
+ *
+ * TWO WAYS TO SAY YES, AND THEY ARE NOT THE SAME KIND OF THING.
+ *
+ *   The PRODUCT flag, `VITE_PASSPORT_ACCOUNT_CUSTODY`, is the real one. A build
+ *   that sets it makes every new passkey Passport on the new contract; no build
+ *   shipped today sets it, which is why every mocked walk and every Passport in
+ *   production takes the path it took yesterday.
+ *
+ *   The WALK flag plus `?accwalk=1` is a harness switch, and it is the same
+ *   shape as `?dynamicwalk=` for the same reason: one preview build serves the
+ *   whole mocked tier, so a spec that needs the new path has to select it per
+ *   tab rather than per build. The flag is set for `playwright.config.ts`'s
+ *   preview and for no deployment, and even there nothing happens until a URL
+ *   asks for it — so no other spec is affected by its presence.
+ *
+ * WHY A FLAG AT ALL, given the ruling that every new Passport goes on the new
+ * contract. Because the flow is being built in a branch and the old onboarding
+ * is what production runs: turning the route on unconditionally would replace
+ * the name-claim onboarding for every visitor of every build in this branch,
+ * which is a decision for a release rather than for a commit. The flag is how
+ * the two live side by side until the release is cut.
+ *
+ * An EXISTING Passport is never affected by either: `passkeyPassportRoute`
+ * answers `legacy` for a passkey that already has a prototype account, and this
+ * question is not even asked for it.
+ */
+export function accountCustodyEnabled(input: {
+  /** `import.meta.env.VITE_PASSPORT_ACCOUNT_CUSTODY`, read by the host. */
+  readonly productFlag: string | undefined;
+  /** `import.meta.env.VITE_PASSPORT_ACC_WALK`, read by the host. */
+  readonly walkFlag: string | undefined;
+  /** `window.location.search`. */
+  readonly search: string;
+}): boolean {
+  if (input.productFlag === '1') return true;
+  if (input.walkFlag !== '1') return false;
+  /* `URLSearchParams` over a string cannot throw — it drops a leading `?` and
+     reads whatever follows — so there is nothing here to guard against, and a
+     guard that cannot fire is a branch nothing can ever drill. */
+  return new URLSearchParams(input.search).has(ACCOUNT_CUSTODY_WALK_PARAM);
+}
