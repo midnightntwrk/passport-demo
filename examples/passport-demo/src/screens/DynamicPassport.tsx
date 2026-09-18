@@ -587,17 +587,19 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
     }
 
     try {
-      const { awaitingK1Coins, k1ColourBalance, listK1Coins } = await import(
-        '../identity/k1CoinStore.js'
-      )
+      const { awaitingK1Coins, k1ColourHoldings } = await import('../identity/k1CoinStore.js')
+      /* HELD PLUS QUEUED, over the colours that have EITHER — which is not the
+         same list as the colours with a held coin. A spend takes the held coin
+         and files its change as awaiting, so a colour whose earlier delivery is
+         sitting in the queue has an empty held slot and real money behind it;
+         drawing the rows from the held slots alone showed no row for it at all
+         (review, 2026/09/18). What one payment can draw on is smaller again,
+         and the refusal for that difference is a sentence rather than a
+         smaller figure — `custodyShieldedSendRefusal`'s. */
       setTokens(
-        listK1Coins(account).map((coin) => ({
-          colourHex: coin.colour,
-          /* HELD PLUS QUEUED — what the account holds of the colour, which is
-             not what one payment can draw on. The refusal for that difference
-             is `custodyShieldedSendRefusal`'s, and it is a sentence rather than
-             a smaller figure. */
-          amount: k1ColourBalance(account, coin.colour),
+        k1ColourHoldings(account).map((holding) => ({
+          colourHex: holding.colour,
+          amount: holding.value,
         })),
       )
       /* The store's own waiting rows PLUS the deliveries this walk could not

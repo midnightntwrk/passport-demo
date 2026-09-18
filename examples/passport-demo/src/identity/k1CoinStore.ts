@@ -834,6 +834,29 @@ export function queuedK1Coins(account: K1Account, colour: string): K1HeldCoin[] 
 }
 
 /**
+ * Every colour this account holds anything of, with what it holds of each.
+ *
+ * HELD UNION QUEUED, and the union is the point (review, 2026/09/18).
+ * {@link listK1Coins} lists the HELD slots alone, and a colour can perfectly
+ * well have an empty held slot and a queue behind it: a spend takes the held
+ * coin and files its change as awaiting, leaving a coin that arrived earlier
+ * sitting in the queue. A screen drawing its rows from the held slots showed no
+ * row at all for that colour — money the holder could neither see nor, since
+ * nothing offered it, promote and spend. A row is what says it is here.
+ *
+ * Colour order, so two reads agree, and a colour whose whole holding is zero is
+ * still a colour this account has coins of.
+ */
+export function k1ColourHoldings(account: K1Account): { colour: string; value: bigint }[] {
+  const state = loadK1CoinStore(account);
+  const colours = new Set([...Object.keys(state.coins), ...Object.keys(state.queued)]);
+  return [...colours].sort().map((colour) => ({
+    colour,
+    value: k1ColourBalance(account, colour),
+  }));
+}
+
+/**
  * What this account holds of a colour: the held coin plus everything queued
  * behind it.
  *

@@ -23,6 +23,7 @@ import {
   isK1NonceSpent,
   k1AccountKey,
   k1AwaitingTxNeedsChainHash,
+  k1ColourHoldings,
   k1CoinCandidates,
   k1ColourBalance,
   k1PrivateStateId,
@@ -682,6 +683,32 @@ describe('a second coin of the same colour', () => {
     ]);
     expect(k1ColourBalance(ALICE, NIGHT)).toBe(350n);
     expect(k1ColourBalance(ALICE, MUSD)).toBe(0n);
+  });
+
+  /* THE DEFECT (review, 2026/09/18): a spend takes the held coin and files its
+     change as awaiting, so the colour's held slot is empty while an earlier
+     delivery sits in the queue. Home drew its rows from the held slots, so that
+     colour had NO ROW — money the holder could neither see nor spend. */
+  it('is still a colour this Passport holds when the held slot has been spent', () => {
+    enqueueK1Coin(ALICE, coin({ value: 100n }));
+    enqueueK1Coin(ALICE, coin({ value: 250n, nonce: OTHER_NONCE, mtIndex: 43n }));
+    enqueueK1Coin(ALICE, { colour: MUSD, nonce: '51'.repeat(32), value: 7n, mtIndex: 2n });
+
+    /* The spend: the held coin goes and its change has no position yet, so the
+       queued coin is deliberately NOT promoted — the change must not land
+       behind it. */
+    rememberK1ChangeCoin(ALICE, NIGHT, { colour: NIGHT, nonce: '52'.repeat(32), value: 60n }, 'tx-1');
+
+    expect(listK1Coins(ALICE).map((held) => held.colour)).toEqual([MUSD]);
+    /* Colour order, and the spent colour is in the list on its queue alone. */
+    expect(k1ColourHoldings(ALICE)).toEqual([
+      { colour: NIGHT, value: 250n },
+      { colour: MUSD, value: 7n },
+    ]);
+  });
+
+  it('lists nothing for an account that has never held a coin', () => {
+    expect(k1ColourHoldings(ALICE)).toEqual([]);
   });
 
   it('does not store the same coin twice, held or queued', () => {
