@@ -52,6 +52,20 @@
  * Passport issues no grants on this path today; the arm is here because the
  * deployed contract has it, and a client that counted past it would be wrong
  * the first time somebody used one.
+ *
+ * AND A CALL THAT DID NOT APPLY APPENDED NOTHING (2026/09/17)
+ * ----------------------------------------------------------
+ * The history carries every action that touched the account, including the
+ * ones the ledger refused: `transactionResult.status` is `SUCCESS`,
+ * `FAILURE`, or `PARTIAL_SUCCESS` (`src/verify/indexer.ts`, `src/lib/
+ * indexerTx.ts`). A `FAILURE` wrote no cell, so counting it puts every later
+ * index out by one — the confident wrong position this module exists never to
+ * produce — and it is skipped like a deploy. `PARTIAL_SUCCESS` is the one
+ * nothing here can decide: part of the transaction applied and the answer does
+ * not say which part, so an appender in that state stops the count exactly as
+ * a grant withdrawal does. A row whose status the answer did not carry is
+ * counted as before, because an indexer that does not report one says nothing
+ * either way and the alternative would stop every count on this build.
  */
 
 /* -------------------------------------------------------------------------- */
@@ -115,7 +129,7 @@ export function custodyActionHistoryQuery(
     actions(limit: ${limit}) {
       __typename
       ... on ContractCall { entryPoint }
-      transaction { hash }
+      transaction { hash transactionResult { status } }
     }
   }
 }`;
@@ -138,6 +152,16 @@ export interface CustodyActionRow {
   readonly entryPoint: string | null;
   /** The transaction's own hash, or null where the row carried none. */
   readonly txHash: string | null;
+  /**
+   * The ledger's apply result — `SUCCESS`, `FAILURE`, `PARTIAL_SUCCESS` — or
+   * ABSENT where the answer carried none.
+   *
+   * Absent and null are not the same thing here and the count reads them
+   * differently: absent is an indexer that was not asked or did not say, which
+   * changes nothing; a status that is present and is not `SUCCESS` is a
+   * transaction that did not do what its entry point names.
+   */
+  readonly status?: string | null;
 }
 
 /** The action types that run no circuit and therefore append nothing. */
@@ -190,8 +214,16 @@ export function custodyActionRowsFrom(
     const row = action as { __typename?: unknown; entryPoint?: unknown; transaction?: unknown };
     const transaction =
       row.transaction && typeof row.transaction === 'object'
-        ? (row.transaction as { hash?: unknown })
+        ? (row.transaction as { hash?: unknown; transactionResult?: unknown })
         : null;
+    const result =
+      transaction && transaction.transactionResult && typeof transaction.transactionResult === 'object'
+        ? (transaction.transactionResult as { status?: unknown })
+        : null;
+    /* The key is left OFF where no status was reported, rather than set to
+       null: the count treats "not said" and "said, and it was not SUCCESS" as
+       different answers. */
+    const status = result && typeof result.status === 'string' ? result.status : undefined;
     rows.push({
       kind: KNOWN_ACTION_KINDS.includes(row.__typename as CustodyActionKind)
         ? (row.__typename as CustodyActionKind)
@@ -201,6 +233,7 @@ export function custodyActionRowsFrom(
         transaction && typeof transaction.hash === 'string' && transaction.hash.length > 0
           ? transaction.hash
           : null,
+      ...(status === undefined ? {} : { status }),
     });
   }
   /* A FULL PAGE IS A TRUNCATED ONE, and a truncated history counts SHORT.
@@ -234,6 +267,21 @@ export interface CustodyInboxTransactions {
   readonly indeterminateFrom: number | null;
 }
 
+/** A transaction the ledger refused outright: it wrote nothing at all. */
+function appliedNothing(row: CustodyActionRow): boolean {
+  return row.status === 'FAILURE';
+}
+
+/**
+ * A transaction that either applied whole or said nothing about it.
+ *
+ * `PARTIAL_SUCCESS` — and any status this build does not recognise — is
+ * neither, and an appending call in that state stops the count.
+ */
+function appliedWhole(row: CustodyActionRow): boolean {
+  return row.status === undefined || row.status === null || row.status === 'SUCCESS';
+}
+
 /**
  * Walk a history and say which transaction wrote each inbox entry.
  *
@@ -252,11 +300,20 @@ export function custodyInboxTransactions(
        cell, so both are skipped rather than stopping the count. */
     if (NON_CIRCUIT_ACTIONS.includes(row.kind)) continue;
     if (row.kind === 'ContractCall' && row.entryPoint !== null) {
-      if (INBOX_APPENDING_ENTRY_POINTS.includes(row.entryPoint)) {
+      /* A CALL THE LEDGER REFUSED WROTE NO CELL. Skipped like a deploy: the
+         action is in the history and the entry is not in the inbox, so
+         counting it would put every later index out by one. */
+      if (appliedNothing(row)) continue;
+      if (INBOX_APPENDING_ENTRY_POINTS.includes(row.entryPoint) && appliedWhole(row)) {
         transactions.push(row.txHash);
         continue;
       }
-      if (!INBOX_MAY_APPEND_ENTRY_POINTS.includes(row.entryPoint)) continue;
+      if (
+        !INBOX_APPENDING_ENTRY_POINTS.includes(row.entryPoint) &&
+        !INBOX_MAY_APPEND_ENTRY_POINTS.includes(row.entryPoint)
+      ) {
+        continue;
+      }
     }
     /* Everything left is a call that MAY have appended one entry and gives no
        way to tell — the four grant withdrawals — or a row this build could not

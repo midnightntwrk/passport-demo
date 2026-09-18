@@ -109,7 +109,17 @@ vi.mock('./contractRuntime.js', async (importOriginal) => ({
     Promise.resolve(name === 'account-custody' ? custodyModule : {}),
   sharedPublicDataProvider: () =>
     Promise.resolve({
-      queryContractState: () => Promise.resolve({ data: {} }),
+      /* COUNTED, and refusable. The delivery watch is a loop over this read,
+         and "it stopped when it found the entry" and "it gave up rather than
+         spinning" are both statements about HOW MANY times it ran. */
+      queryContractState: () => {
+        stateReads += 1;
+        if (failStateReads > 0) {
+          failStateReads -= 1;
+          return Promise.reject(new Error('the indexer is not answering'));
+        }
+        return Promise.resolve({ data: {} });
+      },
     }),
 }));
 
@@ -146,6 +156,11 @@ vi.mock('@midnight-ntwrk/midnight-js-contracts', () => ({
 
 /** What the contract does when a circuit is called, for the drill that cares. */
 let onCall: ((circuit: string, args: unknown[]) => void) | null = null;
+
+/** How many times the recipient's public state has been read this test. */
+let stateReads = 0;
+/** How many of the next reads answer with a failure rather than a state. */
+let failStateReads = 0;
 
 /* -------------------------------------------------------------------------- */
 /* Fixtures                                                                   */
@@ -212,6 +227,8 @@ beforeEach(() => {
   recipient.inboxCount = 0n;
   recipient.entries.clear();
   onCall = null;
+  stateReads = 0;
+  failStateReads = 0;
   readAccountBuild.mockReset();
 });
 
@@ -521,5 +538,187 @@ describe('accountModuleIfKnown', () => {
     const { accountModuleIfKnown } = await loadModule();
     await expect(accountModuleIfKnown(NETWORK, 'not-an-address')).resolves.toBeNull();
     expect(readAccountBuild).not.toHaveBeenCalled();
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The branches nothing else reaches, and the watch's own bounds              */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Added 2026/09/17 with the hardening pass. Three things the drills above
+ * establish for one build and not for the others, each of which is a payment
+ * going wrong silently:
+ *
+ *   - the PROTOTYPE arguments, byte for byte, on both prototype builds. The
+ *     three-leg passkey send and the node-error-239 fix behind it are held
+ *     together by `deposit_shielded` taking exactly one argument there, and a
+ *     second argument arriving would be refused by the compiled ABI after the
+ *     money had already left an earlier leg;
+ *   - a recipient whose build could not be READ at all, which must refuse and
+ *     submit nothing rather than guessing at a circuit name;
+ *   - the delivery watch's own bounds: it stops the moment it finds the bytes,
+ *     it asks again when a read fails, and it gives up after a bounded number
+ *     of attempts rather than spinning.
+ */
+describe('the prototype arguments, byte for byte', () => {
+  for (const build of ['account', 'account-v1'] as const) {
+    it(`sends a shielded deposit into ${build} with the one argument it has always taken`, async () => {
+      readAccountBuild.mockResolvedValue(build);
+      const { depositShielded } = await loadModule();
+      const result = await depositShielded(walletHolding(0n), {
+        contractAddress: PEER,
+        coin: COIN,
+      });
+
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.circuit).toBe('deposit_shielded');
+      expect(calls[0]?.args).toHaveLength(1);
+      const [coin] = calls[0]?.args as [{ nonce: Uint8Array; color: Uint8Array; value: bigint }];
+      /* The exact shape, and nothing beside it: no entry, no seal, no read of
+         the recipient's key. */
+      expect(Object.keys(coin).sort()).toEqual(['color', 'nonce', 'value']);
+      expect(bytesToHex(coin.nonce)).toBe(bytesToHex(COIN.nonce));
+      expect(bytesToHex(coin.color)).toBe(MUSD);
+      expect(coin.value).toBe(COIN.value);
+      expect(result.delivery).toBeUndefined();
+    });
+
+    it(`sends NIGHT into ${build} through deposit_night, with the colour and the amount`, async () => {
+      readAccountBuild.mockResolvedValue(build);
+      const { depositNight, nightColourHex } = await loadModule();
+      await depositNight(walletHolding(10n), {
+        contractAddress: PEER,
+        colourHex: nightColourHex(),
+        amount: 5n,
+      });
+
+      expect(calls[0]?.circuit).toBe('deposit_night');
+      expect(calls[0]?.args).toHaveLength(2);
+      expect(bytesToHex(calls[0]?.args[0] as Uint8Array)).toBe(NIGHT_COLOUR);
+      expect(calls[0]?.args[1]).toBe(5n);
+    });
+  }
+});
+
+describe('a recipient whose build cannot be read', () => {
+  it('refuses a shielded payment, and submits nothing', async () => {
+    readAccountBuild.mockResolvedValue(null);
+    const { depositShielded } = await loadModule();
+    await expect(
+      depositShielded(walletHolding(0n), { contractAddress: PEER, coin: COIN }),
+    ).rejects.toMatchObject({ code: 'network-unreachable' });
+    expect(calls).toHaveLength(0);
+  });
+
+  it('refuses when the read itself fails, rather than guessing a circuit', async () => {
+    readAccountBuild.mockRejectedValue(new Error('the indexer is not answering'));
+    const { depositShielded } = await loadModule();
+    await expect(
+      depositShielded(walletHolding(0n), { contractAddress: PEER, coin: COIN }),
+    ).rejects.toThrow();
+    expect(calls).toHaveLength(0);
+  });
+
+  it('refuses a payment through the one helper another surface calls', async () => {
+    readAccountBuild.mockResolvedValue(null);
+    const { payCustodyAccount, nightColourHex } = await loadModule();
+    await expect(
+      payCustodyAccount(walletHolding(10n), {
+        targetAddress: PEER,
+        kind: 'night',
+        colourHex: nightColourHex(),
+        amount: 5n,
+      }),
+    ).rejects.toMatchObject({ code: 'network-unreachable' });
+    expect(calls).toHaveLength(0);
+  });
+});
+
+describe('the delivery watch', () => {
+  /** A recipient that publishes a key, with the contract writing what it is given. */
+  function payableRecipient(): { secretKeyHex: string } {
+    const keys = generateCustodyEncKeyPair();
+    recipient.encKeyHex = keys.publicKeyHex;
+    recipient.inboxCount = 9n;
+    readAccountBuild.mockResolvedValue('account-custody');
+    return keys;
+  }
+
+  it('stops the moment it finds this payment’s own bytes', async () => {
+    payableRecipient();
+    onCall = (circuit, args) => {
+      if (circuit !== 'deposit_shielded') return;
+      recipient.entries.set(recipient.inboxCount.toString(), args[1] as Uint8Array);
+      recipient.inboxCount += 1n;
+    };
+    const { depositShielded } = await loadModule();
+    const result = await depositShielded(walletHolding(0n), {
+      contractAddress: PEER,
+      coin: COIN,
+    });
+
+    expect(result.delivery).toBe('delivered');
+    /* One read to take the key and the length the seal was made over, one to
+       find the bytes. A watch that kept reading after finding them would be
+       asking a question it already has the answer to. */
+    expect(stateReads).toBe(2);
+  });
+
+  it('asks again when a read fails, because that is the indexer and not the payment', async () => {
+    payableRecipient();
+    onCall = (circuit, args) => {
+      if (circuit !== 'deposit_shielded') return;
+      recipient.entries.set(recipient.inboxCount.toString(), args[1] as Uint8Array);
+      recipient.inboxCount += 1n;
+      /* The first read of the watch answers with a failure. */
+      failStateReads = 1;
+    };
+    const { depositShielded } = await loadModule();
+    vi.useFakeTimers();
+    const watched = runOutTheDeliveryWatch(
+      depositShielded(walletHolding(0n), { contractAddress: PEER, coin: COIN }),
+    );
+
+    await expect(watched).resolves.toMatchObject({ delivery: 'delivered' });
+    expect(stateReads).toBe(3);
+  });
+
+  it('gives up after a bounded number of attempts rather than spinning', async () => {
+    payableRecipient();
+    const { depositShielded } = await loadModule();
+    vi.useFakeTimers();
+    const watched = runOutTheDeliveryWatch(
+      depositShielded(walletHolding(0n), { contractAddress: PEER, coin: COIN }),
+    );
+
+    await expect(watched).resolves.toMatchObject({ delivery: 'unconfirmed' });
+    /* A minute of attempts, three seconds apart, and then an honest answer —
+       never a loop, and never a failure, because the payment was submitted and
+       may well be there. */
+    expect(stateReads).toBeGreaterThan(5);
+    expect(stateReads).toBeLessThanOrEqual(25);
+  });
+
+  it('is not confirmed by an entry that shares all but one byte with ours', async () => {
+    /* NEAR-MISS, ON PURPOSE. A walk that compared prefixes, or lengths, or
+       anything short of every byte would report somebody else's delivery as
+       this payment's. */
+    payableRecipient();
+    onCall = (circuit, args) => {
+      if (circuit !== 'deposit_shielded') return;
+      const ours = args[1] as Uint8Array;
+      const nearly = new Uint8Array(ours);
+      nearly[nearly.length - 1] ^= 1;
+      recipient.entries.set(recipient.inboxCount.toString(), nearly);
+      recipient.inboxCount += 1n;
+    };
+    const { depositShielded } = await loadModule();
+    vi.useFakeTimers();
+    const watched = runOutTheDeliveryWatch(
+      depositShielded(walletHolding(0n), { contractAddress: PEER, coin: COIN }),
+    );
+
+    await expect(watched).resolves.toMatchObject({ delivery: 'unconfirmed' });
   });
 });

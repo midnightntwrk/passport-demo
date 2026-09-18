@@ -728,12 +728,24 @@ export function newCustodyShieldedSend(input: {
   };
 }
 
+/**
+ * Every stage a stored record may be in — the list a record is READ BACK
+ * against, so a stage missing from it is a record that vanishes on reload.
+ *
+ * `'unconfirmed'` was missing until 2026/09/17, and it is the most expensive
+ * one to lose: it is written exactly when value has left the Passport and
+ * nothing here can see which side holds it (`../screens/DynamicPassport.tsx`
+ * saves it before it throws). A record that will not parse is a record the
+ * screen reads as "no payment in flight", so a reload replaced the one
+ * sentence that says what happened with silence.
+ */
 const SHIELDED_SEND_STAGES: readonly CustodyShieldedSendStage[] = [
   'withdrawing',
   'awaiting-note',
   'depositing',
   'returning',
   'done',
+  'unconfirmed',
   'stranded',
 ];
 
@@ -848,6 +860,11 @@ export function nextCustodyShieldedSendStep(
   if (record.stage === 'depositing') return record.noteNonce === null ? 'find-note' : 'deposit';
   if (record.stage === 'returning') return 'report';
   if (record.stage === 'stranded') return 'report';
+  /* Out of the account, in neither account as far as this build can see, and
+     with no leg left to run: the caller's job is to say so. `'nothing'` would
+     leave a person who reopened Passport with no sign of a payment that has
+     demonstrably left it. */
+  if (record.stage === 'unconfirmed') return 'report';
   return 'nothing';
 }
 
