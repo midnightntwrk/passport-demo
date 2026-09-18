@@ -408,6 +408,18 @@ async function main(): Promise<void> {
    * there and the refusal is always the same sentence.
    */
   const custodyProver = custodyProverFromConfig(config);
+  /* WHAT IS STAGED, at start-up, in the journal. `/status` publishes the same
+     counts under `accountCustodyProving.staged`, and both exist because
+     `configured: true` is not readiness: the 3.5 GB of artefacts are rsynced
+     arm by arm and by hand, so a host can name a directory and a proof server
+     and still refuse every passkey Passport when it comes to prove. Asked once
+     here so an operator who has just staged an arm reads it from the journal
+     rather than from the first person whose Passport cannot be activated.
+     Never awaited — it reads the compiled build, and nothing else waits on
+     it. */
+  void custodyProver
+    .readiness()
+    .then((line) => console.log(`[${PROVE_ACCOUNT_CUSTODY_PREFIX}] ${line}`));
 
   /**
    * Alias registrations in progress, keyed BOTH ways: `alias:<label>` and
