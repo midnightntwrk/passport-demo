@@ -533,6 +533,135 @@ rather than claiming it came back. The record that survives a closed tab
 deposits (0.4 MB and 11 MB) prove on the ordinary v3 route `createContractProviders`
 already builds, so a payment does not queue behind a 235 MB proof.
 
+### 3c. The one-transaction send, as built — 2026/09/18
+
+**§3b's "Three legs, and where the value is" is superseded by this section.** The
+three-leg shape is gone from the code: `waitForNote`, `deliverNote`,
+`findStoppedNote`, `awaitCustodyStoppedNote`, `depositShieldedIntoCustody`,
+`custodyPermissionlessCallAt` and the Finish button are deleted, and the stages
+`awaiting-note`, `depositing`, `returning`, `unconfirmed` and `stranded` with
+them. A shielded payment is now ONE transaction, and the live evidence is in
+`scratchpad/live-proxy/RUN-direct.md`.
+
+#### Two doors, one engine
+
+`spendShieldedK1` is the engine and takes the whole payment; two thin functions
+are the doors, and the difference between them is decided once, on the shape of
+what the person typed:
+
+- **`withdrawShieldedK1`** — an `mn_shield-addr…` was typed. ONE call,
+  `withdraw_shielded_with_k256`, carrying
+  `additionalCoinEncPublicKeyMappings: Map(coinPkHex → encPkHex)` built from
+  `decodeShieldedRecipient`. That mapping is the whole of why an ordinary wallet
+  can find the coin: without it the output exists and its ciphertext is
+  addressed to nobody the recipient scans for.
+- **`withdrawShieldedToContractK1`** — a `.night` name was typed and resolved to
+  another account. TWO calls in one transaction (below).
+
+Only a shielded amount may go to an address: the account's unshielded holdings
+are a mirror the contract keeps, and nothing at a shielded address can write one.
+
+#### The composed transaction, exactly
+
+Per candidate position, in `spendShieldedK1`:
+
+1. `createUnprovenCallTx` on the SENDER for
+   `withdraw_shielded_to_contract_with_k256`, with the recipient contract as the
+   payee and `privateStateId` set — this Passport's own store.
+2. `directSpendFromResult(spend.private.result)` → `[sent, change]`. **`sent === null`
+   throws before anything is submitted.** A coin nobody can describe stops the
+   payment instead of arriving unspendable.
+3. `sealCustodyInboxEntry(recipientEncKeyHex, sent)` — the entry the recipient
+   decrypts, sealed to a key read live off the chain.
+4. `createUnprovenCallTx` on the RECIPIENT for `deposit_shielded`, **with no
+   `privateStateId`**. This is deliberate and load-bearing: a connection
+   addressed at somebody else's account must never be served this Passport's
+   coin store.
+5. `graftIntent` — `txA.addIntent({tag:'random'}, [...txB.intents.values()][0]) ?? txA`.
+   **Never merge.** `mergeUnsubmittedCallTxData` is midnight-js's multi-call path
+   and it is a MERGE, which is wrong here; it is reached only from `scoped()` and
+   `submitCallTx`, both of which this code bypasses. The graft is at the ledger
+   level, the same move `custody-payments.ts` makes.
+6. `submitTx(providers, { unprovenTx: composed, circuitId: [both] })`.
+
+**`submitTx` does not compose anything.** Read from `dist/index.js`: `submitTx` →
+`submitTxCore` = `proveTx` → `balanceTx` → `submitTx`, with no merge step, and
+the `circuitId` it is handed is never read. It is passed as an array only so the
+proof provider can name both circuits to the sponsor; the composition is already
+done by step 5.
+
+#### Proving: one request, every circuit the transaction calls
+
+`POST /prove-account-custody` takes `circuits: […]` (a single `circuit:` string
+is still answered, so nothing that predates this breaks). The sponsor validates
+and stage-checks **every** name and refuses more than four. It then hands the
+whole transaction to ONE `httpClientProofProvider.proveTx`, which walks the
+transaction's own calls and fetches each circuit's key — so two circuits are
+proved in one request rather than two.
+
+**Live:** `withdraw_shielded_to_contract_with_k256 + deposit_shielded`, 6477
+bytes in, proved in **131.3 s**, 28827 bytes out.
+
+**The 2 MiB cap is not a constraint.** Measured on the wire from the proxy's own
+captures: the address door 5163 bytes, the composed door **6477 bytes — 0.31 %
+of 2 MiB**, the change backfill 2374 bytes. There is three orders of magnitude of
+room, so nothing in this design needs to be shaped around the limit.
+
+**Nothing proves in the tab.** Every account-custody proof leaves the browser:
+the small keys on the ordinary v3 route, the 235 MB gated keys on the sponsor's
+own route. The sponsor therefore sees the coin and the amount of every gated
+call. That is a recorded decision, not an oversight — the alternative is a 235 MB
+key download per payment — and it is the reason the sponsor is a trusted
+component and is said so here rather than in a footnote.
+
+#### The recipient's position: the reported window first, then a sweep
+
+A withdrawal's change comes back described but WITHOUT `mt_index`, because the
+position is allocated by the transaction being submitted at that moment. So the
+client asks the indexer for the transaction's window and tries the positions in
+it. The rule, in `widenK1CoinCandidates`:
+
+**The plain `[startIndex, endIndex)` window is tried first, in full. Only when it
+is exhausted is a ±4 sweep appended, once.** The sweep reads the ORIGINAL window
+as its base, never the list it is extending — sweeping from the whole list widens
+around its own additions for ever, and a unit drill in `k1CoinStore.test.ts`
+catches exactly that. `K1_CANDIDATE_SWEEP = 4`, and the whole thing is
+idempotent: running it twice adds nothing.
+
+Seven live two-output transactions in `RUN.md` split three-first / four-second,
+and this run adds more. **There is still no stable output order**, which is why
+the window is walked rather than indexed into.
+
+#### The change backfill
+
+After the send is reported — non-blocking, never in the payment's path — the
+change coin's description is written into the sender's OWN inbox by
+`appendChangeToInboxK1`, so a Passport restored on another device can find it by
+walking the inbox rather than needing a store it does not have. Live:
+`append_inbox_with_k256`, proved in 56.6 s, SUCCESS.
+
+**It costs a second approval.** `append_inbox` is gated, so the person is asked
+to sign twice for one payment. Whether that is acceptable, or whether the entry
+should be batched into a later transaction, is an open question for Nicolas.
+
+#### What a reopened Passport is owed
+
+Stages are `sending` and `done`, and `nextCustodyShieldedSendStep` returns
+`'report'` or `'nothing'` — **there is no `'finish'`**. A send is one transaction,
+so there is no leg for a button to run, and a button offering to "finish" one
+would be a button offering to pay twice. What is owed is a sentence and a
+Dismiss, and the sentence points at the balance on the same screen.
+
+#### On §6, "Restorable on another device"
+
+The backfill is a real part of the answer to §6's hard half and should be read
+into it: the inbox now carries the sender's own change, not only what others
+deposited, so walking the inbox from ordinal 0 reconstructs more of the store
+than it could before. **It does not close §6.** The viewing key is still private
+and Dynamic still exports nothing it can be derived from, so "restorable" still
+means "can receive" until that is solved. What changed is the size of what a
+viewing key would recover, not whether one can be had.
+
 ## 4. Migration, through `accountUpgrade.ts`
 
 Extend the machine, do not rewrite it. Drain → deploy → re-point → refund → switch, with
