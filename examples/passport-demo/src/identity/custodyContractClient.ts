@@ -713,10 +713,11 @@ function circuitResultOf(callResult: unknown): unknown {
  */
 export async function deployCustodyAccount(
   session: CustodyDynamicSession,
-  /* GENERALISATION 1 of 5 (2026/09/18, passkey arm): the wave plan's arm.
-     Either arm's device now, and the Passport is filed under the device's own
-     key — `custodyUserKey` — so a passkey account is not named by a Dynamic
-     address it does not have. */
+  /* THE ARM WIDENING (2026/09/18, passkey arm). Either arm's device now, and
+     the Passport is filed under the device's own key — `custodyUserKey` — so a
+     passkey account is not named by a Dynamic address it does not have. The
+     five points that were hardcoded to `k256` are marked GENERALISATION n of 5
+     where each of them is. */
   device: CustodyDeviceIdentity,
   onPhase?: (phase: CustodyPhase) => void,
   overrides: Partial<CustodyDeps> = {},
@@ -755,7 +756,7 @@ export async function deployCustodyAccount(
   );
   const verifierKeys = await readVerifierKeys(providers, module, device.arm);
   const sizes = new Map([...verifierKeys].map(([id, key]) => [id, key.length]));
-  /* GENERALISATION 2 of 5. The plan's FIRST arm is the device's: wave 1 must
+  /* GENERALISATION 1 of 5. The plan's FIRST arm is the device's: wave 1 must
      carry `activate_initial_device_with_<arm>`, because the constructor's boot
      commitment binds the arm and no later wave can repair a deploy that left
      the activation circuit out. `planCustodyWaves` has taken the arm since it
@@ -817,7 +818,7 @@ export async function deployCustodyAccount(
 async function readVerifierKeys(
   providers: Record<string, unknown>,
   _module: CustodyContractModule,
-  /* GENERALISATION 3 of 5. `allCustodyCircuits` orders the roster by which arm
+  /* GENERALISATION 2 of 5. `allCustodyCircuits` orders the roster by which arm
      goes first; the sizes feed the wave plan, so reading them for the other arm
      would plan the waves in the wrong order. */
   firstArm: K1Arm,
