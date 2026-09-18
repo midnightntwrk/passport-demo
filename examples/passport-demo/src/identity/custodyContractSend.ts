@@ -587,6 +587,26 @@ export function directSpendFromResult(result: unknown): CustodyDirectSpend {
  * only material available: the merkle path is named by the runtime that could
  * not build it, not by an error code.
  */
+/**
+ * The text {@link spendPositionMayBeWrong} judges — an error's NAME as well as
+ * its message.
+ *
+ * A WebAssembly trap arrives as `name: 'RuntimeError'`, `message: 'unreachable'`,
+ * and `Error.prototype.message` alone is therefore the word `unreachable` with
+ * nothing in it to recognise. Reading the message alone is why the retry did not
+ * fire on the second live attempt of 2026/09/18 even after the predicate had
+ * been corrected: the predicate was right and was being handed half the evidence.
+ */
+export function spendFailureText(cause: unknown): string {
+  if (!(cause instanceof Error)) return String(cause);
+  /* `Error.name` is a string by the type, so it is not guarded for: what IS
+     guarded for is a name that says nothing (empty) or one the message already
+     carries, either of which would only pad the text. */
+  const { name, message } = cause;
+  if (name.length === 0 || message.includes(name)) return message;
+  return `${name}: ${message}`;
+}
+
 export function spendPositionMayBeWrong(message: string): boolean {
   const text = typeof message === 'string' ? message.toLowerCase() : '';
   if (text.length === 0) return false;

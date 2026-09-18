@@ -152,6 +152,7 @@ import {
   changeCoinFromResult,
   custodyChangeBackfill,
   directSpendFromResult,
+  spendFailureText,
   spendPositionMayBeWrong,
   type CustodyChangeCoin,
 } from './custodyContractSend.js';
@@ -1713,7 +1714,9 @@ export async function spendShieldedK1(
         candidate: attempt,
       };
     } catch (cause) {
-      const message = messageOf(cause);
+      /* NAME AND MESSAGE BOTH. A WASM trap's message is the bare word
+         `unreachable`; what identifies it is its NAME. */
+      const message = spendFailureText(cause);
       /* THE ONE QUESTION THAT DECIDES A RETRY: could this transaction already
          be away? A proof that came back means `submitTx` went on to balance and
          submit, and a transaction that may be on its way must NEVER be built a

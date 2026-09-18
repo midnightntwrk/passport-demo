@@ -22,6 +22,7 @@ import {
   newCustodyShieldedSend,
   nextCustodyShieldedSendStep,
   saveCustodyShieldedSend,
+  spendFailureText,
   spendPositionMayBeWrong,
   CUSTODY_APPROVAL_WAITING,
   CUSTODY_SHIELDED_SEND_KEY,
@@ -476,6 +477,38 @@ describe('changeCoinFromResult', () => {
       expect(read.outcome).toBe('unreadable');
       expect(read).toHaveProperty('reason');
     }
+  });
+});
+
+describe('spendFailureText', () => {
+  /* THE DEFECT THIS CATCHES, live on 2026/09/18 and on the second attempt at
+     fixing it: a WebAssembly trap is `name: 'RuntimeError'`, `message:
+     'unreachable'`, so the message on its own is one word with nothing in it to
+     recognise — and the predicate below, however right, cannot judge evidence it
+     is not given. It is also what a person was shown: the alert read
+     `unreachable`. */
+  it('carries the error’s name, because a WASM trap keeps its evidence there', () => {
+    const trap = new Error('unreachable');
+    trap.name = 'RuntimeError';
+    expect(spendFailureText(trap)).toBe('RuntimeError: unreachable');
+    expect(spendPositionMayBeWrong(spendFailureText(trap))).toBe(true);
+  });
+
+  it('does not repeat a name the message already carries', () => {
+    const named = new Error('RuntimeError: unreachable');
+    named.name = 'RuntimeError';
+    expect(spendFailureText(named)).toBe('RuntimeError: unreachable');
+  });
+
+  it('adds nothing when the name says nothing', () => {
+    const nameless = new Error('could not build the merkle path');
+    nameless.name = '';
+    expect(spendFailureText(nameless)).toBe('could not build the merkle path');
+  });
+
+  it('reads anything that is not an error as itself', () => {
+    expect(spendFailureText('a plain string')).toBe('a plain string');
+    expect(spendFailureText(null)).toBe('null');
   });
 });
 
