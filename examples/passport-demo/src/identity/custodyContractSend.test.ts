@@ -637,6 +637,14 @@ describe('the record a stopped send leaves behind', () => {
     expect(custodyShieldedSendOutcome(send())).toMatch(/still in your Passport/);
     expect(custodyShieldedSendOutcome(send({ stage: 'awaiting-note' }))).toMatch(/has not reached/);
     expect(custodyShieldedSendOutcome(send({ stage: 'depositing' }))).toMatch(/has not reached/);
+    /* AND IT DOES NOT PROMISE A RESUME NOBODY WROTE. There is no auto-resume:
+       the last leg runs when the Finish button is pressed, so a sentence
+       telling somebody to come back and wait left them waiting for good. */
+    for (const stage of ['awaiting-note', 'depositing'] as const) {
+      const sentence = custodyShieldedSendOutcome(send({ stage }));
+      expect(sentence).not.toMatch(/by itself|on its own\./);
+      expect(sentence).toMatch(/press Finish this payment/);
+    }
     expect(custodyShieldedSendOutcome(send({ stage: 'returning' }))).toMatch(/being put back/);
     const stranded = custodyShieldedSendOutcome(send({ stage: 'stranded' }));
     expect(stranded).toMatch(/could not be put back/);

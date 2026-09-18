@@ -892,7 +892,13 @@ export function custodyShieldedSendOutcome(record: CustodyShieldedSendRecord): s
       return 'Nothing was sent, and it is all still in your Passport.';
     case 'awaiting-note':
     case 'depositing':
-      return `It has left your Passport and has not reached ${who} yet. Open Passport again in a moment and it will finish by itself.`;
+      /* IT DOES NOT FINISH BY ITSELF, and the sentence used to say it would
+         (review, 2026/09/18). Nothing resumes a stopped payment on its own:
+         the last leg runs when somebody presses the button that runs it, and
+         telling a person to come back in a moment and wait left them waiting
+         for a thing that was never going to happen. The wording names the
+         button `../lib/custodyAssets.ts`'s resume offer puts on the screen. */
+      return `It has left your Passport and has not reached ${who} yet. It does not finish on its own: open Passport and press Finish this payment.`;
     case 'returning':
       return `It did not reach ${who}, so it is being put back into your Passport.`;
     case 'unconfirmed':
