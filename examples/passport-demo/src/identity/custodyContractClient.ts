@@ -1849,12 +1849,7 @@ export async function spendShieldedK1(
          is the divergence `k1Call` writes down as GENERALISATION 5 and which is
          made here for the same reason: this function composes its own
          transaction and cannot go through `k1Call`. */
-      const challenges = device.arm === 'jubjub' ? jubjubChallenges : k256Challenges;
-      const build =
-        target.kind === 'address'
-          ? challenges.withdrawShielded
-          : challenges.withdrawShieldedToContract;
-      const challenge = build(
+      const challengeArgs = [
         module.pureCircuits,
         context,
         device.pk,
@@ -1862,7 +1857,12 @@ export async function spendShieldedK1(
         colourBytes,
         request.amount,
         coin,
-      );
+      ] as const;
+      const challenges = device.arm === 'jubjub' ? jubjubChallenges : k256Challenges;
+      const challenge: K1Challenge =
+        target.kind === 'address'
+          ? challenges.withdrawShielded(...challengeArgs)
+          : challenges.withdrawShieldedToContract(...challengeArgs);
 
       let auth: K1Authorisation;
       if (device.arm === 'jubjub') {
