@@ -1169,12 +1169,26 @@ export function k1CoinCandidates(account: K1Account, colour: string): bigint[] {
 /**
  * The spend against the current position failed to prove; move to the next.
  *
- * Returns the coin as it now stands, or null when the candidates are
- * exhausted. Exhausted does NOT drop the coin: the description is still the
- * only one that exists, the failure may have been about something else
- * entirely, and a re-reconciliation against the same transaction can hand back
- * the same list to start again. What it does mean is that this module has
- * nothing further to suggest, and the caller says so rather than looping.
+ * Returns the coin as it now stands, or null when every candidate has been
+ * tried. Exhausted does NOT drop the coin: the description is still the only
+ * one that exists, the failure may have been about something else entirely,
+ * and this module simply has nothing further to suggest — the caller says so
+ * rather than looping.
+ *
+ * THE LIST IS ROTATED THROUGH AND NEVER CONSUMED, and that is the repair for a
+ * colour a Passport could be locked out of for good (review, 2026/09/18). The
+ * earlier version deleted the list on exhaustion and left the coin sitting on
+ * the LAST guess, so a failure that was never about the position at all — a
+ * proof service restarted mid-spend answers the same way an unsatisfiable
+ * witness does — cost both approvals and then left the store holding a
+ * position nothing was going to move off, with `reconcileK1CoinFromChain`
+ * answering `'known'` for the held nonce and so rebuilding nothing. Rotating
+ * costs a stored list that stays honest about what is still a guess, and it
+ * means the next spend of that colour starts from the head again.
+ *
+ * WHICH CANDIDATE IS "CURRENT" IS THE COIN'S OWN POSITION, not a cursor beside
+ * it: one fact, so the two cannot disagree. A held position that is not in the
+ * list is not a place in it either, and the head is what gets tried.
  */
 export function advanceK1CoinCandidate(account: K1Account, colour: string): K1HeldCoin | null {
   const target = requireAccount(account);
@@ -1183,17 +1197,20 @@ export function advanceK1CoinCandidate(account: K1Account, colour: string): K1He
   const list = Object.hasOwn(draft.mtIndexCandidates, wanted)
     ? draft.mtIndexCandidates[wanted]
     : [];
-  const remaining = list.slice(1);
-  if (remaining.length === 0 || !Object.hasOwn(draft.coins, wanted)) {
-    /* Nothing left to try, or nothing to try it with. The list goes, because a
-       one-entry list says "still guessing" about a position nothing is going
-       to move off. */
-    delete draft.mtIndexCandidates[wanted];
+  /* Nothing to suggest, or nothing to suggest it for. Whatever list there is
+     stays exactly as it is: every writer of a coin in this colour clears it
+     ({@link putK1Coin}, {@link dropK1Coin}, {@link replaceK1Coin},
+     {@link settleK1Coin}), so it can only outlive the coin it belongs to. */
+  if (list.length === 0 || !Object.hasOwn(draft.coins, wanted)) return null;
+  const next = list.indexOf(draft.coins[wanted].mtIndex) + 1;
+  if (next >= list.length) {
+    /* Every position tried. The head goes back on the coin so the next spend
+       starts where the reconciliation put it, and the list is kept. */
+    draft.coins[wanted] = { ...draft.coins[wanted], mtIndex: list[0] };
     saveDraft(target, draft);
     return null;
   }
-  draft.mtIndexCandidates[wanted] = remaining;
-  draft.coins[wanted] = { ...draft.coins[wanted], mtIndex: remaining[0] };
+  draft.coins[wanted] = { ...draft.coins[wanted], mtIndex: list[next] };
   saveDraft(target, draft);
   return coinFromStoredRow(draft.coins[wanted]);
 }

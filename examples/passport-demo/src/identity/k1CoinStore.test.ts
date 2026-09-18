@@ -804,17 +804,40 @@ describe('a coin whose position the chain gave two answers for', () => {
       mtIndex: 11n,
     });
     expect(heldK1Coin(ALICE, NIGHT)?.mtIndex).toBe(11n);
-    expect(k1CoinCandidates(ALICE, NIGHT)).toEqual([11n]);
+    /* THE LIST IS NOT CONSUMED. Both positions are still the only two answers
+       the chain gave, and the next spend of this colour has to start from the
+       first of them again. */
+    expect(k1CoinCandidates(ALICE, NIGHT)).toEqual([10n, 11n]);
   });
 
-  it('runs out rather than looping, and keeps the coin when it does', () => {
+  it('runs out rather than looping, and keeps the coin and its candidates', () => {
     putK1CoinCandidates(ALICE, { colour: NIGHT, nonce: NONCE, value: 60n }, [10n]);
     expect(advanceK1CoinCandidate(ALICE, NIGHT)).toBeNull();
     expect(heldK1Coin(ALICE, NIGHT)?.mtIndex).toBe(10n);
-    expect(k1CoinCandidates(ALICE, NIGHT)).toEqual([]);
+    expect(k1CoinCandidates(ALICE, NIGHT)).toEqual([10n]);
     /* And with no coin to advance at all, which is a resumed run against a
        store somebody has reset in another tab. */
     expect(advanceK1CoinCandidate(ALICE, MUSD)).toBeNull();
+  });
+
+  it('tries the head when the position held is not one of the candidates', () => {
+    /* A blob from another build: a coin at a position its own list does not
+       contain. Walking off the end of the list is the one thing that must not
+       happen, and the head is the only guess this store ever offered. */
+    seed({
+      [k1AccountKey(ALICE)]: {
+        encSecretKeyHex: null,
+        coins: { [NIGHT]: { colorHex: NIGHT, nonceHex: NONCE, value: '60', mtIndex: '99' } },
+        queued: {},
+        spentNonces: [],
+        mtIndexCandidates: { [NIGHT]: ['10', '11'] },
+        awaiting: {},
+        unreadChange: {},
+      },
+    });
+
+    expect(advanceK1CoinCandidate(ALICE, NIGHT)?.mtIndex).toBe(10n);
+    expect(k1CoinCandidates(ALICE, NIGHT)).toEqual([10n, 11n]);
   });
 
   it('drops the candidates for a colour whose coin was spent or settled', () => {
