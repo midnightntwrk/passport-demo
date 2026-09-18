@@ -248,6 +248,24 @@ makes a coin the indexer has not caught up with safe is not a second spelling of
 question but the awaiting row itself, which is asked about again on every read of Home,
 after a reload, or tomorrow.
 
+**And `resolveHash` does not always have a hash — corrected 2026/09/18.** The paragraph
+above was written as though it did. `resolveTransactionHash` polls the indexer twenty
+times at half-second intervals and then **returns the identifier it was given**, which is
+not a failure and is indistinguishable from an answer at the call site. So an indexer
+more than ten seconds behind left the row filed under the identifier, with nothing to
+rename it to and every later read asking `{ hash: <identifier> }` — a question with no
+answer in it, for ever. The real rule, in one place used by both callers
+(`settleK1AwaitingCoinByChainHash` in `k1CoinStore.ts`, called by `settleShieldedChange`
+and by Home's walk of the awaiting rows):
+
+- a row whose `txId` is a 64-hex chain hash is settled directly;
+- a row whose `txId` is anything else — midnight-js's identifier is 66 hex — has the hash
+  asked for again, ONE question (`resolveTxHashOnce`), and is renamed the first time the
+  indexer can name it;
+- until then nothing is asked about a position, because the identifier form has no answer
+  in it, and the row stays exactly as it is. It counts as a payment still arriving, and
+  the next read of Home is what places it.
+
 The one fallback that does exist is about the SCHEMA and not the value:
 `resolveTxCommitmentWindowByHashOnce` re-asks under `{ identifier: … }` only when a
 deployment's schema refuses the `hash` field outright (GraphQL rejects an unknown field

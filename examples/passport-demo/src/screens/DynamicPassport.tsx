@@ -545,7 +545,7 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
          costs one indexer call per waiting coin and is what makes a reload, or
          simply coming back tomorrow, the remedy it ought to be. */
       try {
-        const { awaitingK1Coins, settleK1AwaitingCoin } = await import(
+        const { awaitingK1Coins, settleK1AwaitingCoinByChainHash } = await import(
           '../identity/k1CoinStore.js'
         )
         const runtime = await import('../identity/contractRuntime.js')
@@ -553,9 +553,22 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
           /* EACH ROW BY ITS OWN TRANSACTION. A colour can hold more than one
              coin waiting for a position — a spend's change, then a delivery,
              then a second spend's change — and each is filed under the
-             transaction that produced it. */
-          await settleK1AwaitingCoin(account, waiting.colour, waiting.txId, (txId) =>
-            runtime.resolveTxCommitmentWindowByHashOnce(opened.network.indexerHttpUrl, txId),
+             transaction that produced it.
+
+             AND BY THE CHAIN'S NAME FOR IT, which a row written while the
+             indexer lagged does not have: the spend's own resolution gives up
+             after ten seconds and hands back midnight-js's identifier, which
+             the indexer answers nothing for. The same helper the spend's settle
+             uses resolves it again here, so a row filed under an identifier is
+             renamed and placed by a later read rather than reading "arriving"
+             for ever. */
+          await settleK1AwaitingCoinByChainHash(
+            account,
+            waiting.colour,
+            waiting.txId,
+            (txId) => runtime.resolveTxHashOnce(opened.network.indexerHttpUrl, txId),
+            (txId) =>
+              runtime.resolveTxCommitmentWindowByHashOnce(opened.network.indexerHttpUrl, txId),
           )
         }
       } catch (cause) {

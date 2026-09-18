@@ -1067,6 +1067,67 @@ export async function settleK1AwaitingCoin(
 }
 
 /**
+ * Whether an awaiting row is still filed under midnight-js's own identifier
+ * rather than the chain's hash.
+ *
+ * THE TWO ARE DIFFERENT LENGTHS, and that is the whole test: a chain hash is 32
+ * bytes (64 hex characters) and midnight-js's identifier is 33 (66). Anything
+ * else is neither, and it is treated the same way as an identifier — there is
+ * nothing to lose by asking the indexer what it resolves to, and a coin filed
+ * under something the indexer cannot answer is a coin that reads as arriving
+ * for ever.
+ */
+export function k1AwaitingTxNeedsChainHash(txId: string): boolean {
+  return !/^[0-9a-f]{64}$/i.test(typeof txId === 'string' ? txId.trim() : '');
+}
+
+/**
+ * Settle an awaiting coin, resolving the chain's hash first when the row is
+ * still filed under an identifier.
+ *
+ * THE DEFECT THIS EXISTS FOR (review, 2026/09/18). `resolveTransactionHash`
+ * polls the indexer for ten seconds and then RETURNS THE IDENTIFIER IT WAS
+ * GIVEN, which is not a failure and reads as an answer. A spend whose indexer
+ * was more than ten seconds behind therefore filed its change under the
+ * identifier, found nothing to rename it to, and every later read asked for a
+ * commitment window at `{ hash: <identifier> }` — a question this indexer
+ * answers for nothing (§3b). The coin read "arriving" for the rest of the
+ * account's life, with the value in it.
+ *
+ * So the resolution is retried HERE, on the reads that follow, and the row is
+ * renamed the first time the indexer knows the transaction. One place, because
+ * both callers — the spend's own settle and Home's walk of the awaiting rows —
+ * have to do the same thing, and a second copy of it is how one of them stops
+ * doing it.
+ *
+ * A ROW WITH NO HASH YET IS NOT ASKED ABOUT. The identifier form of the
+ * question has no answer in it, so asking costs a round trip and can only come
+ * back empty; `'unavailable'` is what a row waiting for its own name is, and it
+ * is what the count of payments still arriving is drawn from.
+ */
+export async function settleK1AwaitingCoinByChainHash(
+  account: K1Account,
+  colour: string,
+  txId: string,
+  resolveChainHash: (txId: string) => Promise<string | null>,
+  reader: K1CommitmentWindowReader,
+): Promise<K1Reconciliation> {
+  if (!k1AwaitingTxNeedsChainHash(txId)) {
+    return settleK1AwaitingCoin(account, colour, txId, reader);
+  }
+  const answer = await resolveChainHash(txId);
+  const hash = typeof answer === 'string' ? answer.trim() : '';
+  if (hash === txId.trim() || k1AwaitingTxNeedsChainHash(hash)) {
+    return {
+      outcome: 'unavailable',
+      reason: `The transaction that produced this coin is not known to the chain by name yet (${JSON.stringify(txId)}).`,
+    };
+  }
+  renameK1AwaitingTx(account, colour, txId, hash);
+  return settleK1AwaitingCoin(account, colour, hash, reader);
+}
+
+/**
  * Re-file an awaiting coin under the transaction the CHAIN knows it by.
  *
  * A spend writes its change down the instant the circuit returns, and at that

@@ -22,6 +22,7 @@ import {
   heldK1Coin,
   isK1NonceSpent,
   k1AccountKey,
+  k1AwaitingTxNeedsChainHash,
   k1CoinCandidates,
   k1ColourBalance,
   k1PrivateStateId,
@@ -41,6 +42,7 @@ import {
   rememberK1ChangeCoin,
   replaceK1Coin,
   settleK1AwaitingCoin,
+  settleK1AwaitingCoinByChainHash,
   settleK1Coin,
   type K1Account,
   type K1CommitmentWindow,
@@ -1414,6 +1416,98 @@ describe('re-filing an awaiting coin under the chain hash', () => {
   it('does nothing when nothing of that colour is waiting', () => {
     renameK1AwaitingTx(ALICE, NIGHT, 'midnight-js-identifier', TX);
     expect(awaitingK1Coins(ALICE)).toEqual([]);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* Settling a row that is still filed under midnight-js's identifier          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * WHAT THIS PROTECTS: the change coin of a spend whose indexer was more than
+ * ten seconds behind.
+ *
+ * `resolveTransactionHash` polls for ten seconds and then RETURNS THE
+ * IDENTIFIER it was given — not a failure, and indistinguishable from an answer
+ * at the call site. The row was therefore left filed under a name the indexer
+ * answers no commitment window for, nothing renamed it afterwards, and the
+ * change read "arriving" for the rest of the account's life with the value in
+ * it (review, 2026/09/18).
+ */
+describe('a coin still waiting under the identifier it was filed with', () => {
+  const IDENTIFIER = 'cd'.repeat(33);
+  const HASH = 'ef'.repeat(32);
+  const CHANGE = { colour: NIGHT, nonce: OTHER_NONCE, value: 60n };
+
+  it('knows a chain hash from one of midnight-js’s identifiers', () => {
+    expect(k1AwaitingTxNeedsChainHash(HASH)).toBe(false);
+    expect(k1AwaitingTxNeedsChainHash(` ${HASH.toUpperCase()} `)).toBe(false);
+    expect(k1AwaitingTxNeedsChainHash(IDENTIFIER)).toBe(true);
+    expect(k1AwaitingTxNeedsChainHash('tx-1')).toBe(true);
+    expect(k1AwaitingTxNeedsChainHash('')).toBe(true);
+    expect(k1AwaitingTxNeedsChainHash(undefined as unknown as string)).toBe(true);
+  });
+
+  it('is renamed to the hash and settled on the next read once the indexer answers', async () => {
+    putK1Coin(ALICE, coin());
+    rememberK1ChangeCoin(ALICE, NIGHT, CHANGE, IDENTIFIER);
+    const window = vi
+      .fn<K1CommitmentWindowReader>()
+      .mockResolvedValue({ startIndex: 12, endIndex: 13 });
+    const resolve = vi.fn<(txId: string) => Promise<string | null>>().mockResolvedValue(HASH);
+
+    const outcome = await settleK1AwaitingCoinByChainHash(
+      ALICE,
+      NIGHT,
+      IDENTIFIER,
+      resolve,
+      window,
+    );
+
+    expect(outcome.outcome).toBe('learned');
+    expect(resolve).toHaveBeenCalledWith(IDENTIFIER);
+    /* THE QUESTION IS ASKED ABOUT THE HASH, never the identifier. */
+    expect(window).toHaveBeenCalledWith(HASH);
+    expect(heldK1Coin(ALICE, NIGHT)?.mtIndex).toBe(12n);
+    expect(awaitingK1Coins(ALICE)).toEqual([]);
+  });
+
+  it('asks nothing about a position while the indexer cannot name the transaction', async () => {
+    putK1Coin(ALICE, coin());
+    rememberK1ChangeCoin(ALICE, NIGHT, CHANGE, IDENTIFIER);
+    const window = vi.fn<K1CommitmentWindowReader>().mockResolvedValue(null);
+
+    for (const answer of [null, IDENTIFIER, ` ${IDENTIFIER} `, 'still-not-a-hash']) {
+      const outcome = await settleK1AwaitingCoinByChainHash(
+        ALICE,
+        NIGHT,
+        IDENTIFIER,
+        () => Promise.resolve(answer),
+        window,
+      );
+      expect(outcome.outcome).toBe('unavailable');
+    }
+    /* The row is still here, with its description and its identifier, which is
+       what makes a read tomorrow the remedy it ought to be. */
+    expect(window).not.toHaveBeenCalled();
+    expect(awaitingK1Coins(ALICE)).toEqual([
+      { colour: NIGHT, nonce: OTHER_NONCE, value: 60n, txId: IDENTIFIER },
+    ]);
+  });
+
+  it('asks nobody to name a row that is already filed under a chain hash', async () => {
+    putK1Coin(ALICE, coin());
+    rememberK1ChangeCoin(ALICE, NIGHT, CHANGE, HASH);
+    const window = vi
+      .fn<K1CommitmentWindowReader>()
+      .mockResolvedValue({ startIndex: 3, endIndex: 4 });
+    const resolve = vi.fn<(txId: string) => Promise<string | null>>().mockResolvedValue(null);
+
+    const outcome = await settleK1AwaitingCoinByChainHash(ALICE, NIGHT, HASH, resolve, window);
+
+    expect(outcome.outcome).toBe('learned');
+    expect(resolve).not.toHaveBeenCalled();
+    expect(window).toHaveBeenCalledWith(HASH);
   });
 });
 
