@@ -496,7 +496,9 @@ describe('a refusal handed back to the caller', () => {
       engine: () => Promise.reject(new Error('Proof Server response: code="400"')),
     }).prove(request());
     const two = await proverWith({
-      engine: () => Promise.reject(new Error('Proof Server response: code="403"')),
+      /* The prover's other verdict code, so both of these are 502s and the
+         sentence is what is being compared. */
+      engine: () => Promise.reject(new Error('Proof Server response: code="422"')),
     }).prove(request());
     assert.equal(one.body.error, 'proving-failed');
     assert.equal(two.body.error, 'proving-failed');
@@ -830,18 +832,48 @@ describe('the engine that would talk to a proof server', () => {
       true,
     );
     assert.equal(isCustodyProverVerdict('the prover answered with status code: 422'), true);
-    assert.equal(isCustodyProverVerdict('code=404'), true);
-    /* Not now, rather than no. */
-    assert.equal(isCustodyProverVerdict('code="408"'), false);
-    assert.equal(isCustodyProverVerdict('code="425"'), false);
-    assert.equal(isCustodyProverVerdict('code="429"'), false);
-    /* Broke while trying, including a gateway's answer wrapping the prover's. */
-    assert.equal(isCustodyProverVerdict('code="500"'), false);
-    assert.equal(isCustodyProverVerdict('code="400", status="502"'), false);
     /* Nothing to go on is never read as a verdict. */
     assert.equal(isCustodyProverVerdict('connect ECONNREFUSED 127.0.0.1:6300'), false);
     assert.equal(isCustodyProverVerdict(''), false);
     assert.equal(isCustodyProverVerdict(undefined as never), false);
+  });
+
+  /* WHY THIS IS AN ALLOWLIST (review, 2026/09/18). The proof server refuses a
+     transaction it has READ with 400 or 422; every other 4xx on that route is
+     the gateway in front of it — a route that is not mounted, a key it
+     rejected, the wrong method, a body over its limit. Read as verdicts they
+     armed the client's candidate retry, so ONE press asked for an approval per
+     candidate position and `/status` told the operator a proof server that had
+     never seen the transaction had refused it. */
+  it('never reads a gateway’s own 4xx as a judgement on the transaction', () => {
+    for (const status of [401, 403, 404, 405, 408, 413, 425, 429, 451, 500, 502, 504]) {
+      assert.equal(
+        isCustodyProverVerdict(`Failed Proof Server response: code="${status}"`),
+        false,
+        `code ${status}`,
+      );
+    }
+    /* And a gateway's status wrapping the prover's own withholds the verdict:
+       one unexplained status is enough. */
+    assert.equal(isCustodyProverVerdict('code="400", status="502"'), false);
+    assert.equal(isCustodyProverVerdict('code="404", status="400"'), false);
+  });
+
+  it('answers 503 for a gateway’s refusal in front of the proof server', async () => {
+    for (const said of [
+      `'prove' returned an error: Error: Failed Proof Server response: url="https://host/prover-v3/prove", code="404", status="Not Found"`,
+      `'check' returned an error: Error: Failed Proof Server response: code="401", status="Unauthorized"`,
+      `'prove' returned an error: Error: Failed Proof Server response: code="403", status="Forbidden"`,
+      `'prove' returned an error: Error: Failed Proof Server response: code="413", status="Payload Too Large"`,
+    ]) {
+      const prover = proverWith({ engine: () => Promise.reject(new Error(said)) });
+      const outcome = await prover.prove(request());
+      assert.equal(outcome.status, 503, said);
+      assert.equal(outcome.body.error, 'prover-unavailable', said);
+      /* What the operator reads says the service needs attention, not that the
+         transaction was refused. */
+      assert.equal(prover.snapshot().lastError?.code, 'prover-unavailable', said);
+    }
   });
 });
 

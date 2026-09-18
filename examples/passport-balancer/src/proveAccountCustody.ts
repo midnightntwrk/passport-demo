@@ -922,27 +922,38 @@ export function createCustodyProver(options: CustodyProverOptions): CustodyProve
  * up`) is a server that never answered, and a 5xx is one that broke while
  * trying.
  *
- * THE THREE 4xx CODES THAT ARE NOT VERDICTS are the ones that mean "not now"
- * rather than "no": `408` and `425` are the server asking for the same request
- * again, and `429` is its own queue being full. Reading any of them as a
- * verdict would spend an approval on a position the server never looked at.
+ * AN ALLOWLIST, NOT A DENYLIST, and the difference is somebody's approvals
+ * (review, 2026/09/18). The proof server answers a transaction it has read and
+ * will not prove with `400` (`Public transcript input mismatch`, the live shape)
+ * or `422`. Every other 4xx on that route comes from the GATEWAY in front of it
+ * — Caddy answers `404` for a route that is not mounted, `401`/`403` for a key
+ * it rejected, `405` for the wrong method, `413` for a body over its limit —
+ * and none of those is a judgement about the transaction. Denylisting the three
+ * "not now" codes let all of them through as verdicts: the client then threw
+ * `CustodyProofNotBuilt`, the spend rotated through EVERY candidate position
+ * (an approval each, on one press), and `/status` told the operator the
+ * transaction had been refused by a proof server that had never seen it.
+ *
+ * `408`, `425`, and `429` are therefore not special cases any more; they are
+ * simply not on the list, along with everything else.
  *
  * Unrecognised is `false` on purpose: a refusal to prove is asserted from
  * evidence, never assumed, because the cost of assuming it is somebody's
  * second approval.
  */
+const PROVER_VERDICT_STATUSES: readonly number[] = [400, 422];
+
 export function isCustodyProverVerdict(message: string): boolean {
   const text = typeof message === 'string' ? message : '';
   const statuses = [...text.matchAll(/(?:code|status(?:\s*code)?)\s*[=:]\s*"?(\d{3})"?/gi)].map(
     (match) => Number(match[1]),
   );
   if (statuses.length === 0) return false;
-  /* ANY 5xx WINS. A message that names both — a gateway's 502 wrapping the
-     prover's own answer — is a call that did not reach a prover's judgement. */
-  if (statuses.some((status) => status >= 500)) return false;
-  return statuses.some(
-    (status) => status >= 400 && status < 500 && status !== 408 && status !== 425 && status !== 429,
-  );
+  /* EVERY STATUS NAMED HAS TO BE ONE OF THEM. A message carrying a second one —
+     a gateway's 502 or 404 wrapping the prover's own answer — is a call that did
+     not reach a prover's judgement, so one unexplained status is enough to
+     withhold the verdict. */
+  return statuses.every((status) => PROVER_VERDICT_STATUSES.includes(status));
 }
 
 /** The deadline fired. Separate from the engine's own failures on purpose. */
