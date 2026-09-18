@@ -785,6 +785,51 @@ export interface AssetFunding {
   fundedAt: string;
 }
 
+/**
+ * What a caller is told the MOMENT the asset deposit has been submitted, before
+ * anybody knows whether it landed.
+ *
+ * WHY THIS EXISTS. `fundAsset` resolves only once the credit has been seen on
+ * chain, which is up to ninety seconds of polling after the deposit was
+ * submitted, and the caller writes its journal entry from what `fundAsset`
+ * returns. A restart inside that window — a deploy, a watchdog, an operator —
+ * leaves a deposit on chain and nothing on disk that says so.
+ *
+ * On a PROTOTYPE account the chain covers for that: the retry reads
+ * `coins[mUSD]` and sees the grant already there, so `assetNeeded` is false and
+ * nothing is paid twice. On an ACCOUNT CUSTODY account nothing covers for it —
+ * custody there is stateless, so `balances()` answers null, `activationLegs`
+ * falls back to zero, and the retry mints and deposits a SECOND hundred mUSD
+ * into an account that already has one.
+ *
+ * So the transaction hashes are handed over the moment they exist. The entry a
+ * caller writes from them is provisional — no `balanceAfter`, because nothing
+ * has been read — and it is enough to make `assetRecorded` true across a
+ * restart, which is the whole of what stops the second coin.
+ */
+export interface AssetDepositSubmitted {
+  /** The faucet call that created the coin. */
+  readonly mintTxHash: string;
+  /** `deposit_shielded` — submitted, NOT yet known to have landed. */
+  readonly depositTxHash: string;
+  readonly amount: bigint;
+  readonly colourHex: string;
+  readonly at: string;
+}
+
+export interface FundAssetOptions {
+  /**
+   * Called once, as soon as the deposit has been submitted and before the wait
+   * for its credit begins. See {@link AssetDepositSubmitted}.
+   *
+   * AWAITED, so a caller that persists it has really persisted it before this
+   * function goes on to spend ninety seconds polling. A callback that throws is
+   * logged and swallowed: a journal this service could not write is not a
+   * reason to abandon a deposit that is already on chain.
+   */
+  readonly onDepositSubmitted?: (submitted: AssetDepositSubmitted) => void | Promise<void>;
+}
+
 /** Both balances an account holds, from ONE decode of ONE indexer read. */
 export interface AccountBalances {
   /** Mirrored NIGHT for the native colour — `night_balances` or `unshielded_balances`. */
@@ -943,7 +988,7 @@ export interface AccountFunder {
    * with its own transaction and has no business holding a lock that
    * `/balance-only` is queued behind.
    */
-  fundAsset(contractAddress: string): Promise<AssetFunding>;
+  fundAsset(contractAddress: string, options?: FundAssetOptions): Promise<AssetFunding>;
   /**
    * Mints one grant-sized asset coin AHEAD of the next activation, if there is
    * not one ready already, so the asset leg is a single `deposit_shielded`
@@ -1798,7 +1843,7 @@ export async function createAccountFunder(
       return spareInFlight ? 'minting' : 'none';
     },
 
-    async fundAsset(contractAddress: string): Promise<AssetFunding> {
+    async fundAsset(contractAddress: string, options?: FundAssetOptions): Promise<AssetFunding> {
       const { colourBytes } = requireAsset();
       const address = rawContractAddress(contractAddress);
       /* The same baseline discipline as the NIGHT leg: the confirmation below
@@ -1941,6 +1986,36 @@ export async function createAccountFunder(
             : `The ${ASSET_SYMBOL} grant was minted but could not be deposited into ${address}; the coin stayed with the balancer.`,
           `mint ${mintTx}: ${cause instanceof Error ? cause.message : String(cause)}`,
         );
+      }
+
+      /* THE HASHES, HANDED OVER NOW — before the ninety seconds of polling
+         below, and awaited so a caller that persists them really has.
+
+         The deposit is on chain from this line onwards, and until 2026/09/18
+         nothing said so anywhere but in memory: the caller wrote its journal
+         entry from what this function RETURNS, which is after the confirmation.
+         A restart inside that window left a custody account holding a hundred
+         mUSD that no record mentioned, and the next `/fund-account` deposited a
+         second hundred — a prototype account is saved from that by its own
+         `coins` map, and a custody account, which mirrors nothing, is not.
+
+         A callback that throws is logged and swallowed. A journal this service
+         could not write is a worse position than one it could, and neither is a
+         reason to walk away from a deposit that has already been made. */
+      if (options?.onDepositSubmitted) {
+        try {
+          await options.onDepositSubmitted({
+            mintTxHash: mintTx,
+            depositTxHash: depositTx,
+            amount: config.assetGrant,
+            colourHex: assetColourHex ?? bytesToHex(colourBytes),
+            at: new Date().toISOString(),
+          });
+        } catch (cause) {
+          console.error(
+            `[asset] the provisional record of ${depositTx} for ${address} could not be written: ${cause instanceof Error ? cause.message : String(cause)}. The deposit is submitted; a restart before it confirms may pay a second grant.`,
+          );
+        }
       }
 
       /* ------------------------------------------------------------------ */

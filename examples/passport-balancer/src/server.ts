@@ -2155,7 +2155,35 @@ async function main(): Promise<void> {
           /* Takes the spend lock itself, twice — mint, then deposit — with the
              wait for the minted coin to become spendable in between and outside
              it. See `fundAsset` for why. */
-          const grant = await funder.fundAsset(contractAddress);
+          const grant = await funder.fundAsset(contractAddress, {
+            /* THE ROW GOES DOWN WHEN THE DEPOSIT IS SUBMITTED, not when it is
+               confirmed. `fundAsset` then spends up to ninety seconds watching
+               for the credit, and a restart inside that window used to leave a
+               coin on chain with nothing on disk naming it — after which the
+               next `/fund-account` paid a second one. A prototype account is
+               saved from that by its own `coins` map, which the retry reads; a
+               custody account mirrors no shielded holding, so nothing saves it
+               but this row.
+
+               PROVISIONAL, and it says so by what it omits: no `balanceAfter`,
+               because nothing has been read yet. The confirmed write below
+               replaces it. What it is for is `assetRecorded` in
+               `./activationLegs.ts`, which is what a retry consults. */
+            onDepositSubmitted: async (submitted) => {
+              assetEntry = {
+                symbol: funder.assetSymbol,
+                colourHex: submitted.colourHex,
+                amount: submitted.amount.toString(),
+                mintTx: submitted.mintTxHash,
+                depositTx: submitted.depositTxHash,
+                at: submitted.at,
+              };
+              await recordLeg({ asset: assetEntry });
+              console.log(
+                `[asset] ${contractAddress}: deposit ${submitted.depositTxHash} submitted and recorded before it confirms, so a restart cannot pay a second grant`,
+              );
+            },
+          });
           assetsFunded += 1;
           lastSpendAt = Date.now();
           assetBlock = grant.depositBlock;
