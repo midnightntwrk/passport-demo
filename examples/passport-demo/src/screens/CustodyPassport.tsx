@@ -219,13 +219,31 @@ export default function CustodyPassport({ network, arm }: CustodyPassportProps) 
    * settles it the first time a ceremony is warranted anyway.
    */
   const [user, setUser] = useState<string | null>(arm.userKey)
+  /**
+   * The same value, where a CALLBACK can see it.
+   *
+   * LIVE, 2026/09/18, AND NOTHING SHORT OF A LIVE RUN WOULD HAVE FOUND IT. The
+   * setup succeeded on stagenet — four waves, an activation, all landed — and
+   * the screen stayed on "Create my Passport" as though nothing had happened.
+   * `refresh` is a `useCallback` over `user`, and the copy of it that `create`
+   * closed over was made BEFORE the ceremony, when `user` was still null; so
+   * the read that was supposed to move the screen to the name step returned
+   * early and the Passport the person had just paid for was invisible until
+   * they reloaded. A ref is what a callback can read after the render that made
+   * it, so `refresh` reads this and depends on nothing.
+   */
+  const userRef = useRef<string | null>(arm.userKey)
+  const rememberUser = useCallback((next: string | null) => {
+    userRef.current = next
+    setUser(next)
+  }, [])
   useEffect(() => {
     /* The arm's own answer wins whenever it changes: a second sign-in, or a
        pointer that appeared while this screen was open. A settled identity is
        never thrown away for a null, because the ceremony that produced it is
        not free. */
-    if (arm.userKey !== null) setUser(arm.userKey)
-  }, [arm.userKey])
+    if (arm.userKey !== null) rememberUser(arm.userKey)
+  }, [arm.userKey, rememberUser])
 
   const [view, setView] = useState<DynamicPassportView | null>(null)
   const [screen, setScreen] = useState<Screen | null>(null)
@@ -261,13 +279,14 @@ export default function CustodyPassport({ network, arm }: CustodyPassportProps) 
 
   /** Re-reads what is stored and moves the screen to match it. */
   const refresh = useCallback((): DynamicPassportView | null => {
-    if (user === null) return null
-    const next = readDynamicPassport({ storage: window.localStorage, user, network })
+    const settled = userRef.current
+    if (settled === null) return null
+    const next = readDynamicPassport({ storage: window.localStorage, user: settled, network })
     setView(next)
     setInterrupted(dynamicSetupInterrupted(next.record))
     setScreen(next.stage === 'home' ? 'home' : next.stage === 'name' ? 'name' : 'create')
     return next
-  }, [network, user])
+  }, [network])
 
   useEffect(() => {
     if (user === null) {
@@ -294,9 +313,9 @@ export default function CustodyPassport({ network, arm }: CustodyPassportProps) 
     if (device.current) return device.current
     const identity = await arm.ensureIdentity()
     device.current = identity
-    setUser(identity.userKey)
+    rememberUser(identity.userKey)
     return identity
-  }, [arm])
+  }, [arm, rememberUser])
 
   /**
    * Runs one piece of work with the single busy line and the single sentence.
@@ -361,6 +380,43 @@ export default function CustodyPassport({ network, arm }: CustodyPassportProps) 
     [],
   )
 
+  /**
+   * Asks for this Passport's opening balance, and never pretends it arrived.
+   *
+   * WHAT IT IS ALLOWED TO DO IS ASK. The figures on Home come from the account's
+   * own state and its own list of deliveries and from nowhere else; this call
+   * adds nothing to them. So a refusal here is not a failure of the setup — the
+   * Passport is made, named, and usable — and it must not throw, or it would
+   * undo a setup that worked over money that has not turned up yet.
+   *
+   * IT IS REFUSED TODAY, AND THE REFUSAL IS WORTH READING. The deployed service
+   * decodes the account with the PROTOTYPE module and fingerprints it on
+   * `recovery_shares` and `night_balances`, neither of which this contract has,
+   * so it answers `not-an-account` — about an account that is one. The fix is
+   * the sponsor's (it reads through its own account view instead), and until it
+   * lands an opening balance arrives another way or not at all. The service's
+   * own words go to the console, where they are of use to somebody; what the
+   * reader gets is the truth in a sentence of ours, because the service's
+   * sentence is both wrong and full of words this screen does not say.
+   */
+  const askForOpeningBalance = useCallback(async (contractAddress: string): Promise<void> => {
+    for (const funderUrl of FUNDER_URLS) {
+      try {
+        const response = await fetch(`${funderUrl}/fund-account`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ contractAddress }),
+        })
+        if (response.ok) return
+        const body: unknown = await response.json().catch(() => ({}))
+        console.warn('[account-custody] the opening balance was refused', response.status, body)
+        return
+      } catch (cause) {
+        console.warn('[account-custody] the opening balance could not be asked for', cause)
+      }
+    }
+  }, [])
+
   /* ---------------------------------------------------------------------- */
   /* Making one                                                             */
   /* ---------------------------------------------------------------------- */
@@ -389,9 +445,14 @@ export default function CustodyPassport({ network, arm }: CustodyPassportProps) 
       if (!record.activated) {
         record = (await activateK1Device(arm.session, identity, onPhase)).record
       }
+      /* THE OPENING BALANCE IS ASKED FOR WHEN THE KEY IS ON, and not when the
+         account lands. An unactivated account holds nothing and can be called
+         by nobody, and the service refuses to fund one — so asking at the
+         deploy is a refusal every time, on a schedule. */
+      if (record.address !== null) await askForOpeningBalance(record.address)
       refresh()
     })
-  }, [arm, ensureIdentity, interrupted, refresh, run])
+  }, [arm, askForOpeningBalance, ensureIdentity, interrupted, refresh, run])
 
   /* ---------------------------------------------------------------------- */
   /* The name                                                               */
