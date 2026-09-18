@@ -1300,6 +1300,39 @@ export function advanceK1CoinCandidate(account: K1Account, colour: string): K1He
 }
 
 /**
+ * Put the coin back on the head of its candidate list.
+ *
+ * THE OTHER HALF OF ROTATION, and the half a person can walk out of the middle
+ * of (review, 2026/09/18). A rotation is only canonical while the run doing it
+ * is still running: a spend that has advanced once and then exits for a reason
+ * that is NOT about the position — the second approval dismissed, the tab
+ * closed, a proof service restarted — leaves the coin persisted at the second
+ * candidate. The next press starts there, and if that guess is the wrong one it
+ * runs out of list after a SINGLE approval without ever trying the head. Two
+ * approvals for one press, and the position the chain offered first never
+ * tried.
+ *
+ * So every exit that is not a retry puts the head back, and the persisted state
+ * is the same whether a run finished, threw, or was abandoned: candidate 0 is
+ * the current guess whenever no spend is in flight.
+ *
+ * Silent where there is no list or no coin — there is nothing to be canonical
+ * about — and it never touches the list itself.
+ */
+export function restartK1CoinCandidates(account: K1Account, colour: string): void {
+  const target = requireAccount(account);
+  const wanted = requireColour(colour);
+  const draft = draftOf(loadK1CoinStore(target));
+  const list = Object.hasOwn(draft.mtIndexCandidates, wanted)
+    ? draft.mtIndexCandidates[wanted]
+    : [];
+  if (list.length === 0 || !Object.hasOwn(draft.coins, wanted)) return;
+  if (draft.coins[wanted].mtIndex === list[0]) return;
+  draft.coins[wanted] = { ...draft.coins[wanted], mtIndex: list[0] };
+  saveDraft(target, draft);
+}
+
+/**
  * The position in the store proved; it is a fact from here.
  *
  * Called on the success of a spend, which is the only evidence available:

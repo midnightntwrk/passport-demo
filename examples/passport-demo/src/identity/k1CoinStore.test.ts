@@ -24,6 +24,7 @@ import {
   k1AccountKey,
   k1AwaitingTxNeedsChainHash,
   k1ColourHoldings,
+  restartK1CoinCandidates,
   k1CoinCandidates,
   k1ColourBalance,
   k1PrivateStateId,
@@ -867,6 +868,39 @@ describe('a coin whose position the chain gave two answers for', () => {
 
     expect(advanceK1CoinCandidate(ALICE, NIGHT)?.mtIndex).toBe(10n);
     expect(k1CoinCandidates(ALICE, NIGHT)).toEqual([10n, 11n]);
+  });
+
+  /* THE DEFECT (review, 2026/09/18): a rotation is only canonical while the run
+     doing it is still running. A spend that advanced once and then stopped for
+     a reason that was not about the position — the second approval dismissed,
+     the tab closed — left the coin persisted at the SECOND candidate, so the
+     next press started there and ran the list out after one approval without
+     ever trying the position the chain offered first. */
+  it('puts the coin back on the head when a run leaves the rotation half-way', () => {
+    putK1CoinCandidates(ALICE, { colour: NIGHT, nonce: NONCE, value: 60n }, CANDIDATES);
+    expect(advanceK1CoinCandidate(ALICE, NIGHT)?.mtIndex).toBe(11n);
+
+    restartK1CoinCandidates(ALICE, NIGHT);
+
+    expect(heldK1Coin(ALICE, NIGHT)?.mtIndex).toBe(10n);
+    expect(k1CoinCandidates(ALICE, NIGHT)).toEqual([10n, 11n]);
+    /* And the next press tries the head, then the second one — the whole list
+       again, from one approval. */
+    expect(advanceK1CoinCandidate(ALICE, NIGHT)?.mtIndex).toBe(11n);
+  });
+
+  it('changes nothing when there is no list, no coin, or nothing to put back', () => {
+    /* Already on the head: no write, and the row is untouched. */
+    putK1CoinCandidates(ALICE, { colour: NIGHT, nonce: NONCE, value: 60n }, CANDIDATES);
+    restartK1CoinCandidates(ALICE, NIGHT);
+    expect(heldK1Coin(ALICE, NIGHT)?.mtIndex).toBe(10n);
+
+    /* A colour with a coin and no candidates, and a colour with neither. */
+    putK1Coin(ALICE, { colour: MUSD, nonce: OTHER_NONCE, value: 5n, mtIndex: 77n });
+    restartK1CoinCandidates(ALICE, MUSD);
+    expect(heldK1Coin(ALICE, MUSD)?.mtIndex).toBe(77n);
+    restartK1CoinCandidates(ALICE_ON_PREVIEW, NIGHT);
+    expect(heldK1Coin(ALICE_ON_PREVIEW, NIGHT)).toBeNull();
   });
 
   it('drops the candidates for a colour whose coin was spent or settled', () => {

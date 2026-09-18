@@ -733,6 +733,47 @@ describe('a spend against a position that may be the wrong one', () => {
     expect(isK1NonceSpent(ACCOUNT, NONCE)).toBe(false);
   });
 
+  /* THE DEFECT (review, 2026/09/18): the rotation is canonical only while the
+     run doing it is still running. A press that advanced once and then stopped
+     for a reason that was NOT the position — this one, the second approval
+     dismissed — left the coin persisted at the second candidate. The next press
+     started there, ran the list out after ONE approval, and never tried the
+     position the chain offered first: two approvals spent for one payment, and
+     the likelier guess untried. */
+  it('leaves the coin on the head when somebody dismisses the second approval', async () => {
+    const test = harness({ positionFailures: 1 });
+    const { session, device } = deviceFake();
+    let asks = 0;
+    const dismissing: CustodyDynamicSession = {
+      ...session,
+      signRaw: (request) => {
+        asks += 1;
+        /* The first approval is given; the second is dismissed. */
+        if (asks === 1) return session.signRaw(request);
+        return Promise.reject(new Error('You did not approve that.'));
+      },
+    };
+    putK1CoinCandidates(ACCOUNT, { colour: COLOUR, nonce: NONCE, value: 100n }, [5n, 6n]);
+
+    await expect(
+      withdrawShieldedK1(
+        dismissing,
+        device,
+        { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 40n },
+        undefined,
+        test.deps,
+      ),
+    ).rejects.toThrow('You did not approve that.');
+
+    expect(asks).toBe(2);
+    /* CANONICAL AGAIN: the head is the current guess whenever no spend is in
+       flight, so the next press tries the position the chain offered first and
+       still has the second to fall back on. */
+    expect(heldK1Coin(ACCOUNT, COLOUR)?.mtIndex).toBe(5n);
+    expect(k1CoinCandidates(ACCOUNT, COLOUR)).toEqual([5n, 6n]);
+    expect(isK1NonceSpent(ACCOUNT, NONCE)).toBe(false);
+  });
+
   it('refuses before anything is signed when the store holds nothing of that colour', async () => {
     const test = harness();
     const { session, device, signed } = deviceFake();

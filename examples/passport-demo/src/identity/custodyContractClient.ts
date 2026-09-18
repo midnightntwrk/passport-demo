@@ -141,6 +141,7 @@ import {
   rememberK1ChangeCoin,
   rememberK1EncSecretKey,
   renameK1AwaitingTx,
+  restartK1CoinCandidates,
   settleK1AwaitingCoinByChainHash,
   settleK1Coin,
   type K1Account,
@@ -1432,7 +1433,14 @@ export async function withdrawShieldedK1(
          actually surfaces for these circuits, says only that it declined to
          prove — and that arrives as the error's NAME so the sentence a person
          reads stays plain. */
-      if (!spendPositionMayBeWrong(message) && !isCustodyProofNotBuilt(cause)) throw cause;
+      if (!spendPositionMayBeWrong(message) && !isCustodyProofNotBuilt(cause)) {
+        /* NOT THE POSITION, so this run is over — and the store must not be
+           left mid-rotation. A coin persisted at the second candidate is a coin
+           whose next press starts there and runs the list out after ONE
+           approval, never trying the position the chain offered first. */
+        restartK1CoinCandidates(account, colour);
+        throw cause;
+      }
       const next = advanceK1CoinCandidate(account, colour);
       if (next === null) throw cause;
       attempt += 1;
