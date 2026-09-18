@@ -101,7 +101,7 @@ export function seedDynamicWalk(search: string): boolean {
        answered it would be offering a capability the product does not have. */
     signMessage: () =>
       Promise.reject(new Error('This sign-in cannot approve Passport actions yet.')),
-    signRaw: (digestHex: string) => signWalkDigest(digestHex),
+    signRaw: (digestHex: string) => signWalkDigest(digestHex, address),
     signOut: () => {
       publishDynamicSession({
         status: 'signed-out',
@@ -124,13 +124,35 @@ export function seedDynamicWalk(search: string): boolean {
 }
 
 /**
+ * The scalar this walk signs with, for the address it signed in as.
+ *
+ * ONE KEY PER ADDRESS, and the reason is a live one. A Passport's device is the
+ * point recovered from this signature, so a fixed scalar gives every walk
+ * address the SAME device key — and a run that has one such Passport pay
+ * another would then be a key paying itself, which proves nothing about two
+ * holders. The default address keeps {@link WALK_SCALAR} unchanged so the
+ * Passport the mocked walks are seeded against still signs as itself; any other
+ * address gets the scalar offset by its own bytes, which is deterministic (a
+ * spec re-running the same address gets the same Passport back) and stays well
+ * inside the curve order.
+ */
+function walkScalarFor(address: string): bigint {
+  if (address.toLowerCase() === DYNAMIC_WALK_ADDRESS) return WALK_SCALAR;
+  let offset = 0n;
+  for (const character of address.toLowerCase()) {
+    offset = (offset * 131n + BigInt(character.charCodeAt(0))) % 0xffff_ffff_ffff_ffffn;
+  }
+  return WALK_SCALAR ^ offset;
+}
+
+/**
  * A real ECDSA signature over the digest, in the shape Dynamic returns:
  * `0x` + `r‖s‖v`, with `v` as 27 or 28.
  *
  * `@noble/curves` through an `import()`, exactly as `custodyRecover.ts` reaches it,
  * so the curve stays out of the entry chunk here too.
  */
-async function signWalkDigest(digestHex: string): Promise<string> {
+async function signWalkDigest(digestHex: string, address: string): Promise<string> {
   const { secp256k1 } = await import('@noble/curves/secp256k1.js');
   const digest = Uint8Array.from(
     digestHex.match(/.{2}/g)?.map((byte) => Number.parseInt(byte, 16)) ?? [],
@@ -143,7 +165,7 @@ async function signWalkDigest(digestHex: string): Promise<string> {
      `recoverSecp256k1Point` on 2026/09/16.
      `format: 'recovered'` returns 65 bytes with the recovery byte FIRST;
      Dynamic returns it last, as `v`, so the two halves are swapped below. */
-  const recovered = secp256k1.sign(digest, scalarBytes(WALK_SCALAR), {
+  const recovered = secp256k1.sign(digest, scalarBytes(walkScalarFor(address)), {
     prehash: false,
     format: 'recovered',
   });
