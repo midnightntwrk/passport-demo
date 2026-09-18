@@ -525,3 +525,43 @@ describe('the proving deadline', () => {
     expect(CUSTODY_PROOF_TIMEOUT_MS).toBeGreaterThan(180_000);
   });
 });
+
+describe("a library's preamble around our own sentence", () => {
+  /* THE DEFECT THIS CATCHES put a library's internals on the screen over a
+     payment somebody had approved (live, 2026/09/18). midnight-js re-throws
+     what it catches with its own words in front, and the result was short,
+     carried none of the forbidden vocabulary, and was not a runtime error — so
+     every check passed it. */
+  it('paints our sentence, not the wrapper midnight-js put round it', () => {
+    expect(
+      custodyFailureSentence(
+        new Error(
+          "Unexpected error submitting scoped transaction '<unnamed>': Error: The service that finishes this step is not answering right now. Try again in a moment.",
+        ),
+      ),
+    ).toBe('The service that finishes this step is not answering right now. Try again in a moment.');
+  });
+
+  /* And a wrapper with nothing of ours inside it still meets every check —
+     the unwrapping finds words, not permission. */
+  it('refuses a wrapper whose inside is the vocabulary too', () => {
+    expect(
+      custodyFailureSentence(new Error('Error: contract state could not be deserialised')),
+    ).toBe(CUSTODY_UNEXPECTED);
+  });
+
+  it('refuses a wrapper whose inside is still machine-shaped and long', () => {
+    expect(
+      custodyFailureSentence(
+        new Error(`Error: ${'a call into the runtime failed for a reason nobody wrote down '.repeat(4)}`),
+      ),
+    ).toBe(CUSTODY_UNEXPECTED);
+  });
+
+  /* A plain sentence of ours is untouched. */
+  it('leaves a sentence with no preamble exactly as it is', () => {
+    expect(custodyFailureSentence(new Error('There is nothing of that kind in this Passport to send.'))).toBe(
+      'There is nothing of that kind in this Passport to send.',
+    );
+  });
+});

@@ -751,7 +751,7 @@ const RUNTIME_ERROR_NAMES: ReadonlySet<string> = new Set([
  * and the real cause goes to the console, where it is of use to somebody.
  */
 export function custodyFailureSentence(cause: unknown): string {
-  const message = cause instanceof Error ? cause.message.trim() : '';
+  const message = unwrapCustodyMessage(cause instanceof Error ? cause.message.trim() : '');
   if (message.length === 0 || message.length > 160) return CUSTODY_UNEXPECTED;
   /* A RUNTIME ERROR IS NEVER ONE OF OURS. Every refusal this layer writes is a
      plain `Error`; a `TypeError` or a `RangeError` comes from a library reading
@@ -763,6 +763,39 @@ export function custodyFailureSentence(cause: unknown): string {
   const lower = message.toLowerCase();
   if (CUSTODY_FORBIDDEN_WORDS.some((word) => lower.includes(word))) return CUSTODY_UNEXPECTED;
   return message;
+}
+
+/**
+ * Our own sentence, out of whatever a library wrapped it in.
+ *
+ * midnight-js re-throws what it catches with its own preamble, so the refusal
+ * this layer wrote reaches a screen as
+ *
+ *   Unexpected error submitting scoped transaction '<unnamed>': Error: The
+ *   service that finishes this step is not answering right now.
+ *
+ * — which is short, carries none of the forbidden vocabulary, and is not a
+ * runtime error, so every check below waved it through and a reader was shown a
+ * library's internals over a payment they had approved (seen live,
+ * 2026/09/18). The tell is the nested `Error:`: nothing this layer writes
+ * contains one. So the text after the LAST such marker is taken, which is our
+ * sentence where there is one and the library's own words where there is not —
+ * and those then meet the same checks as any other message, which is what
+ * catches them.
+ */
+function unwrapCustodyMessage(message: string): string {
+  const marker = /(?:^|[\s:])(?:[A-Za-z]*Error):\s*/g;
+  let unwrapped = message;
+  for (let pass = 0; pass < 4; pass += 1) {
+    marker.lastIndex = 0;
+    let last: number | null = null;
+    for (let found = marker.exec(unwrapped); found !== null; found = marker.exec(unwrapped)) {
+      last = found.index + found[0].length;
+    }
+    if (last === null) return unwrapped.trim();
+    unwrapped = unwrapped.slice(last).trim();
+  }
+  return unwrapped;
 }
 
 /** Whether two recovered points are the same point. */
