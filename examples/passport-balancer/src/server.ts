@@ -3200,7 +3200,14 @@ async function main(): Promise<void> {
         response.on('close', () => {
           if (!response.writableFinished) connection.abort();
         });
-        const outcome = await custodyProver.prove(body, connection.signal);
+        /* COUNTED AS A PROOF IN FLIGHT, which is what stops the memory
+           recycler treating this process as idle. An account custody proof is
+           the LONGEST thing this service ever does — minutes, against a 235 MB
+           key — and it is also what pushes the resident set past the recycle
+           threshold. Uncounted, the watchdog read "nothing is in flight",
+           SIGTERMed the process mid-proof, and the caller got a socket hang up
+           after twenty seconds of a payment it had approved (2026/09/18). */
+        const outcome = await countingProof(() => custodyProver.prove(body, connection.signal));
         respond(
           request,
           response,
