@@ -314,6 +314,10 @@ ERROR midnight_zkir::ir_vm: Public transcript input mismatch idx=13
   computed=Some(1bff900ba21710e6750348a1529f5907432fe8475651d0e28a30605e1058f924)
 ```
 
+(The `7379905…` recorded the night before is the same line about the same
+quantity at a different block: the root moves every time a leaf is added, which
+is why it decodes to nothing in particular.)
+
 `expected` is the ROOT of the contract's own Zswap tree, which the client's
 public transcript declares; `computed` is the root the circuit rebuilds from
 the coin commitment and the Merkle path at the position the `held_coin` witness
