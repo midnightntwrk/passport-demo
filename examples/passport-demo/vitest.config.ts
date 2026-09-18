@@ -792,6 +792,7 @@ export default mergeConfig(
           'src/lib/zkArtefactCache.ts',
           'src/identity/custodyContractSigning.ts',
           'src/identity/custodyJubjubSigner.ts',
+          'src/identity/passkeyCustody.ts',
           'src/identity/custodyContractPlan.ts',
           'src/identity/custodyContractSend.ts',
           'src/identity/custodyContractSession.ts',
