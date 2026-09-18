@@ -21,6 +21,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   DYNAMIC_SETUP_STEPS,
   CUSTODY_MARKER_CIRCUIT,
+  custodyArmFromOperations,
   CUSTODY_NAME_KEY,
   choosePassportIdentity,
   dynamicSetupAction,
@@ -419,5 +420,110 @@ describe('recoveredCustodyRecord', () => {
 describe('k1PrivateStateId', () => {
   it('composes the id the deploy composes, so both devices read one store', () => {
     expect(k1PrivateStateId('0xABCDEF0123456789')).toBe('passport-account-custody-abcdef01');
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* Which build, and which arm, a list of entry points is                      */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The marker and the arm, on lists of names taken from the compiled modules.
+ *
+ * THE LISTS ARE REAL. They were read off
+ * `contracts/stagenet/<module>/contract/index.js` on 2026/09/18 rather than
+ * recalled, which is the difference between drilling the rule and drilling a
+ * memory of it: the list this repository used to call the prototype's carried
+ * `deposit_unshielded`, a name no prototype has ever declared.
+ */
+describe('CUSTODY_MARKER_CIRCUIT', () => {
+  /* Wave 1 of a jubjub-born account: the two deposits and the jubjub arm. */
+  const JUBJUB_WAVE_ONE = [
+    'deposit_unshielded',
+    'deposit_shielded',
+    'activate_initial_device_with_jubjub',
+    'append_inbox_with_jubjub',
+    'withdraw_shielded_with_jubjub',
+  ];
+  /* Wave 1 of a k256-born account. */
+  const K256_WAVE_ONE = [
+    'deposit_unshielded',
+    'deposit_shielded',
+    'activate_initial_device_with_k256',
+    'append_inbox_with_k256',
+    'withdraw_shielded_with_k256',
+  ];
+  /* The eleven-circuit prototype's own names, in full. */
+  const PROTOTYPE = [
+    'add_device',
+    'add_grant',
+    'deposit_night',
+    'deposit_shielded',
+    'grant_withdraw_night',
+    'grant_withdraw_shielded',
+    'recover',
+    'remove_device',
+    'revoke_grant',
+    'withdraw_night',
+    'withdraw_shielded',
+  ];
+
+  it('is a name wave 1 of EITHER arm already carries', () => {
+    expect(JUBJUB_WAVE_ONE).toContain(CUSTODY_MARKER_CIRCUIT);
+    expect(K256_WAVE_ONE).toContain(CUSTODY_MARKER_CIRCUIT);
+  });
+
+  it('is a name no prototype carries', () => {
+    expect(PROTOTYPE).not.toContain(CUSTODY_MARKER_CIRCUIT);
+    /* And the near miss that makes the point: the prototypes DO have an
+       unshielded deposit, under another name. */
+    expect(PROTOTYPE).toContain('deposit_night');
+  });
+
+  it('is not the k256 gated circuit any more, which wave 1 of a passkey account lacks', () => {
+    expect(JUBJUB_WAVE_ONE).not.toContain('withdraw_shielded_with_k256');
+    expect(CUSTODY_MARKER_CIRCUIT).not.toBe('withdraw_shielded_with_k256');
+  });
+});
+
+describe('custodyArmFromOperations', () => {
+  const JUBJUB_WAVE_ONE = [
+    'deposit_unshielded',
+    'deposit_shielded',
+    'activate_initial_device_with_jubjub',
+  ];
+  const K256_WAVE_ONE = [
+    'deposit_unshielded',
+    'deposit_shielded',
+    'activate_initial_device_with_k256',
+  ];
+
+  it('reads a passkey-born account off its own activation circuit', () => {
+    expect(custodyArmFromOperations(JUBJUB_WAVE_ONE)).toBe('jubjub');
+  });
+
+  it('reads a sign-in-born account off its own activation circuit', () => {
+    expect(custodyArmFromOperations(K256_WAVE_ONE)).toBe('k256');
+  });
+
+  it('refuses to guess for a finished account, which carries both activations', () => {
+    /* Deliberately null rather than a guess: the roster the last wave leaves
+       behind is the same for both arms, and a caller that needs the answer
+       holds the device and can ask the device set. */
+    expect(custodyArmFromOperations([...JUBJUB_WAVE_ONE, ...K256_WAVE_ONE])).toBeNull();
+  });
+
+  it('is null for a prototype, which has no arm at all', () => {
+    expect(custodyArmFromOperations(['deposit_night', 'withdraw_shielded'])).toBeNull();
+  });
+
+  it('is null for a read that did not complete, which is never an answer', () => {
+    expect(custodyArmFromOperations(null)).toBeNull();
+  });
+
+  it('is null for an account custody account with neither activation, which cannot happen', () => {
+    /* Not reachable from any wave plan — wave 1 carries one of them — but the
+       function must not answer a question it has not been given evidence for. */
+    expect(custodyArmFromOperations(['deposit_unshielded', 'deposit_shielded'])).toBeNull();
   });
 });

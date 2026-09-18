@@ -350,13 +350,59 @@ export function readDynamicPassport(options: {
 /* -------------------------------------------------------------------------- */
 
 /**
- * The circuit that says a deployed account is a account custody build.
+ * The circuit that says a deployed account is an account custody build.
  *
- * The same discriminator `accountModuleFor` uses, and for the same reason: the
- * answer is the DEPLOYED CIRCUIT SET read off the chain, never a local record.
- * Neither prototype build carries this name.
+ * The same discriminator `accountBuildFromOperations` uses, and for the same
+ * reason: the answer is the DEPLOYED CIRCUIT SET read off the chain, never a
+ * local record. Neither prototype build carries this name — they spell the
+ * unshielded deposit `deposit_night`.
+ *
+ * ARM-AGNOSTIC, AND IT HAD TO BECOME SO. This was `withdraw_shielded_with_k256`
+ * until 2026/09/18, which is a name a JUBJUB-born account does not carry until
+ * its third wave — so a passkey Passport recovered by name mid-setup answered
+ * `not-yours` about its own account. `deposit_unshielded` is in wave 1 of both
+ * arms' plans, so it is true of an account custody account from its first
+ * transaction onwards.
+ *
+ * Spelled here rather than imported from `./passportContract.js`: that module
+ * reaches the indexer provider and the wallet, and this one is pure by
+ * construction. `custodyContractSession.test.ts` holds the two spellings
+ * together against the compiled modules' own circuit lists.
  */
-export const CUSTODY_MARKER_CIRCUIT = 'withdraw_shielded_with_k256';
+export const CUSTODY_MARKER_CIRCUIT = 'deposit_unshielded';
+
+/**
+ * Which arm an account custody account was BORN with, from the same list.
+ *
+ * Not a build question — both arms are the same build — but the one an opener
+ * has to answer next: the constructor's boot commitment binds the arm, so an
+ * account that carries `activate_initial_device_with_jubjub` can only ever be
+ * opened by a passkey, and one that carries the k256 activation only by a
+ * social sign-in. Wave 1 carries exactly one of them; the other arrives with
+ * the later waves, so ASK ABOUT THE ACTIVATION rather than about any gated
+ * circuit, and ask about it in the order that survives a finished deploy.
+ *
+ * Null means the list is not an account custody account's at all, or is a read
+ * that did not complete — never "some other arm".
+ */
+export function custodyArmFromOperations(
+  operations: readonly string[] | null,
+): 'jubjub' | 'k256' | null {
+  if (operations === null) return null;
+  if (!operations.includes(CUSTODY_MARKER_CIRCUIT)) return null;
+  const jubjub = operations.includes('activate_initial_device_with_jubjub');
+  const k256 = operations.includes('activate_initial_device_with_k256');
+  /* A FINISHED account carries both activations, because the roster does; only
+     wave 1 tells the arms apart by presence. What tells them apart afterwards
+     is the gated circuit the OTHER arm's waves bring — so a list with both
+     activations is read by which arm's first wave it looks like, and the
+     jubjub-born plan is the one whose wave 1 is the jubjub arm. There is no
+     honest answer from a finished roster alone, and the caller that needs one
+     holds the device: it asks the device set instead. */
+  if (jubjub && !k256) return 'jubjub';
+  if (k256 && !jubjub) return 'k256';
+  return null;
+}
 
 /** What a recovery attempt has managed to find out. */
 export interface CustodyRecoveryProbe {

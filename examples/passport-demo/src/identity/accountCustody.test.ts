@@ -99,7 +99,9 @@ import {
   unshieldedAddressBytes,
 } from './accountCustody.js';
 import {
+  CUSTODY_ARM_OPERATION,
   K256_ARM_OPERATION,
+  PROTOTYPE_WITHDRAW_OPERATION,
   ONE_TX_TRANSFER_OPERATION,
   accountBuildFromOperations,
 } from './passportContract.js';
@@ -812,53 +814,107 @@ describe('accountModuleFor', () => {
 /**
  * The three-way discriminator, on a list of names rather than through a read.
  *
- * THE ORDER IS THE WHOLE OF IT, and the reason is that only one of the two
- * questions IDENTIFIES anything. The prototypes are told apart by an absence —
- * no `transfer_shielded_to_account` means the older of the two — and the account
- * custody build, which shares no circuit name with either, is absent it as well. So
- * the older question alone reads an account custody account as `account-v1`: a module that
- * cannot open it. The k256 question is positive, so it goes first.
+ * EVERY QUESTION IS POSITIVE, and that is what this drill is about. Reading a
+ * build by what it LACKS cannot tell "the old build" from "a build that is
+ * neither", which is how an account custody account came to be read as
+ * `account-v1` — a module that cannot open it, and the one the Upgrade screen
+ * offers to drain.
+ *
+ * THE NAMES BELOW ARE THE COMPILED BUILDS' OWN, read off
+ * `contracts/stagenet/<module>/contract/index.js` on 2026/09/18 rather than
+ * recalled. That matters more than it sounds: the list this file used to call
+ * `V1` contained `deposit_unshielded`, which no prototype has ever declared —
+ * both spell it `deposit_night` — so the fixture agreed with the rule about
+ * accounts that do not exist.
  */
 describe('accountBuildFromOperations', () => {
-  /* The eleven entry points every pre-upgrade Passport carries, trimmed to the
-     ones this decision reads plus enough company to be a realistic list. */
-  const V1 = ['deposit_unshielded', 'withdraw_unshielded', 'withdraw_shielded', 'add_device'];
+  /* The eleven-circuit prototype's own names. */
+  const V1 = [
+    'add_device',
+    'add_grant',
+    'deposit_night',
+    'deposit_shielded',
+    'grant_withdraw_night',
+    'grant_withdraw_shielded',
+    'recover',
+    'remove_device',
+    'revoke_grant',
+    'withdraw_night',
+    'withdraw_shielded',
+  ];
+
+  /* The twelve-circuit prototype: the same eleven and the one-transaction
+     transfer. */
+  const V12 = [...V1, ONE_TX_TRANSFER_OPERATION];
+
+  /* Wave 1 of a JUBJUB-born account custody account, which is the case the
+     k256 discriminator got wrong: the two deposits and the jubjub arm, with
+     nothing `_with_k256` on chain for two more transactions. */
+  const CUSTODY_WAVE_ONE = [
+    'deposit_unshielded',
+    'deposit_shielded',
+    'activate_initial_device_with_jubjub',
+    'add_device_with_jubjub',
+    'append_inbox_with_jubjub',
+    'remove_device_with_jubjub',
+    'withdraw_shielded_with_jubjub',
+    'withdraw_shielded_to_contract_with_jubjub',
+    'withdraw_unshielded_with_jubjub',
+    'rotate_enc_key_with_jubjub',
+  ];
 
   it('reads a pre-upgrade account as the eleven-circuit build', () => {
     expect(accountBuildFromOperations(V1)).toBe('account-v1');
   });
 
   it('reads an upgraded account as the current build', () => {
-    expect(accountBuildFromOperations([...V1, ONE_TX_TRANSFER_OPERATION])).toBe('account');
+    expect(accountBuildFromOperations(V12)).toBe('account');
   });
 
-  it('reads an account custody account as the account custody build', () => {
-    expect(accountBuildFromOperations([...V1, K256_ARM_OPERATION])).toBe('account-custody');
+  it('reads a finished account custody account as the account custody build', () => {
+    expect(accountBuildFromOperations([...CUSTODY_WAVE_ONE, K256_ARM_OPERATION])).toBe(
+      'account-custody',
+    );
+  });
+
+  it('reads a JUBJUB-born account as account custody from its very first wave', () => {
+    /* THE DEFECT THIS RULE EXISTS FOR. Wave 1 of a passkey Passport carries no
+       `_with_k256` anything, so the old discriminator answered `account-v1`
+       for it — for the whole of a four-wave deploy, and for ever after an
+       interrupted one. */
+    expect(accountBuildFromOperations(CUSTODY_WAVE_ONE)).toBe('account-custody');
   });
 
   it('never reads a real account custody entry-point list as a prototype build', () => {
-    /* the account custody build's own names, none of which the prototypes have. Under the
-       two-way rule this list carries no `transfer_shielded_to_account` and so
-       would have answered `account-v1` — a module that cannot open it. */
     expect(
       accountBuildFromOperations([
-        'deposit_unshielded',
-        'deposit_shielded',
-        'withdraw_unshielded_with_jubjub',
-        'withdraw_shielded_with_jubjub',
+        ...CUSTODY_WAVE_ONE,
         'withdraw_unshielded_with_k256',
         K256_ARM_OPERATION,
       ]),
     ).toBe('account-custody');
   });
 
-  it('asks the k256 question first even where both names are present', () => {
-    /* Not a list any build produces today — the two share no circuit name —
-       but the order is a rule rather than a coincidence, and a future build
-       that carried both must still be read as the one that can prove k256. */
+  it('asks the custody question first even where both names are present', () => {
+    /* Not a list any build produces today — the three share no discriminating
+       name — but the order is a rule rather than a coincidence. */
     expect(
-      accountBuildFromOperations([...V1, ONE_TX_TRANSFER_OPERATION, K256_ARM_OPERATION]),
+      accountBuildFromOperations([...V12, CUSTODY_ARM_OPERATION]),
     ).toBe('account-custody');
+  });
+
+  it('is not fooled by the deposit the prototypes really do declare', () => {
+    /* `deposit_night` is the prototypes' unshielded deposit. A rule that read
+       "a deposit that is not shielded" rather than the NAME would answer
+       `account-custody` for every Passport in production. */
+    expect(V1).toContain('deposit_night');
+    expect(V1).not.toContain(CUSTODY_ARM_OPERATION);
+    expect(accountBuildFromOperations(V1)).toBe('account-v1');
+  });
+
+  it('names the eleven-circuit build by a circuit it has', () => {
+    expect(V1).toContain(PROTOTYPE_WITHDRAW_OPERATION);
+    expect(CUSTODY_WAVE_ONE).not.toContain(PROTOTYPE_WITHDRAW_OPERATION);
   });
 
   it('reads an empty list as the oldest build, which is what an empty read means', () => {

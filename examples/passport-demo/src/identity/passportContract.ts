@@ -586,15 +586,49 @@ export async function accountHasOneTxTransfer(
 
 /**
  * The circuit only the account custody build has, and so the thing that
- * identifies it.
+ * identifies it — WHICHEVER ARM the account was born with.
  *
- * It is a WITHDRAWAL circuit rather than one of the cheaper-looking `derive_*`
- * ones on purpose: pure circuits do not appear in `operations()` at all, which
- * lists the deployed contract's entry points. This one does, it is named for
- * the arm it belongs to, and no build of the prototype account contract has
- * ever carried a `_with_k256` anything.
+ * IT USED TO BE `withdraw_shielded_with_k256`, AND THAT NAME IS WRONG FOR HALF
+ * THE ACCOUNTS. A Passport held by a passkey is born on the jubjub arm, and a
+ * jubjub-born account is deployed in four waves: wave 1 carries the two
+ * deposits and the whole jubjub arm, and `withdraw_shielded_with_k256` does not
+ * arrive until wave 3. Between those two transactions — which on stagenet is
+ * tens of seconds, and after an interrupted setup is for ever — an account
+ * reading for the k256 name answers `account-v1`, which is a module that cannot
+ * open it and, worse, the module the Upgrade screen offers to drain.
+ *
+ * `deposit_unshielded` is the arm-agnostic answer. It is one of the two
+ * permissionless deposits, so it is in wave 1 of BOTH arms' plans and is
+ * present from the first transaction an account ever has; and neither prototype
+ * build carries it — they call the same idea `deposit_night` (checked against
+ * the compiled modules, 2026/09/18: `account` and `account-v1` declare
+ * `deposit_night`, `deposit_shielded`, `withdraw_night`, `withdraw_shielded`
+ * and nothing named `deposit_unshielded`).
+ *
+ * It is an entry point rather than one of the cheaper-looking `derive_*` pure
+ * circuits for the reason the old name was: pure circuits do not appear in
+ * `operations()` at all, which lists the deployed contract's entry points.
+ */
+export const CUSTODY_ARM_OPERATION = 'deposit_unshielded';
+
+/**
+ * The name the k256 arm is known by, kept because a reader who wants to know
+ * which ARM an account was born with still has to ask for one, and because the
+ * account-module drill asserts the compiled build declares it.
+ *
+ * It is NOT the build discriminator any more. See {@link CUSTODY_ARM_OPERATION}.
  */
 export const K256_ARM_OPERATION = 'withdraw_shielded_with_k256';
+
+/**
+ * The shielded withdrawal every prototype build carries and the account custody
+ * build does not — the ACC spells it `withdraw_shielded_with_<arm>`.
+ *
+ * It is the positive marker for "this is a prototype", which is what lets the
+ * eleven-circuit answer be a reading of what is there rather than the residue
+ * of two questions that both said no.
+ */
+export const PROTOTYPE_WITHDRAW_OPERATION = 'withdraw_shielded';
 
 /** Which compiled build a deployed account is, read off its own entry points. */
 export type AccountBuild = 'account' | 'account-v1' | 'account-custody';
@@ -602,21 +636,33 @@ export type AccountBuild = 'account' | 'account-v1' | 'account-custody';
 /**
  * The build, from the entry points the chain reports.
  *
- * THE K256 QUESTION IS ASKED FIRST, AND IT IS THE ONLY POSITIVE ONE. The two
- * prototype builds are told apart by an ABSENCE — no
- * `transfer_shielded_to_account` means the older of the two — and an absence
- * cannot tell "the old build" from "a build that is neither". The account
- * custody build shares not one circuit name with either prototype (checked
- * 2026/09/16: its thirty names and the account build's twelve do not intersect
- * at all), so the older question answers `account-v1` for an account on the
- * custody contract, and `account-v1` is a module that cannot open it. `withdraw_shielded_with_k256` is the one name
- * that identifies a build rather than ruling one out, so it is asked first and
- * the absence-based question is left to decide between the two it can.
+ * EVERY QUESTION IS POSITIVE, AND THAT IS THE WHOLE OF THE RULE. An absence
+ * cannot tell "the old build" from "a build that is neither", and reading a
+ * build by what it LACKS is how an account custody account came to be opened as
+ * `account-v1` — a module that cannot open it, and the one the Upgrade screen
+ * offers to drain. So each build is named by a circuit it has and the others do
+ * not (checked against the three compiled modules, 2026/09/18):
+ *
+ *   `deposit_unshielded`            → the account custody build. Wave 1 on both
+ *                                     arms, so it is true from an account's
+ *                                     first transaction; no prototype has it.
+ *   `transfer_shielded_to_account`  → the twelve-circuit prototype.
+ *   `withdraw_shielded`             → the eleven-circuit prototype. The ACC
+ *                                     spells this `withdraw_shielded_with_<arm>`
+ *                                     and so does not answer to it; the
+ *                                     twelve-circuit build does, which is why
+ *                                     this question comes last of the three.
+ *
+ * AN EMPTY OR UNRECOGNISED LIST IS STILL `account-v1`, and deliberately: this
+ * function is reached only for an address that IS a Passport account, and the
+ * oldest build is the one whose module opens the most of them. What has changed
+ * is that it is now the residue of three positive questions rather than of one,
+ * so nothing that really is an ACC can land on it.
  *
  * Kept separate from the read so it can be drilled on a list of names.
  */
 export function accountBuildFromOperations(operations: readonly string[]): AccountBuild {
-  if (operations.includes(K256_ARM_OPERATION)) return 'account-custody';
+  if (operations.includes(CUSTODY_ARM_OPERATION)) return 'account-custody';
   if (operations.includes(ONE_TX_TRANSFER_OPERATION)) return 'account';
   return 'account-v1';
 }
