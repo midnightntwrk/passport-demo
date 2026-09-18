@@ -186,6 +186,14 @@ interface ChainFake {
    * already asked the recipient for their key once.
    */
   claimFailures?: number;
+  /**
+   * Whether `addIntent` quietly attaches nothing.
+   *
+   * A build that returned the transaction unchanged is the shape the silent
+   * `?? sender` fallback was written for, and the shape that ends in a
+   * transaction which spends the sender's coin and pays nobody.
+   */
+  graftDoesNothing?: boolean;
   /** What a wrong position says. The live shape is a bare WASM trap. */
   positionFailure?: () => Error;
 }
@@ -226,18 +234,26 @@ function harness(chain: ChainFake = {}) {
   let submitted = 0;
 
   const unprovenCall = (circuit: string, args: readonly unknown[]): FakeCallTx => {
-    const make = (grafted: readonly unknown[]): FakeCallTx => ({
+    /* THE INTENTS MAP GROWS, as the real `addIntent` grows it. A fake whose
+       map stayed one long would drill a world in which a graft that attached
+       nothing is indistinguishable from one that worked — which is the world
+       the silent `?? sender` fallback lived in, and it ends in a transaction
+       that spends the sender's coin and pays nobody. */
+    const make = (grafted: readonly unknown[], intents: Map<number, unknown>): FakeCallTx => ({
       circuit,
       args,
       grafted,
       serialize: () => new Uint8Array([1, 2, 3]),
-      intents: new Map([[0, { intentFor: circuit }]]),
+      intents,
       addIntent: (segment, intent) => {
         if (segment.tag !== 'random') throw new Error('a claim goes into a random segment');
-        return make([...grafted, intent]);
+        if (chain.graftDoesNothing === true) return make(grafted, intents);
+        const next = new Map(intents);
+        next.set(next.size, intent);
+        return make([...grafted, intent], next);
       },
     });
-    return make([]);
+    return make([], new Map([[0, { intentFor: circuit }]]));
   };
 
   /* THE SPEND'S OWN RESULT. `withdraw_shielded_*` answers an option holding the
@@ -648,6 +664,38 @@ describe('a passkey Passport pays another one of these accounts', () => {
       run.calls.filter((call) => call.circuit === 'withdraw_shielded_to_contract_with_jubjub'),
     ).toHaveLength(2);
     expect(reader.reads).toBe(2);
+  });
+
+  /* A8, 2026/09/18. `addIntent` used to fall back to the ungrafted transaction
+     when a build returned nothing — the defensive read the deploy waves make of
+     `addDeploy`. The two are not alike: a deploy that loses its addition fails
+     at the node, and a SPEND that loses its graft is a perfectly valid
+     transaction that spends the sender's coin, addresses the output to the
+     recipient's contract, and carries neither the claim that takes it nor the
+     entry that describes it. Nothing downstream can notice, because it
+     succeeds. */
+  it('refuses to send a payment whose claim did not attach', async () => {
+    const run = harness({ graftDoesNothing: true });
+    seedCoin();
+
+    await expect(
+      withdrawShieldedToContractK1(
+        null,
+        run.device,
+        {
+          recipientAccountAddress: PEER,
+          readRecipientEncKey: encKeyReader(),
+          colourHex: COLOUR,
+          amount: 4n,
+        },
+        undefined,
+        run.deps,
+      ),
+    ).rejects.toThrow('This Passport could not prepare that payment. Nothing was sent.');
+
+    /* NOTHING WAS SUBMITTED, so the coin is exactly where it was. */
+    expect(run.grafts).toEqual([]);
+    expect(heldK1Coin(ACCOUNT, COLOUR)?.nonce).toBe(NONCE);
   });
 
   it('signs the direct transfer’s own challenge, which is not the address door’s', async () => {

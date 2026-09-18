@@ -653,7 +653,15 @@ Per candidate position, in `spendShieldedK1`:
    `privateStateId`**. This is deliberate and load-bearing: a connection
    addressed at somebody else's account must never be served this Passport's
    coin store.
-5. `graftIntent` — `txA.addIntent({tag:'random'}, [...txB.intents.values()][0]) ?? txA`.
+5. `graftIntent` — `txA.addIntent({tag:'random'}, [...txB.intents.values()][0])`, and
+   **the result is checked**: the returned transaction must carry one intent more
+   than the one handed in, or the payment is refused before anything is
+   submitted. It used to fall back to `?? txA` on a build that returned nothing,
+   which is the defensive read the deploy waves make of `addDeploy` — but the two
+   are not alike. A deploy that loses its addition fails loudly at the node; a
+   spend that loses its graft is a VALID transaction that takes the sender's
+   money and pays nobody, because the withdrawal half is intact and the claim
+   half is simply absent. See question 2 under "Open questions for Nicolas".
    **Never merge.** `mergeUnsubmittedCallTxData` is midnight-js's multi-call path
    and it is a MERGE, which is wrong here; it is reached only from `scoped()` and
    `submitCallTx`, both of which this code bypasses. The graft is at the ledger
@@ -743,6 +751,31 @@ walking the inbox rather than needing a store it does not have. Live:
 **It costs a second approval.** `append_inbox` is gated, so the person is asked
 to sign twice for one payment. Whether that is acceptable, or whether the entry
 should be batched into a later transaction, is an open question for Nicolas.
+
+#### Open questions for Nicolas
+
+1. **The change backfill's second approval**, above: acceptable, or batched into
+   a later transaction?
+2. **Can the claim's segment fail while the withdrawal's succeeds?** The
+   composed transaction carries two calls: the sender's gated
+   `withdraw_shielded_to_contract_with_<arm>` and the recipient's
+   permissionless `deposit_shielded`, grafted in as an intent in a RANDOM
+   segment. A transaction has a guaranteed part and fallible parts, and a
+   fallible segment can fail on its own — that is what `FailFallible` means. If
+   the segment carrying the claim can fail while the segment carrying the
+   withdrawal succeeds, the outcome is a shielded output owned by the
+   recipient's contract that their `deposit_shielded` never claimed and that
+   no inbox entry describes: money that has left the sender, does not appear in
+   the recipient's balance, and that nobody holds a description of. The client
+   cannot tell today — it reads one status for the whole transaction, and
+   `SucceedEntirely` is the only one it books a spend on, so the case would
+   reach it as a refusal and a restored store even though value HAD moved.
+   What we need from the contract side is whether the composition makes that
+   outcome reachable at all (one segment, or two?), and if it is, whether the
+   claim should be placed in the guaranteed part instead so the two cannot come
+   apart. Until it is answered the client treats anything but `SucceedEntirely`
+   as "nothing moved", which is right for a whole-transaction failure and would
+   be wrong for a split one.
 
 #### What a reopened Passport is owed
 

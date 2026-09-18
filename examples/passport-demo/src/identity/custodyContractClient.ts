@@ -2260,9 +2260,20 @@ interface CustodyUnprovenTx {
  * random segment, which is what the reference client's conformance test
  * submits and what the node accepts.
  *
- * `addIntent` returns the new transaction; a build that returns nothing leaves
- * the original, which is the same defensive read the deploy waves make of
- * `addDeploy` after three live deploys landed carrying nothing.
+ * THE RESULT IS CHECKED, AND IT DID NOT USED TO BE. `addIntent` returns the new
+ * transaction, and a build that returned nothing fell back to the original —
+ * the same defensive read the deploy waves make of `addDeploy` after three live
+ * deploys landed carrying nothing. The two are not alike. A deploy that loses
+ * its addition fails at the node, loudly, having spent a sponsored fee. A SPEND
+ * that loses its graft is a perfectly valid transaction: the withdrawal half is
+ * intact, so the sender's coin is spent and the output is addressed to the
+ * recipient's contract — and the claim that was supposed to take it, and the
+ * inbox entry that was supposed to describe it, are simply not there. The money
+ * leaves, nobody holds it, and nobody can ever describe it. Nothing downstream
+ * could detect that: the transaction succeeds.
+ *
+ * So the count is asserted. One intent more than went in, or the payment does
+ * not go out — which costs nothing, because this runs before the proof.
  */
 function graftIntent(sender: CustodyUnprovenTx, claim: CustodyUnprovenTx): CustodyUnprovenTx {
   const intents = claim.intents;
@@ -2270,7 +2281,13 @@ function graftIntent(sender: CustodyUnprovenTx, claim: CustodyUnprovenTx): Custo
   if (first === undefined) {
     throw new Error('This Passport could not prepare that payment. Nothing was sent.');
   }
-  return sender.addIntent({ tag: 'random' }, first) ?? sender;
+  const before = sender.intents?.size ?? 0;
+  const grafted = sender.addIntent({ tag: 'random' }, first);
+  if (grafted === undefined || (grafted.intents?.size ?? 0) !== before + 1) {
+    console.warn('[account-custody] the recipient’s claim did not attach to the payment');
+    throw new Error('This Passport could not prepare that payment. Nothing was sent.');
+  }
+  return grafted;
 }
 
 /** midnight-js's own transaction id, off either shape of finalised data. */

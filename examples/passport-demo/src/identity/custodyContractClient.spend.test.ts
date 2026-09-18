@@ -330,18 +330,25 @@ function harness(
 
   /** An unproven call, with the two members a graft needs. */
   const unprovenCall = (circuit: string, args: readonly unknown[]): FakeCallTx => {
-    const make = (grafted: readonly unknown[]): FakeCallTx => ({
+    /* THE INTENTS MAP GROWS, as the real `addIntent` grows it. A fake whose
+       map stayed one long would drill a world in which a graft that attached
+       nothing is indistinguishable from one that worked — which is the world
+       the silent `?? sender` fallback lived in, and it ends in a transaction
+       that spends the sender's coin and pays nobody. */
+    const make = (grafted: readonly unknown[], intents: Map<number, unknown>): FakeCallTx => ({
       circuit,
       args,
       grafted,
       serialize: () => new Uint8Array([1, 2, 3]),
-      intents: new Map([[0, { intentFor: circuit }]]),
+      intents,
       addIntent: (segment, intent) => {
         if (segment.tag !== 'random') throw new Error('a claim goes into a random segment');
-        return make([...grafted, intent]);
+        const next = new Map(intents);
+        next.set(next.size, intent);
+        return make([...grafted, intent], next);
       },
     });
-    return make([]);
+    return make([], new Map([[0, { intentFor: circuit }]]));
   };
 
   /* THE SPEND IS BUILT HERE AND SENT BELOW. A wrong coin position traps while
