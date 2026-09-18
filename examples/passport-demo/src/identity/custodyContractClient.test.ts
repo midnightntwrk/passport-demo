@@ -2049,3 +2049,83 @@ describe('a passkey Passport, through the widened entry points', () => {
     expect(loadCustodyRecord(test.storage, k1UserKey(other.session), 'stagenet')).not.toBeNull();
   });
 });
+
+/* -------------------------------------------------------------------------- */
+/* Who may fix this account's circuits afterwards                             */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The maintenance authority, and Hector's decision of 2026/09/18: keep it.
+ *
+ * The reason is the week's prototype accounts, which cannot take a circuit fix
+ * — a retired authority makes an account immutable, so a defect means a fresh
+ * account and a migration of everything in the old one. A passkey Passport can
+ * afford to keep it because the key is DERIVED from the passkey and never
+ * written down; a social sign-in cannot, because there is nothing deterministic
+ * to derive from and a kept authority there would be backed by a sampled key
+ * living in one browser — an authority nobody holds.
+ */
+describe('the maintenance authority', () => {
+  function passkeyDevice(): JubjubSigner & { maintenanceSecretHex: string } {
+    const signer = jubjubDeviceSigner({
+      pure: pureFake(),
+      secretScalar: 0x2a1fn,
+      randomBytes: (length) => new Uint8Array(length).fill(9),
+    });
+    return { ...signer, sign: signer.sign.bind(signer), maintenanceSecretHex: 'dd'.repeat(32) };
+  }
+
+  it('is NOT retired for a passkey, so its circuits can be fixed later', async () => {
+    const test = harness();
+    const device = passkeyDevice();
+    await deployCustodyAccount(null, device, undefined, test.deps);
+
+    /* No wave retires it. The old plan's last wave replaced the committee with
+       an empty one, which is what made the account immutable. */
+    expect(test.built.filter((entry) => entry[0] === 'retire')).toHaveLength(0);
+  });
+
+  it('is the key the passkey derived, and not one this browser sampled', async () => {
+    const test = harness();
+    const device = passkeyDevice();
+    await deployCustodyAccount(null, device, undefined, test.deps);
+
+    /* The fake's `signingKeyFromBip340` tags what it was handed, so this is the
+       derived secret arriving at the authority rather than a sampled one. A
+       sampled key would be an authority that dies with this browser — the worst
+       of both answers. */
+    const committees = test.built.filter((entry) => entry[0] === 'authority');
+    expect(committees).toHaveLength(1);
+    /* ONE key in the committee, and not the empty committee a retirement
+       installs. */
+    expect(committees[0][1]).toBe(1);
+  });
+
+  it('IS retired for a social sign-in, exactly as it always was', async () => {
+    const test = harness();
+    const { session, device } = deviceFake();
+    await deployCustodyAccount(session, device, undefined, test.deps);
+
+    expect(test.built.filter((entry) => entry[0] === 'retire')).toHaveLength(1);
+    /* And the only committee it ever builds is the EMPTY one the retirement
+       installs — nothing derived is put behind it, because that arm has no key
+       to derive. */
+    const committees = test.built.filter((entry) => entry[0] === 'authority');
+    expect(committees).toHaveLength(1);
+    expect(committees[0][1]).toBe(0);
+  });
+
+  it('retires for a passkey that was asked for an account nobody can fix', async () => {
+    /* The developer surface's case, and the guard that makes the two halves
+       agree: a device with no key gets a plan that retires. */
+    const test = harness();
+    const signer = jubjubDeviceSigner({
+      pure: pureFake(),
+      secretScalar: 0x2a1fn,
+      randomBytes: (length) => new Uint8Array(length).fill(9),
+    });
+    await deployCustodyAccount(null, signer, undefined, test.deps);
+
+    expect(test.built.filter((entry) => entry[0] === 'retire')).toHaveLength(1);
+  });
+});

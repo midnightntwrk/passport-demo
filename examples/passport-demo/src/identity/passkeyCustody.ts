@@ -76,20 +76,25 @@ export interface PasskeyCustodyDevice {
  * `PASSPORT_CONTRACT_SCOPE`. It is READ and not retained: the four derivations
  * happen here and the caller is free to zero it the moment this resolves.
  *
- * THE MAINTENANCE KEY IS DERIVED ONLY WHEN IT WILL BE KEPT, and the default is
- * that it will not. The wave plan retires the authority on its last wave, which
- * makes the account immutable and the key pointless; deriving one anyway would
- * put a signing secret in a field nothing reads, which is the kind of thing
- * that gets stored by somebody later. Where the authority IS kept
- * (`planCustodyWaves`'s third argument, and Hector's call), a DERIVED key is
- * the only kind worth keeping — a sampled one lives in this browser and a
- * Passport reinstalled elsewhere would hold an authority nobody can sign for.
- * See `PASSPORT_MAINTENANCE_LABEL` for what each answer costs.
+ * THE MAINTENANCE KEY IS DERIVED, AND THE AUTHORITY IS KEPT — Hector's decision
+ * of 2026/09/18, made for one reason: the prototype accounts made this week
+ * cannot take a circuit fix. A retired authority makes the account immutable, so
+ * a defect in a circuit means a fresh account and a migration of everything in
+ * the old one, which is exactly the position those Passports are in.
+ *
+ * The default here is therefore `true`, and the wave plan follows the DEVICE
+ * rather than a flag a caller might forget (`custodyRetiresAuthority`): a device
+ * that carries a key keeps the authority that key is to, and one that does not
+ * retires it. A caller may still pass `false` — the developer surface makes an
+ * account it never intends to upgrade — and then nothing is derived at all,
+ * which is the point: a signing secret in a field nothing reads is the kind of
+ * thing somebody stores later. See `PASSPORT_MAINTENANCE_LABEL` for what each
+ * answer costs, and `custodyRetiresAuthority` for why only this arm may choose.
  */
 export async function passkeyCustodyDevice(options: {
   readonly pure: CustodyPureCircuits;
   readonly contractRoot: Uint8Array;
-  /** True only where the account is meant to keep its maintenance authority. */
+  /** False only where the account is meant to be immutable. Defaults to true. */
   readonly keepMaintenanceAuthority?: boolean;
   /** Injected so a drill can pin the signature nonce. */
   readonly randomBytes?: (length: number) => Uint8Array;
@@ -103,7 +108,7 @@ export async function passkeyCustodyDevice(options: {
   });
   const encSecretKeyHex = bytesToHex(secrets.encSecret);
   const maintenanceSecretHex =
-    options.keepMaintenanceAuthority === true ? bytesToHex(secrets.maintenanceSecret) : undefined;
+    options.keepMaintenanceAuthority === false ? undefined : bytesToHex(secrets.maintenanceSecret);
   /* The three we did not ask for go back to zero before anybody can hold them.
      `deviceSecret` and `recoverySecret` belong to the PROTOTYPE contract and
      have no meaning on this one; they come back only because the derivation is

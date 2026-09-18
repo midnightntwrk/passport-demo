@@ -48,22 +48,24 @@ describe('passkeyCustodyDevice', () => {
     expect(built.device.encSecretKeyHex).toBe(bytesToHex(encSecret));
   });
 
-  it('derives no maintenance key where the authority is going to be retired', async () => {
+  it('derives the maintenance key by default, because the authority is kept', async () => {
+    /* HECTOR, 2026/09/18: keep it. This week's prototype accounts cannot take a
+       circuit fix, and a retired authority is what makes that true. */
     const built = await passkeyCustodyDevice({ pure, contractRoot: ROOT });
-    /* ABSENT, not empty. The wave plan retires the authority on its last wave,
-       so a key here would be a signing secret in a field nothing reads — which
-       is the kind of thing somebody stores later. */
-    expect('maintenanceSecretHex' in built.device).toBe(false);
+    const { maintenanceSecret } = await derivePassportContractSecrets(ROOT);
+    expect(built.device.maintenanceSecretHex).toBe(bytesToHex(maintenanceSecret));
   });
 
-  it('derives one where the authority is going to be kept', async () => {
+  it('derives none where the caller asks for an account that can never be fixed', async () => {
+    /* ABSENT, not empty. A key for an authority the plan is about to retire is
+       a signing secret in a field nothing reads, which is the kind of thing
+       somebody stores later. */
     const built = await passkeyCustodyDevice({
       pure,
       contractRoot: ROOT,
-      keepMaintenanceAuthority: true,
+      keepMaintenanceAuthority: false,
     });
-    const { maintenanceSecret } = await derivePassportContractSecrets(ROOT);
-    expect(built.device.maintenanceSecretHex).toBe(bytesToHex(maintenanceSecret));
+    expect('maintenanceSecretHex' in built.device).toBe(false);
   });
 
   it('gives the same passkey the same device every time', async () => {
@@ -99,11 +101,7 @@ describe('passkeyCustodyDevice', () => {
   });
 
   it('zeroes what it can when the action is over', async () => {
-    const built = await passkeyCustodyDevice({
-      pure,
-      contractRoot: ROOT,
-      keepMaintenanceAuthority: true,
-    });
+    const built = await passkeyCustodyDevice({ pure, contractRoot: ROOT });
     /* The hex strings the device holds are copies and stay readable — they are
        what the deploy is built from. What `forget` clears is this module's own
        byte arrays, so nothing of the root survives in a buffer somebody could

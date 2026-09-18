@@ -794,7 +794,7 @@ export async function deployCustodyAccount(
      commitment binds the arm and no later wave can repair a deploy that left
      the activation circuit out. `planCustodyWaves` has taken the arm since it
      was written; only the caller was hardcoded. */
-  const waves = planCustodyWaves(sizes, device.arm);
+  const waves = planCustodyWaves(sizes, device.arm, custodyRetiresAuthority(device));
   record = { ...record, totalWaves: waves.length };
   /* Decided ONCE, from the plan this deploy will actually run, and handed to
      both wave runners: the one that builds the authority and the one that has
@@ -930,17 +930,46 @@ interface WaveContext {
 }
 
 /**
+ * Whether this account's maintenance authority is thrown away on the last wave.
+ *
+ * HECTOR DECIDED THIS ON 2026/09/18, and decided it for one reason: the
+ * prototype accounts made this week cannot take a circuit fix. A retired
+ * authority makes the account immutable — no verifier key can ever be replaced
+ * — so a defect in a circuit means a fresh account and a migration of
+ * everything in the old one, which is exactly the position those Passports are
+ * in and exactly what he did not want to repeat.
+ *
+ * SO A PASSKEY KEEPS IT, and only a passkey. The cost of keeping it is that
+ * whoever can complete the assertion can replace a verifier key and therefore
+ * replace the rule that guards the coins, which is a strictly larger prize than
+ * the balance; the cost of retiring it is an account nobody can ever fix. What
+ * makes keeping it worth having is that the key is DERIVED from the passkey and
+ * never written down (see `PASSPORT_MAINTENANCE_LABEL`), so it survives a
+ * reinstall for exactly as long as the passkey does.
+ *
+ * A k256 device carries no derived key — the vendor's signatures are randomised
+ * and there is nothing deterministic to hash — so a kept authority there would
+ * be backed by a sampled key living in one browser: an authority nobody holds,
+ * which is the worst of both answers. That arm retires, as it always has, and
+ * the Dynamic product is parked in any case.
+ */
+function custodyRetiresAuthority(device: CustodyDeviceIdentity): boolean {
+  return !('maintenanceSecretHex' in device && device.maintenanceSecretHex !== undefined);
+}
+
+/**
  * The maintenance signing key the passkey hands down — or null, which is the
- * answer for every account this app deploys today.
+ * answer for a device that carries none.
  *
  * TWO CONDITIONS, AND THE SECOND ONE WAS MISSING. A device that carries a
  * `maintenanceSecretHex` was enough to take this branch, so a passkey Passport
  * got an authority built from a secret derived from somebody's authenticator
  * ON A PLAN THAT RETIRES THE AUTHORITY TWO WAVES LATER. That is a derived
- * upgrade secret created, stored, and made worthless in the same setup.
- * `planCustodyWaves` retires by default and nothing here asks it not to, so
- * the honest reading of the plan is the gate: the key is derived only for an
- * account that is going to KEEP the authority it is the key to.
+ * upgrade secret created, stored, and made worthless in the same setup. The
+ * plan is now asked NOT to retire for exactly the devices that carry a key
+ * ({@link custodyRetiresAuthority}), so the two conditions agree by
+ * construction; the second is kept because a plan is a value a caller can hand
+ * in, and a key built against a plan that retires is still worthless.
  *
  * It hands back a function because nothing persists a derived key; see
  * {@link signingKeyFor} for the other half of that rule.
