@@ -293,7 +293,23 @@ same thing: the local runtime, when it cannot build a Merkle path for the positi
 all, and the proving service, when the path it built rebuilds a different root. The
 second arrives inside midnight-js's own wrapper, which is why
 `isCustodyProofNotBuilt` walks the `cause` chain and matches the error's name in the
-text (§3b, "Why a recoverable guess became a dead stop").
+text (§3b, "Why a recoverable guess became a dead stop"). There is a third, and it took
+a live run to find: the runtime does not always fail politely. A position past the last
+leaf the contract's own Zswap state retains makes it TRAP, and all that arrives is
+`RuntimeError: unreachable` — a name and one word (§3c).
+
+**A settled coin has no candidate list, and that is the case the retry has to survive
+(corrected 2026/09/18).** Reconciliation keeps the winning position and drops the
+candidates, which is right: a coin whose position the chain has agreed needs no list. But
+if the chain later has the coin somewhere else, the one position left is the wrong one and
+there is nothing to advance to — the retry fires and finds an empty list. `widenK1CoinCandidates`
+therefore seeds a list from the coin's OWN position when it has none, and sweeps
+`K1_CANDIDATE_SWEEP` either side of it. D1 sat in exactly that state live and could not
+send at all until this was in. Seeding rather than sweeping directly is what keeps the
+widening idempotent — the contiguous prefix of a one-position list is that position, so a
+second call recomputes the same neighbours and adds nothing — which matters because a
+spend's loop is `advance ?? widen` and a widening that kept finding more would never
+terminate.
 
 ### 3b. What the live stagenet run of 2026/09/18 settled, and what it did not
 
