@@ -119,7 +119,7 @@ describe('passkeyCustodyDevice', () => {
     ).rejects.toThrow(/32 bytes/);
   });
 
-  it('names three labels, all distinct', async () => {
+  it('names three labels, all distinct', () => {
     const labels = [JUBJUB_DEVICE_LABEL, PASSKEY_CUSTODY_LABELS.enc, PASSKEY_CUSTODY_LABELS.maintenance];
     /* DOMAIN SEPARATION IS THE WHOLE POINT of one assertion producing several
        secrets: two labels that collided would make the viewing secret and the
