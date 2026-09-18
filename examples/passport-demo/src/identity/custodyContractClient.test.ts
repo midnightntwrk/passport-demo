@@ -469,6 +469,18 @@ function harness(
     indexerHttpUrl: '',
     deserialiseUnbound: (bytes: Uint8Array) => ({ proven: bytes.length }),
   };
+  /* THE CHAIN'S ANSWER ABOUT A SUBMITTED CALL, in one place: a spend submits
+     and then asks the connection what became of it, so the same data has to
+     come back from `watchForTxData` as `submitTx` used to answer with. */
+  (providers.publicDataProvider as Record<string, unknown>).watchForTxData = (txId: string) =>
+    Promise.resolve(finalisedCall(txId));
+
+  const finalisedCall = (txId: string) => ({
+    txId,
+    status: 'SucceedEntirely',
+    ...(chain.finalHash === undefined ? {} : { txHash: chain.finalHash }),
+    ...(chain.finalBlock === undefined ? {} : { blockHeight: chain.finalBlock }),
+  });
 
   const callTx = new Proxy(
     {},
@@ -536,6 +548,9 @@ function harness(
     },
   );
 
+  /* Named, because `submitTxAsync` is the same submission read for its id. */
+  let contractsFake: { submitTx(providers: unknown, options: unknown): Promise<unknown> };
+
   const deps: Partial<CustodyDeps> = {
     storage: () => storage,
     randomBytes: (length) => new Uint8Array(length).fill(7),
@@ -551,6 +566,17 @@ function harness(
     ledger: () => Promise.resolve(ledgerFake(chain, built)),
     contracts: () =>
       Promise.resolve({
+        /* SUBMIT AND WAIT, SPLIT, exactly as the library splits them: the real
+           `submitTx` is `submitTxAsync` followed by `watchForTxData`, and a
+           spend uses the two halves so it can write the change down between
+           them. The fake composes them the same way round. */
+        submitTxAsync: async (submitProviders: unknown, options: unknown) => {
+          const data = (await contractsFake.submitTx(submitProviders, options)) as {
+            txId?: string;
+            public?: { txId?: string };
+          };
+          return data.txId ?? data.public?.txId ?? '';
+        },
         /* THE SPEND IS BUILT AND NOT SENT, which is where a wrong coin position
            now fails: the circuit is EXECUTED here, against the contract's own
            Zswap tree, so a position the tree does not carry traps before any
@@ -594,12 +620,7 @@ function harness(
               return Promise.reject(custodyProofNotBuilt());
             }
             chain.authNonce += 1n;
-            return Promise.resolve({
-              txId: `id-${calls.length}`,
-              status: 'SucceedEntirely',
-              ...(chain.finalHash === undefined ? {} : { txHash: chain.finalHash }),
-              ...(chain.finalBlock === undefined ? {} : { blockHeight: chain.finalBlock }),
-            });
+            return Promise.resolve(finalisedCall(`id-${calls.length}`));
           }
           if (!overrides.dropSubmissions) {
             const tx = (options as { unprovenTx: FakeTx }).unprovenTx;
@@ -620,6 +641,9 @@ function harness(
           opened.push((options as { contractAddress: string }).contractAddress);
           return Promise.resolve({ callTx });
         },
+      }).then((api) => {
+        contractsFake = api;
+        return api;
       }),
     /* A CLOCK THAT MOVES. `awaitAuthorityCounter` gives up on a deadline, and a
        frozen clock would spin for ever in the one drill that wants to see it

@@ -248,7 +248,7 @@ function harness(chain: ChainFake = {}) {
     });
   };
 
-  const submitTx = async (submitProviders: unknown, submitOptions: unknown) => {
+  const submitTxAsync = async (submitProviders: unknown, submitOptions: unknown) => {
     const { unprovenTx, circuitId } = submitOptions as {
       unprovenTx: FakeCallTx;
       circuitId: string[];
@@ -260,14 +260,20 @@ function harness(chain: ChainFake = {}) {
     if (prover) await prover.proveTx(unprovenTx);
     grafts.push(unprovenTx.grafted.length);
     submitted += 1;
-    /* The chain's verdict travels with the id, as it does on the real one. */
-    return { txId: `id-${submitted}`, status: 'SucceedEntirely' };
+    return `id-${submitted}`;
   };
+
+  /* The chain's verdict, asked for separately — as the real pair are. */
+  const watchForTxData = (txId: string) => Promise.resolve({ txId, status: 'SucceedEntirely' });
+
+  const submitTx = async (submitProviders: unknown, submitOptions: unknown) =>
+    watchForTxData(await submitTxAsync(submitProviders, submitOptions));
 
   const providers: Record<string, unknown> = {
     publicDataProvider: {
       queryContractState: () =>
         Promise.resolve({ data: 'state', serialize: () => new Uint8Array([1]) }),
+      watchForTxData,
     },
     privateStateProvider: {
       setContractAddress: () => undefined,
@@ -305,6 +311,7 @@ function harness(chain: ChainFake = {}) {
         createUnprovenDeployTx: () => Promise.reject(new Error('not used here')),
         createUnprovenCallTx,
         submitTx,
+        submitTxAsync,
         /* THE GATED CALL THAT IS NOT A SPEND. `append_inbox` composes nothing,
            so it still goes through midnight-js's own `callTx` — which is the
            path the backfill takes. */

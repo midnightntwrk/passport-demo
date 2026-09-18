@@ -151,6 +151,7 @@ import {
   restartK1CoinCandidates,
   settleK1AwaitingCoinByChainHash,
   settleK1Coin,
+  undoK1ChangeCoin,
   widenK1CoinCandidates,
   type K1Account,
   type K1CoinStoreState,
@@ -434,6 +435,17 @@ export interface CustodyContractsApi {
    */
   createUnprovenCallTx(providers: unknown, options: unknown): Promise<unknown>;
   submitTx(providers: unknown, options: unknown): Promise<unknown>;
+  /**
+   * Prove, balance, and submit — and come back with the id, not the outcome.
+   *
+   * THE HALF OF `submitTx` A SPEND NEEDS. `submitTx` is this followed by an
+   * unbounded `watchForTxData`, so a caller using it cannot write anything down
+   * between the node taking the transaction and the chain ruling on it. A
+   * shielded spend has to: the change coin's description is the circuit's
+   * return value and exists nowhere else, and the wait is where the sockets
+   * drop. See {@link spendShieldedK1}.
+   */
+  submitTxAsync(providers: unknown, options: unknown): Promise<string>;
   findDeployedContract(providers: unknown, options: unknown): Promise<{ callTx: CustodyCallTx }>;
 }
 
@@ -1982,51 +1994,73 @@ export async function spendShieldedK1(
          words). So the graft above is made at the ledger level and this is
          handed the finished transaction. The circuit names still travel,
          because the proof provider is what names them to the service. */
+      /* SUBMITTED AND WATCHED SEPARATELY, WHICH IS THE WHOLE OF R2. `submitTx`
+         is `submitTxAsync` followed by `watchForTxData`, and doing both behind
+         one call puts the ONLY description of the change coin — the circuit's
+         return value, which is on no chain and in no inbox — behind an
+         unbounded wait for finality. A socket dropped during that wait (the
+         outages of 2026/09/05 and 2026/09/07) threw before a single line of the
+         bookkeeping had run: the held slot kept a coin that had just been spent,
+         the change was gone for good, `sendTxId` stayed null, and the screen
+         told somebody nothing had been sent about a transaction that was away.
+         Split, the id arrives at submission and the write happens THERE. */
       phase = 'submitting';
-      const finalized = await contracts.submitTx(providers, {
+      const identifier = await contracts.submitTxAsync(providers, {
         unprovenTx,
         circuitId: [...circuits],
       });
-      const identifier = finalizedTxId(finalized);
+
+      /* BEFORE ANYTHING IS ASKED OF ANYBODY, and before anything is waited on.
+         One write: the held coin marked spent, its nonce remembered, and the
+         change filed as awaiting under the id the transaction was submitted
+         with. */
+      settleK1Coin(account, colour);
+      const written = writeShieldedChange(account, colour, change, identifier);
+      /* AND THE RECORD NAMES THE TRANSACTION FROM HERE ON. Everything after
+         this line can fail, and none of those failures may leave a record
+         saying nothing was sent — `custodyShieldedSendOutcome` decides that on
+         `sendTxId` alone, and this is where it gets one. */
+      onPhase?.({ step: 'confirm', txId: identifier ?? undefined });
+
+      /* THE CHAIN'S VERDICT, WAITED FOR HERE RATHER THAN INSIDE THE SUBMIT. */
+      let finalized: unknown;
+      try {
+        finalized = await watchForTxData(providers, identifier);
+      } catch (cause) {
+        /* THE WRITE STAYS. A wait that failed says nothing about the
+           transaction: it may be in the next block. Undoing here would drop the
+           change coin's only description on the strength of a socket, which is
+           the more expensive of the two mistakes by a distance — the other is a
+           coin the store holds and the chain does not, and `k1CoinStore`'s own
+           reconciliation is the thing that settles that. */
+        console.warn('[account-custody] the payment was sent and its outcome is not known', cause);
+        throw new Error(CUSTODY_SEND_UNCONFIRMED);
+      }
       const chainHash = finalizedTxHash(finalized);
 
-      /* THE CHAIN'S VERDICT, AND NOT THE FACT THAT IT ANSWERED. `submitTx`
-         resolves with the finalised data for a transaction that FAILED exactly
-         as it does for one that succeeded — the status is the only thing that
-         tells them apart, and nothing here read it. A `FailFallible` therefore
-         went through the whole of the bookkeeping below: the held coin deleted,
-         its nonce appended to the spent list, and a change coin that was never
-         created filed as awaiting a position. `reconcileK1CoinFromChain` then
-         answers `spent` about that nonce for ever, so the coin the account
-         still demonstrably holds is invisible to every future spend — the
-         balance is gone and no screen can say why.
-         A failed transaction spent NOTHING (MIP-0012 INV-5), so the store is
-         left exactly as it was and the position the proof verified against is
-         put back at the head rather than left mid-rotation. */
+      /* THE CHAIN'S VERDICT, AND NOT THE FACT THAT IT ANSWERED. The finalised
+         data comes back for a transaction that FAILED exactly as it does for
+         one that succeeded — the status is the only thing that tells them
+         apart, and nothing here read it. A `FailFallible` therefore kept the
+         whole of the write above: the held coin deleted, its nonce appended to
+         the spent list, and a change coin that was never created filed as
+         awaiting a position. `reconcileK1CoinFromChain` then answers `spent`
+         about that nonce for ever, so the coin the account still demonstrably
+         holds is invisible to every future spend — the balance is gone and no
+         screen can say why.
+         A failed transaction spent NOTHING (MIP-0012 INV-5), so the write is
+         taken back exactly and the position the proof verified against is put
+         back at the head rather than left mid-rotation. */
       const status = finalizedStatus(finalized);
       if (status !== (await succeededEntirely())) {
         console.warn(
           `[account-custody] the chain did not accept the payment (${status ?? 'no status'})`,
         );
+        undoK1ChangeCoin(account, held, change.outcome === 'change' ? change : null);
         restartK1CoinCandidates(account, colour);
-        /* A TRANSACTION EXISTS, whatever it came to, so the record says so:
-           `custodyShieldedSendOutcome` tells somebody nothing was sent only
-           while `sendTxId` is null, and this one was sent and refused. */
-        onPhase?.({ step: 'confirm', txId: chainHash ?? identifier ?? undefined });
         throw new Error(status === null ? CUSTODY_SEND_UNCONFIRMED : CUSTODY_SEND_FAILED);
       }
 
-      /* BEFORE ANYTHING IS ASKED OF ANYBODY. The change coin's description is
-         the circuit's return value and exists nowhere else in the world; the
-         write happens the instant the transaction is known to be on chain,
-         rather than after the indexer has been polled for a window. */
-      settleK1Coin(account, colour);
-      const written = writeShieldedChange(account, colour, change, chainHash ?? identifier);
-
-      /* CARRIED OUT THE MOMENT THE TRANSACTION EXISTS, and before the two slow
-         indexer questions below — a tab closed during those has a transaction
-         away and must not be told that nothing was sent. */
-      onPhase?.({ step: 'confirm', txId: chainHash ?? identifier ?? undefined });
       /* THE CHAIN'S OWN HASH, when the finalised data carried one. It is what
          the indexer answers a commitment window at, and asking for it again
          would be a second question with a worse answer. */
@@ -2211,6 +2245,26 @@ function finalizedTxHash(result: unknown): string | null {
   const view = result as { txHash?: unknown; public?: { txHash?: unknown } } | null;
   const value = view?.txHash ?? view?.public?.txHash;
   return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+/**
+ * What the chain said about a transaction that has been submitted.
+ *
+ * ASKED OF THE CONNECTION, not of midnight-js's `submitTx`, because the whole
+ * point of {@link spendShieldedK1}'s split is that the write happens between
+ * the submission and this. The provider's own wait is unbounded by contract —
+ * see `passportContract.ts` for what that costs a screen — but a spend is
+ * already past the point where anything can be undone by giving up, so the
+ * honest thing is to wait and to say so if the wait fails.
+ */
+async function watchForTxData(providers: Record<string, unknown>, txId: string): Promise<unknown> {
+  const reader = providers.publicDataProvider as
+    | { watchForTxData?: (id: string) => Promise<unknown> }
+    | undefined;
+  if (typeof reader?.watchForTxData !== 'function') {
+    throw new Error('this connection cannot be asked what became of a payment');
+  }
+  return reader.watchForTxData(txId);
 }
 
 /**

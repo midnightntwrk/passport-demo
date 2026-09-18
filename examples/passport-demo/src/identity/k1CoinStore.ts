@@ -1016,6 +1016,65 @@ function dropAwaitingRow(draft: K1StoreDraft, colour: string, nonceHex: string):
 }
 
 /**
+ * Take {@link rememberK1ChangeCoin} back, in ONE write, for a transaction that
+ * turned out not to have happened.
+ *
+ * THE ONE CALLER IS A SPEND WHOSE TRANSACTION THE CHAIN REFUSED. A payment is
+ * booked at SUBMISSION, not at finality, because the change coin's description
+ * is the circuit's return value and exists nowhere else in the world — a tab
+ * closed during the wait for a verdict must not be the thing that loses it. The
+ * price of writing that early is that the verdict can come back no, and a
+ * refused transaction spent nothing (MIP-0012 INV-5): the coin was never
+ * consumed, the change was never created, and leaving the write in place would
+ * mark a live nonce spent for ever and file a coin that does not exist.
+ *
+ * So this is the exact inverse of that write and nothing more:
+ *
+ *   - the change coin's awaiting row goes, addressed by its nonce;
+ *   - the spent nonce is forgotten, so the coin can be offered again;
+ *   - whatever was promoted into the held slot behind the spend goes back to
+ *     the FRONT of its queue, oldest-first order intact;
+ *   - the coin the spend consumed is put back, at the position it was held at.
+ *
+ * THE CANDIDATE LIST IS NOT RESTORED, AND MUST NOT BE. `settleK1Coin` ran on a
+ * proof that verified against this position, and a proof verifying is the chain
+ * agreeing with it — that is a fact about the coin whatever the transaction
+ * carrying it came to afterwards. Putting the guesses back would make the next
+ * spend of this colour re-try positions the chain has already settled, at one
+ * approval each.
+ */
+export function undoK1ChangeCoin(
+  account: K1Account,
+  coin: K1HeldCoin,
+  change: { readonly colour: string; readonly nonce: string } | null,
+): void {
+  const target = requireAccount(account);
+  const restored = requireCoin(coin);
+  editStore(target, (draft) => {
+    if (change !== null) {
+      dropAwaitingRow(draft, requireColour(change.colour), requireColour(change.nonce));
+    }
+    draft.spentNonces = draft.spentNonces.filter((nonce) => nonce !== restored.nonce);
+    /* WHATEVER TOOK THE SLOT GOES BACK WHERE IT CAME FROM. A spend that left no
+       change promotes the next queued coin of the colour into the held slot;
+       the coin being restored is the one that was there before it, so the
+       promoted coin returns to the front of the queue rather than being
+       overwritten by the restore. */
+    const occupant = Object.hasOwn(draft.coins, restored.colour)
+      ? draft.coins[restored.colour]
+      : null;
+    if (occupant !== null) {
+      const queue = Object.hasOwn(draft.queued, restored.colour)
+        ? draft.queued[restored.colour]
+        : [];
+      queue.unshift(occupant);
+      draft.queued[restored.colour] = queue;
+    }
+    draft.coins[restored.colour] = rowFromCoin(restored);
+  });
+}
+
+/**
  * Every coin this account holds that has no position yet — colour order, and
  * oldest first within a colour.
  *

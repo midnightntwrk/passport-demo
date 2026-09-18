@@ -44,6 +44,7 @@ import {
   rememberK1EncSecretKey,
   rememberK1ChangeCoin,
   replaceK1Coin,
+  undoK1ChangeCoin,
   settleK1AwaitingCoin,
   settleK1AwaitingCoinByChainHash,
   settleK1Coin,
@@ -1442,6 +1443,64 @@ describe('a change coin waiting for its position', () => {
     });
     expect(awaitingK1Coins(ALICE)).toEqual([
       { colour: NIGHT, nonce: NONCE, value: 60n, txId: 'tx-1' },
+    ]);
+  });
+});
+
+describe('taking a spend back when the chain refused the transaction', () => {
+  /* THE PRICE OF WRITING AT SUBMISSION. A payment is booked the instant it has
+     an id, because the change coin's description exists nowhere else in the
+     world and a tab closed during the wait for a verdict must not lose it. The
+     verdict can then come back no — and a refused transaction spent nothing, so
+     the write has to be exactly reversible. */
+
+  it('puts the coin back and forgets the change a refused transaction never made', () => {
+    putK1Coin(ALICE, coin({ value: 100n, mtIndex: 3n }));
+    rememberK1ChangeCoin(ALICE, NIGHT, { colour: NIGHT, nonce: OTHER_NONCE, value: 60n }, 'tx-1');
+
+    undoK1ChangeCoin(ALICE, coin({ value: 100n, mtIndex: 3n }), {
+      colour: NIGHT,
+      nonce: OTHER_NONCE,
+    });
+
+    expect(heldK1Coin(ALICE, NIGHT)).toEqual(coin({ value: 100n, mtIndex: 3n }));
+    /* The nonce is live again — an account whose spend did not happen must be
+       able to offer the same coin a second time. */
+    expect(isK1NonceSpent(ALICE, NONCE)).toBe(false);
+    expect(awaitingK1Coins(ALICE)).toEqual([]);
+    expect(loadK1CoinStore(ALICE).awaiting).toEqual({});
+  });
+
+  it('demotes the coin a spend with no change promoted, keeping the queue order', () => {
+    enqueueK1Coin(ALICE, coin({ value: 100n, mtIndex: 3n }));
+    enqueueK1Coin(ALICE, coin({ nonce: OTHER_NONCE, value: 40n, mtIndex: 4n }));
+    rememberK1ChangeCoin(ALICE, NIGHT, null, 'tx-1');
+    expect(heldK1Coin(ALICE, NIGHT)?.nonce).toBe(OTHER_NONCE);
+
+    undoK1ChangeCoin(ALICE, coin({ value: 100n, mtIndex: 3n }), null);
+
+    expect(heldK1Coin(ALICE, NIGHT)).toEqual(coin({ value: 100n, mtIndex: 3n }));
+    /* The promoted coin goes back to the FRONT of the queue: it was the next
+       one before the spend and it is the next one after the undo. */
+    expect(queuedK1Coins(ALICE, NIGHT)).toEqual([
+      coin({ nonce: OTHER_NONCE, value: 40n, mtIndex: 4n }),
+    ]);
+    expect(isK1NonceSpent(ALICE, NONCE)).toBe(false);
+  });
+
+  it('demotes it in front of the coins still queued behind it', () => {
+    const third = '5c'.repeat(32);
+    enqueueK1Coin(ALICE, coin({ value: 100n, mtIndex: 3n }));
+    enqueueK1Coin(ALICE, coin({ nonce: OTHER_NONCE, value: 40n, mtIndex: 4n }));
+    enqueueK1Coin(ALICE, coin({ nonce: third, value: 20n, mtIndex: 5n }));
+    rememberK1ChangeCoin(ALICE, NIGHT, null, 'tx-1');
+
+    undoK1ChangeCoin(ALICE, coin({ value: 100n, mtIndex: 3n }), null);
+
+    expect(heldK1Coin(ALICE, NIGHT)).toEqual(coin({ value: 100n, mtIndex: 3n }));
+    expect(queuedK1Coins(ALICE, NIGHT)).toEqual([
+      coin({ nonce: OTHER_NONCE, value: 40n, mtIndex: 4n }),
+      coin({ nonce: third, value: 20n, mtIndex: 5n }),
     ]);
   });
 });

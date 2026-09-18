@@ -252,6 +252,14 @@ interface ChainFake {
    */
   submitStatus?: string | null;
   /**
+   * A failure raised while WAITING for the chain's verdict.
+   *
+   * The node has the transaction and the wait for finality failed — a dropped
+   * socket, which is what the outages of 2026/09/05 and 2026/09/07 were. It
+   * says nothing about whether the transaction landed.
+   */
+  watchFailure?: string;
+  /**
    * What the indexer answers when a row still filed under an identifier is
    * asked about again — `settleK1AwaitingCoinByChainHash`'s second chance.
    */
@@ -282,6 +290,8 @@ interface SpendHarness {
   windowQuestions: string[];
   /** Every identifier the settle asked the indexer to name the hash of. */
   hashQuestions: string[];
+  /** Every transaction the run waited on the chain's verdict for. */
+  watched: string[];
   chain: ChainFake;
 }
 
@@ -315,6 +325,7 @@ function harness(
   const opened: string[] = [];
   const windowQuestions: string[] = [];
   const hashQuestions: string[] = [];
+  const watched: string[] = [];
   let submitted = 0;
 
   /** An unproven call, with the two members a graft needs. */
@@ -364,11 +375,13 @@ function harness(
     });
   };
 
-  /* REAL `submitTx` PROVES, BALANCES, THEN SUBMITS, behind one call — which is
-     why the caller cannot tell those three apart from the outside and why the
-     proof provider reports the boundary. The fake does the same, so a test can
-     fail on either side of it. */
-  const submitTx = async (submitProviders: unknown, submitOptions: unknown) => {
+  /* REAL `submitTxAsync` PROVES, BALANCES, THEN SUBMITS, behind one call —
+     which is why the caller cannot tell those three apart from the outside and
+     why the proof provider reports the boundary. It comes back with the id the
+     moment the node has the transaction and says NOTHING about what became of
+     it; that is a second question, below. The fake does the same, so a test can
+     fail on any of the four. */
+  const submitTxAsync = async (submitProviders: unknown, submitOptions: unknown) => {
     const { unprovenTx } = submitOptions as { unprovenTx: FakeCallTx };
     const prover = (submitProviders as {
       proofProvider?: { proveTx(tx: unknown): Promise<unknown> };
@@ -377,20 +390,31 @@ function harness(
     grafts.push(unprovenTx.grafted.length);
     submitted += 1;
     if (chain.submitFailure !== undefined) throw new Error(chain.submitFailure);
-    /* THE STATUS IS PART OF THE ANSWER, and the real `submitTx` resolves with
-       it whether the chain took the transaction or refused it. A fake that
-       carried only an id would drill a world in which arriving is the same as
-       succeeding, which is exactly the world the defect lived in. */
-    return {
-      txId: `id-${submitted}`,
-      ...(chain.submitStatus === null ? {} : { status: chain.submitStatus ?? 'SucceedEntirely' }),
-    };
+    return `id-${submitted}`;
   };
+
+  /* THE CHAIN'S ANSWER, ASKED FOR SEPARATELY. The status is part of it, and the
+     real one carries it whether the chain took the transaction or refused it: a
+     fake that answered only an id would drill a world in which arriving is the
+     same as succeeding, which is exactly the world the defect lived in. */
+  const watchForTxData = (txId: string) => {
+    watched.push(txId);
+    if (chain.watchFailure !== undefined) return Promise.reject(new Error(chain.watchFailure));
+    return Promise.resolve({
+      txId,
+      ...(chain.submitStatus === null ? {} : { status: chain.submitStatus ?? 'SucceedEntirely' }),
+    });
+  };
+
+  /* The library's own composition of the two, for anything that wants it. */
+  const submitTx = async (submitProviders: unknown, submitOptions: unknown) =>
+    watchForTxData(await submitTxAsync(submitProviders, submitOptions));
 
   const providers: Record<string, unknown> = {
     publicDataProvider: {
       queryContractState: () =>
         Promise.resolve({ data: 'state', serialize: () => new Uint8Array([1]) }),
+      watchForTxData,
     },
     privateStateProvider: {
       setContractAddress: () => undefined,
@@ -412,6 +436,7 @@ function harness(
     opened,
     windowQuestions,
     hashQuestions,
+    watched,
     chain,
     deps: {
       storage: () => storage,
@@ -445,6 +470,7 @@ function harness(
           createUnprovenDeployTx: () => Promise.reject(new Error('not used here')),
           createUnprovenCallTx,
           submitTx,
+          submitTxAsync,
           findDeployedContract: () => Promise.reject(new Error('not used here')),
         } as never),
       resolveChainHash: (_indexer: string, txId: string) => {
@@ -802,7 +828,11 @@ describe('the change coin reaches storage before anything slow happens', () => {
     expect(heldK1Coin(ACCOUNT, COLOUR)?.mtIndex).toBe(5n);
     expect(isK1NonceSpent(ACCOUNT, NONCE)).toBe(false);
     expect(awaitingK1Coins(ACCOUNT)).toEqual([]);
-    expect(k1CoinCandidates(ACCOUNT, COLOUR)).toEqual([5n, 6n]);
+    /* THE GUESSES DO NOT COME BACK, and that is right: the proof verified
+       against position 5, which is the chain agreeing with it, and that stays
+       true whatever the transaction carrying it came to afterwards. Putting the
+       list back would cost an approval per position on the next press. */
+    expect(k1CoinCandidates(ACCOUNT, COLOUR)).toEqual([]);
     /* ONE ATTEMPT. A refused transaction is not a wrong position, and a second
        candidate would be a second approval and a second transaction. */
     expect(test.calls.filter((call) => call.circuit === 'withdraw_shielded_with_k256')).toHaveLength(
@@ -1101,9 +1131,66 @@ describe('a spend against a position that may be the wrong one', () => {
       1,
     );
     expect(signed).toHaveLength(1);
-    /* And the store is left canonical rather than mid-rotation. */
+    /* And the store is left canonical rather than mid-rotation. Nothing was
+       written, because the failure came before there was an id to write
+       anything under — the transaction was never acknowledged. */
     expect(heldK1Coin(ACCOUNT, COLOUR)?.mtIndex).toBe(5n);
     expect(k1CoinCandidates(ACCOUNT, COLOUR)).toEqual([5n, 6n]);
+    expect(awaitingK1Coins(ACCOUNT)).toEqual([]);
+  });
+
+  /* ---------------------------------------------------------------------- */
+  /* THE WAIT FOR A VERDICT IS NOT THE SUBMISSION (R2)                       */
+  /*                                                                         */
+  /* `submitTx` is `submitTxAsync` followed by an unbounded wait for         */
+  /* finality, so writing only after it returns puts the change coin's ONLY  */
+  /* description behind a socket that has dropped twice in this build's      */
+  /* history (2026/09/05, 2026/09/07). Split, the id arrives at submission   */
+  /* and the write happens there — so a wait that fails loses nothing.       */
+  /* ---------------------------------------------------------------------- */
+
+  it('keeps the change and names the transaction when the wait for a verdict fails', async () => {
+    const test = harness({
+      circuitResult: changeResult(60n),
+      /* The shape of a dropped socket: the node took it, the wait did not
+         survive long enough to hear what became of it. */
+      watchFailure: 'WebSocket is not connected',
+    });
+    const { session, device, signed } = deviceFake();
+    putK1CoinCandidates(ACCOUNT, { colour: COLOUR, nonce: NONCE, value: 100n }, [5n, 6n]);
+
+    const seen: string[] = [];
+    await expect(
+      withdrawShieldedK1(
+        session,
+        device,
+        {
+          recipientCoinPublicKey: new Uint8Array(32),
+          recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+          colourHex: COLOUR,
+          amount: 40n,
+        },
+        (phase) => {
+          if (phase.txId !== undefined) seen.push(phase.txId);
+        },
+        test.deps,
+      ),
+    ).rejects.toThrow('Your payment was sent and this Passport could not confirm it.');
+
+    /* THE DESCRIPTION SURVIVED, which is the whole of the fix: it exists
+       nowhere else in the world, and the wait is exactly where it used to be
+       lost. The coin is filed under the identifier it was submitted with. */
+    expect(awaitingK1Coins(ACCOUNT)).toEqual([
+      { colour: COLOUR, nonce: CHANGE_NONCE, value: 60n, txId: 'id-1' },
+    ]);
+    expect(isK1NonceSpent(ACCOUNT, NONCE)).toBe(true);
+    expect(heldK1Coin(ACCOUNT, COLOUR)).toBeNull();
+    /* The record names the transaction, so the screen hedges rather than
+       telling somebody nothing was sent. */
+    expect(seen).toEqual(['id-1']);
+    /* And still one approval: the transaction may be away. */
+    expect(signed).toHaveLength(1);
+    expect(test.watched).toEqual(['id-1']);
   });
 
   it('restores the head and keeps the list when every candidate has been tried', async () => {
