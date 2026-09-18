@@ -834,6 +834,29 @@ export function queuedK1Coins(account: K1Account, colour: string): K1HeldCoin[] 
 }
 
 /**
+ * Every colour this account holds anything of, with what it holds of each.
+ *
+ * HELD UNION QUEUED, and the union is the point (review, 2026/09/18).
+ * {@link listK1Coins} lists the HELD slots alone, and a colour can perfectly
+ * well have an empty held slot and a queue behind it: a spend takes the held
+ * coin and files its change as awaiting, leaving a coin that arrived earlier
+ * sitting in the queue. A screen drawing its rows from the held slots showed no
+ * row at all for that colour — money the holder could neither see nor, since
+ * nothing offered it, promote and spend. A row is what says it is here.
+ *
+ * Colour order, so two reads agree, and a colour whose whole holding is zero is
+ * still a colour this account has coins of.
+ */
+export function k1ColourHoldings(account: K1Account): { colour: string; value: bigint }[] {
+  const state = loadK1CoinStore(account);
+  const colours = new Set([...Object.keys(state.coins), ...Object.keys(state.queued)]);
+  return [...colours].sort().map((colour) => ({
+    colour,
+    value: k1ColourBalance(account, colour),
+  }));
+}
+
+/**
  * What this account holds of a colour: the held coin plus everything queued
  * behind it.
  *
@@ -1067,6 +1090,67 @@ export async function settleK1AwaitingCoin(
 }
 
 /**
+ * Whether an awaiting row is still filed under midnight-js's own identifier
+ * rather than the chain's hash.
+ *
+ * THE TWO ARE DIFFERENT LENGTHS, and that is the whole test: a chain hash is 32
+ * bytes (64 hex characters) and midnight-js's identifier is 33 (66). Anything
+ * else is neither, and it is treated the same way as an identifier — there is
+ * nothing to lose by asking the indexer what it resolves to, and a coin filed
+ * under something the indexer cannot answer is a coin that reads as arriving
+ * for ever.
+ */
+export function k1AwaitingTxNeedsChainHash(txId: string): boolean {
+  return !/^[0-9a-f]{64}$/i.test(typeof txId === 'string' ? txId.trim() : '');
+}
+
+/**
+ * Settle an awaiting coin, resolving the chain's hash first when the row is
+ * still filed under an identifier.
+ *
+ * THE DEFECT THIS EXISTS FOR (review, 2026/09/18). `resolveTransactionHash`
+ * polls the indexer for ten seconds and then RETURNS THE IDENTIFIER IT WAS
+ * GIVEN, which is not a failure and reads as an answer. A spend whose indexer
+ * was more than ten seconds behind therefore filed its change under the
+ * identifier, found nothing to rename it to, and every later read asked for a
+ * commitment window at `{ hash: <identifier> }` — a question this indexer
+ * answers for nothing (§3b). The coin read "arriving" for the rest of the
+ * account's life, with the value in it.
+ *
+ * So the resolution is retried HERE, on the reads that follow, and the row is
+ * renamed the first time the indexer knows the transaction. One place, because
+ * both callers — the spend's own settle and Home's walk of the awaiting rows —
+ * have to do the same thing, and a second copy of it is how one of them stops
+ * doing it.
+ *
+ * A ROW WITH NO HASH YET IS NOT ASKED ABOUT. The identifier form of the
+ * question has no answer in it, so asking costs a round trip and can only come
+ * back empty; `'unavailable'` is what a row waiting for its own name is, and it
+ * is what the count of payments still arriving is drawn from.
+ */
+export async function settleK1AwaitingCoinByChainHash(
+  account: K1Account,
+  colour: string,
+  txId: string,
+  resolveChainHash: (txId: string) => Promise<string | null>,
+  reader: K1CommitmentWindowReader,
+): Promise<K1Reconciliation> {
+  if (!k1AwaitingTxNeedsChainHash(txId)) {
+    return settleK1AwaitingCoin(account, colour, txId, reader);
+  }
+  const answer = await resolveChainHash(txId);
+  const hash = typeof answer === 'string' ? answer.trim() : '';
+  if (hash === txId.trim() || k1AwaitingTxNeedsChainHash(hash)) {
+    return {
+      outcome: 'unavailable',
+      reason: `The transaction that produced this coin is not known to the chain by name yet (${JSON.stringify(txId)}).`,
+    };
+  }
+  renameK1AwaitingTx(account, colour, txId, hash);
+  return settleK1AwaitingCoin(account, colour, hash, reader);
+}
+
+/**
  * Re-file an awaiting coin under the transaction the CHAIN knows it by.
  *
  * A spend writes its change down the instant the circuit returns, and at that
@@ -1169,12 +1253,26 @@ export function k1CoinCandidates(account: K1Account, colour: string): bigint[] {
 /**
  * The spend against the current position failed to prove; move to the next.
  *
- * Returns the coin as it now stands, or null when the candidates are
- * exhausted. Exhausted does NOT drop the coin: the description is still the
- * only one that exists, the failure may have been about something else
- * entirely, and a re-reconciliation against the same transaction can hand back
- * the same list to start again. What it does mean is that this module has
- * nothing further to suggest, and the caller says so rather than looping.
+ * Returns the coin as it now stands, or null when every candidate has been
+ * tried. Exhausted does NOT drop the coin: the description is still the only
+ * one that exists, the failure may have been about something else entirely,
+ * and this module simply has nothing further to suggest — the caller says so
+ * rather than looping.
+ *
+ * THE LIST IS ROTATED THROUGH AND NEVER CONSUMED, and that is the repair for a
+ * colour a Passport could be locked out of for good (review, 2026/09/18). The
+ * earlier version deleted the list on exhaustion and left the coin sitting on
+ * the LAST guess, so a failure that was never about the position at all — a
+ * proof service restarted mid-spend answers the same way an unsatisfiable
+ * witness does — cost both approvals and then left the store holding a
+ * position nothing was going to move off, with `reconcileK1CoinFromChain`
+ * answering `'known'` for the held nonce and so rebuilding nothing. Rotating
+ * costs a stored list that stays honest about what is still a guess, and it
+ * means the next spend of that colour starts from the head again.
+ *
+ * WHICH CANDIDATE IS "CURRENT" IS THE COIN'S OWN POSITION, not a cursor beside
+ * it: one fact, so the two cannot disagree. A held position that is not in the
+ * list is not a place in it either, and the head is what gets tried.
  */
 export function advanceK1CoinCandidate(account: K1Account, colour: string): K1HeldCoin | null {
   const target = requireAccount(account);
@@ -1183,17 +1281,20 @@ export function advanceK1CoinCandidate(account: K1Account, colour: string): K1He
   const list = Object.hasOwn(draft.mtIndexCandidates, wanted)
     ? draft.mtIndexCandidates[wanted]
     : [];
-  const remaining = list.slice(1);
-  if (remaining.length === 0 || !Object.hasOwn(draft.coins, wanted)) {
-    /* Nothing left to try, or nothing to try it with. The list goes, because a
-       one-entry list says "still guessing" about a position nothing is going
-       to move off. */
-    delete draft.mtIndexCandidates[wanted];
+  /* Nothing to suggest, or nothing to suggest it for. Whatever list there is
+     stays exactly as it is: every writer of a coin in this colour clears it
+     ({@link putK1Coin}, {@link dropK1Coin}, {@link replaceK1Coin},
+     {@link settleK1Coin}), so it can only outlive the coin it belongs to. */
+  if (list.length === 0 || !Object.hasOwn(draft.coins, wanted)) return null;
+  const next = list.indexOf(draft.coins[wanted].mtIndex) + 1;
+  if (next >= list.length) {
+    /* Every position tried. The head goes back on the coin so the next spend
+       starts where the reconciliation put it, and the list is kept. */
+    draft.coins[wanted] = { ...draft.coins[wanted], mtIndex: list[0] };
     saveDraft(target, draft);
     return null;
   }
-  draft.mtIndexCandidates[wanted] = remaining;
-  draft.coins[wanted] = { ...draft.coins[wanted], mtIndex: remaining[0] };
+  draft.coins[wanted] = { ...draft.coins[wanted], mtIndex: list[next] };
   saveDraft(target, draft);
   return coinFromStoredRow(draft.coins[wanted]);
 }

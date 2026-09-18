@@ -547,26 +547,32 @@ export function changeCoinFromResult(result: unknown): CustodyChangeCoin {
 export function spendPositionMayBeWrong(message: string): boolean {
   const text = typeof message === 'string' ? message.toLowerCase() : '';
   if (text.length === 0) return false;
-  return (
+  if (
     text.includes('merkle') ||
     text.includes('mt_index') ||
     text.includes('membership') ||
     text.includes('witness') ||
     text.includes('unsatisfiable') ||
-    text.includes('constraint') ||
-    /* A WASM TRAP IS THE THIRD SHAPE THIS FAILURE COMES IN, and it names
-       nothing. A position past the leaves the contract's own Zswap state
-       retains does not produce a wrong Merkle path — it makes the on-chain
-       runtime trap while EXECUTING the call, and all that reaches here is
-       `Unexpected error executing scoped transaction '<unnamed>':
-       RuntimeError: unreachable` (live, 2026/09/18, position 3804 against a
-       tree whose last leaf for this contract was 3803). `RuntimeError` is the
-       WebAssembly trap marker rather than any word about positions, which is
-       why it is matched by name: a trap inside the call this function's one
-       caller is retrying is a trap the next candidate may not hit, and an
-       unnecessary retry costs one proof that is never submitted (INV-5). */
-    text.includes('runtimeerror')
-  );
+    text.includes('constraint')
+  ) {
+    return true;
+  }
+  /* A WASM TRAP IS THE THIRD SHAPE THIS FAILURE COMES IN, and it names nothing
+     about positions. A position past the leaves the contract's own Zswap state
+     retains does not produce a wrong Merkle path — it makes the on-chain
+     runtime trap while EXECUTING the call, and all that reaches here is
+     `Unexpected error executing scoped transaction '<unnamed>': RuntimeError:
+     unreachable` (live, 2026/09/18, position 3804 against a tree whose last
+     leaf for this contract was 3803).
+     `RuntimeError` ALONE IS NOT ENOUGH (review, 2026/09/18). It is the marker
+     for every WebAssembly trap in the stack — the wallet's own proving and the
+     runtime's serialisation included — and a retry is not free: it asks for a
+     second approval and, on a coin whose list has run out, used to leave the
+     store on the wrong guess. What makes this trap a position's trap is WHERE
+     it happened: inside the execution of the call being retried, which the
+     runtime's own wrapper names. A trap from anywhere else is somebody else's
+     problem and the next candidate will not fix it. */
+  return text.includes('runtimeerror') && text.includes('executing scoped transaction');
 }
 
 /* -------------------------------------------------------------------------- */
@@ -886,7 +892,13 @@ export function custodyShieldedSendOutcome(record: CustodyShieldedSendRecord): s
       return 'Nothing was sent, and it is all still in your Passport.';
     case 'awaiting-note':
     case 'depositing':
-      return `It has left your Passport and has not reached ${who} yet. Open Passport again in a moment and it will finish by itself.`;
+      /* IT DOES NOT FINISH BY ITSELF, and the sentence used to say it would
+         (review, 2026/09/18). Nothing resumes a stopped payment on its own:
+         the last leg runs when somebody presses the button that runs it, and
+         telling a person to come back in a moment and wait left them waiting
+         for a thing that was never going to happen. The wording names the
+         button `../lib/custodyAssets.ts`'s resume offer puts on the screen. */
+      return `It has left your Passport and has not reached ${who} yet. It does not finish on its own: open Passport and press Finish this payment.`;
     case 'returning':
       return `It did not reach ${who}, so it is being put back into your Passport.`;
     case 'unconfirmed':

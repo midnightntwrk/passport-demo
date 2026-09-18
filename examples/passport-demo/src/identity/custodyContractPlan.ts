@@ -252,6 +252,14 @@ export const CUSTODY_PROVER_UNAVAILABLE =
  * where the proof server answered 400 and the payment stopped with a sentence
  * about a service that was in fact up.
  *
+ * WHAT THE SPONSOR PROMISES BY IT, SINCE 2026/09/18. `proving-failed` is
+ * reserved for the proof server's own 4xx — a verdict on the transaction — and
+ * a proof server that is unreachable, broken, or busy answers `503
+ * prover-unavailable` instead (`../../../passport-balancer/src/
+ * proveAccountCustody.ts`, `isCustodyProverVerdict`). Without that split a
+ * proof service restarted in the middle of a spend armed the retry, which cost
+ * the holder a second approval to learn nothing about either position.
+ *
  * THE SIGNAL IS THE ERROR'S NAME, NOT ITS WORDS. The retry used to be armed by
  * matching the message, which would put "unsatisfiable constraint" in front of
  * somebody who chose Google — so the sentence here is the one they should read,

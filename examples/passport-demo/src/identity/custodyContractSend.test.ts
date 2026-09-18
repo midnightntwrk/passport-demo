@@ -457,6 +457,19 @@ describe('spendPositionMayBeWrong', () => {
     expect(spendPositionMayBeWrong('The proving service did not answer.')).toBe(false);
     expect(spendPositionMayBeWrong('1010: Invalid Transaction: Custom error: 239')).toBe(false);
   });
+
+  /* A TRAP FROM SOMEWHERE ELSE IN THE STACK IS NOT A POSITION'S TRAP.
+     `RuntimeError` is the marker for every WebAssembly trap there is, and the
+     one this retry is armed for happened inside the execution of the call
+     being retried. Reading the rest of them as position failures asks for an
+     approval a different position cannot earn back. */
+  it('does not retry a runtime trap from outside the call being retried', () => {
+    expect(spendPositionMayBeWrong('RuntimeError: memory access out of bounds')).toBe(false);
+    expect(spendPositionMayBeWrong('RuntimeError: unreachable')).toBe(false);
+    expect(
+      spendPositionMayBeWrong('proving failed: RuntimeError: table index is out of bounds'),
+    ).toBe(false);
+  });
 });
 
 /* -------------------------------------------------------------------------- */
@@ -624,6 +637,14 @@ describe('the record a stopped send leaves behind', () => {
     expect(custodyShieldedSendOutcome(send())).toMatch(/still in your Passport/);
     expect(custodyShieldedSendOutcome(send({ stage: 'awaiting-note' }))).toMatch(/has not reached/);
     expect(custodyShieldedSendOutcome(send({ stage: 'depositing' }))).toMatch(/has not reached/);
+    /* AND IT DOES NOT PROMISE A RESUME NOBODY WROTE. There is no auto-resume:
+       the last leg runs when the Finish button is pressed, so a sentence
+       telling somebody to come back and wait left them waiting for good. */
+    for (const stage of ['awaiting-note', 'depositing'] as const) {
+      const sentence = custodyShieldedSendOutcome(send({ stage }));
+      expect(sentence).not.toMatch(/by itself|on its own\./);
+      expect(sentence).toMatch(/press Finish this payment/);
+    }
     expect(custodyShieldedSendOutcome(send({ stage: 'returning' }))).toMatch(/being put back/);
     const stranded = custodyShieldedSendOutcome(send({ stage: 'stranded' }));
     expect(stranded).toMatch(/could not be put back/);

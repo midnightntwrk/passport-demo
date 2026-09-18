@@ -128,6 +128,7 @@ import {
   messageOf,
   resolveTransactionHash,
   resolveTxCommitmentWindowByHashOnce,
+  resolveTxHashOnce,
   transactionId,
 } from './contractRuntime.js';
 import {
@@ -140,7 +141,7 @@ import {
   rememberK1ChangeCoin,
   rememberK1EncSecretKey,
   renameK1AwaitingTx,
-  settleK1AwaitingCoin,
+  settleK1AwaitingCoinByChainHash,
   settleK1Coin,
   type K1Account,
   type K1CoinStoreState,
@@ -228,6 +229,16 @@ export interface CustodyDeps {
     indexerHttpUrl: string,
     txId: string,
   ): Promise<{ startIndex: number; endIndex: number } | null>;
+  /**
+   * The chain's hash for one of midnight-js's identifiers, or null when the
+   * indexer has no answer YET.
+   *
+   * One question, not the ten-second poll: this is asked again on every read
+   * that finds a coin still filed under an identifier, so a lagging indexer
+   * costs a question rather than a coin. See
+   * `settleK1AwaitingCoinByChainHash`.
+   */
+  resolveChainHash(indexerHttpUrl: string, txId: string): Promise<string | null>;
 }
 
 /** The parts of the compiled build this module uses. */
@@ -1506,11 +1517,23 @@ async function settleShieldedChange(
   if (written !== null && written.txId !== step.txHash) {
     renameK1AwaitingTx(account, change.colour, written.txId, step.txHash);
   }
-  /* THE HASH NAMES THE ROW, not the colour. A colour can have a second coin in
+  /* AND `step.txHash` MAY STILL BE THE IDENTIFIER. `resolveTransactionHash`
+     polls for ten seconds and then hands back what it was given, which is not
+     a failure and reads as an answer — so an indexer more than ten seconds
+     behind left the row filed under a name it will never answer for, with
+     every later read asking the same unanswerable question (review,
+     2026/09/18). The settle below resolves it again when that is what the row
+     is holding, which is also what Home's walk does with the same helper.
+
+     THE HASH NAMES THE ROW, not the colour. A colour can have a second coin in
      flight — an earlier spend's change, or a delivery this walk has not placed
      — and settling "the colour" would file one of them and drop the rest. */
-  const settled = await settleK1AwaitingCoin(account, change.colour, step.txHash, (txId) =>
-    deps.commitmentWindow(wallet.network.indexerHttpUrl, txId),
+  const settled = await settleK1AwaitingCoinByChainHash(
+    account,
+    change.colour,
+    step.txHash,
+    (txId) => deps.resolveChainHash(wallet.network.indexerHttpUrl, txId),
+    (txId) => deps.commitmentWindow(wallet.network.indexerHttpUrl, txId),
   );
   if (settled.outcome === 'learned') return { ...step, change, changePosition: 'settled' };
   if (settled.outcome === 'ambiguous') {
@@ -2059,6 +2082,7 @@ export function defaultCustodyDeps(): CustodyDeps {
        the next read of Home. */
     commitmentWindow: (indexerHttpUrl, txId) =>
       resolveTxCommitmentWindowByHashOnce(indexerHttpUrl, txId),
+    resolveChainHash: (indexerHttpUrl, txId) => resolveTxHashOnce(indexerHttpUrl, txId),
     now: () => Date.now(),
     sleep: (milliseconds) =>
       new Promise((resolve) => {

@@ -24,6 +24,7 @@ import {
   createCustodyProveEngine,
   hexFromBytes,
   custodyImpureCircuits,
+  isCustodyProverVerdict,
   type CustodyProofJob,
   type CustodyProver,
   type CustodyProverOptions,
@@ -253,8 +254,11 @@ describe('a host with no account custody proving on it', () => {
         ),
     });
     const outcome = await prover.prove(request());
-    assert.equal(outcome.status, 502);
-    assert.equal(outcome.body.error, 'proving-failed');
+    /* A failure that names no status from the proof server is the server not
+       having answered, which is this host's problem and not a verdict on the
+       transaction — see `isCustodyProverVerdict`. */
+    assert.equal(outcome.status, 503);
+    assert.equal(outcome.body.error, 'prover-unavailable');
     const published = prover.snapshot().lastError?.detail ?? '';
     assert.ok(!published.includes(staged), published);
     assert.ok(!published.includes('127.0.0.1:6300'), published);
@@ -489,10 +493,10 @@ describe('a refusal handed back to the caller', () => {
 
   it('says the same sentence for the same code, whatever the cause was', async () => {
     const one = await proverWith({
-      engine: () => Promise.reject(new Error('connect ECONNREFUSED 127.0.0.1:6300')),
+      engine: () => Promise.reject(new Error('Proof Server response: code="400"')),
     }).prove(request());
     const two = await proverWith({
-      engine: () => Promise.reject(new Error('414 Request-URI Too Large from the prover')),
+      engine: () => Promise.reject(new Error('Proof Server response: code="403"')),
     }).prove(request());
     assert.equal(one.body.error, 'proving-failed');
     assert.equal(two.body.error, 'proving-failed');
@@ -770,14 +774,20 @@ describe('the engine that would talk to a proof server', () => {
     assert.notEqual(built[0], built[1]);
   });
 
-  it('turns a proof server’s failure into 502 proving-failed', async () => {
+  it('turns a proof server’s refusal to prove into 502 proving-failed', async () => {
     const prover = proverWith({
       engine: createCustodyProveEngine({
         deserialiseUnproven: () => Promise.resolve({}),
         zkConfigProviderFor: () => Promise.resolve({}),
         proofProviderFor: () =>
           Promise.resolve({
-            proveTx: () => Promise.reject(new Error('connect ECONNREFUSED')),
+            /* The live shape, 2026/09/18. */
+            proveTx: () =>
+              Promise.reject(
+                new Error(
+                  `'prove' returned an error: Error: Failed Proof Server response: url="http://127.0.0.1:6300/prove", code="400", status="Bad Request"`,
+                ),
+              ),
           }),
       }),
     });
@@ -785,8 +795,53 @@ describe('the engine that would talk to a proof server', () => {
     assert.equal(outcome.status, 502);
     assert.equal(outcome.body.error, 'proving-failed');
     /* The prover's own words are the journal's, not the caller's. */
-    assert.ok(!String(outcome.body.detail).includes('ECONNREFUSED'), String(outcome.body.detail));
+    assert.ok(!String(outcome.body.detail).includes('Bad Request'), String(outcome.body.detail));
     assert.equal(prover.snapshot().lastError?.code, 'proving-failed');
+  });
+
+  /* WHY THIS IS A DIFFERENT CODE FROM THE ONE ABOVE. `proving-failed` is the
+     only refusal the client reads as evidence about the TRANSACTION: it arms
+     the retry against a shielded coin's next candidate position, which costs
+     the holder a second approval. A proof server restarted in the middle of a
+     spend has said nothing about either position, so it must not spend one. */
+  it('answers 503 prover-unavailable when the proof server never answered at all', async () => {
+    for (const said of [
+      'connect ECONNREFUSED 127.0.0.1:6300',
+      'fetch failed',
+      'socket hang up',
+      'Failed Proof Server response: code="502", status="Bad Gateway"',
+      'Failed Proof Server response: code="429", status="Too Many Requests"',
+    ]) {
+      const prover = proverWith({ engine: () => Promise.reject(new Error(said)) });
+      const outcome = await prover.prove(request());
+      assert.equal(outcome.status, 503, said);
+      assert.equal(outcome.body.error, 'prover-unavailable', said);
+      assert.equal(prover.snapshot().lastError?.code, 'prover-unavailable', said);
+      assert.ok(!String(outcome.body.detail).includes(said), String(outcome.body.detail));
+    }
+  });
+
+  it('reads a proof server’s own HTTP answer, and nothing else, as a verdict', () => {
+    /* The live wrapper, and the two spellings the provider uses. */
+    assert.equal(
+      isCustodyProverVerdict(
+        `'check' returned an error: Error: Failed Proof Server response: url="http://127.0.0.1:6310/check", code="400", status="Bad Request"`,
+      ),
+      true,
+    );
+    assert.equal(isCustodyProverVerdict('the prover answered with status code: 422'), true);
+    assert.equal(isCustodyProverVerdict('code=404'), true);
+    /* Not now, rather than no. */
+    assert.equal(isCustodyProverVerdict('code="408"'), false);
+    assert.equal(isCustodyProverVerdict('code="425"'), false);
+    assert.equal(isCustodyProverVerdict('code="429"'), false);
+    /* Broke while trying, including a gateway's answer wrapping the prover's. */
+    assert.equal(isCustodyProverVerdict('code="500"'), false);
+    assert.equal(isCustodyProverVerdict('code="400", status="502"'), false);
+    /* Nothing to go on is never read as a verdict. */
+    assert.equal(isCustodyProverVerdict('connect ECONNREFUSED 127.0.0.1:6300'), false);
+    assert.equal(isCustodyProverVerdict(''), false);
+    assert.equal(isCustodyProverVerdict(undefined as never), false);
   });
 });
 

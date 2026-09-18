@@ -79,6 +79,7 @@ import {
   custodyInFlightRefusal,
   custodyMayReadHoldings,
   custodyUnplacedDeliveries,
+  runCustodyWork,
 } from '../lib/custodyScreenRules.js'
 import type { PassportContractName } from '../identity/contractRuntime.js'
 import type { LocalMidnightWallet } from '../lib/localWallet.js'
@@ -281,7 +282,21 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
    * use to somebody.
    */
   const run = useCallback(
-    async (label: string, work: () => Promise<void>): Promise<void> => {
+    async (
+      label: string,
+      work: () => Promise<void>,
+      /**
+       * The read that shows what the work changed, run once the work has let
+       * the coin store go.
+       *
+       * NOT A LINE AT THE END OF `work`. The flag below makes `readHoldings`
+       * refuse while a payment is running, so a payment that read its own
+       * result from inside itself read nothing at all — "Sent." over the
+       * figure from before the payment, until Refresh (live, 2026/09/18). The
+       * order is `../lib/custodyScreenRules.ts`'s `runCustodyWork`.
+       */
+      after: (() => Promise<void>) | null = null,
+    ): Promise<void> => {
       /* NOTHING ELSE READS THE STORE WHILE THIS RUNS. `readHoldings` fires from
          an effect, and the inbox walk inside it writes coins — so a walk that
          landed in the middle of a payment could file a delivery over the coin
@@ -300,21 +315,19 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
         setError(refusal)
         return
       }
-      inFlight.current = true
       setBusy(label)
       setError(null)
-      try {
-        await work()
-      } catch (cause) {
-        console.warn('[account-custody] that step did not finish', cause)
-        if (cause instanceof Error && cause.message === CUSTODY_SETUP_INTERRUPTED) {
-          setInterrupted(true)
-        }
-        setError(custodyFailureSentence(cause))
-      } finally {
-        inFlight.current = false
-        setBusy(null)
+      /* THE LABEL STAYS UP ACROSS THE FOLLOW-UP READ, on purpose: the flag is
+         already clear by then, so the only thing left holding a second press
+         off the store is the busy state the buttons read. */
+      const { failure } = await runCustodyWork(inFlight, work, after)
+      setBusy(null)
+      if (failure === null) return
+      console.warn('[account-custody] that step did not finish', failure)
+      if (failure instanceof Error && failure.message === CUSTODY_SETUP_INTERRUPTED) {
+        setInterrupted(true)
       }
+      setError(custodyFailureSentence(failure))
     },
     [],
   )
@@ -532,7 +545,7 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
          costs one indexer call per waiting coin and is what makes a reload, or
          simply coming back tomorrow, the remedy it ought to be. */
       try {
-        const { awaitingK1Coins, settleK1AwaitingCoin } = await import(
+        const { awaitingK1Coins, settleK1AwaitingCoinByChainHash } = await import(
           '../identity/k1CoinStore.js'
         )
         const runtime = await import('../identity/contractRuntime.js')
@@ -540,9 +553,22 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
           /* EACH ROW BY ITS OWN TRANSACTION. A colour can hold more than one
              coin waiting for a position — a spend's change, then a delivery,
              then a second spend's change — and each is filed under the
-             transaction that produced it. */
-          await settleK1AwaitingCoin(account, waiting.colour, waiting.txId, (txId) =>
-            runtime.resolveTxCommitmentWindowByHashOnce(opened.network.indexerHttpUrl, txId),
+             transaction that produced it.
+
+             AND BY THE CHAIN'S NAME FOR IT, which a row written while the
+             indexer lagged does not have: the spend's own resolution gives up
+             after ten seconds and hands back midnight-js's identifier, which
+             the indexer answers nothing for. The same helper the spend's settle
+             uses resolves it again here, so a row filed under an identifier is
+             renamed and placed by a later read rather than reading "arriving"
+             for ever. */
+          await settleK1AwaitingCoinByChainHash(
+            account,
+            waiting.colour,
+            waiting.txId,
+            (txId) => runtime.resolveTxHashOnce(opened.network.indexerHttpUrl, txId),
+            (txId) =>
+              runtime.resolveTxCommitmentWindowByHashOnce(opened.network.indexerHttpUrl, txId),
           )
         }
       } catch (cause) {
@@ -561,17 +587,19 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
     }
 
     try {
-      const { awaitingK1Coins, k1ColourBalance, listK1Coins } = await import(
-        '../identity/k1CoinStore.js'
-      )
+      const { awaitingK1Coins, k1ColourHoldings } = await import('../identity/k1CoinStore.js')
+      /* HELD PLUS QUEUED, over the colours that have EITHER — which is not the
+         same list as the colours with a held coin. A spend takes the held coin
+         and files its change as awaiting, so a colour whose earlier delivery is
+         sitting in the queue has an empty held slot and real money behind it;
+         drawing the rows from the held slots alone showed no row for it at all
+         (review, 2026/09/18). What one payment can draw on is smaller again,
+         and the refusal for that difference is a sentence rather than a
+         smaller figure — `custodyShieldedSendRefusal`'s. */
       setTokens(
-        listK1Coins(account).map((coin) => ({
-          colourHex: coin.colour,
-          /* HELD PLUS QUEUED — what the account holds of the colour, which is
-             not what one payment can draw on. The refusal for that difference
-             is `custodyShieldedSendRefusal`'s, and it is a sentence rather than
-             a smaller figure. */
-          amount: k1ColourBalance(account, coin.colour),
+        k1ColourHoldings(account).map((holding) => ({
+          colourHex: holding.colour,
+          amount: holding.value,
         })),
       )
       /* The store's own waiting rows PLUS the deliveries this walk could not
@@ -963,8 +991,10 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
         } else {
           await sendNight(shared)
         }
-        await readHoldings()
-      })
+        /* The figures are read by `run` AFTER this returns — see its `after`
+           argument. A read from here reads nothing: the payment still holds
+           the store. */
+      }, readHoldings)
     },
     [custodyContext, network, readHoldings, run, sendNight, sendShielded],
   )
@@ -1002,8 +1032,8 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
       }
       saveCustodyShieldedSend(window.localStorage, withNote)
       await deliverNote(wallet, withNote, note, pending.recipientLabel)
-      await readHoldings()
-    })
+      /* Read once the store is free again, not from in here. */
+    }, readHoldings)
   }, [custodyContext, deliverNote, readHoldings, run])
 
   /** Forgets a payment the person has been told about. */

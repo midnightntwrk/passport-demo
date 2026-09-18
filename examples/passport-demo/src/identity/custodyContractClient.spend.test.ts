@@ -43,6 +43,7 @@ import {
   type K256DeviceIdentity,
 } from './custodyContractSigning.js';
 import {
+  CUSTODY_PROVER_UNAVAILABLE,
   hexToBytes,
   saveCustodyRecord,
   type CustodyAccountRecord,
@@ -71,11 +72,23 @@ import {
   type CustodyDynamicSession,
 } from './custodyContractClient.js';
 
+/**
+ * A 64-hex stand-in for the chain's hash of an identifier.
+ *
+ * THE SHAPE MATTERS HERE. A chain hash is 32 bytes and midnight-js's
+ * identifier is 33, and that difference is how `settleK1AwaitingCoinByChainHash`
+ * tells a row that still needs resolving from one that is ready to settle — so
+ * a fake hash of any other shape would drill a path production never takes.
+ */
+function chainHashOf(identifier: string): string {
+  return identifier.replace(/[^0-9a-f]/gi, '').padEnd(64, 'c').slice(0, 64);
+}
+
 /** The indexer walk that names the chain's hash. Controlled per test. */
 let resolveHashWith: (indexer: string, identifier: string) => Promise<string> = (
   _indexer,
   identifier,
-) => Promise.resolve(`hash-of-${identifier}`);
+) => Promise.resolve(chainHashOf(identifier));
 
 vi.mock('./contractRuntime.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./contractRuntime.js')>()),
@@ -182,6 +195,11 @@ interface ChainFake {
   positionFailures?: number;
   /** A failure a different position could not fix. */
   otherFailure?: string;
+  /**
+   * What the indexer answers when a row still filed under an identifier is
+   * asked about again — `settleK1AwaitingCoinByChainHash`'s second chance.
+   */
+  chainHashLater?: (txId: string) => string | null;
 }
 
 interface SpendHarness {
@@ -192,6 +210,8 @@ interface SpendHarness {
   opened: string[];
   /** Every commitment-window question asked, by transaction. */
   windowQuestions: string[];
+  /** Every identifier the settle asked the indexer to name the hash of. */
+  hashQuestions: string[];
   chain: ChainFake;
 }
 
@@ -222,6 +242,7 @@ function harness(
   const connections: { privateStateId: string; account: unknown }[] = [];
   const opened: string[] = [];
   const windowQuestions: string[] = [];
+  const hashQuestions: string[] = [];
   let submitted = 0;
 
   const callTx = new Proxy(
@@ -272,6 +293,7 @@ function harness(
     connections,
     opened,
     windowQuestions,
+    hashQuestions,
     chain,
     deps: {
       storage: () => storage,
@@ -309,6 +331,10 @@ function harness(
             return Promise.resolve({ callTx });
           },
         } as never),
+      resolveChainHash: (_indexer: string, txId: string) => {
+        hashQuestions.push(txId);
+        return Promise.resolve(chain.chainHashLater?.(txId) ?? null);
+      },
       commitmentWindow: (_indexer: string, txId: string) => {
         windowQuestions.push(txId);
         return (options.window ?? (() => Promise.resolve({ startIndex: 8, endIndex: 9 })))(txId);
@@ -355,7 +381,7 @@ async function until(condition: () => boolean, what: string): Promise<void> {
 
 beforeEach(() => {
   resetCustodySessionState();
-  resolveHashWith = (_indexer, identifier) => Promise.resolve(`hash-of-${identifier}`);
+  resolveHashWith = (_indexer, identifier) => Promise.resolve(chainHashOf(identifier));
   const coins = new Map<string, string>();
   Object.defineProperty(globalThis, 'window', {
     configurable: true,
@@ -408,7 +434,7 @@ describe('the change coin reaches storage before anything slow happens', () => {
     /* And nothing has been asked about the position yet. */
     expect(test.windowQuestions).toEqual([]);
 
-    gate.release('chain-hash');
+    gate.release(chainHashOf('id-1'));
     await pending;
   });
 
@@ -428,8 +454,8 @@ describe('the change coin reaches storage before anything slow happens', () => {
     /* THE IDENTIFIER IS NOT A KEY THE INDEXER CAN ANSWER — a sponsored
        transaction is superseded — so the row is renamed to the hash before the
        position is asked about, and the question is asked about the hash. */
-    expect(test.windowQuestions).toEqual(['hash-of-id-1']);
-    expect(result.txHash).toBe('hash-of-id-1');
+    expect(test.windowQuestions).toEqual([chainHashOf('id-1')]);
+    expect(result.txHash).toBe(chainHashOf('id-1'));
     expect(result.changePosition).toBe('settled');
     expect(heldK1Coin(ACCOUNT, COLOUR)).toEqual({
       colour: COLOUR,
@@ -438,6 +464,65 @@ describe('the change coin reaches storage before anything slow happens', () => {
       mtIndex: 8n,
     });
     expect(awaitingK1Coins(ACCOUNT)).toEqual([]);
+  });
+
+  /* THE DEFECT THIS IS THE DRILL FOR (review, 2026/09/18). `resolveTransactionHash`
+     polls the indexer for ten seconds and then HANDS BACK THE IDENTIFIER it was
+     given, which is not a failure and reads exactly like an answer. The row was
+     therefore left filed under a name the indexer answers nothing for, and every
+     later read asked the same unanswerable question: the change read "arriving"
+     for the rest of the account's life whenever the indexer lagged by more than
+     ten seconds. */
+  it('asks the indexer again when the spend’s own hash walk ran out of patience', async () => {
+    const test = harness({
+      circuitResult: changeResult(60n),
+      /* The indexer caught up between the two questions. */
+      chainHashLater: () => chainHashOf('id-1'),
+    });
+    const { session, device } = deviceFake();
+    putK1Coin(ACCOUNT, { colour: COLOUR, nonce: NONCE, value: 100n, mtIndex: 5n });
+    /* Ten seconds of polling, and then the identifier back unchanged. */
+    resolveHashWith = (_indexer, identifier) => Promise.resolve(identifier);
+
+    const result = await withdrawShieldedK1(
+      session,
+      device,
+      { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 40n },
+      undefined,
+      test.deps,
+    );
+
+    /* The identifier was never put to the window — it has no answer in it —
+       and the row was renamed the moment the indexer could name it. */
+    expect(test.hashQuestions).toEqual(['id-1']);
+    expect(test.windowQuestions).toEqual([chainHashOf('id-1')]);
+    expect(result.changePosition).toBe('settled');
+    expect(heldK1Coin(ACCOUNT, COLOUR)?.nonce).toBe(CHANGE_NONCE);
+    expect(awaitingK1Coins(ACCOUNT)).toEqual([]);
+  });
+
+  it('keeps the change waiting under its identifier until the indexer knows it', async () => {
+    const test = harness({ circuitResult: changeResult(60n) });
+    const { session, device } = deviceFake();
+    putK1Coin(ACCOUNT, { colour: COLOUR, nonce: NONCE, value: 100n, mtIndex: 5n });
+    resolveHashWith = (_indexer, identifier) => Promise.resolve(identifier);
+
+    const result = await withdrawShieldedK1(
+      session,
+      device,
+      { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 40n },
+      undefined,
+      test.deps,
+    );
+
+    /* NOTHING IS ASKED ABOUT A POSITION under a name the indexer cannot answer,
+       and the row keeps its description so a later read can rename it. */
+    expect(test.hashQuestions).toEqual(['id-1']);
+    expect(test.windowQuestions).toEqual([]);
+    expect(result.changePosition).toBe('awaiting');
+    expect(awaitingK1Coins(ACCOUNT)).toEqual([
+      { colour: COLOUR, nonce: CHANGE_NONCE, value: 60n, txId: 'id-1' },
+    ]);
   });
 
   it('leaves the change described and waiting when the position question hangs', async () => {
@@ -590,7 +675,6 @@ describe('a spend against a position that may be the wrong one', () => {
     const test = harness({ positionFailures: 5 });
     const { session, device } = deviceFake();
     putK1CoinCandidates(ACCOUNT, { colour: COLOUR, nonce: NONCE, value: 100n }, [5n, 6n]);
-    const before = loadK1CoinStore(ACCOUNT);
 
     await expect(
       withdrawShieldedK1(
@@ -603,14 +687,50 @@ describe('a spend against a position that may be the wrong one', () => {
     ).rejects.toThrow(/merkle/);
 
     /* NOTHING WAS SPENT. An unsatisfiable witness submits no transaction, so
-       the coin is still the coin — the list is gone because there is nothing
-       left to suggest, and the description stays. */
+       the coin is still the coin. AND NOTHING WAS FORGOTTEN: the description
+       and BOTH positions survive, with the head back on the coin, so the next
+       spend of this colour starts where the chain's own answer put it. A run
+       that kept the last guess and dropped the list was a colour nothing could
+       spend again — `reconcileK1CoinFromChain` answers 'known' for a nonce the
+       store holds, so no later read rebuilt it (review, 2026/09/18). */
     expect(heldK1Coin(ACCOUNT, COLOUR)?.nonce).toBe(NONCE);
+    expect(heldK1Coin(ACCOUNT, COLOUR)?.mtIndex).toBe(5n);
+    expect(k1CoinCandidates(ACCOUNT, COLOUR)).toEqual([5n, 6n]);
     expect(isK1NonceSpent(ACCOUNT, NONCE)).toBe(false);
-    expect(Object.keys(before.coins)).toEqual([COLOUR]);
+    expect(Object.keys(loadK1CoinStore(ACCOUNT).coins)).toEqual([COLOUR]);
     expect(test.calls.filter((call) => call.circuit === 'withdraw_shielded_with_k256')).toHaveLength(
       2,
     );
+  });
+
+  /* THE SCENARIO, and the reason the sponsor now has two codes for it: the
+     proof service is restarted while a spend is being proved. It has looked at
+     neither candidate position, so a retry against the second one asks for a
+     second approval to learn nothing — and on a two-candidate coin it used to
+     run the list out and leave the store on the wrong guess for good. */
+  it('asks for one approval only when the proof service is not there mid-spend', async () => {
+    const test = harness({ otherFailure: CUSTODY_PROVER_UNAVAILABLE });
+    const { session, device, signed } = deviceFake();
+    putK1CoinCandidates(ACCOUNT, { colour: COLOUR, nonce: NONCE, value: 100n }, [5n, 6n]);
+
+    await expect(
+      withdrawShieldedK1(
+        session,
+        device,
+        { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 40n },
+        undefined,
+        test.deps,
+      ),
+    ).rejects.toThrow(CUSTODY_PROVER_UNAVAILABLE);
+
+    expect(signed).toHaveLength(1);
+    expect(test.calls.filter((call) => call.circuit === 'withdraw_shielded_with_k256')).toHaveLength(
+      1,
+    );
+    /* The guess, the list, and the coin are all exactly as they were. */
+    expect(heldK1Coin(ACCOUNT, COLOUR)?.mtIndex).toBe(5n);
+    expect(k1CoinCandidates(ACCOUNT, COLOUR)).toEqual([5n, 6n]);
+    expect(isK1NonceSpent(ACCOUNT, NONCE)).toBe(false);
   });
 
   it('refuses before anything is signed when the store holds nothing of that colour', async () => {

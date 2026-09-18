@@ -22,8 +22,11 @@
  *      write one coin store. Two at once file a delivery over a coin the other
  *      has just spent, or spend the same coin twice — and the store's own
  *      guards then refuse a proof for reasons no sentence on the screen could
- *      explain. {@link custodyInFlightRefusal} is the refusal, and
- *      {@link custodyMayReadHoldings} is the same rule for the background read.
+ *      explain. {@link custodyInFlightRefusal} is the refusal,
+ *      {@link custodyMayReadHoldings} is the same rule for the background read,
+ *      and {@link runCustodyWork} is the ORDER those two imply: the read that
+ *      shows what a payment changed cannot run inside the payment that is
+ *      holding the store, or it is refused and the figure stays stale.
  *   3. WHAT THE WALK'S OUTCOMES MEAN FOR THE FIGURE SHOWN. A delivery the chain
  *      could not place is money that has arrived and cannot be spent yet, which
  *      is neither a balance nor nothing. {@link custodyUnplacedDeliveries} and
@@ -132,6 +135,62 @@ export function custodyInFlightRefusal(inFlight: boolean): string | null {
  */
 export function custodyMayReadHoldings(inFlight: boolean): boolean {
   return !inFlight;
+}
+
+/** A mutable flag holder — React's `useRef` is one, and so is `{ current }`. */
+export interface CustodyInFlightFlag {
+  current: boolean;
+}
+
+/** What a piece of the screen's work came to. */
+export interface CustodyWorkOutcome {
+  /** What the work threw, or null when it finished. */
+  readonly failure: unknown;
+}
+
+/**
+ * Run one piece of work under the in-flight flag, and THEN the read that shows
+ * what it changed.
+ *
+ * WHY THE ORDER IS A FUNCTION AND NOT TWO LINES IN THE SCREEN. The flag above
+ * makes {@link custodyMayReadHoldings} refuse a read while a payment owns the
+ * coin store — and a payment that asked for its own follow-up read INSIDE its
+ * own work is therefore a payment whose read is refused. That was live on
+ * 2026/09/18: "Sent." appeared over the figure the account held BEFORE the
+ * payment, and only Refresh or a reload moved it. The read has to happen after
+ * the flag clears, which is one statement in the wrong place either way and is
+ * the whole of the defect, so the order is written down here and drilled rather
+ * than left to the sequence of lines in a component.
+ *
+ * THE FOLLOW-UP RUNS EVEN WHEN THE WORK FAILED. A payment can fail after the
+ * value has moved — the last leg throws having broadcast — so a failure is
+ * exactly when the figures on screen are least trustworthy. What the work threw
+ * is what the person is told about; a follow-up that ALSO throws is reported
+ * only when there was nothing else to report, because the work's own failure is
+ * the one that names what they asked for.
+ */
+export async function runCustodyWork(
+  inFlight: CustodyInFlightFlag,
+  work: () => Promise<void>,
+  followUp: (() => Promise<void>) | null = null,
+): Promise<CustodyWorkOutcome> {
+  let failure: unknown = null;
+  inFlight.current = true;
+  try {
+    await work();
+  } catch (cause) {
+    failure = cause;
+  } finally {
+    /* BEFORE the follow-up, which is the point of this function. */
+    inFlight.current = false;
+  }
+  if (followUp === null) return { failure };
+  try {
+    await followUp();
+  } catch (cause) {
+    if (failure === null) failure = cause;
+  }
+  return { failure };
 }
 
 /* -------------------------------------------------------------------------- */

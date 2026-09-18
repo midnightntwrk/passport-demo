@@ -20,8 +20,10 @@
  *       the key it is filed under;
  *   (c) the balance of a colour is held + queued, and counts neither the
  *       coins awaiting a position nor a candidate list;
- *   (d) a colour with candidates outstanding has its current guess at the head
- *       of the list — a guess is stored as a guess, never as a fact;
+ *   (d) a colour with candidates outstanding has its current guess AMONG them —
+ *       a guess is stored as a guess, never as a fact, and the list is rotated
+ *       through rather than consumed (`advanceK1CoinCandidate`), so which entry
+ *       is current moves while the list itself stays whole;
  *   (e) no row survives a round-trip with a nonce or colour that is not 64 hex
  *       characters, or a value or position that is not a decimal integer.
  *
@@ -164,10 +166,12 @@ function expectInvariants(account: K1Account, where: string): void {
     expect(spent.has(row.nonceHex), `${where}: spent coin ${row.nonceHex} is held again`).toBe(
       false,
     );
-    /* (d). */
+    /* (d). The guess moves through the list and the list is never consumed, so
+       what must hold is that the position held is one this store offered —
+       never that it is still the head. */
     const candidates = state.mtIndexCandidates[colourKey] ?? [];
     if (candidates.length > 0) {
-      expect(candidates[0], `${where}: the current guess is not the head of the list`).toBe(
+      expect(candidates, `${where}: the current guess is not one of the candidates`).toContain(
         row.mtIndex,
       );
     }
@@ -370,14 +374,20 @@ describe('what each write leaves behind', () => {
     expectInvariants(ALICE, 'after the walk offered the spent coin back');
   });
 
-  it('clears a candidate list that has nothing left to try, and holds the coin still', () => {
+  it('keeps every candidate when the list runs out, and puts the head back on the coin', () => {
     putK1CoinCandidates(ALICE, { colour: MUSD, nonce: hex64(0x44), value: 80n }, [8n, 9n]);
     expect(advanceK1CoinCandidate(ALICE, MUSD)?.mtIndex).toBe(9n);
-    /* Exhausted does not drop the coin: the description is still the only one
-       that exists, and the failure may have been about something else. */
+    /* Exhausted does not drop the coin, and since 2026/09/18 it does not drop
+       the LIST either: the failure may have been about something else entirely
+       — a proof service restarted mid-spend answers the same way — and a store
+       left holding the last guess with no list beside it was a colour nothing
+       could spend again. */
     expect(advanceK1CoinCandidate(ALICE, MUSD)).toBeNull();
     expect(heldK1Coin(ALICE, MUSD)?.nonce).toBe(hex64(0x44));
-    expect(k1CoinCandidates(ALICE, MUSD)).toEqual([]);
+    expect(heldK1Coin(ALICE, MUSD)?.mtIndex).toBe(8n);
+    expect(k1CoinCandidates(ALICE, MUSD)).toEqual([8n, 9n]);
+    /* And round again from the head, which is what the next spend gets. */
+    expect(advanceK1CoinCandidate(ALICE, MUSD)?.mtIndex).toBe(9n);
     expectInvariants(ALICE, 'after the candidates ran out');
   });
 
@@ -421,7 +431,8 @@ describe('what each write leaves behind', () => {
 
   it('does not invent a coin out of a candidate list left behind by another build', () => {
     /* A blob with positions for a colour that holds nothing. The list must not
-       become a coin, and the first read that touches it clears it. */
+       become a coin; it is left where it is, because every writer of a coin in
+       a colour clears that colour's list on the way in. */
     storage.set(
       STORAGE_KEY,
       JSON.stringify({
@@ -438,6 +449,9 @@ describe('what each write leaves behind', () => {
     );
     expect(heldK1Coin(ALICE, MUSD)).toBeNull();
     expect(advanceK1CoinCandidate(ALICE, MUSD)).toBeNull();
+    expect(heldK1Coin(ALICE, MUSD)).toBeNull();
+    /* And a coin written into the colour starts from ITS own positions. */
+    putK1Coin(ALICE, coin({ nonce: hex64(0x55), value: 20n, mtIndex: 3n }));
     expect(k1CoinCandidates(ALICE, MUSD)).toEqual([]);
     expectInvariants(ALICE, 'after an orphan candidate list was read');
   });

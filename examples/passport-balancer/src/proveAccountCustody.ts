@@ -866,10 +866,16 @@ export function createCustodyProver(options: CustodyProverOptions): CustodyProve
           estimateMs(),
         );
       }
+      const said = cause instanceof Error ? cause.message : String(cause);
+      /* A VERDICT AND AN ABSENCE ARE DIFFERENT ANSWERS, and the caller acts on
+         the difference — see {@link isCustodyProverVerdict}. */
+      if (isCustodyProverVerdict(said)) {
+        return refused(502, 'proving-failed', `The proof server could not prove ${circuit}: ${said}`);
+      }
       return refused(
-        502,
-        'proving-failed',
-        `The proof server could not prove ${circuit}: ${cause instanceof Error ? cause.message : String(cause)}`,
+        503,
+        'prover-unavailable',
+        `The proof server could not be reached to prove ${circuit}: ${said}`,
       );
     } finally {
       if (timer !== undefined) clearTimeout(timer);
@@ -889,6 +895,54 @@ export function createCustodyProver(options: CustodyProverOptions): CustodyProve
       lastError,
     }),
   };
+}
+
+/**
+ * Whether a failed prover call was the proof server's VERDICT on the
+ * transaction, rather than the proof server being out of reach.
+ *
+ * WHY THE SPONSOR HAS TO TELL THESE APART. `proving-failed` is the one refusal
+ * the client reads as evidence ABOUT THE TRANSACTION: for a shielded spend it
+ * is the shape a wrong candidate position arrives in, so it arms a retry
+ * against the next position — which costs the holder a second approval
+ * (`../../passport-demo/src/identity/custodyContractClient.ts`). Answering it
+ * for a proof server that was simply restarted mid-spend therefore spent both
+ * of a two-candidate coin's approvals on a failure that had nothing to do with
+ * either position, and left the coin sitting on the last guess. So a verdict is
+ * a verdict and everything else is `503 prover-unavailable`: try again, nothing
+ * learned about the transaction.
+ *
+ * WHAT A VERDICT LOOKS LIKE, FROM THE LIVE RUN OF 2026/09/18. midnight-js's
+ * proof provider reports the proof server's own HTTP answer in the message:
+ * `'check' returned an error: Error: Failed Proof Server response:
+ * url="http://127.0.0.1:6310/check", code="400", status="Bad Request"`. A 4xx
+ * is the server having read the request and declined it — `Public transcript
+ * input mismatch` for a position that rebuilds a different root. Anything with
+ * no status in it at all (`connect ECONNREFUSED`, `fetch failed`, `socket hang
+ * up`) is a server that never answered, and a 5xx is one that broke while
+ * trying.
+ *
+ * THE THREE 4xx CODES THAT ARE NOT VERDICTS are the ones that mean "not now"
+ * rather than "no": `408` and `425` are the server asking for the same request
+ * again, and `429` is its own queue being full. Reading any of them as a
+ * verdict would spend an approval on a position the server never looked at.
+ *
+ * Unrecognised is `false` on purpose: a refusal to prove is asserted from
+ * evidence, never assumed, because the cost of assuming it is somebody's
+ * second approval.
+ */
+export function isCustodyProverVerdict(message: string): boolean {
+  const text = typeof message === 'string' ? message : '';
+  const statuses = [...text.matchAll(/(?:code|status(?:\s*code)?)\s*[=:]\s*"?(\d{3})"?/gi)].map(
+    (match) => Number(match[1]),
+  );
+  if (statuses.length === 0) return false;
+  /* ANY 5xx WINS. A message that names both — a gateway's 502 wrapping the
+     prover's own answer — is a call that did not reach a prover's judgement. */
+  if (statuses.some((status) => status >= 500)) return false;
+  return statuses.some(
+    (status) => status >= 400 && status < 500 && status !== 408 && status !== 425 && status !== 429,
+  );
 }
 
 /** The deadline fired. Separate from the engine's own failures on purpose. */
