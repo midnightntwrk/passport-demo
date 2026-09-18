@@ -89,6 +89,7 @@ import {
   type K1Arm,
   type K1Authorisation,
   type K1Challenge,
+  jubjubChallenges,
   k256Challenges,
   deviceEntry,
   bootCommitment,
@@ -241,11 +242,42 @@ export type CustodyCallDevice = K256DeviceIdentity | (JubjubSigner & CustodyPass
  * arm exists for.
  */
 export function custodyUserKey(
-  session: Pick<CustodyDynamicSession, 'address'>,
-  device: Pick<CustodyDeviceIdentity, 'arm' | 'pk'>,
+  session: Pick<CustodyDynamicSession, 'address'> | null,
+  device: CustodyOwner,
 ): string {
-  return device.arm === 'jubjub' ? `jubjub:${device.pk.x.toString(16)}` : k1UserKey(session);
+  if (device.arm === 'jubjub') return `jubjub:${device.pk.x.toString(16)}`;
+  /* Not reachable from the screen, which has a session before it has a k256
+     device at all — the point is RECOVERED from a vendor signature. It is here
+     because the type now admits null for the arm that has no vendor, and a
+     type that admits something has to say what happens when it arrives. */
+  if (session === null) throw new Error('A social sign-in Passport needs the sign-in it is held by.');
+  return k1UserKey(session);
 }
+
+/**
+ * The half of a device that NAMES a Passport in storage: which arm, and the
+ * point.
+ *
+ * Everything the custody layer files — the record, the wallet seed, the
+ * viewing-key slot, the coin store, the name — is keyed by
+ * {@link custodyUserKey}, and every entry point that files anything therefore
+ * needs this much of a device even when it needs no signature at all. A
+ * permissionless deposit is the clearest case: it proves nothing and signs
+ * nothing, and it still has to know whose record to write the hash into.
+ */
+export type CustodyOwner = Pick<CustodyDeviceIdentity, 'arm' | 'pk'>;
+
+/**
+ * Who is signed in with a VENDOR, or null where there is no vendor.
+ *
+ * A jubjub Passport is held by a passkey: there is no address to name it by and
+ * no socket to sign over, and the two entry points that once demanded both read
+ * neither on that arm. Null is the honest value, and it is narrower than a
+ * stub session with an empty address — which is what the screen used to pass
+ * and which would have filed a real Passport under `''` the first time anybody
+ * mixed the arms up.
+ */
+export type CustodySession = CustodyDynamicSession | null;
 
 /* -------------------------------------------------------------------------- */
 /* The seams                                                                  */
@@ -713,7 +745,7 @@ function circuitResultOf(callResult: unknown): unknown {
  * twenty verifier keys, the last of them retiring the maintenance authority.
  */
 export async function deployCustodyAccount(
-  session: CustodyDynamicSession,
+  session: CustodySession,
   /* THE ARM WIDENING (2026/09/18, passkey arm). Either arm's device now, and
      the Passport is filed under the device's own key — `custodyUserKey` — so a
      passkey account is not named by a Dynamic address it does not have. The
@@ -762,7 +794,7 @@ export async function deployCustodyAccount(
      commitment binds the arm and no later wave can repair a deploy that left
      the activation circuit out. `planCustodyWaves` has taken the arm since it
      was written; only the caller was hardcoded. */
-  const waves = planCustodyWaves(sizes, device.arm);
+  const waves = planCustodyWaves(sizes, device.arm, custodyRetiresAuthority(device));
   record = { ...record, totalWaves: waves.length };
   /* Decided ONCE, from the plan this deploy will actually run, and handed to
      both wave runners: the one that builds the authority and the one that has
@@ -898,17 +930,46 @@ interface WaveContext {
 }
 
 /**
+ * Whether this account's maintenance authority is thrown away on the last wave.
+ *
+ * HECTOR DECIDED THIS ON 2026/09/18, and decided it for one reason: the
+ * prototype accounts made this week cannot take a circuit fix. A retired
+ * authority makes the account immutable — no verifier key can ever be replaced
+ * — so a defect in a circuit means a fresh account and a migration of
+ * everything in the old one, which is exactly the position those Passports are
+ * in and exactly what he did not want to repeat.
+ *
+ * SO A PASSKEY KEEPS IT, and only a passkey. The cost of keeping it is that
+ * whoever can complete the assertion can replace a verifier key and therefore
+ * replace the rule that guards the coins, which is a strictly larger prize than
+ * the balance; the cost of retiring it is an account nobody can ever fix. What
+ * makes keeping it worth having is that the key is DERIVED from the passkey and
+ * never written down (see `PASSPORT_MAINTENANCE_LABEL`), so it survives a
+ * reinstall for exactly as long as the passkey does.
+ *
+ * A k256 device carries no derived key — the vendor's signatures are randomised
+ * and there is nothing deterministic to hash — so a kept authority there would
+ * be backed by a sampled key living in one browser: an authority nobody holds,
+ * which is the worst of both answers. That arm retires, as it always has, and
+ * the Dynamic product is parked in any case.
+ */
+function custodyRetiresAuthority(device: CustodyDeviceIdentity): boolean {
+  return !('maintenanceSecretHex' in device && device.maintenanceSecretHex !== undefined);
+}
+
+/**
  * The maintenance signing key the passkey hands down — or null, which is the
- * answer for every account this app deploys today.
+ * answer for a device that carries none.
  *
  * TWO CONDITIONS, AND THE SECOND ONE WAS MISSING. A device that carries a
  * `maintenanceSecretHex` was enough to take this branch, so a passkey Passport
  * got an authority built from a secret derived from somebody's authenticator
  * ON A PLAN THAT RETIRES THE AUTHORITY TWO WAVES LATER. That is a derived
- * upgrade secret created, stored, and made worthless in the same setup.
- * `planCustodyWaves` retires by default and nothing here asks it not to, so
- * the honest reading of the plan is the gate: the key is derived only for an
- * account that is going to KEEP the authority it is the key to.
+ * upgrade secret created, stored, and made worthless in the same setup. The
+ * plan is now asked NOT to retire for exactly the devices that carry a key
+ * ({@link custodyRetiresAuthority}), so the two conditions agree by
+ * construction; the second is kept because a plan is a value a caller can hand
+ * in, and a key built against a plan that retires is still worthless.
  *
  * It hands back a function because nothing persists a derived key; see
  * {@link signingKeyFor} for the other half of that rule.
@@ -1262,7 +1323,7 @@ async function awaitAuthorityCounter(
  * not itself an authorised call.
  */
 export async function activateK1Device(
-  session: CustodyDynamicSession,
+  session: CustodySession,
   device: CustodyDeviceIdentity,
   onPhase?: (phase: CustodyPhase) => void,
   overrides: Partial<CustodyDeps> = {},
@@ -1363,7 +1424,7 @@ export interface CustodyCallRequest {
  * approved.
  */
 export async function k1Call(
-  session: CustodyDynamicSession,
+  session: CustodySession,
   device: CustodyCallDevice,
   request: CustodyCallRequest,
   onPhase?: (phase: CustodyPhase) => void,
@@ -1417,6 +1478,12 @@ export async function k1Call(
   } else {
     if (typeof challenge === 'function') {
       throw new Error('the k256 arm needs a finished challenge, not a builder');
+    }
+    /* `custodyUserKey` has already refused a k256 device with no session, so
+       this cannot be reached; it is here so the narrowing is the compiler's
+       and not a comment. */
+    if (session === null) {
+      throw new Error('A social sign-in Passport needs the sign-in it is held by.');
     }
     const signer = dynamicK256Signer({
       accountAddress: session.address,
@@ -1477,13 +1544,14 @@ export async function k1Call(
  * name and the circuit's own arguments, nothing more.
  */
 export async function custodyPermissionlessCall(
-  session: CustodyDynamicSession,
+  session: CustodySession,
+  owner: CustodyOwner,
   request: { operation: string; args: readonly unknown[] },
   onPhase?: (phase: CustodyPhase) => void,
   overrides: Partial<CustodyDeps> = {},
 ): Promise<CustodyStepResult> {
   const deps = withDefaults(overrides);
-  const user = k1UserKey(session);
+  const user = custodyUserKey(session, owner);
   const wallet = await deps.wallet(user);
   const network = wallet.network.networkId;
   const storage = deps.storage();
@@ -1559,6 +1627,11 @@ export interface CustodyShieldedWithdrawResult extends CustodyStepResult {
  * {@link rememberK1ChangeCoin}: its description exists nowhere but in the
  * value this call returned.
  */
+/* WHERE THE PASSKEY ARM PLUGS IN. `session`/`device` here become
+   `CustodySession`/`CustodyCallDevice` and the two `k1UserKey(session)` reads
+   become `custodyUserKey(session, device)`, exactly as every entry point above
+   now does — left to the direct-send builder, who owns this function and its
+   challenge builders. */
 export async function withdrawShieldedK1(
   session: CustodyDynamicSession,
   device: K256DeviceIdentity,
@@ -1771,14 +1844,15 @@ async function settleShieldedChange(
  * that hash is the only thing the sender learned.
  */
 export async function custodyPermissionlessCallAt(
-  session: CustodyDynamicSession,
+  session: CustodySession,
+  owner: CustodyOwner,
   targetAddress: string,
   request: { operation: string; args: readonly unknown[] },
   onPhase?: (phase: CustodyPhase) => void,
   overrides: Partial<CustodyDeps> = {},
 ): Promise<CustodyStepResult> {
   const deps = withDefaults(overrides);
-  const user = k1UserKey(session);
+  const user = custodyUserKey(session, owner);
   const wallet = await deps.wallet(user);
   const network = wallet.network.networkId;
   const storage = deps.storage();
@@ -1839,7 +1913,8 @@ export async function custodyPermissionlessCallAt(
  * approval from anybody.
  */
 export async function depositShieldedIntoCustody(
-  session: CustodyDynamicSession,
+  session: CustodySession,
+  owner: CustodyOwner,
   request: {
     readonly targetAddress: string;
     readonly recipientEncKeyHex: string;
@@ -1856,6 +1931,7 @@ export async function depositShieldedIntoCustody(
   });
   return custodyPermissionlessCallAt(
     session,
+    owner,
     request.targetAddress,
     { operation: 'deposit_shielded', args: [sealed.coin, sealed.entry] },
     onPhase,
@@ -1864,8 +1940,8 @@ export async function depositShieldedIntoCustody(
 }
 
 export async function appendInboxK1(
-  session: CustodyDynamicSession,
-  device: K256DeviceIdentity,
+  session: CustodySession,
+  device: CustodyCallDevice,
   entry: Uint8Array,
   onPhase?: (phase: CustodyPhase) => void,
   overrides: Partial<CustodyDeps> = {},
@@ -1879,7 +1955,14 @@ export async function appendInboxK1(
     {
       operation: 'append_inbox',
       args: [entry],
-      challenge: (pure, context, pk) => k256Challenges.appendInbox(pure, context, pk, entry),
+      /* THE ARM PICKS THE CHALLENGE, and the two are not the same kind of
+         thing: k256's is finished bytes, jubjub's is a BUILDER, because a
+         Schnorr preimage contains its own signature nonce and grind counter.
+         `k1Call` asserts it got the kind the arm wants; see GENERALISATION 5. */
+      challenge: (pure, context, pk) =>
+        device.arm === 'jubjub'
+          ? jubjubChallenges.appendInbox(pure, context, pk, entry)
+          : k256Challenges.appendInbox(pure, context, pk, entry),
     },
     onPhase,
     overrides,
@@ -2191,11 +2274,12 @@ async function signingKeyFor(
  * ever into one press that works.
  */
 export async function startCustodyAccountAgain(
-  session: CustodyDynamicSession,
+  session: CustodySession,
+  owner: CustodyOwner,
   overrides: Partial<CustodyDeps> = {},
 ): Promise<void> {
   const deps = withDefaults(overrides);
-  const user = k1UserKey(session);
+  const user = custodyUserKey(session, owner);
   const wallet = await deps.wallet(user);
   const storage = deps.storage();
   const record = loadCustodyRecord(storage, user, wallet.network.networkId);

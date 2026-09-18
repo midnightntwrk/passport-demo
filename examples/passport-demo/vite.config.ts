@@ -99,6 +99,17 @@ function stampBuildId(): Plugin {
            word about what had actually failed. Stand down and let it surface. */
         if (error) return;
         const outDir = path.resolve(__dirname, 'dist');
+        /* AND STAND DOWN WHEN THERE IS NO OUTPUT, whatever `error` says.
+           Rollup passes the failure to `closeBundle` only when its caller hands
+           it over, and Vite closes the bundle in a `finally` WITHOUT it — so
+           the guard above never fires and this hook ran on top of every failed
+           build anyway, exactly the way the note below describes. On 2026/09/18
+           that turned a dangling symlink under `public/zk/` into
+           "ENOENT … dist/assets" with no mention of the symlink, and cost an
+           hour across three worktrees before anybody saw the real sentence.
+           An absent `assets/` after a build means the build wrote nothing,
+           which means it failed, which means Vite is about to say why. Let it. */
+        if (!fs.existsSync(path.join(outDir, 'assets'))) return;
         const workerPath = path.join(outDir, 'sw.js');
         const source = fs.readFileSync(workerPath, 'utf8');
         if (!source.includes(BUILD_ID_PLACEHOLDER)) {

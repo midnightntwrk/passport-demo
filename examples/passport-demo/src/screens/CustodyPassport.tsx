@@ -1,21 +1,17 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { ArrowRight, BadgeCheck, Copy, Loader2, RefreshCw, Search, ShieldCheck } from 'lucide-react'
 
-import { useDynamicSession } from '../lib/dynamic.js'
-
-import { recoverSecp256k1Point } from '../lib/custodyRecover.js'
 import { normaliseNameForRecovery, type NameRecoveryOutcome } from '../lib/nameRecovery.js'
+import type { CustodyArm, CustodyIdentity } from '../lib/custodyArm.js'
 import { parseEndpointList } from '../lib/endpoints.js'
-import { K256_ENVELOPE_NONE, k256Challenges, type K256DeviceIdentity } from '../identity/custodyContractSigning.js'
+import { k256Challenges, type K256DeviceIdentity } from '../identity/custodyContractSigning.js'
 import {
   activateK1Device,
   defaultCustodyDeps,
   deployCustodyAccount,
   k1Call,
-  recoverK1DevicePoint,
   startCustodyAccountAgain,
   withdrawShieldedK1,
-  type CustodyDynamicSession,
   type CustodyPhase,
 } from '../identity/custodyContractClient.js'
 import {
@@ -28,12 +24,10 @@ import {
   type CustodyAccountRecord,
 } from '../identity/custodyContractPlan.js'
 import {
-  choosePassportIdentity,
   dynamicSetupAction,
   dynamicSetupCopy,
   dynamicSetupInterrupted,
   dynamicSetupPhase,
-  dynamicUserKey,
   k1PrivateStateId,
   custodyRecoveryOutcome,
   readDynamicPassport,
@@ -43,7 +37,6 @@ import {
 } from '../identity/custodyContractSession.js'
 import {
   clearCustodyShieldedSend,
-  custodyApprovalPrompt,
   custodySendRefusal,
   custodyShieldedSendOutcome,
   custodyShieldedSendRefusal,
@@ -91,14 +84,28 @@ import './onboarding.css'
 import './dynamic-passport.css'
 
 /**
- * A PASSPORT HELD BY A SOCIAL SIGN-IN, end to end.
+ * A PASSPORT ON THE ACCOUNT CUSTODY CONTRACT, end to end, for EITHER ARM.
  *
  * WHAT IT IS
  * ----------
- * The whole of the Dynamic-only path from `docs/demo/dynamic-build-out-plan.md`
- * §6: sign in with Google, Discord, Microsoft, or X; get a Passport set up for
- * that sign-in with the signed-in key as the key that approves for it; claim a
- * `.night` name; and pay somebody. No passkey is made and none is asked for.
+ * Set a Passport up in waves on Nicolas's account custody contract, activate
+ * the key that approves for it, claim a `.night` name, show what it holds, come
+ * back to it by name on another device, and pay somebody. The contract is the
+ * same and every one of those steps is the same whoever is holding the
+ * Passport; what differs is only the key, and that difference is an ARM.
+ *
+ * A PASSKEY holds a JubJub scalar derived from its own PRF output. There is no
+ * vendor: the signer is built once from the contract root a single assertion
+ * produces and signs synchronously, and the Passport is named by its own device
+ * point, which is the same value on every device the passkey syncs to.
+ *
+ * A SOCIAL SIGN-IN holds a secp256k1 key inside a vendor. The point is
+ * recovered from two signatures, every approval is a round trip, and the
+ * Passport is named by the embedded address.
+ *
+ * `../lib/custodyArm.ts` is that difference and nothing else. This screen asks
+ * it for a device and a name, and asks the custody layer for everything else —
+ * which is why the passkey arm cost an adapter rather than a second screen.
  *
  * WHY IT IS ONE SCREEN AND NOT A BRANCH THROUGH `App.tsx`
  * -------------------------------------------------------
@@ -111,17 +118,18 @@ import './dynamic-passport.css'
  * until a reviewer met it.
  *
  * So this is a screen with its own state, reached by ONE branch at the top of
- * that ladder. With no Dynamic session the branch is false and `App.tsx`
- * renders exactly what it renders today — which is the property the 89 mocked
- * specs hold us to, and the reason the flag-off build is untouched.
+ * that ladder. A passkey holder who already has a PROTOTYPE account never
+ * reaches it — `passkeyPassportRoute` sends them to the flow they have always
+ * had — so every Passport in production takes the branch it took yesterday,
+ * which is the property the mocked specs hold us to.
  *
  * THE COPY RULE
  * -------------
  * The words wallet address, DUST, contract, registry, indexer, resolver,
  * sponsor, and SDK do not appear on this screen, and neither does the name of
- * the fee token. Nor does "Dynamic": the reader chose Google, not a vendor, so
- * the approval prompt names the provider they recognise
- * ({@link custodyApprovalPrompt}).
+ * the fee token. Nor does "Dynamic": a reader who signed in chose Google, not a
+ * vendor, and a reader who did not chose a fingerprint, not a passkey. Both
+ * sentences come from the arm.
  *
  * WHAT THE SCREEN DOES WITH MONEY
  * -------------------------------
@@ -190,16 +198,52 @@ const PHASE_LABELS: Record<CustodyPhase['step'], string> = {
   confirm: 'Confirming',
 }
 
-export interface DynamicPassportProps {
+export interface CustodyPassportProps {
   /** The network this build transacts on. */
   network: string
+  /** Who is holding this Passport. See `../lib/custodyArm.ts`. */
+  arm: CustodyArm
 }
 
 type Screen = 'create' | 'name' | 'home' | 'recover'
 
-export default function DynamicPassport({ network }: DynamicPassportProps) {
-  const session = useDynamicSession()
-  const user = dynamicUserKey(session.evmAddress)
+export default function CustodyPassport({ network, arm }: CustodyPassportProps) {
+  /**
+   * The key every store this Passport owns is filed under.
+   *
+   * IT CAN ARRIVE LATE, and that is the one thing about this screen the Dynamic
+   * arm did not have to think about. A sign-in knows its key as soon as it is
+   * signed in; a passkey's key is its device point, which costs a user-verified
+   * assertion to derive. The arm supplies whatever it already knows — for a
+   * passkey, the pointer a previous visit wrote — and {@link ensureIdentity}
+   * settles it the first time a ceremony is warranted anyway.
+   */
+  const [user, setUser] = useState<string | null>(arm.userKey)
+  /**
+   * The same value, where a CALLBACK can see it.
+   *
+   * LIVE, 2026/09/18, AND NOTHING SHORT OF A LIVE RUN WOULD HAVE FOUND IT. The
+   * setup succeeded on stagenet — four waves, an activation, all landed — and
+   * the screen stayed on "Create my Passport" as though nothing had happened.
+   * `refresh` is a `useCallback` over `user`, and the copy of it that `create`
+   * closed over was made BEFORE the ceremony, when `user` was still null; so
+   * the read that was supposed to move the screen to the name step returned
+   * early and the Passport the person had just paid for was invisible until
+   * they reloaded. A ref is what a callback can read after the render that made
+   * it, so `refresh` reads this and depends on nothing.
+   */
+  const userRef = useRef<string | null>(arm.userKey)
+  const rememberUser = useCallback((next: string | null) => {
+    userRef.current = next
+    setUser(next)
+  }, [])
+  useEffect(() => {
+    /* The arm's own answer wins whenever it changes: a second sign-in, or a
+       pointer that appeared while this screen was open. A settled identity is
+       never thrown away for a null, because the ceremony that produced it is
+       not free. */
+    if (arm.userKey !== null) rememberUser(arm.userKey)
+  }, [arm.userKey, rememberUser])
 
   const [view, setView] = useState<DynamicPassportView | null>(null)
   const [screen, setScreen] = useState<Screen | null>(null)
@@ -229,19 +273,20 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
      away rather than offering to create a Passport and throwing
      `CUSTODY_SETUP_INTERRUPTED` at whoever pressed it. */
   const [interrupted, setInterrupted] = useState(false)
-  const device = useRef<K256DeviceIdentity | null>(null)
+  const device = useRef<CustodyIdentity | null>(null)
   /* Whether a payment or a setup is running. See {@link run}. */
   const inFlight = useRef(false)
 
   /** Re-reads what is stored and moves the screen to match it. */
   const refresh = useCallback((): DynamicPassportView | null => {
-    if (user === null) return null
-    const next = readDynamicPassport({ storage: window.localStorage, user, network })
+    const settled = userRef.current
+    if (settled === null) return null
+    const next = readDynamicPassport({ storage: window.localStorage, user: settled, network })
     setView(next)
     setInterrupted(dynamicSetupInterrupted(next.record))
     setScreen(next.stage === 'home' ? 'home' : next.stage === 'name' ? 'name' : 'create')
     return next
-  }, [network, user])
+  }, [network])
 
   useEffect(() => {
     if (user === null) {
@@ -253,23 +298,24 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
   }, [refresh, user])
 
   /**
-   * The key that approves, recovered once.
+   * The key that approves, settled once.
    *
-   * ONE SIGNATURE, AND IT IS NOT THE ONE THAT MATTERS: the sign-in hands out an
+   * ONE CEREMONY, AND IT IS NOT FREE ON EITHER ARM. A sign-in hands out an
    * address and nothing else, so the point behind it is recovered from a
-   * signature over a digest Passport chose. Doing it per call would mean an
+   * signature over a digest Passport chose; a passkey hands out nothing until
+   * somebody touches the authenticator. Doing either per call would mean an
    * approval before every approval, which is the thing a person would notice.
+   *
+   * It also settles {@link user}, which on the passkey arm is not known before
+   * this runs — so every caller below awaits this before reading a store.
    */
-  const ensureDevice = useCallback(async (): Promise<K256DeviceIdentity> => {
+  const ensureIdentity = useCallback(async (): Promise<CustodyIdentity> => {
     if (device.current) return device.current
-    const pk = await recoverK1DevicePoint({
-      session: custodySession(session),
-      recover: recoverSecp256k1Point,
-    })
-    const identity: K256DeviceIdentity = { arm: 'k256', pk, envelope: K256_ENVELOPE_NONE }
+    const identity = await arm.ensureIdentity()
     device.current = identity
+    rememberUser(identity.userKey)
     return identity
-  }, [session])
+  }, [arm, rememberUser])
 
   /**
    * Runs one piece of work with the single busy line and the single sentence.
@@ -334,6 +380,43 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
     [],
   )
 
+  /**
+   * Asks for this Passport's opening balance, and never pretends it arrived.
+   *
+   * WHAT IT IS ALLOWED TO DO IS ASK. The figures on Home come from the account's
+   * own state and its own list of deliveries and from nowhere else; this call
+   * adds nothing to them. So a refusal here is not a failure of the setup — the
+   * Passport is made, named, and usable — and it must not throw, or it would
+   * undo a setup that worked over money that has not turned up yet.
+   *
+   * IT IS REFUSED TODAY, AND THE REFUSAL IS WORTH READING. The deployed service
+   * decodes the account with the PROTOTYPE module and fingerprints it on
+   * `recovery_shares` and `night_balances`, neither of which this contract has,
+   * so it answers `not-an-account` — about an account that is one. The fix is
+   * the sponsor's (it reads through its own account view instead), and until it
+   * lands an opening balance arrives another way or not at all. The service's
+   * own words go to the console, where they are of use to somebody; what the
+   * reader gets is the truth in a sentence of ours, because the service's
+   * sentence is both wrong and full of words this screen does not say.
+   */
+  const askForOpeningBalance = useCallback(async (contractAddress: string): Promise<void> => {
+    for (const funderUrl of FUNDER_URLS) {
+      try {
+        const response = await fetch(`${funderUrl}/fund-account`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ contractAddress }),
+        })
+        if (response.ok) return
+        const body: unknown = await response.json().catch(() => ({}))
+        console.warn('[account-custody] the opening balance was refused', response.status, body)
+        return
+      } catch (cause) {
+        console.warn('[account-custody] the opening balance could not be asked for', cause)
+      }
+    }
+  }, [])
+
   /* ---------------------------------------------------------------------- */
   /* Making one                                                             */
   /* ---------------------------------------------------------------------- */
@@ -347,24 +430,29 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
          fresh Passport rather than pressing the same broken step again. The
          account already on chain is left where it is: it is dormant, it holds
          nothing, and there is no transaction that would tidy it away. */
+      const { device: identity } = await ensureIdentity()
       if (interrupted) {
-        await startCustodyAccountAgain(custodySession(session))
+        await startCustodyAccountAgain(arm.session, identity)
         setInterrupted(false)
       }
-      const identity = await ensureDevice()
       const onPhase = (phase: CustodyPhase) => {
         setBusy(phase.detail ? `${PHASE_LABELS[phase.step]}` : PHASE_LABELS[phase.step])
       }
       /* Both halves are resumable and both check the chain before they act, so
          running them one after the other is safe on a second press: whatever
          already landed is skipped rather than replayed. */
-      let record = (await deployCustodyAccount(custodySession(session), identity, onPhase)).record
+      let record = (await deployCustodyAccount(arm.session, identity, onPhase)).record
       if (!record.activated) {
-        record = (await activateK1Device(custodySession(session), identity, onPhase)).record
+        record = (await activateK1Device(arm.session, identity, onPhase)).record
       }
+      /* THE OPENING BALANCE IS ASKED FOR WHEN THE KEY IS ON, and not when the
+         account lands. An unactivated account holds nothing and can be called
+         by nobody, and the service refuses to fund one — so asking at the
+         deploy is a refusal every time, on a schedule. */
+      if (record.address !== null) await askForOpeningBalance(record.address)
       refresh()
     })
-  }, [ensureDevice, interrupted, refresh, run, session])
+  }, [arm, askForOpeningBalance, ensureIdentity, interrupted, refresh, run])
 
   /* ---------------------------------------------------------------------- */
   /* The name                                                               */
@@ -789,15 +877,15 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
       const plan = planCustodySend(input)
 
       /* LEG ONE — gated, and the only thing the holder approves. */
-      setBusy(custodyApprovalPrompt(session.provider))
-      const identity = await ensureDevice()
+      setBusy(arm.approvalPrompt)
+      const { device: identity } = await ensureIdentity()
       const colour = nightColourBytes()
       const recipientBytes = await unshieldedRecipientBytes(
         plan.withdraw.recipientAddress,
         wallet.network.networkId,
       )
       await k1Call(
-        custodySession(session),
+        arm.session,
         identity,
         {
           operation: 'withdraw_unshielded',
@@ -829,7 +917,7 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
       })
       setNotice(`Sent. ${label} has it.`)
     },
-    [balance, ensureDevice, session],
+    [arm, balance, ensureIdentity],
   )
 
   /** A token out of the account, in the three legs a shielded amount takes. */
@@ -907,14 +995,26 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
 
       /* LEG ONE — gated, for EXACTLY the amount, with the change coin coming
          back as the circuit's own value and going straight into the store. */
-      setBusy(custodyApprovalPrompt(session.provider))
-      const identity = await ensureDevice()
+      setBusy(arm.approvalPrompt)
+      const { device: identity } = await ensureIdentity()
+      /* WHERE THE PASSKEY ARM PLUGS INTO THE SEND. This is the only path left
+         on this screen that still demands a vendor session, because it is the
+         one the DIRECT SEND is replacing outright: the three legs below become
+         a single gated call that pays the recipient from the account, and the
+         two that route through this Passport's own wallet are deleted with
+         them. `withdrawShieldedK1` takes `CustodySession` and
+         `CustodyCallDevice` when that lands, exactly as every other entry point
+         already does, and this guard goes with it. Until then a passkey
+         Passport does everything on this screen except send, and says so. */
+      if (arm.session === null || identity.arm !== 'k256') {
+        throw new Error('Paying somebody from this Passport is coming. Everything else here works.')
+      }
       const keys = await accountModule.decodeShieldedRecipient(
         plan.withdraw.ownShieldedAddress,
         wallet.network.networkId,
       )
       const withdrawal = await withdrawShieldedK1(
-        custodySession(session),
+        arm.session,
         identity,
         {
           recipientCoinPublicKey: keys.coinPublicKey,
@@ -948,7 +1048,7 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
       setStopped(stoppedRecord)
       await deliverNote(wallet, stoppedRecord, note, label)
     },
-    [deliverNote, ensureDevice, session, waitForNote],
+    [arm, deliverNote, ensureIdentity, waitForNote],
   )
 
   /**
@@ -1062,9 +1162,6 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
 
   const findByName = useCallback(
     async (typed: string): Promise<NameRecoveryOutcome> => {
-      if (user === null) {
-        return { kind: 'unreachable', detail: 'Your sign-in is still starting up.' }
-      }
       const label = normaliseNameForRecovery(typed)
       const [{ resolveAliasTarget }, { readAccountOperations }] = await Promise.all([
         import('../identity/midnames.js'),
@@ -1086,16 +1183,31 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
       let operations: readonly string[] | null = null
       let holdsDevice: boolean | null = null
       let pk: K256DeviceIdentity['pk'] | null = null
+      /* THE CEREMONY COMES FIRST HERE, AND ONLY HERE. Everywhere else the key
+         this Passport is filed under is already known; on a NEW DEVICE it is
+         not — that is what coming back by name means — and on the passkey arm
+         that key IS the device point, which is what the assertion produces. So
+         the identity is settled before any store is read rather than after it,
+         and somebody who typed a name they do not own has paid one touch for
+         the answer, which is the cheapest honest price for it. */
+      let restoredUser: string
+      let identity: CustodyIdentity
+      try {
+        identity = await ensureIdentity()
+        restoredUser = identity.userKey
+        pk = identity.device.pk
+      } catch (cause) {
+        console.warn('[account-custody] could not open this Passport', cause)
+        return { kind: 'unreachable', detail: 'Your Passport is still starting up.' }
+      }
       try {
         const deps = defaultCustodyDeps()
-        const wallet = await deps.wallet(user)
+        const wallet = await deps.wallet(restoredUser)
         operations = await readAccountOperations(wallet.network.indexerHttpUrl, address)
         if (operations !== null) {
-          const identity = await ensureDevice()
-          pk = identity.pk
           const [contractModule, providers] = await Promise.all([
             deps.contractModule(),
-            deps.providers(wallet, k1PrivateStateId(user)),
+            deps.providers(wallet, k1PrivateStateId(restoredUser)),
           ])
           const reader = providers.publicDataProvider as {
             queryContractState(a: string): Promise<{ data: unknown } | null>
@@ -1119,7 +1231,7 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
                 entryAt: (counter) =>
                   deviceEntry(
                     contractModule.pureCircuits,
-                    identity,
+                    identity.device,
                     hexToBytes(address),
                     ledger.device_epoch,
                     counter,
@@ -1139,32 +1251,52 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
       const outcome = custodyRecoveryOutcome(resolved, { operations, holdsDevice })
       if (outcome.kind !== 'found' || pk === null) return outcome
       const restored: CustodyAccountRecord = recoveredCustodyRecord({
-        user,
+        user: restoredUser,
         network,
         address,
-        privateStateId: k1PrivateStateId(user),
+        privateStateId: k1PrivateStateId(restoredUser),
         pkXHex: pk.x.toString(16),
         pkYHex: pk.y.toString(16),
       })
       saveCustodyRecord(window.localStorage, restored)
-      saveCustodyName(window.localStorage, user, network, label)
+      saveCustodyName(window.localStorage, restoredUser, network, label)
+      /* THE VIEWING SECRET, SO A RECOVERED PASSPORT CAN DESCRIBE ITS OWN MONEY.
+         The account's whole coin store is rebuilt by opening its own list of
+         deliveries, and an entry opens with this secret or with nothing; a
+         Passport brought back on a second device has an empty store, so
+         `readHoldings` walks the list, opens nothing, and shows a balance of
+         zero over a chain that says otherwise.
+
+         A PASSKEY CAN FIX THAT AND A SIGN-IN CANNOT, which is the whole reason
+         the secret is derived on this arm: the same authenticator that produced
+         the device point produces the secret the account's entries were sealed
+         to, so it is in hand here with no further ceremony. A Dynamic device
+         carries none and the store keeps whatever it had, which for that arm is
+         what Dynamic's own storage restore is for.
+
+         Only where the store has NONE. An existing secret is this account's own
+         and is never written over — see `rememberK1EncSecretKey`'s caller at
+         the deploy, which files it when the account is created. */
+      if ('encSecretKeyHex' in identity.device && identity.device.encSecretKeyHex !== undefined) {
+        const { loadK1CoinStore, rememberK1EncSecretKey } = await import(
+          '../identity/k1CoinStore.js'
+        )
+        const account = { network, address }
+        if (loadK1CoinStore(account).encSecretKeyHex === null) {
+          rememberK1EncSecretKey(account, identity.device.encSecretKeyHex)
+        }
+      }
       refresh()
       return outcome
     },
-    [ensureDevice, network, refresh, user],
+    [ensureIdentity, network, refresh],
   )
 
   /* ---------------------------------------------------------------------- */
   /* What is on screen                                                      */
   /* ---------------------------------------------------------------------- */
 
-  if (
-    choosePassportIdentity({
-      hasPasskeyProfile: false,
-      dynamicStatus: session.status,
-      evmAddress: session.evmAddress,
-    }) !== 'dynamic'
-  ) {
+  if (!arm.ready) {
     return (
       <Shell label="Passport">
         <p className="mnob-lede">Getting your Passport ready…</p>
@@ -1172,13 +1304,13 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
     )
   }
 
-  const who = session.handle ?? 'your account'
-  const via = session.provider ?? 'your sign-in'
+
 
   if (screen === 'recover') {
     return (
       <RecoverStep
-        provider={via}
+        keyPhrase={arm.keyPhrase}
+        otherKeyHint={arm.otherKeyHint}
         onFind={findByName}
         onBack={() => setScreen(view?.stage === 'home' ? 'home' : 'create')}
       />
@@ -1199,8 +1331,7 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
   if (screen === 'home') {
     return (
       <HomeStep
-        provider={via}
-        handle={who}
+        badge={arm.badge}
         name={view?.name ?? null}
         address={view?.address ?? null}
         receivingAddress={receivingAddress}
@@ -1227,15 +1358,12 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
   const phase = dynamicSetupPhase(view?.record ?? null)
   return (
     <Shell label="Passport">
-      <p className="mnob-kicker">Signed in with {via}</p>
+      <p className="mnob-kicker">{arm.kicker}</p>
       <h1 className="mnob-title">
         <span>Set up</span>
         <span>your Passport</span>
       </h1>
-      <p className="mnob-lede">
-        {who} is all Passport needs. Nothing else to remember, and nothing to install — the same
-        sign-in brings your Passport back on any device.
-      </p>
+      <p className="mnob-lede">{arm.lede}</p>
 
       <div className="mndyn-actions">
         <button
@@ -1371,7 +1499,10 @@ function NameStep(props: {
 }
 
 function RecoverStep(props: {
-  provider: string
+  /** "…that {keyPhrase} is part of it". See `../lib/custodyArm.ts`. */
+  keyPhrase: string
+  /** What to try when the name turns out to be somebody else's. */
+  otherKeyHint: string
   onFind: (name: string) => Promise<NameRecoveryOutcome>
   onBack: () => void
 }) {
@@ -1388,7 +1519,7 @@ function RecoverStep(props: {
       </h1>
       <p className="mnob-lede">
         Type the <code>.night</code> name you already hold. Passport will check with Midnight that
-        your {props.provider} sign-in is part of it before bringing anything back.
+        {' '}{props.keyPhrase} is part of it before bringing anything back.
       </p>
       <form
         className="mnob-stage"
@@ -1399,7 +1530,9 @@ function RecoverStep(props: {
           setMessage(null)
           void props
             .onFind(trimmed)
-            .then((outcome) => setMessage(recoveryMessage(outcome, props.provider)))
+            .then((outcome) =>
+              setMessage(recoveryMessage(outcome, props.keyPhrase, props.otherKeyHint)),
+            )
             .catch((cause: unknown) =>
               setMessage(
                 cause instanceof Error
@@ -1454,8 +1587,7 @@ function RecoverStep(props: {
 }
 
 function HomeStep(props: {
-  provider: string
-  handle: string
+  badge: string
   name: string | null
   address: string | null
   receivingAddress: string | null
@@ -1489,7 +1621,7 @@ function HomeStep(props: {
   return (
     <Shell label="Passport">
       <p className="mnob-kicker">
-        <BadgeCheck size={13} aria-hidden="true" /> {props.provider} · {props.handle}
+        <BadgeCheck size={13} aria-hidden="true" /> {props.badge}
       </p>
       <h1 className="mnob-title">
         <span>{props.name ? `${props.name}.night` : 'Your Passport'}</span>
@@ -1643,32 +1775,18 @@ function HomeStep(props: {
 /* Small helpers                                                              */
 /* -------------------------------------------------------------------------- */
 
-/**
- * The two-field session the custody layer takes.
- *
- * The address it is handed back by a caller is ignored on purpose: the bridge
- * already closes over the key it signs with, and letting a caller name another
- * would be a way to ask the wrong one for an approval.
- */
-function custodySession(session: {
-  evmAddress: string | null
-  signRaw: (digestHex: string) => Promise<string>
-}): CustodyDynamicSession {
-  return {
-    address: session.evmAddress ?? '',
-    signRaw: async (input: { accountAddress: string; message: string }) =>
-      session.signRaw(input.message),
-  }
-}
-
 /** The one place the recovery answers become sentences on this path. */
-function recoveryMessage(outcome: NameRecoveryOutcome, provider: string): string | null {
+function recoveryMessage(
+  outcome: NameRecoveryOutcome,
+  keyPhrase: string,
+  otherKeyHint: string,
+): string | null {
   if (outcome.kind === 'found') return null
   if (outcome.kind === 'unknown') {
     return 'No Passport is registered under that name. Check the spelling, or go back and set a new one up.'
   }
   if (outcome.kind === 'not-yours') {
-    return `That name belongs to a Passport your ${provider} sign-in is not part of. If you have more than one sign-in, go back and use the other one.`
+    return `That name belongs to a Passport ${keyPhrase} is not part of. ${otherKeyHint}`
   }
   return outcome.detail
 }

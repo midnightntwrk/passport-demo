@@ -4,7 +4,7 @@
  *
  * WHY THESE THREE AND NOT THE WHOLE SCREEN
  * ----------------------------------------
- * `../screens/DynamicPassport.tsx` is a React component: it holds refs, awaits
+ * `../screens/CustodyPassport.tsx` is a React component: it holds refs, awaits
  * a wallet, writes `localStorage`, and paints. None of that can be asserted on
  * cheaply, and most of it does not need to be — a heading in the wrong place is
  * a thing a reader sees and reports. These three are different, because each

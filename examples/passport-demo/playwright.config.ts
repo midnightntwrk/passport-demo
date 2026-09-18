@@ -122,6 +122,12 @@ const previewEnv = {
      until a URL carries `?dynamicwalk=…`, which no other spec writes. See
      `src/lib/dynamicWalk.ts`. */
   VITE_DYNAMIC_WALK: '1',
+  /* The account custody route, so `e2e/passkey-custody.spec.ts` can walk a
+     passkey Passport made on the new contract. Like the stand-in sign-in above
+     it does NOTHING until a URL carries `?accwalk=1`, which no other spec
+     writes — so every other spec still sees a build that makes Passports the
+     way production makes them. See `src/lib/custodyRoute.ts`. */
+  VITE_PASSPORT_ACC_WALK: '1',
 };
 
 export default defineConfig({
