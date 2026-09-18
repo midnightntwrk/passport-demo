@@ -713,28 +713,39 @@ describe('the change coin reaches storage before anything slow happens', () => {
     expect(heldK1Coin(ACCOUNT, COLOUR)?.mtIndex).toBe(8n);
   });
 
-  it('records a spend whose change it could not read, rather than losing the colour', async () => {
+  /* FLIPPED 2026/09/18. This used to assert that a spend whose change could not
+     be read was SUBMITTED and the colour given a row naming the transaction.
+     That is the wrong half of the choice: the description is the circuit's
+     return value and exists nowhere else in the world, so submitting without it
+     strands the remainder of somebody's balance on chain permanently, and the
+     row naming the transaction buys nobody anything they can spend. The read
+     happens on the unproven call, so refusing costs exactly nothing. */
+  it('refuses to send a payment whose change it could not read, and sends nothing', async () => {
     const test = harness({ circuitResult: { is_some: true, value: 'not a coin' } });
     const { session, device } = deviceFake();
     putK1Coin(ACCOUNT, { colour: COLOUR, nonce: NONCE, value: 100n, mtIndex: 5n });
 
-    const result = await withdrawShieldedK1(
-      session,
-      device,
-      {
-        recipientCoinPublicKey: new Uint8Array(32),
-        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
-        colourHex: COLOUR, amount: 40n },
-      undefined,
-      test.deps,
-    );
+    await expect(
+      withdrawShieldedK1(
+        session,
+        device,
+        {
+          recipientCoinPublicKey: new Uint8Array(32),
+          recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+          colourHex: COLOUR, amount: 40n },
+        undefined,
+        test.deps,
+      ),
+    ).rejects.toThrow('This Passport could not prepare that payment. Nothing was sent.');
 
-    expect(result.change.outcome).toBe('unreadable');
-    expect(result.changePosition).toBe('none');
-    /* The colour keeps a row naming the transaction, so nothing silently stops
-       being shown and somebody has a hash to go and look with. */
-    expect(loadK1CoinStore(ACCOUNT).unreadChange[COLOUR]).toBe('id-1');
-    expect(isK1NonceSpent(ACCOUNT, NONCE)).toBe(true);
+    /* NOTHING WAS SUBMITTED, so nothing moved and the store is untouched: the
+       coin is still held, its nonce is not spent, and no colour carries a row
+       saying a payment left. */
+    expect(test.grafts).toEqual([]);
+    expect(heldK1Coin(ACCOUNT, COLOUR)?.nonce).toBe(NONCE);
+    expect(isK1NonceSpent(ACCOUNT, NONCE)).toBe(false);
+    expect(loadK1CoinStore(ACCOUNT).unreadChange).toEqual({});
+    expect(awaitingK1Coins(ACCOUNT)).toEqual([]);
   });
 
   it('promotes the next payment when the spend consumed the coin exactly', async () => {
@@ -828,7 +839,7 @@ describe('a spend against a position that may be the wrong one', () => {
        grafted intent, which can escape position attribution. So the two
        reported positions go first, in order, and the third attempt is the
        first swept one. */
-    const test = harness({ positionFailures: 2 });
+    const test = harness({ circuitResult: changeResult(60n), positionFailures: 2 });
     const { session, device } = deviceFake();
     putK1CoinCandidates(ACCOUNT, { colour: COLOUR, nonce: NONCE, value: 100n }, [5n, 6n]);
 

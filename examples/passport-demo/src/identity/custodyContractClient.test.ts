@@ -1879,7 +1879,10 @@ describe('the shielded withdrawal', () => {
   /* And when they run out, the sentence is the plain one — not a word about
      witnesses in front of somebody who chose Google. */
   it('gives up in the plain sentence when the service declines every candidate', async () => {
-    const { test, account, session, device } = await readyPassport({ proofRefusals: 50 });
+    const { test, account, session, device } = await readyPassport({
+      circuitResult: changeResult(60n),
+      proofRefusals: 50,
+    });
     putK1CoinCandidates(account, { colour: COLOUR, nonce: NONCE, value: 100n }, [5n, 6n]);
 
     await expect(

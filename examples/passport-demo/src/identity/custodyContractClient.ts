@@ -1927,6 +1927,20 @@ export async function spendShieldedK1(
       const spendResult = spend.private.result;
       const direct = payee === null ? null : directSpendFromResult(spendResult);
       const change = direct === null ? changeCoinFromResult(spendResult) : direct.change;
+      if (change.outcome === 'unreadable') {
+        /* NOTHING HAS BEEN SUBMITTED, AND SO NOTHING IS AT RISK. The change
+           coin's description is the circuit's return value and exists nowhere
+           else in the world: a transaction sent with a description this build
+           could not read would leave the remainder of somebody's balance on
+           chain with nobody — not the holder, not a second device, not this
+           repository — ever able to describe it again. The read happens on the
+           UNPROVEN call, before anything leaves the tab, which is exactly what
+           makes "do not send it" available here instead of a note in the store
+           afterwards saying where the money went. The same rule the coin the
+           recipient would claim is already held to, four lines below. */
+        console.warn(`[account-custody] the change could not be read: ${change.reason}`);
+        throw new Error('This Passport could not prepare that payment. Nothing was sent.');
+      }
 
       let unprovenTx = spend.private.unprovenTx;
       let sent: CustodySentCoin | null = null;
@@ -2178,9 +2192,20 @@ function finalizedBlockHeight(result: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
+/**
+ * A change coin this build could describe.
+ *
+ * THE ONLY KIND A SPEND EVER REACHES. An unreadable one is refused on the
+ * UNPROVEN call and nothing is submitted, so the write below has no case for
+ * it and is not given one: a branch that cannot fire is a branch nothing can
+ * ever drill, and a write that could file an undescribed coin is a shape this
+ * module should not be able to express.
+ */
+type CustodyReadableChange = Exclude<CustodyChangeCoin, { readonly outcome: 'unreadable' }>;
+
 /** What the spend wrote down at submission time, for the settle that follows. */
 interface ShieldedChangeWrite {
-  readonly change: CustodyChangeCoin;
+  readonly change: CustodyReadableChange;
   /** The name the coin was filed under, until the chain's hash is known. */
   readonly txId: string;
 }
@@ -2191,21 +2216,10 @@ interface ShieldedChangeWrite {
 function writeShieldedChange(
   account: K1Account,
   colour: string,
-  change: CustodyChangeCoin,
+  change: CustodyReadableChange,
   identifier: string | null,
 ): ShieldedChangeWrite {
   const txId = identifier ?? 'unknown';
-  if (change.outcome === 'unreadable') {
-    /* THE VALUE HAS MOVED and this build could not read the description of what
-       came back. The coin is not dropped: a dropped coin is a colour this
-       Passport silently stops showing. It is recorded as spent with the
-       transaction that spent it, so the row can say a payment left and its
-       change could not be described, and a later run has the hash to go and
-       look. */
-    console.warn('[account-custody] the withdrawal succeeded and its change could not be read');
-    rememberK1ChangeCoin(account, colour, 'unreadable', txId);
-    return { change, txId };
-  }
   if (change.outcome === 'none') {
     rememberK1ChangeCoin(account, colour, null, txId);
     return { change, txId };
