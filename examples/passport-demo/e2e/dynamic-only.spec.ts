@@ -285,7 +285,22 @@ async function serveAccountCustodyState(page: Page, addresses: readonly string[]
  */
 async function seedDynamicPassport(
   page: Page,
-  options: { name: string; accountAddress: string; musd: string },
+  options: {
+    name: string;
+    accountAddress: string;
+    musd: string;
+    /**
+     * The coin this Passport's mUSD row is drawn from, where the walk wants a
+     * state a SPEND has already left behind rather than a delivery: the change
+     * coin's own nonce, and the nonce of the coin it replaced recorded as
+     * spent. Written the way `k1CoinStore.ts` writes it, because the point of
+     * the walk is that the shipped reader reads it.
+     */
+    coin?: { nonceHex: string; mtIndex: string };
+    spentNonces?: readonly string[];
+    /** A shielded payment that stopped between its legs, as it is persisted. */
+    stoppedSend?: Record<string, unknown>;
+  },
 ): Promise<void> {
   const key = `${WALK_USER}|${WALK_NETWORK}`;
   const record = {
@@ -310,20 +325,24 @@ async function seedDynamicPassport(
       encSecretKeyHex: 'ab'.repeat(32),
       coins: {
         [MUSD_COLOUR]: {
-          nonceHex: 'cd'.repeat(32),
+          nonceHex: options.coin?.nonceHex ?? 'cd'.repeat(32),
           colorHex: MUSD_COLOUR,
           value: options.musd,
-          mtIndex: '12',
+          mtIndex: options.coin?.mtIndex ?? '12',
         },
       },
       queued: {},
-      spentNonces: [],
+      spentNonces: options.spentNonces ?? [],
       mtIndexCandidates: {},
       awaiting: {},
     },
   };
+  const sends =
+    options.stoppedSend === undefined
+      ? null
+      : { [`${WALK_NETWORK}::${options.accountAddress}`]: options.stoppedSend };
   await page.addInitScript(
-    ([recordKey, seededRecord, seededName, seededStore]) => {
+    ([recordKey, seededRecord, seededName, seededStore, seededSends]) => {
       window.localStorage.setItem(
         'passport-account-custody:v1',
         JSON.stringify({ [recordKey as string]: seededRecord }),
@@ -333,9 +352,39 @@ async function seedDynamicPassport(
         JSON.stringify({ [recordKey as string]: seededName }),
       );
       window.localStorage.setItem('passport-k1-coins:v1', JSON.stringify(seededStore));
+      if (seededSends !== null) {
+        window.localStorage.setItem(
+          'passport-account-custody-shielded-send:v1',
+          JSON.stringify(seededSends),
+        );
+      }
     },
-    [key, record, options.name, store] as const,
+    [key, record, options.name, store, sends] as const,
   );
+}
+
+/**
+ * A shielded payment that stopped, as `custodyContractSend.ts` persists one.
+ *
+ * Written out here rather than imported: the walk's whole point is that the
+ * SHIPPED reader reads what a previous session left in `localStorage`, and a
+ * record built by the module under test would agree with itself whatever the
+ * stored shape had become.
+ */
+function stoppedSendRow(stage: string): Record<string, unknown> {
+  return {
+    network: WALK_NETWORK,
+    accountAddress: ACCOUNT_CUSTODY_ADDRESS,
+    stage,
+    colourHex: MUSD_COLOUR,
+    amount: '10',
+    recipientLabel: `${RESOLVABLE_NAME}.night`,
+    recipientAccountAddress: PASSPORT_ACCOUNT_ADDRESS,
+    noteNonce: null,
+    withdrawTxId: 'ab'.repeat(32),
+    depositTxId: null,
+    startedAt: 1_789_600_000_000,
+  };
 }
 
 test.describe('a Passport that has been paid', () => {
@@ -467,6 +516,113 @@ test.describe('a Passport that has been paid', () => {
        every account custody call (see the walk above). */
     expect(sentence).not.toContain('not built yet');
     await expect(page.getByRole('button', { name: /^Send/ })).toBeEnabled();
+
+    await context.close();
+  });
+});
+
+/**
+ * WHAT A PREVIOUS SESSION LEFT BEHIND, read by the shipped build.
+ *
+ * Both walks here start from `localStorage` written before the app runs, in
+ * the shape the app's own modules persist — which is the only way to drill the
+ * thing that actually goes wrong with a payment: not the leg that fails, but
+ * what the NEXT open of Passport says about it. A tab is closed between two
+ * legs far more often than a leg fails, and until 2026/09/17 one of these
+ * states came back as no payment at all.
+ */
+test.describe('a Passport opened again after a payment', () => {
+  test('still holds the change a spend left, after a reload', async ({ browser }) => {
+    const context = await browser.newContext(
+      walkContextOptions({ viewport: { width: 420, height: 900 } }),
+    );
+    const page = await context.newPage();
+    await installNetworkBoundary(page);
+    await serveAccountCustodyState(page, [ACCOUNT_CUSTODY_ADDRESS, PASSPORT_ACCOUNT_ADDRESS]);
+    /* The state a spend of 70 out of 100 leaves: the change coin held at the
+       position that proved, and the consumed nonce recorded as spent. */
+    await seedDynamicPassport(page, {
+      name: 'walker',
+      accountAddress: ACCOUNT_CUSTODY_ADDRESS,
+      musd: '30',
+      coin: { nonceHex: 'a1'.repeat(32), mtIndex: '13' },
+      spentNonces: ['cd'.repeat(32)],
+    });
+    await page.goto(WALK);
+
+    const holding = page.locator('.mndyn-holding');
+    await expect(holding.locator('.mndyn-holding-figure')).toHaveText('30');
+
+    /* THE RELOAD IS THE ASSERTION. The change coin's description exists
+       nowhere but in this browser, and the inbox walk that runs on every open
+       re-reads the entry that described the coin the spend consumed — so a
+       reload is where a build that let that walk win puts the spent hundred
+       back over the thirty of change. */
+    await page.reload();
+    await expect(page.getByRole('heading', { name: 'walker.night' })).toBeVisible();
+    await expect(holding.locator('.mndyn-holding-figure')).toHaveText('30');
+    const body = await page.locator('body').innerText();
+    expect(body).not.toContain('100');
+
+    await context.close();
+  });
+
+  test('says where a payment that stopped between its legs got to, and offers to finish it', async ({
+    browser,
+  }) => {
+    const context = await browser.newContext(
+      walkContextOptions({ viewport: { width: 420, height: 900 } }),
+    );
+    const page = await context.newPage();
+    await installNetworkBoundary(page);
+    await serveAccountCustodyState(page, [ACCOUNT_CUSTODY_ADDRESS, PASSPORT_ACCOUNT_ADDRESS]);
+    await seedDynamicPassport(page, {
+      name: 'walker',
+      accountAddress: ACCOUNT_CUSTODY_ADDRESS,
+      musd: '30',
+      stoppedSend: stoppedSendRow('awaiting-note'),
+    });
+    await page.goto(WALK);
+
+    /* The value is out of the account and the last leg needs nobody's
+       approval, so the offer says both things and gives a button. */
+    const offer = page.locator('.mnob-unusable');
+    await expect(offer).toBeVisible();
+    await expect(offer).toContainText('did not finish');
+    await expect(offer).toContainText('It has left your Passport and can still be delivered.');
+    await expect(page.getByRole('button', { name: 'Finish this payment' })).toBeVisible();
+
+    await context.close();
+  });
+
+  test('does not go quiet about a payment nothing here can see the far side of', async ({
+    browser,
+  }) => {
+    const context = await browser.newContext(
+      walkContextOptions({ viewport: { width: 420, height: 900 } }),
+    );
+    const page = await context.newPage();
+    await installNetworkBoundary(page);
+    await serveAccountCustodyState(page, [ACCOUNT_CUSTODY_ADDRESS, PASSPORT_ACCOUNT_ADDRESS]);
+    /* THE DEFECT THIS CATCHES, fixed 2026/09/17: this stage was missing from
+       the reader's list of stages, so the record did not parse and a reopened
+       Passport said nothing at all about value that had demonstrably left it. */
+    await seedDynamicPassport(page, {
+      name: 'walker',
+      accountAddress: ACCOUNT_CUSTODY_ADDRESS,
+      musd: '30',
+      stoppedSend: stoppedSendRow('unconfirmed'),
+    });
+    await page.goto(WALK);
+
+    const offer = page.locator('.mnob-unusable');
+    await expect(offer).toBeVisible();
+    await expect(offer).toContainText('nothing here can see whether');
+    await expect(offer).toContainText(`Check with ${RESOLVABLE_NAME}.night before sending it again`);
+    /* Nothing to finish, so the only control is to put it away — pressing
+       "finish" on this would be a second payment. */
+    await expect(page.getByRole('button', { name: 'Finish this payment' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Dismiss' })).toBeVisible();
 
     await context.close();
   });
