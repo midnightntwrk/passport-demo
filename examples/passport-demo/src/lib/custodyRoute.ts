@@ -134,6 +134,55 @@ export function passkeyPassportRoute(input: {
   return input.custodyUser === null ? 'new' : 'custody';
 }
 
+/**
+ * What a browser that holds SOMEBODY ELSE'S Passport is owed before it is
+ * offered a new one.
+ *
+ * THE POINTER IS PER CREDENTIAL, and `new` therefore means "no Passport for
+ * THIS key here" and not "no Passport here". A browser two keys have been used
+ * on — a second passkey made on the same laptop, a shared machine, a key
+ * created and then not chosen at the prompt — answers `new` for the second key
+ * while plainly holding the first's Passport, and the screen then offered to
+ * create one with nothing said. Somebody who picked the wrong key at the
+ * browser's prompt would have made a second Passport, with a second name to
+ * claim and a second balance to fund, and no way to tell from the screen that
+ * the first one was still there.
+ *
+ * It is a SENTENCE and not a refusal: a second Passport on one browser is a
+ * legitimate thing to want, and this build has no way to know which key the
+ * reader meant. What it can do is say what it can see.
+ *
+ * ONE SENTENCE, IN THE ARM'S OWN VOCABULARY. "The key on this device" is how
+ * `../lib/custodyArm.ts` names a passkey to somebody who experienced it as a
+ * fingerprint, and the notice borrows it rather than saying "credential" or
+ * "passkey" — and it names no machinery at all.
+ */
+export const CUSTODY_OTHER_KEY_NOTICE =
+  'This browser already holds a Passport set up with a different key. Use that key to open it, or carry on here to make a second one.';
+
+export function custodyOtherKeyNotice(input: {
+  /** What {@link passkeyPassportRoute} answered. */
+  readonly route: PasskeyPassportRoute;
+  /** Every pointer this browser holds — {@link loadCustodyPasskeyPointers}. */
+  readonly pointers: Record<string, string>;
+  /** The credential that just signed in. */
+  readonly credentialId: string;
+  readonly network: string;
+}): string | null {
+  /* ONLY IN FRONT OF THE OFFER. A holder being sent to their own Passport, or
+     to the flow their prototype Passport lives in, is not being offered
+     anything and has nothing to be warned about. */
+  if (input.route !== 'new') return null;
+  const mine = custodyPasskeyKey(input.credentialId, input.network);
+  /* PER NETWORK, like the pointer itself: a Passport on another network is not
+     a Passport this screen could open. */
+  const here = `|${input.network}`;
+  for (const key of Object.keys(input.pointers)) {
+    if (key !== mine && key.endsWith(here)) return CUSTODY_OTHER_KEY_NOTICE;
+  }
+  return null;
+}
+
 
 /* -------------------------------------------------------------------------- */
 /* Whether this build makes new Passports on the account custody contract      */

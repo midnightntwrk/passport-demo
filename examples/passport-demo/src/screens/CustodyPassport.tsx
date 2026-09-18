@@ -194,11 +194,20 @@ export interface CustodyPassportProps {
   network: string
   /** Who is holding this Passport. See `../lib/custodyArm.ts`. */
   arm: CustodyArm
+  /**
+   * One sentence about what this BROWSER already holds, shown before the offer
+   * to make a Passport — or null when there is nothing to say.
+   *
+   * Decided by `../lib/custodyRoute.ts`'s `custodyOtherKeyNotice`, which is
+   * where the reasoning is. It is a notice and never a refusal: a second
+   * Passport on one browser is a legitimate thing to want.
+   */
+  notice?: string | null
 }
 
 type Screen = 'create' | 'name' | 'home' | 'recover'
 
-export default function CustodyPassport({ network, arm }: CustodyPassportProps) {
+export default function CustodyPassport({ network, arm, notice: browserNotice = null }: CustodyPassportProps) {
   /**
    * The key every store this Passport owns is filed under.
    *
@@ -1305,6 +1314,15 @@ export default function CustodyPassport({ network, arm }: CustodyPassportProps) 
         <span>your Passport</span>
       </h1>
       <p className="mnob-lede">{arm.lede}</p>
+
+      {/* WHAT THIS BROWSER ALREADY HOLDS, said before the offer rather than
+          discovered afterwards as a second Passport with a second name to
+          claim. See `../lib/custodyRoute.ts`. */}
+      {browserNotice !== null ? (
+        <p className="mnob-hint mndyn-browser-notice" role="status">
+          {browserNotice}
+        </p>
+      ) : null}
 
       <div className="mndyn-actions">
         <button

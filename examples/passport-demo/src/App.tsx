@@ -181,7 +181,9 @@ import { useDynamicSession } from './lib/dynamic.js';
 import { useDynamicCustodyArm, usePasskeyCustodyArm } from './lib/custodyArms.js';
 import {
   accountCustodyEnabled,
+  custodyOtherKeyNotice,
   loadCustodyPasskeyPointer,
+  loadCustodyPasskeyPointers,
   passkeyPassportRoute,
   saveCustodyPasskeyPointer,
 } from './lib/custodyRoute.js';
@@ -6089,6 +6091,22 @@ export default function PassportDemo() {
         })
       : 'legacy';
   /**
+   * What a browser holding somebody else's Passport is owed before it is
+   * offered a new one.
+   *
+   * The pointer is per credential, so `new` means "no Passport for THIS key
+   * here" and not "no Passport here". See `./lib/custodyRoute.ts`.
+   */
+  const passkeyOtherKeyNotice =
+    profile && localWalletNetworkId
+      ? custodyOtherKeyNotice({
+          route: passkeyRoute,
+          pointers: loadCustodyPasskeyPointers(window.localStorage),
+          credentialId: profile.passkey.credentialId,
+          network: localWalletNetworkId,
+        })
+      : null;
+  /**
    * The 32 bytes the account custody screen's device is derived from.
    *
    * ONE USER-VERIFIED ASSERTION, and the same one every other contract path in
@@ -9677,6 +9695,7 @@ export default function PassportDemo() {
           <CustodyPassport
             network={localWalletNetworkId ?? configuredWalletNetwork ?? selectedNetwork}
             arm={custodyArm}
+            notice={passkeyOtherKeyNotice}
           />
         </Suspense>
       ) : showOnboarding ? (

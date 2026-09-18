@@ -12,7 +12,9 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   accountCustodyEnabled,
+  CUSTODY_OTHER_KEY_NOTICE,
   CUSTODY_PASSKEY_KEY,
+  custodyOtherKeyNotice,
   custodyPasskeyKey,
   loadCustodyPasskeyPointer,
   loadCustodyPasskeyPointers,
@@ -136,6 +138,94 @@ describe('passkeyPassportRoute', () => {
     expect(
       passkeyPassportRoute({ hasPrototypeAccount: true, custodyUser: 'jubjub:2a1f' }),
     ).toBe('legacy');
+  });
+});
+
+describe('what a browser holding somebody else’s Passport is told first', () => {
+  const CREDENTIAL = 'AQIDBAUGBwgJCg';
+  const USER = 'jubjub:2a1f';
+  const OTHER = 'a-second-key-on-this-laptop';
+
+  /* THE POINTER IS PER CREDENTIAL, so `new` means "no Passport for THIS key
+     here" and not "no Passport here". A browser two keys have been used on
+     answers `new` for the second while plainly holding the first's Passport,
+     and the screen offered to create one with nothing said — so somebody who
+     picked the wrong key at the browser's prompt made a SECOND Passport, with
+     a second name to claim and a second balance to fund, and nothing on the
+     screen said the first was still there. */
+  it('says what the browser holds when the key that signed in is a different one', () => {
+    expect(
+      custodyOtherKeyNotice({
+        route: 'new',
+        pointers: { [custodyPasskeyKey(OTHER, 'TestNet')]: 'jubjub:99ff' },
+        credentialId: CREDENTIAL,
+        network: 'TestNet',
+      }),
+    ).toBe(CUSTODY_OTHER_KEY_NOTICE);
+  });
+
+  it('says nothing when the only Passport here is this key’s own', () => {
+    expect(
+      custodyOtherKeyNotice({
+        route: 'new',
+        pointers: { [custodyPasskeyKey(CREDENTIAL, 'TestNet')]: USER },
+        credentialId: CREDENTIAL,
+        network: 'TestNet',
+      }),
+    ).toBeNull();
+  });
+
+  it('says nothing about a Passport on another network, which this screen cannot open', () => {
+    expect(
+      custodyOtherKeyNotice({
+        route: 'new',
+        pointers: { [custodyPasskeyKey(OTHER, 'Undeployed')]: 'jubjub:99ff' },
+        credentialId: CREDENTIAL,
+        network: 'TestNet',
+      }),
+    ).toBeNull();
+  });
+
+  it('says nothing to a browser that holds nothing at all', () => {
+    expect(
+      custodyOtherKeyNotice({
+        route: 'new',
+        pointers: {},
+        credentialId: CREDENTIAL,
+        network: 'TestNet',
+      }),
+    ).toBeNull();
+  });
+
+  /* ONLY IN FRONT OF THE OFFER. A holder being sent to their own Passport is
+     not being offered anything and has nothing to be warned about. */
+  it('says nothing to a holder who is being sent to a Passport rather than offered one', () => {
+    const pointers = { [custodyPasskeyKey(OTHER, 'TestNet')]: 'jubjub:99ff' };
+    for (const route of ['custody', 'legacy'] as const) {
+      expect(
+        custodyOtherKeyNotice({ route, pointers, credentialId: CREDENTIAL, network: 'TestNet' }),
+      ).toBeNull();
+    }
+  });
+
+  /* ONE SENTENCE, IN THE ARM'S OWN VOCABULARY — and naming no machinery. */
+  it('is one sentence a reader can act on, with none of the machinery in it', () => {
+    expect(CUSTODY_OTHER_KEY_NOTICE.length).toBeLessThan(160);
+    for (const word of [
+      'wallet address',
+      'dust',
+      'contract',
+      'registry',
+      'indexer',
+      'resolver',
+      'sponsor',
+      'sdk',
+      'credential',
+      'passkey',
+      'pointer',
+    ]) {
+      expect(CUSTODY_OTHER_KEY_NOTICE.toLowerCase()).not.toContain(word);
+    }
   });
 });
 
