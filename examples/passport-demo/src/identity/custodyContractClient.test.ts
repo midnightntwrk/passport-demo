@@ -131,6 +131,8 @@ function pureFake(): CustodyPureCircuits {
     compute_public_point_with_k256: (scalar) => ({ x: scalar, y: scalar, identity: false }),
     challenge_withdraw_shielded_with_k256: (self, pk, recipient, color, amount, coin, nonce) =>
       tag('ch-ws', bytesToHex(self.bytes), pk.x, bytesToHex(recipient.bytes), color, amount, coin.value, nonce),
+    challenge_withdraw_shielded_to_contract_with_k256: (self, pk, recipient, color, amount, coin, nonce) =>
+      tag('ch-wsc', bytesToHex(self.bytes), pk.x, bytesToHex(recipient.bytes), color, amount, coin.value, nonce),
     challenge_withdraw_unshielded_with_k256: (self, pk, color, amount, recipient, nonce) =>
       tag('ch-wu', bytesToHex(self.bytes), pk.x, color, amount, bytesToHex(recipient.bytes), nonce),
     challenge_append_inbox_with_k256: (self, pk, entry, nonce) =>
