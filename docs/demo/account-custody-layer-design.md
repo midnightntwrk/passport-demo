@@ -311,6 +311,66 @@ second call recomputes the same neighbours and adds nothing — which matters be
 spend's loop is `advance ?? widen` and a widening that kept finding more would never
 terminate.
 
+### 3a.1 The passkey arm through the same engine, live — 2026/09/18
+
+Recorded in full in `scratchpad/live-proxy/RUN-sends.md`. What it adds to §3a
+and §3c is that **the arm is not a second engine**: `spendShieldedK1` and its
+two doors, the retry, the store and the backfill are one code path, and the arm
+chooses the gated half of a circuit name and how the authorisation is built and
+nothing else.
+
+**Where the arm diverges, and it is two lines.** The circuit is
+`withdraw_shielded_with_${arm}` or `withdraw_shielded_to_contract_with_${arm}`;
+the authorisation is built either by the vendor over a socket (k256, four
+trailing arguments ending in the envelope) or synchronously from the passkey's
+derived scalar (jubjub, five, ending in `grind_nonce`). `deposit_shielded` is
+permissionless and therefore the SAME circuit whichever arm the sender is on —
+which is why a passkey Passport pays a social sign-in's Passport and the
+reverse, and why the recipient's arm never enters the sender's decision.
+
+**The four measurements, on a passkey Passport (`jjp9h5apyr7fe6.night`,
+account `098b18f2…dbee`) made and named live the same afternoon:**
+
+| | transaction | block | proof | window |
+|---|---|---|---|---|
+| Direct transfer to `dynone1.night`, 1 mUSD | `f865d6c942f7e5738b92480b4740de7d293b4c80755a0b042293614d624e752f` | 519005 | **58.6 s** (`…_to_contract_with_jubjub` + `deposit_shielded`, one request, 6353 bytes in) | `[3842, 3844)` |
+| The change backfill | `a8f0c2c22429fb3586b88dfbb30255df76cab11e92a58d6c7c29c85f8c38c9aa` | 519019 | **56.1 s** (`append_inbox_with_jubjub`) | `[3844, 3844)` — none, which is right |
+| To a shielded address, 1 mUSD | `47e1d1c1a0699479b2595d8cb34dd895bce31b01c89e4548a33828cb938435f3` | 519072 | **59.7 s** (`withdraw_shielded_with_jubjub`) | `[3844, 3845)` |
+| Being paid, from a social sign-in's Passport | `07e80bc7ecd8e21d4ec4b64f7c62f16e6d974c62a1ff574615c17349d0825323` | 518986 | 126.5 s | `[3841, 3842)` |
+
+Every one SUCCESS. Both composed transactions carry BOTH calls under a single
+hash, read off the indexer rather than off the client.
+
+**A jubjub proof is half a k256 one.** 58.6 s against 126.5 s for the same
+composed pair on the same box and the same proof server, minutes apart. The
+gated jubjub circuits verify a Schnorr signature over the embedded curve; the
+k256 ones verify ECDSA over a foreign one, which is the expensive half of the
+account custody contract and always was.
+
+**The retry fired on this arm, and the failure was the proof service's.** The
+address send's first attempt drew a `400` from `/prover-v3/prove` for the change
+coin's stored position (3842); the phase said nothing had been submitted, the
+next candidate (3843) was tried, and it proved. So the mechanism §3c rebuilt on
+the wording-to-phase argument works on an arm it had never run on. It also shows
+the mechanism's one cost plainly: the client cannot distinguish a service that
+refuses a position from a service that is unwell, so a transient proving failure
+also burns a candidate. Safe (nothing is submitted either way) and cheap (the
+list is short), but worth naming.
+
+**And an ordinary wallet finds what a passkey's contract created.** The
+throwaway recipient of the address send — no Passport, no account contract —
+synced from genesis and holds the coin as a spendable coin, under its own nonce,
+alongside the one an earlier k256 run gave it. `additionalCoinEncPublicKeyMappings`
+is what makes that true, and it is now shown on both arms.
+
+**What the run did NOT settle.** The sponsor's `/fund-account` still refuses an
+account custody account with `not-an-account` (§7a; the sibling sponsor PR is the
+fix), so a passkey Passport is still funded by being paid rather than by an
+opening balance. And the account's NIGHT still moves in the two legs of §3b,
+the second of which goes through the sender's own wallet — so the passkey arm
+refuses that one payment in a sentence rather than taking a route the ruling of
+2026/09/18 forbids.
+
 ### 3b. What the live stagenet run of 2026/09/18 settled, and what it did not
 
 Recorded in full in `scratchpad/live-proxy/RUN.md`.
