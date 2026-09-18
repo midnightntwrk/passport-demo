@@ -43,6 +43,7 @@ import {
   type K256DeviceIdentity,
 } from './custodyContractSigning.js';
 import {
+  CUSTODY_PROVER_UNAVAILABLE,
   hexToBytes,
   saveCustodyRecord,
   type CustodyAccountRecord,
@@ -590,7 +591,6 @@ describe('a spend against a position that may be the wrong one', () => {
     const test = harness({ positionFailures: 5 });
     const { session, device } = deviceFake();
     putK1CoinCandidates(ACCOUNT, { colour: COLOUR, nonce: NONCE, value: 100n }, [5n, 6n]);
-    const before = loadK1CoinStore(ACCOUNT);
 
     await expect(
       withdrawShieldedK1(
@@ -603,14 +603,50 @@ describe('a spend against a position that may be the wrong one', () => {
     ).rejects.toThrow(/merkle/);
 
     /* NOTHING WAS SPENT. An unsatisfiable witness submits no transaction, so
-       the coin is still the coin — the list is gone because there is nothing
-       left to suggest, and the description stays. */
+       the coin is still the coin. AND NOTHING WAS FORGOTTEN: the description
+       and BOTH positions survive, with the head back on the coin, so the next
+       spend of this colour starts where the chain's own answer put it. A run
+       that kept the last guess and dropped the list was a colour nothing could
+       spend again — `reconcileK1CoinFromChain` answers 'known' for a nonce the
+       store holds, so no later read rebuilt it (review, 2026/09/18). */
     expect(heldK1Coin(ACCOUNT, COLOUR)?.nonce).toBe(NONCE);
+    expect(heldK1Coin(ACCOUNT, COLOUR)?.mtIndex).toBe(5n);
+    expect(k1CoinCandidates(ACCOUNT, COLOUR)).toEqual([5n, 6n]);
     expect(isK1NonceSpent(ACCOUNT, NONCE)).toBe(false);
-    expect(Object.keys(before.coins)).toEqual([COLOUR]);
+    expect(Object.keys(loadK1CoinStore(ACCOUNT).coins)).toEqual([COLOUR]);
     expect(test.calls.filter((call) => call.circuit === 'withdraw_shielded_with_k256')).toHaveLength(
       2,
     );
+  });
+
+  /* THE SCENARIO, and the reason the sponsor now has two codes for it: the
+     proof service is restarted while a spend is being proved. It has looked at
+     neither candidate position, so a retry against the second one asks for a
+     second approval to learn nothing — and on a two-candidate coin it used to
+     run the list out and leave the store on the wrong guess for good. */
+  it('asks for one approval only when the proof service is not there mid-spend', async () => {
+    const test = harness({ otherFailure: CUSTODY_PROVER_UNAVAILABLE });
+    const { session, device, signed } = deviceFake();
+    putK1CoinCandidates(ACCOUNT, { colour: COLOUR, nonce: NONCE, value: 100n }, [5n, 6n]);
+
+    await expect(
+      withdrawShieldedK1(
+        session,
+        device,
+        { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 40n },
+        undefined,
+        test.deps,
+      ),
+    ).rejects.toThrow(CUSTODY_PROVER_UNAVAILABLE);
+
+    expect(signed).toHaveLength(1);
+    expect(test.calls.filter((call) => call.circuit === 'withdraw_shielded_with_k256')).toHaveLength(
+      1,
+    );
+    /* The guess, the list, and the coin are all exactly as they were. */
+    expect(heldK1Coin(ACCOUNT, COLOUR)?.mtIndex).toBe(5n);
+    expect(k1CoinCandidates(ACCOUNT, COLOUR)).toEqual([5n, 6n]);
+    expect(isK1NonceSpent(ACCOUNT, NONCE)).toBe(false);
   });
 
   it('refuses before anything is signed when the store holds nothing of that colour', async () => {

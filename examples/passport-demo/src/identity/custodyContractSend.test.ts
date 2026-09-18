@@ -457,6 +457,19 @@ describe('spendPositionMayBeWrong', () => {
     expect(spendPositionMayBeWrong('The proving service did not answer.')).toBe(false);
     expect(spendPositionMayBeWrong('1010: Invalid Transaction: Custom error: 239')).toBe(false);
   });
+
+  /* A TRAP FROM SOMEWHERE ELSE IN THE STACK IS NOT A POSITION'S TRAP.
+     `RuntimeError` is the marker for every WebAssembly trap there is, and the
+     one this retry is armed for happened inside the execution of the call
+     being retried. Reading the rest of them as position failures asks for an
+     approval a different position cannot earn back. */
+  it('does not retry a runtime trap from outside the call being retried', () => {
+    expect(spendPositionMayBeWrong('RuntimeError: memory access out of bounds')).toBe(false);
+    expect(spendPositionMayBeWrong('RuntimeError: unreachable')).toBe(false);
+    expect(
+      spendPositionMayBeWrong('proving failed: RuntimeError: table index is out of bounds'),
+    ).toBe(false);
+  });
 });
 
 /* -------------------------------------------------------------------------- */
