@@ -28,7 +28,12 @@ import { ContractState } from '@midnight-ntwrk/compact-runtime';
 
 import { accountModuleForState, scanInboxForEntry, shieldedDepositConfirmed } from '../src/accountModule.js';
 import { accountViewFrom, type AccountView, type CustodyAccountLedger, type PrototypeAccountLedger } from '../src/accountState.js';
-import { ColourPayFailure, asColourPayFailure, custodyGiftPlan } from '../src/gift.js';
+import {
+  ColourPayFailure,
+  asColourPayFailure,
+  custodyGiftDelivered,
+  custodyGiftPlan,
+} from '../src/gift.js';
 import { sealInboxEntry } from '../src/custodyInbox.js';
 
 import * as prototypeBuild from '../contracts-stagenet/managed/account/contract/index.js';
@@ -181,6 +186,58 @@ describe('what confirms a gift that cannot be read back off the chain', () => {
       }),
       false,
     );
+  });
+});
+
+describe('the gift desk refusing the fallback the opening balance accepts', () => {
+  const ours = sealInboxEntry(k256View.encKey() as Uint8Array, {
+    nonce: new Uint8Array(32).fill(9),
+    color: new Uint8Array(32).fill(1),
+    value: 1n,
+  });
+
+  it('delivers on our own entry, and on nothing else', () => {
+    assert.equal(custodyGiftDelivered('account-custody', 4n, 5n, 1n, 'found'), true);
+    assert.equal(custodyGiftDelivered('account-custody', 4n, 5n, 1n, 'absent'), false);
+  });
+
+  it('does NOT deliver on an unwalkable map, however much the inbox grew', () => {
+    /* THE AMBER. `./account.ts` takes `unreadable` plus a block as evidence for
+       the opening balance; this desk must not, because its `200` is written
+       into a permanent once-per-recipient row. A stranger's entry and an
+       included-but-failed transaction satisfy that weaker rule exactly. */
+    assert.equal(custodyGiftDelivered('account-custody', 4n, 5n, 1n, 'unreadable'), false);
+    assert.equal(custodyGiftDelivered('account-custody', 4n, 99n, 1n, 'unreadable'), false);
+    /* And the rule this one is narrower than, so the difference is on record. */
+    assert.equal(
+      shieldedDepositConfirmed('account-custody', 4n, 5n, 1n, {
+        entryFound: false,
+        inboxUnreadable: true,
+        included: true,
+      }),
+      true,
+      'the opening balance rule is the looser one — that is the thing being narrowed',
+    );
+  });
+
+  it('refuses for the whole window when the map never becomes walkable', () => {
+    /* Every attempt in the confirm loop asks the same question of the same
+       unwalkable map, so the loop ends unconfirmed and `payIntoCustody` throws
+       `504 credit-not-seen`. The caller writes its ledger row from the RETURN,
+       so a throw is also what leaves no row — the coin is not lost, the two
+       hashes are in the message, and a later request tries again. */
+    const scan = scanInboxForEntry(() => null, 4n, 6n, ours);
+    assert.equal(scan, 'unreadable');
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      assert.equal(custodyGiftDelivered('account-custody', 4n, 6n, 1n, scan), false);
+    }
+  });
+
+  it('leaves a prototype recipient exactly as it was', () => {
+    /* The mirror is read back there, so the scan has nothing to do with it and
+       this narrowing must not touch it. */
+    assert.equal(custodyGiftDelivered('account', 0n, 1n, 1n, 'unreadable'), true);
+    assert.equal(custodyGiftDelivered('account', 0n, 0n, 1n, 'found'), false);
   });
 });
 

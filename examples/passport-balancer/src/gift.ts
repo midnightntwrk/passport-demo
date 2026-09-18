@@ -48,6 +48,8 @@ import {
   sealedShieldedDeposit,
   shieldedDepositConfirmed,
   InboxEntryRequired,
+  type AccountModuleName,
+  type InboxScan,
 } from './accountModule.js';
 import type { AccountOpening } from './account.js';
 import type { AccountView } from './accountState.js';
@@ -466,6 +468,45 @@ export function custodyGiftPlan(
 }
 
 /**
+ * Whether a gift into a custody account has been DELIVERED — which for this
+ * desk means one thing and one thing only: the 192 bytes it sealed, found in
+ * the account's public inbox.
+ *
+ * `./account.ts` accepts a weaker answer for the opening balance. Where the
+ * inbox map cannot be walked at all, it lets the deposit's own block stand in.
+ * That is a deliberate difference and not an oversight:
+ *
+ *   - the opening balance is this service paying itself into an account it has
+ *     just been asked to open, and its caller is the app, which asks again;
+ *   - a gift is a PARTNER being told `200`, and that answer is written into a
+ *     permanent once-per-recipient ledger row. An item recorded as given is
+ *     never given again.
+ *
+ * On an unwalkable map the weaker evidence is two guesses stacked: that the
+ * inbox grew because of US rather than because of another depositor, the
+ * owner's own change entry, or a backfill; and that a transaction the indexer
+ * placed in a block was ACCEPTED in it, which the indexer never says. Either
+ * being wrong writes "delivered" over a coin that is not there, for ever. So
+ * `unreadable` is not a delivery here, and the caller is told to ask again.
+ */
+export function custodyGiftDelivered(
+  module: AccountModuleName,
+  inboxBefore: bigint,
+  observed: bigint,
+  amount: bigint,
+  scan: InboxScan,
+): boolean {
+  return shieldedDepositConfirmed(module, inboxBefore, observed, amount, {
+    entryFound: scan === 'found',
+    /* FALSE WHATEVER THE SCAN SAID, which is what closes the fallback:
+       `shieldedDepositConfirmed` reaches its weaker branch only when this is
+       true. */
+    inboxUnreadable: false,
+    included: false,
+  });
+}
+
+/**
  * An account funder refusal, in this desk's currency.
  *
  * The codes come straight across — `not-an-account`, `account-not-activated`,
@@ -707,7 +748,26 @@ export function createColourPayer(deps: {
     }
     console.log(`[colour] deposited ${name} into the custody account (tx ${depositTx})`);
 
-    /* 4. OUR ENTRY, in the account's public inbox. */
+    /* 4. OUR ENTRY, in the account's public inbox. NOTHING ELSE WILL DO.
+          `./account.ts` accepts a weaker answer for the opening balance — where
+          the inbox map cannot be walked at all, the deposit's own block stands
+          in — and this desk deliberately does not. The two are not the same
+          decision:
+
+            - the opening balance is this service paying itself into an account
+              it has just been asked to open, and its caller is the app, which
+              retries;
+            - a gift is a PARTNER being told `200`, and that answer is written
+              into a permanent once-per-recipient ledger row. An item recorded
+              as given is never given again.
+
+          On an unwalkable map the weaker evidence is two guesses stacked: that
+          the inbox grew because of US rather than because of any other
+          depositor, the owner's own change entry, or a backfill; and that a
+          transaction the indexer placed in a block was ACCEPTED in it, which
+          the indexer never says. Either being wrong writes "delivered" over a
+          coin that is not there, permanently. So the fallback is refused and
+          the caller is told to ask again. */
     let confirmed = false;
     for (let attempt = 0; attempt < CONFIRM_ATTEMPTS && !confirmed; attempt += 1) {
       try {
@@ -719,24 +779,17 @@ export function createColourPayer(deps: {
           observed,
           sealedEntry,
         );
-        confirmed = shieldedDepositConfirmed(opening.module, inboxBefore, observed, amount, {
-          entryFound: scan === 'found',
-          inboxUnreadable: scan === 'unreadable',
-          /* Asked only where the map could not be walked at all: a block is
-             where a transaction was PROCESSED and not proof it was accepted
-             there, so beside an inbox somebody else grew it would report a
-             refused deposit as delivered. */
-          included:
-            scan === 'unreadable' &&
-            observed > inboxBefore &&
-            (await resolveTransactionHash(config.indexerHttpUrls, depositTx)).block !== null,
-        });
+        confirmed = custodyGiftDelivered(opening.module, inboxBefore, observed, amount, scan);
       } catch {
         /* Indexer lag or a transient failure; asked again below. */
       }
       if (!confirmed) await wait(CONFIRM_INTERVAL_MS);
     }
     if (!confirmed) {
+      /* NO LEDGER ROW IS WRITTEN — the caller writes it from this function's
+         return, and this throws. The coin is not lost and the message says so:
+         both hashes are in it, and a later request for the same item finds no
+         row and tries again. */
       throw new ColourPayFailure(
         504,
         'credit-not-seen',
