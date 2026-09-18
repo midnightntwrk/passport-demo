@@ -581,6 +581,18 @@ describe("a library's preamble around our own sentence", () => {
 
   /* And a wrapper with nothing of ours inside it still meets every check —
      the unwrapping finds words, not permission. */
+  /* Any error NAME, not only ones spelled "…Error": `CustodyProofNotBuilt`
+     leaked through a suffix-shaped pattern on 2026/09/18. */
+  it('unwraps an error name that does not end in Error', () => {
+    expect(
+      custodyFailureSentence(
+        new Error(
+          "Unexpected error submitting scoped transaction '<unnamed>': CustodyProofNotBuilt: That payment could not be completed just now. Try again in a moment.",
+        ),
+      ),
+    ).toBe('That payment could not be completed just now. Try again in a moment.');
+  });
+
   it('refuses a wrapper whose inside is the vocabulary too', () => {
     expect(
       custodyFailureSentence(new Error('Error: contract state could not be deserialised')),

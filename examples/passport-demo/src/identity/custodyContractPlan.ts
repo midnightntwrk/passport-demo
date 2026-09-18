@@ -830,9 +830,15 @@ export function custodyFailureSentence(cause: unknown): string {
  * sentence where there is one and the library's own words where there is not —
  * and those then meet the same checks as any other message, which is what
  * catches them.
+ *
+ * ANY ERROR NAME, not only ones ending in "Error". `CustodyProofNotBuilt` is
+ * one of ours and it leaked through a pattern that looked for the suffix
+ * (2026/09/18), so the marker is a capitalised identifier followed by a colon
+ * and a space — which is what an error name rendered into a message looks like,
+ * and which no sentence this layer writes contains.
  */
 function unwrapCustodyMessage(message: string): string {
-  const marker = /(?:^|[\s:])(?:[A-Za-z]*Error):\s*/g;
+  const marker = /(?:^|[\s:])[A-Z][A-Za-z0-9_]{2,}:\s+/g;
   let unwrapped = message;
   for (let pass = 0; pass < 4; pass += 1) {
     marker.lastIndex = 0;
