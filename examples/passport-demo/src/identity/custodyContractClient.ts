@@ -127,7 +127,7 @@ import {
   loadContractModule,
   messageOf,
   resolveTransactionHash,
-  resolveTxCommitmentWindowOnce,
+  resolveTxCommitmentWindowByHashOnce,
   transactionId,
 } from './contractRuntime.js';
 import {
@@ -2048,8 +2048,17 @@ export function defaultCustodyDeps(): CustodyDeps {
     },
     contracts: async () =>
       (await import('@midnight-ntwrk/midnight-js-contracts')) as unknown as CustodyContractsApi,
+    /* BY THE CHAIN'S HASH, which is the only offset this indexer answers a
+       commitment window at (`docs/demo/account-custody-layer-design.md` §3b,
+       the live run of 2026/09/18). What is handed in here IS a hash:
+       `settleShieldedChange` renames the awaiting row to it before asking, for
+       exactly that reason. This was `resolveTxCommitmentWindowOnce`, which asks
+       at `offset: { identifier: … }` — so the withdrawal's own settle asked a
+       question the indexer cannot answer with a value it would not have
+       recognised either way, and the change coin could only ever be placed by
+       the next read of Home. */
     commitmentWindow: (indexerHttpUrl, txId) =>
-      resolveTxCommitmentWindowOnce(indexerHttpUrl, txId),
+      resolveTxCommitmentWindowByHashOnce(indexerHttpUrl, txId),
     now: () => Date.now(),
     sleep: (milliseconds) =>
       new Promise((resolve) => {

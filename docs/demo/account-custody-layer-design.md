@@ -233,6 +233,31 @@ a one-element list, losslessly, and the new shape is written by the account's ne
 A row whose candidate positions could not be stored (the colour's held slot is occupied)
 now WAITS for the slot instead of being dropped with its description.
 
+**How a change coin's position is asked for, exactly — one question, by the chain's
+hash.** The design read as though the client tried the hash and then the identifier for
+the same coin. It does not, and it should not. A spend files its change the instant the
+circuit returns, and the only name for the transaction at that moment is midnight-js's
+own identifier; a sponsored transaction is superseded by the balanced one, so that
+identifier is a key the indexer will never answer a commitment window for. So
+`settleShieldedChange` RENAMES the awaiting row to the chain hash as soon as
+`resolveHash` has it (`renameK1AwaitingTx`) and then asks ONCE, at
+`offset: { hash: … }` — the only offset this indexer answers (§3b). There is no
+identifier attempt for the same coin, because the identifier form can never answer for
+one: it is not a fallback that was dropped, it is a question with no answer in it. What
+makes a coin the indexer has not caught up with safe is not a second spelling of the
+question but the awaiting row itself, which is asked about again on every read of Home,
+after a reload, or tomorrow.
+
+The one fallback that does exist is about the SCHEMA and not the value:
+`resolveTxCommitmentWindowByHashOnce` re-asks under `{ identifier: … }` only when a
+deployment's schema refuses the `hash` field outright (GraphQL rejects an unknown field
+for the whole query rather than answering without it), so a deployment that serves only
+the other spelling still gets an answer. The live run never needed it. Until 2026/09/17
+the client's default reader for this was `resolveTxCommitmentWindowOnce`, the identifier
+form — handed a hash. It could not answer, and a withdrawal's change coin was therefore
+placed only by the next read of Home rather than by the spend itself; both now ask by
+hash.
+
 **The candidate rule.** A withdrawal's transaction carries two shielded outputs — the
 payee's note and the account's change — so the indexer's commitment window gives two
 positions and nothing distinguishes them client-side. The candidates are stored in the

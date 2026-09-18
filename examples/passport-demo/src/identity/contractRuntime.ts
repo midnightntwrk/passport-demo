@@ -1513,9 +1513,18 @@ export async function resolveTxCommitmentWindowOnce(
  * THE SCHEMA TAKES EITHER. `TransactionOffset` accepts `{ hash }` or
  * `{ identifier }` — introspected against the v4 endpoint on 2026/08/04 and
  * written down in `../lib/indexerTx.ts`, which is why this is a hash offset
- * rather than a hash resolved to an identifier first. A deployment that refuses
- * the `hash` spelling falls back to the identifier form with the same value, so
- * the caller gets an answer wherever one can be had; nothing is invented when
+ * rather than a hash resolved to an identifier first.
+ *
+ * THE FALLBACK BELOW IS ABOUT THE SCHEMA, NOT THE VALUE, and the difference
+ * matters because the two look alike in a diff. GraphQL rejects an unknown
+ * field for the whole query rather than answering without it, so a deployment
+ * that knows only `identifier` refuses the first ask outright — and the second
+ * ask exists for that deployment alone, with the same value. It is NOT a second
+ * guess at what the caller handed in: an identifier and a hash are different
+ * values, a sponsored transaction's identifier is superseded away from, and no
+ * spelling of the question makes one answerable by the other. Stagenet answers
+ * `{ hash }` and has never needed the fallback (2026/09/18, recorded in
+ * `docs/demo/account-custody-layer-design.md` §3b). Nothing is invented when
  * neither spelling works, and `null` means what it always means here.
  */
 export async function resolveTxCommitmentWindowByHashOnce(
