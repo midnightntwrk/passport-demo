@@ -106,7 +106,10 @@
  *      the reference: described, held, unspendable. {@link rememberK1ChangeCoin}
  *      writes it in the same write that records the spend, and
  *      {@link settleK1AwaitingCoin} files it when the chain answers — which
- *      may be after a reload, and is still not too late.
+ *      may be after a reload, and is still not too late. A colour holds a
+ *      LIST of these, not one: spend, be paid, spend again is an ordinary
+ *      sequence, and one slot per colour meant the second spend wrote over the
+ *      first change coin's description (2026/09/17).
  *   4. CANDIDATE POSITIONS. A withdrawal's transaction carries TWO shielded
  *      outputs — the recipient's note and the contract's change — so the
  *      commitment window it lands in gives two positions and no way to tell
@@ -203,8 +206,8 @@ export interface K1CoinStoreState {
    */
   readonly mtIndexCandidates: Record<string, readonly string[]>;
   /**
-   * Colour → a coin this account demonstrably holds and has no position for
-   * yet, with the transaction that produced it.
+   * Colour → EVERY coin this account demonstrably holds and has no position
+   * for yet, oldest first, each with the transaction that produced it.
    *
    * THE GAP BETWEEN A SPEND AND THE CHAIN ANSWERING, and the only place in
    * this store where a coin sits that the witness cannot use. A withdrawal
@@ -221,8 +224,21 @@ export interface K1CoinStoreState {
    * will hand to a proof, and a position of "we have not asked yet" written as
    * a number is exactly the confident wrong answer this module refuses to
    * hold. A holder sees it as arriving rather than as balance.
+   *
+   * A LIST PER COLOUR, AND IT HAD TO BECOME ONE (2026/09/17). This was one row
+   * per colour, and one row per colour loses money in a sequence nothing
+   * unusual produces: a spend files its change here, an inbox delivery of the
+   * same colour takes the held slot the spend emptied, and a second spend of
+   * that colour files ITS change — over the first row, whose description
+   * exists nowhere else in the world. The account is then holding a coin
+   * nobody can ever describe again, and nothing on any screen says so. So a
+   * colour holds as many awaiting rows as it has coins in flight, and
+   * {@link settleK1AwaitingCoin} and {@link renameK1AwaitingTx} address ONE of
+   * them by the transaction that produced it rather than the colour they are
+   * filed under. Within a colour the nonce is the identity: the same coin is
+   * never held twice, however many times it is offered.
    */
-  readonly awaiting: Record<string, AwaitingK1CoinRow>;
+  readonly awaiting: Record<string, readonly AwaitingK1CoinRow[]>;
   /**
    * Colours whose last spend returned change this build could not READ.
    *
@@ -386,6 +402,36 @@ function awaitingRowFrom(row: unknown): AwaitingK1CoinRow | null {
   return { nonceHex: nonce, colorHex: colour, value, txId };
 }
 
+/**
+ * The awaiting rows of ONE colour, from either shape a store may hold them in.
+ *
+ * THE MIGRATION LIVES HERE, in the read, and it is lossless. Until 2026/09/17
+ * a colour held a single awaiting row and stored it as a bare object; it now
+ * holds a list, for the reason {@link K1CoinStoreState.awaiting} gives. A
+ * store written by the older build is therefore read as a one-element list —
+ * the coin keeps its nonce, its value, and the transaction to look it up by,
+ * which is everything there is to keep, and the next spend of that colour
+ * appends beside it rather than over it. Nothing is rewritten on read: the new
+ * shape is written by the next write to the account, and a build that is
+ * downgraded reads the first row of the list, which is the oldest coin.
+ *
+ * A row filed under the wrong colour, or a second row with a nonce the list
+ * already holds, is dropped for the reasons {@link coinFromRow} gives: the
+ * store's answers go into proofs, and one coin counted twice is a balance that
+ * cannot be spent down.
+ */
+function awaitingRowsFrom(colour: string, value: unknown): AwaitingK1CoinRow[] {
+  const rows: unknown[] = Array.isArray(value) ? (value as unknown[]) : [value];
+  const kept: AwaitingK1CoinRow[] = [];
+  for (const entry of rows) {
+    const row = awaitingRowFrom(entry);
+    if (row === null || row.colorHex !== colour) continue;
+    if (kept.some((held) => held.nonceHex === row.nonceHex)) continue;
+    kept.push(row);
+  }
+  return kept;
+}
+
 /** A stored candidate list: decimal positions, in the order they are tried. */
 function candidateListFrom(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
@@ -442,12 +488,19 @@ function readAll(): Record<string, K1CoinStoreState> {
           if (colour !== null && kept.length > 0) mtIndexCandidates[colour] = kept;
         }
       }
-      const awaiting = emptyMap<AwaitingK1CoinRow>();
+      const awaiting = emptyMap<readonly AwaitingK1CoinRow[]>();
       if (entry.awaiting && typeof entry.awaiting === 'object') {
-        for (const [colourKey, row] of Object.entries(entry.awaiting as Record<string, unknown>)) {
-          const parsedRow = awaitingRowFrom(row);
-          if (parsedRow === null || parsedRow.colorHex !== normalisedColourHex(colourKey)) continue;
-          awaiting[parsedRow.colorHex] = parsedRow;
+        for (const [colourKey, rows] of Object.entries(
+          entry.awaiting as Record<string, unknown>,
+        )) {
+          const colour = normalisedColourHex(colourKey);
+          if (colour === null) continue;
+          const kept = awaitingRowsFrom(colour, rows);
+          /* An empty list is not written back, for the reason the queue's is
+             not: a key mapping to `[]` is a row this store hands out for ever
+             and a colour that reads as having something arriving when it has
+             nothing. */
+          if (kept.length > 0) awaiting[colour] = kept;
         }
       }
       const unreadChange = emptyMap<string>();
@@ -579,7 +632,7 @@ interface K1StoreDraft {
   queued: Record<string, StoredK1Coin[]>;
   spentNonces: string[];
   mtIndexCandidates: Record<string, string[]>;
-  awaiting: Record<string, AwaitingK1CoinRow>;
+  awaiting: Record<string, AwaitingK1CoinRow[]>;
   unreadChange: Record<string, string>;
 }
 
@@ -592,8 +645,11 @@ function draftOf(state: K1CoinStoreState): K1StoreDraft {
   for (const [colour, list] of Object.entries(state.mtIndexCandidates)) {
     mtIndexCandidates[colour] = [...list];
   }
-  const awaiting = emptyMap<AwaitingK1CoinRow>();
-  Object.assign(awaiting, state.awaiting);
+  const awaiting = emptyMap<AwaitingK1CoinRow[]>();
+  /* Copied row by row rather than assigned. The lists are what a writer edits
+     in place, and a shared list is one colour's edit landing in the state a
+     caller is still reading. */
+  for (const [colour, rows] of Object.entries(state.awaiting)) awaiting[colour] = [...rows];
   const unreadChange = emptyMap<string>();
   Object.assign(unreadChange, state.unreadChange);
   return {
@@ -892,7 +948,13 @@ export function rememberK1ChangeCoin(
     if (Object.hasOwn(draft.coins, spent)) rememberSpentNonce(draft, draft.coins[spent].nonceHex);
     delete draft.coins[spent];
     delete draft.mtIndexCandidates[spent];
-    if (row !== null) draft.awaiting[row.colorHex] = row;
+    /* APPENDED, NEVER OVERWRITTEN. See
+       {@link K1CoinStoreState.awaiting}: a colour can have two coins in flight
+       at once, and the row this write would have replaced describes a coin
+       nothing else in the world describes. Same nonce twice is the same coin
+       offered twice — a resumed run, a repeated call — and it is not stored
+       twice. */
+    if (row !== null) addAwaitingRow(draft, row);
     /* Written in the SAME write as the spend, for the reason the awaiting slot
        is: a description that exists nowhere else must not be lost between two
        writes, and the fact that there is no description is itself the thing
@@ -908,41 +970,88 @@ export function rememberK1ChangeCoin(
   });
 }
 
-/** Every coin this account holds that has no position yet, colour order. */
-export function awaitingK1Coins(account: K1Account): K1AwaitingCoin[] {
-  const state = loadK1CoinStore(account);
-  return Object.values(state.awaiting)
-    .map((row) => ({
-      colour: row.colorHex,
-      nonce: row.nonceHex,
-      value: BigInt(row.value),
-      txId: row.txId,
-    }))
-    .sort((a, b) => (a.colour < b.colour ? -1 : 1));
+/** Adds an awaiting row to its colour's list, unless the coin is already in it. */
+function addAwaitingRow(draft: K1StoreDraft, row: AwaitingK1CoinRow): void {
+  const rows = Object.hasOwn(draft.awaiting, row.colorHex) ? draft.awaiting[row.colorHex] : [];
+  if (!rows.some((held) => held.nonceHex === row.nonceHex)) rows.push(row);
+  draft.awaiting[row.colorHex] = rows;
 }
 
 /**
- * Ask the chain where an awaiting coin landed, and file it once it answers.
+ * Removes one awaiting row by the coin it describes, and the colour's key with
+ * it when that was the last row.
+ *
+ * By NONCE, not by transaction: the transaction a row is filed under is
+ * renamed while the row waits ({@link renameK1AwaitingTx}), and the nonce is
+ * the one thing about a coin that never changes.
+ */
+function dropAwaitingRow(draft: K1StoreDraft, colour: string, nonceHex: string): void {
+  if (!Object.hasOwn(draft.awaiting, colour)) return;
+  const rows = draft.awaiting[colour].filter((row) => row.nonceHex !== nonceHex);
+  if (rows.length === 0) delete draft.awaiting[colour];
+  else draft.awaiting[colour] = rows;
+}
+
+/**
+ * Every coin this account holds that has no position yet — colour order, and
+ * oldest first within a colour.
+ *
+ * All of them, which is what the count of "payments still arriving" is drawn
+ * from. Two coins of one colour in flight is an ordinary state (a spend, a
+ * delivery, a second spend), and a count that collapsed them would show one
+ * payment arriving where two are.
+ */
+export function awaitingK1Coins(account: K1Account): K1AwaitingCoin[] {
+  const state = loadK1CoinStore(account);
+  return Object.keys(state.awaiting)
+    .sort()
+    .flatMap((colour) =>
+      state.awaiting[colour].map((row) => ({
+        colour: row.colorHex,
+        nonce: row.nonceHex,
+        value: BigInt(row.value),
+        txId: row.txId,
+      })),
+    );
+}
+
+/**
+ * Ask the chain where ONE awaiting coin landed, and file it once it answers.
+ *
+ * `txId` names which row — the transaction the row is currently filed under,
+ * which is midnight-js's identifier until {@link renameK1AwaitingTx} has the
+ * chain's hash. A colour can have more than one coin in flight
+ * ({@link K1CoinStoreState.awaiting}), so a settle addressed at the colour
+ * alone would file one coin and silently drop the others.
  *
  * `'unavailable'` LEAVES THE ROW WHERE IT IS, which is the whole reason the
  * awaiting slot exists: an indexer that has not caught up yet is a question to
  * ask again in a moment, or after a reload, or tomorrow, and none of those
- * cost the coin. `'learned'` and `'ambiguous'` both move it into `coins` —
- * settled, or with its candidates beside it — and `'refused'` drops it,
- * because a row this store will not hold will not start being holdable.
+ * cost the coin. So does an `'ambiguous'` the store did not take — candidates
+ * go into a colour's held slot or nowhere, and a colour already holding
+ * something has nowhere to put them, so the row waits for the slot rather than
+ * being dropped with its description. `'learned'`, a stored `'ambiguous'`,
+ * `'spent'`, and `'refused'` all remove the row: the coin is in `coins` now,
+ * or it is one this store has already accounted for, or it is one this store
+ * will not hold and will not start being able to.
  */
 export async function settleK1AwaitingCoin(
   account: K1Account,
   colour: string,
+  txId: string,
   reader: K1CommitmentWindowReader,
 ): Promise<K1Reconciliation> {
   const target = requireAccount(account);
   const wanted = requireColour(colour);
   const state = loadK1CoinStore(target);
-  if (!Object.hasOwn(state.awaiting, wanted)) {
-    return { outcome: 'refused', reason: `Nothing of colour ${wanted} is waiting for a position.` };
+  const rows = Object.hasOwn(state.awaiting, wanted) ? state.awaiting[wanted] : [];
+  const row = rows.find((held) => held.txId === txId) ?? null;
+  if (row === null) {
+    return {
+      outcome: 'refused',
+      reason: `Nothing of colour ${wanted} is waiting for a position under ${JSON.stringify(txId)}.`,
+    };
   }
-  const row = state.awaiting[wanted];
   const outcome = await reconcileK1CoinFromChain(
     target,
     { colour: row.colorHex, nonce: row.nonceHex, value: BigInt(row.value), txId: row.txId },
@@ -950,8 +1059,9 @@ export async function settleK1AwaitingCoin(
     { candidates: 'store' },
   );
   if (outcome.outcome === 'unavailable') return outcome;
+  if (outcome.outcome === 'ambiguous' && !outcome.stored) return outcome;
   editStore(target, (draft) => {
-    delete draft.awaiting[wanted];
+    dropAwaitingRow(draft, wanted, row.nonceHex);
   });
   return outcome;
 }
@@ -966,15 +1076,33 @@ export async function settleK1AwaitingCoin(
  * filed under it stays "arriving" for ever however often it is asked about.
  * Once `resolveHash` has the chain's hash, the row is renamed to it.
  *
- * Silent when there is nothing waiting in that colour.
+ * ONE ROW, named by the id it is currently filed under. A colour can have two
+ * coins in flight ({@link K1CoinStoreState.awaiting}) and each is filed under
+ * its own spend; renaming "the colour's row" would put one spend's hash on
+ * another spend's coin, and a coin filed under a transaction that did not
+ * produce it can never settle.
+ *
+ * Silent when nothing in that colour is filed under `fromTxId`, and silent on
+ * an empty `toTxId` — a row with nothing to look it up by is worse than a row
+ * filed under an id the indexer cannot answer, because the second can still be
+ * renamed.
  */
-export function renameK1AwaitingTx(account: K1Account, colour: string, txId: string): void {
+export function renameK1AwaitingTx(
+  account: K1Account,
+  colour: string,
+  fromTxId: string,
+  toTxId: string,
+): void {
   const target = requireAccount(account);
   const wanted = requireColour(colour);
-  if (typeof txId !== 'string' || txId.trim() === '') return;
+  if (typeof toTxId !== 'string' || toTxId.trim() === '') return;
   editStore(target, (draft) => {
     if (!Object.hasOwn(draft.awaiting, wanted)) return;
-    draft.awaiting[wanted] = { ...draft.awaiting[wanted], txId };
+    const rows = draft.awaiting[wanted];
+    const at = rows.findIndex((row) => row.txId === fromTxId);
+    if (at < 0) return;
+    rows[at] = { ...rows[at], txId: toTxId.trim() };
+    draft.awaiting[wanted] = rows;
   });
 }
 

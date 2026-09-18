@@ -1504,9 +1504,12 @@ async function settleShieldedChange(
      can answer — which is exactly how a change coin used to stay "arriving"
      for ever. */
   if (written !== null && written.txId !== step.txHash) {
-    renameK1AwaitingTx(account, change.colour, step.txHash);
+    renameK1AwaitingTx(account, change.colour, written.txId, step.txHash);
   }
-  const settled = await settleK1AwaitingCoin(account, change.colour, (txId) =>
+  /* THE HASH NAMES THE ROW, not the colour. A colour can have a second coin in
+     flight — an earlier spend's change, or a delivery this walk has not placed
+     — and settling "the colour" would file one of them and drop the rest. */
+  const settled = await settleK1AwaitingCoin(account, change.colour, step.txHash, (txId) =>
     deps.commitmentWindow(wallet.network.indexerHttpUrl, txId),
   );
   if (settled.outcome === 'learned') return { ...step, change, changePosition: 'settled' };

@@ -519,7 +519,11 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
         )
         const runtime = await import('../identity/contractRuntime.js')
         for (const waiting of awaitingK1Coins(account)) {
-          await settleK1AwaitingCoin(account, waiting.colour, (txId) =>
+          /* EACH ROW BY ITS OWN TRANSACTION. A colour can hold more than one
+             coin waiting for a position — a spend's change, then a delivery,
+             then a second spend's change — and each is filed under the
+             transaction that produced it. */
+          await settleK1AwaitingCoin(account, waiting.colour, waiting.txId, (txId) =>
             runtime.resolveTxCommitmentWindowByHashOnce(opened.network.indexerHttpUrl, txId),
           )
         }

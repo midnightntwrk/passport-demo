@@ -219,6 +219,20 @@ overwrites — a row whose nonce the store has recorded as spent is dropped, a c
 store already holds keeps the stored coin, and the queue, the spent list, and the
 candidates are never taken from an incoming state. Drilled in both orders.
 
+**A colour's awaiting rows are a LIST, and one slot lost a coin.** The store files a
+spend's change coin the instant the circuit returns, with its description and no position
+(`awaiting`). That was one row per colour, and this sequence — spend, be paid in the same
+colour, spend again — put the second spend's change on the first's row. The row it
+replaced was the only description of that coin anywhere: the chain carries the note, not
+its nonce, value, or transaction, so the coin became unspendable by anybody for ever,
+with nothing on screen saying so. A colour now holds as many rows as it has coins in
+flight; `settleK1AwaitingCoin` and `renameK1AwaitingTx` name ONE row by the transaction it
+is filed under, and within a colour the nonce is the coin's identity, so a resumed run
+offering the same coin twice stores it once. A store written by the older build is read as
+a one-element list, losslessly, and the new shape is written by the account's next write.
+A row whose candidate positions could not be stored (the colour's held slot is occupied)
+now WAITS for the slot instead of being dropped with its description.
+
 **The candidate rule.** A withdrawal's transaction carries two shielded outputs — the
 payee's note and the account's change — so the indexer's commitment window gives two
 positions and nothing distinguishes them client-side. The candidates are stored in the

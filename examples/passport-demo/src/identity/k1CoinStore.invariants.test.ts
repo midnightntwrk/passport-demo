@@ -54,6 +54,7 @@ import {
   settleK1Coin,
   type K1Account,
   type K1CoinStoreState,
+  type K1Reconciliation,
   type K1HeldCoin,
 } from './k1CoinStore.js';
 
@@ -74,6 +75,26 @@ function hex64(seed: number): string {
 
 function coin(patch: Partial<K1HeldCoin> = {}): K1HeldCoin {
   return { colour: MUSD, nonce: hex64(0x7f), value: 100n, mtIndex: 42n, ...patch };
+}
+
+/**
+ * Settles the OLDEST coin of a colour that is waiting for a position.
+ *
+ * A settle names one row by the transaction it is filed under, and a drill that
+ * does not know which rows exist has to look. When none do it asks about a
+ * transaction nothing is filed under, which is a branch worth walking too.
+ */
+async function settleOldestAwaiting(
+  colour: string,
+  reader: (txId: string) => Promise<{ startIndex: number; endIndex: number } | null>,
+): Promise<K1Reconciliation> {
+  const waiting = awaitingK1Coins(ALICE).find((row) => row.colour === colour);
+  return settleK1AwaitingCoin(
+    ALICE,
+    colour,
+    waiting?.txId ?? 'nothing-is-filed-under-this',
+    reader,
+  );
 }
 
 /* -------------------------------------------------------------------------- */
@@ -163,13 +184,29 @@ function expectInvariants(account: K1Account, where: string): void {
     }
   }
 
-  for (const [colourKey, row] of Object.entries(state.awaiting)) {
-    expect(row.colorHex, `${where}: awaiting row filed under the wrong colour`).toBe(colourKey);
-    expect(HEX64.test(row.nonceHex), `${where}: awaiting nonce ${row.nonceHex}`).toBe(true);
-    expect(DECIMAL.test(row.value), `${where}: awaiting value ${row.value}`).toBe(true);
-    expect(row.txId.length, `${where}: an awaiting coin with nothing to look it up by`)
-      .toBeGreaterThan(0);
-    expect(spent.has(row.nonceHex), `${where}: spent coin ${row.nonceHex} is awaiting`).toBe(false);
+  for (const [colourKey, rows] of Object.entries(state.awaiting)) {
+    /* A LIST PER COLOUR since 2026/09/17, because a colour can have two coins
+       in flight at once and one slot lost the first of them. An empty list is
+       not written back, for the same reason an empty queue is not. */
+    expect(rows.length, `${where}: an empty awaiting list was written back`).toBeGreaterThan(0);
+    const nonces = new Set<string>();
+    for (const row of rows) {
+      expect(row.colorHex, `${where}: awaiting row filed under the wrong colour`).toBe(colourKey);
+      expect(HEX64.test(row.colorHex), `${where}: awaiting colour ${row.colorHex}`).toBe(true);
+      expect(HEX64.test(row.nonceHex), `${where}: awaiting nonce ${row.nonceHex}`).toBe(true);
+      expect(DECIMAL.test(row.value), `${where}: awaiting value ${row.value}`).toBe(true);
+      expect(row.txId.length, `${where}: an awaiting coin with nothing to look it up by`)
+        .toBeGreaterThan(0);
+      expect(spent.has(row.nonceHex), `${where}: spent coin ${row.nonceHex} is awaiting`).toBe(
+        false,
+      );
+      /* ONE ROW PER COIN. The same coin twice is the same value counted twice
+         in the figure of what is still arriving. */
+      expect(nonces.has(row.nonceHex), `${where}: coin ${row.nonceHex} is awaiting twice`).toBe(
+        false,
+      );
+      nonces.add(row.nonceHex);
+    }
   }
 
   /* (c). The figure a holder is shown is held + queued and nothing else. */
@@ -276,9 +313,7 @@ const writes: { name: string; run: () => Promise<void> | void }[] = [
   {
     name: 'the chain answering where an awaiting coin landed',
     run: async () => {
-      await settleK1AwaitingCoin(ALICE, MUSD, () =>
-        Promise.resolve({ startIndex: 21, endIndex: 22 }),
-      );
+      await settleOldestAwaiting(MUSD, () => Promise.resolve({ startIndex: 21, endIndex: 22 }));
     },
   },
   {
@@ -366,7 +401,12 @@ describe('what each write leaves behind', () => {
    * the sequence is written down and the test starts passing the day the slot
    * becomes a list.
    */
-  it.fails('keeps BOTH change coins when a colour is spent twice before the chain answers', () => {
+  /* THE DEFECT THIS CATCHES lost a coin outright. `awaiting` held ONE row per
+     colour, so the second spend's change overwrote the first's — and the first
+     row was the only description of that coin in the world. Nothing on chain
+     carries it, so the value was not "delayed": it was gone, and no screen said
+     so. The rows are a list per colour now. */
+  it('keeps BOTH change coins when a colour is spent twice before the chain answers', () => {
     putK1Coin(ALICE, coin({ nonce: hex64(0x11), value: 100n, mtIndex: 5n }));
     rememberK1ChangeCoin(ALICE, MUSD, { colour: MUSD, nonce: hex64(0x33), value: 60n }, 'tx-1');
 
@@ -517,7 +557,7 @@ describe('two hundred writes in a row', () => {
             break;
           default: {
             const windowRoll = random();
-            await settleK1AwaitingCoin(ALICE, colour, () =>
+            await settleOldestAwaiting(colour, () =>
               Promise.resolve(
                 windowRoll < 0.3
                   ? null
@@ -682,7 +722,7 @@ describe('storage that refuses', () => {
     expect(() => settleK1Coin(ALICE, MUSD)).not.toThrow();
     expect(() => rememberK1EncSecretKey(ALICE, 'ab'.repeat(32))).not.toThrow();
     await expect(
-      settleK1AwaitingCoin(ALICE, MUSD, () => Promise.resolve({ startIndex: 1, endIndex: 2 })),
+      settleOldestAwaiting(MUSD, () => Promise.resolve({ startIndex: 1, endIndex: 2 })),
     ).resolves.toBeDefined();
 
     /* And the session still answers with the last state that DID land, rather
