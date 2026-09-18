@@ -187,6 +187,158 @@ deposits is already set up for this.
    because `/status` is on the internet. A refusal that names a circuit reads
    the same way in the journal, under `[prove-account-custody]`.
 
+#### Staging the passkey arm (2026/09/18)
+
+Everything above staged the **k256** half of the account custody build, which is
+what a Dynamic Passport proves against. A **passkey** Passport is born on the
+other arm, and none of its key material is on the droplet: its circuits are
+`<operation>_with_jubjub`, and they are separate files with separate keys.
+
+Until they are staged, a passkey Passport is refused `503 prover-unavailable`
+at `activate_initial_device_with_jubjub` — the first thing it asks for, after
+four waves of deploy have already been paid for — and `/status` says
+`configured: true` throughout, because the directory and the prover are named
+and only the files are missing. That is the defect `accountCustodyProving.staged`
+exists to make visible before somebody's onboarding finds it.
+
+**Where they are.** `scratchpad/k1-compile/out`, the local compile of the
+pinned revision. Its `contract/index.js` and `compiler/contract-info.json` are
+byte-identical to the tracked build
+(`sha256 d74eff90…6b6a6` and `ca4f82ea…47ba3`), so the module the droplet
+already runs and these keys are the same compile — check that before staging
+anything, because a key set from a different compile verifies against nothing.
+
+**What to copy.** Eleven circuits, three files each. Sizes are bytes as
+measured on 2026/09/18:
+
+| circuit | `keys/*.prover` | `keys/*.verifier` | `zkir/*.bzkir` |
+| --- | ---: | ---: | ---: |
+| `activate_initial_device_with_jubjub` | 24,648,020 | 2,313 | 1,716 |
+| `add_device_with_jubjub` | 49,291,288 | 2,313 | 3,448 |
+| `append_inbox_with_jubjub` | 98,574,479 | 2,313 | 3,567 |
+| `issue_grant_with_jubjub` | 98,579,365 | 2,313 | 8,453 |
+| `remove_device_with_jubjub` | 49,291,960 | 2,313 | 4,120 |
+| `revoke_all_grants_with_jubjub` | 49,290,943 | 2,313 | 3,103 |
+| `revoke_grant_with_jubjub` | 49,292,097 | 2,313 | 4,257 |
+| `rotate_enc_key_with_jubjub` | 49,290,830 | 2,313 | 2,990 |
+| `withdraw_shielded_to_contract_with_jubjub` | 98,576,566 | 2,313 | 5,654 |
+| `withdraw_shielded_with_jubjub` | 98,576,060 | 2,313 | 5,148 |
+| `withdraw_unshielded_with_jubjub` | 49,292,320 | 2,313 | 4,480 |
+| **total** | **714,704,928** | **25,443** | **45,936** |
+
+**714,776,307 bytes — 0.715 GB, or 0.67 GiB — beside the 2.261 GB of the k256
+arm already there.** Check `df -h /opt` first: the whole build is 3.48 GB
+(3.2 GiB, which is the "3.2 GB" the sections above quote — `du` counts in
+GiB and this table counts in bytes).
+
+The two permissionless deposits, `deposit_shielded` (11,278,047 + 2,121 +
+1,487) and `deposit_unshielded` (446,654 + 1,353 + 1,518), carry no arm and are
+already staged: they are what the opening balance and every partner gift prove,
+whichever key the account was born on.
+
+**What NOT to copy, for now.** The three delegated-grant jubjub circuits —
+`withdraw_shielded_with_grant_jubjub`, `withdraw_shielded_to_contract_with_grant_jubjub`,
+`withdraw_unshielded_with_grant_jubjub` — are a further **0.493 GB** and nothing
+in the demo calls them. Leaving them off is the difference between 0.715 GB and
+1.208 GB for the arm. `/status` will report them as not staged, which is
+accurate: the route refuses a circuit whose files are not there, and no client
+asks for these.
+
+```sh
+# From a machine holding scratchpad/k1-compile/out, with the droplet's layout.
+SRC=scratchpad/k1-compile/out
+DST=root@<droplet>:/opt/passport-account-custody-artefacts/managed/account-custody
+
+rsync -a --info=progress2 \
+  --include='*_with_jubjub.prover' --include='*_with_jubjub.verifier' \
+  --exclude='*' "$SRC/keys/" "$DST/keys/"
+rsync -a --info=progress2 \
+  --include='*_with_jubjub.bzkir' --exclude='*' "$SRC/zkir/" "$DST/zkir/"
+```
+
+The `*_with_grant_jubjub` names do not match `*_with_jubjub`, so those filters
+leave the three delegated-grant circuits behind on their own.
+
+**No restart.** The route resolves the files per request — `keys/<name>.prover`,
+`keys/<name>.verifier`, `zkir/<name>.bzkir`, checked before it proves — so the
+arm is live the moment the rsync finishes. This is the additive change the
+droplet rules allow: nothing under `/opt/passport-balancer` is touched, no unit
+file changes, and the running service is not stopped. Note that
+`accountCustodyProving.staged` is read at start-up and then once per proof, so
+`/status` will keep reporting the pre-rsync counts until the first proof asks —
+the files decide, not the counter.
+
+**The environment, unchanged.** The same two variables the k256 arm uses, and no
+third:
+
+```ini
+Environment=BALANCER_ACCOUNT_CUSTODY_ASSETS=/opt/passport-account-custody-artefacts/managed/account-custody
+Environment=BALANCER_PROVER_URL_V3=http://127.0.0.1:6300
+```
+
+#### The deploy gate for the passkey arm
+
+Three checks, in this order, and the third is the only one that proves anything.
+
+1. **`/status` says the route is configured and the arm is staged.**
+
+   ```sh
+   curl -s https://67-205-177-162.sslip.io/balancer/status \
+     | python3 -c 'import json,sys; b=json.load(sys.stdin)["accountCustodyProving"]; print(b["configured"], b["staged"])'
+   ```
+
+   `configured` must be `true`. `staged.jubjub.ready` must be at least 11 of 14
+   — the three delegated-grant circuits are the ones deliberately left off —
+   and `staged.shared` must be 2 of 2. `staged.missing` names what is short.
+
+2. **The start-up line says the same thing in the journal.**
+
+   ```sh
+   ssh root@<droplet> 'journalctl -u passport-balancer -n 200 | grep prove-account-custody'
+   ```
+
+   It reads `account-custody proving N/30 circuits staged (jubjub 11/14, k256
+   14/14, shared 2/2), proving at http://127.0.0.1:6300`. It is written once at
+   start-up, so after an rsync with no restart it describes the host as it was —
+   which is why check 3 exists.
+
+3. **A smoke proof of `activate_initial_device_with_jubjub`.** It is the
+   smallest jubjub key (24.6 MB) and the first circuit a passkey Passport asks
+   for, so it is both the cheapest check and the one that matters.
+
+   The gate is a **`200`** for a real unproven transaction — one the live
+   harness produces on the way to activating an account. That is the whole
+   check, and it is what the passkey onboarding run of 2026/09/18 exercised
+   through a local sponsor against this same `/prover-v3`. Send it with:
+
+   ```sh
+   curl -s -X POST https://67-205-177-162.sslip.io/balancer/prove-account-custody \
+     -H 'content-type: application/json' \
+     -d @- <<'JSON'
+   {"circuits":["activate_initial_device_with_jubjub"],"unprovenTx":"<hex>","network":"stagenet"}
+   JSON
+   ```
+
+   With no transaction to hand, the cheap probe is the same request with
+   `"unprovenTx":"00"` — **and read the journal, not the status code.** Both
+   outcomes are `503 prover-unavailable` from outside, because a transaction
+   that is one byte of nonsense fails to deserialise locally and that is not a
+   proof server's verdict. The journal tells them apart:
+
+   - `refused: prover-unavailable — The key material for
+     activate_initial_device_with_jubjub is not staged on this host (N of 3
+     files missing)` — **the fail.** The rsync did not land. Nothing reached
+     the proof server, and no key was read.
+   - `refused: prover-unavailable — The proof server could not be reached to
+     prove activate_initial_device_with_jubjub: <a deserialisation error>` —
+     **the files are there.** The route resolved the circuit, found all three
+     files, and got as far as the transaction, which is as far as one byte of
+     nonsense can go.
+
+   `400 unknown-circuit` from either probe means the module on the droplet is
+   not the compile these keys came from — check the two hashes above before
+   staging anything else.
+
 #### The limits it runs under, and why
 
 | | |
@@ -221,6 +373,14 @@ then `Environment=BALANCER_PROVER_URL_V3=http://127.0.0.1:6301` and a restart.
 The supervisor's probe table would gain a row for it
 (`GET http://127.0.0.1:6301/health`, and `docker inspect
 passport-proof-server-account-custody`), restarted like the first one.
+
+The passkey arm makes this more pressing rather than less, and it is still a
+recommendation. A jubjub-born account's onboarding is four waves and an
+activation against the same server that is balancing every name claim, and the
+live run of 2026/09/18 measured 115 s for the waves and the activation in a
+browser **behind a proof queue another drill was using at the same time** — the
+queueing is in that number. Isolating the k1 proving before `/prove-k1` traffic
+goes live is the same recommendation from the other side.
 
 **This is a recommendation and it has not been done.** It is two containers'
 worth of memory on an 8 GB box, so it wants measuring under a real walk before
