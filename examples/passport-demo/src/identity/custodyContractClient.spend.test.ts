@@ -244,6 +244,14 @@ interface ChainFake {
    */
   submitFailure?: string;
   /**
+   * The chain's verdict on the transaction, as the finalised data carries it.
+   *
+   * `undefined` is the ordinary success. `null` is finalised data with NO
+   * status in it at all — the shape this build cannot read a verdict out of,
+   * which is not the same as a verdict of no.
+   */
+  submitStatus?: string | null;
+  /**
    * What the indexer answers when a row still filed under an identifier is
    * asked about again — `settleK1AwaitingCoinByChainHash`'s second chance.
    */
@@ -369,7 +377,14 @@ function harness(
     grafts.push(unprovenTx.grafted.length);
     submitted += 1;
     if (chain.submitFailure !== undefined) throw new Error(chain.submitFailure);
-    return { txId: `id-${submitted}` };
+    /* THE STATUS IS PART OF THE ANSWER, and the real `submitTx` resolves with
+       it whether the chain took the transaction or refused it. A fake that
+       carried only an id would drill a world in which arriving is the same as
+       succeeding, which is exactly the world the defect lived in. */
+    return {
+      txId: `id-${submitted}`,
+      ...(chain.submitStatus === null ? {} : { status: chain.submitStatus ?? 'SucceedEntirely' }),
+    };
   };
 
   const providers: Record<string, unknown> = {
@@ -746,6 +761,80 @@ describe('the change coin reaches storage before anything slow happens', () => {
     expect(isK1NonceSpent(ACCOUNT, NONCE)).toBe(false);
     expect(loadK1CoinStore(ACCOUNT).unreadChange).toEqual({});
     expect(awaitingK1Coins(ACCOUNT)).toEqual([]);
+  });
+
+  /* ---------------------------------------------------------------------- */
+  /* THE CHAIN'S VERDICT (R1)                                                */
+  /*                                                                         */
+  /* `submitTx` resolves with the finalised data for a transaction that      */
+  /* FAILED exactly as it does for one that succeeded. Booking the spend on  */
+  /* the strength of the promise resolving deletes the held coin, marks its  */
+  /* nonce spent for ever, and files a change coin the chain never created — */
+  /* and `reconcileK1CoinFromChain` then answers 'spent' about a coin the    */
+  /* account still holds, which is a balance that cannot come back.          */
+  /* ---------------------------------------------------------------------- */
+
+  it('leaves the coin held when the chain refused the transaction', async () => {
+    const test = harness({ circuitResult: changeResult(60n), submitStatus: 'FailFallible' });
+    const { session, device } = deviceFake();
+    putK1CoinCandidates(ACCOUNT, { colour: COLOUR, nonce: NONCE, value: 100n }, [5n, 6n]);
+
+    const seen: string[] = [];
+    await expect(
+      withdrawShieldedK1(
+        session,
+        device,
+        {
+          recipientCoinPublicKey: new Uint8Array(32),
+          recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+          colourHex: COLOUR,
+          amount: 40n,
+        },
+        (phase) => {
+          if (phase.txId !== undefined) seen.push(phase.txId);
+        },
+        test.deps,
+      ),
+    ).rejects.toThrow('That payment did not go through, and nothing left your Passport.');
+
+    /* A FAILED TRANSACTION SPENT NOTHING, so the store says nothing happened. */
+    expect(heldK1Coin(ACCOUNT, COLOUR)?.nonce).toBe(NONCE);
+    expect(heldK1Coin(ACCOUNT, COLOUR)?.mtIndex).toBe(5n);
+    expect(isK1NonceSpent(ACCOUNT, NONCE)).toBe(false);
+    expect(awaitingK1Coins(ACCOUNT)).toEqual([]);
+    expect(k1CoinCandidates(ACCOUNT, COLOUR)).toEqual([5n, 6n]);
+    /* ONE ATTEMPT. A refused transaction is not a wrong position, and a second
+       candidate would be a second approval and a second transaction. */
+    expect(test.calls.filter((call) => call.circuit === 'withdraw_shielded_with_k256')).toHaveLength(
+      1,
+    );
+    /* And the transaction is still named, because one exists: the record must
+       not tell somebody nothing was sent when something was. */
+    expect(seen).toEqual(['id-1']);
+  });
+
+  it('hedges rather than guessing when the finalised data carried no verdict', async () => {
+    const test = harness({ circuitResult: changeResult(60n), submitStatus: null });
+    const { session, device } = deviceFake();
+    putK1Coin(ACCOUNT, { colour: COLOUR, nonce: NONCE, value: 100n, mtIndex: 5n });
+
+    await expect(
+      withdrawShieldedK1(
+        session,
+        device,
+        {
+          recipientCoinPublicKey: new Uint8Array(32),
+          recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+          colourHex: COLOUR,
+          amount: 40n,
+        },
+        undefined,
+        test.deps,
+      ),
+    ).rejects.toThrow('Your payment was sent and this Passport could not confirm it.');
+
+    expect(heldK1Coin(ACCOUNT, COLOUR)?.nonce).toBe(NONCE);
+    expect(isK1NonceSpent(ACCOUNT, NONCE)).toBe(false);
   });
 
   it('promotes the next payment when the spend consumed the coin exactly', async () => {

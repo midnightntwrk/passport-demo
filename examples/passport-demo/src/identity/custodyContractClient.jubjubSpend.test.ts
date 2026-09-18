@@ -260,7 +260,8 @@ function harness(chain: ChainFake = {}) {
     if (prover) await prover.proveTx(unprovenTx);
     grafts.push(unprovenTx.grafted.length);
     submitted += 1;
-    return { txId: `id-${submitted}` };
+    /* The chain's verdict travels with the id, as it does on the real one. */
+    return { txId: `id-${submitted}`, status: 'SucceedEntirely' };
   };
 
   const providers: Record<string, unknown> = {

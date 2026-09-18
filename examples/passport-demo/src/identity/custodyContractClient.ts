@@ -109,6 +109,8 @@ import {
   CUSTODY_PROVER_UNAVAILABLE,
   custodyProofNotBuilt,
   isCustodyProofNotBuilt,
+  CUSTODY_SEND_FAILED,
+  CUSTODY_SEND_UNCONFIRMED,
   CUSTODY_SETUP_INTERRUPTED,
   loadCustodyAuthorityKey,
   loadCustodyRecord,
@@ -1985,14 +1987,40 @@ export async function spendShieldedK1(
         unprovenTx,
         circuitId: [...circuits],
       });
+      const identifier = finalizedTxId(finalized);
+      const chainHash = finalizedTxHash(finalized);
+
+      /* THE CHAIN'S VERDICT, AND NOT THE FACT THAT IT ANSWERED. `submitTx`
+         resolves with the finalised data for a transaction that FAILED exactly
+         as it does for one that succeeded — the status is the only thing that
+         tells them apart, and nothing here read it. A `FailFallible` therefore
+         went through the whole of the bookkeeping below: the held coin deleted,
+         its nonce appended to the spent list, and a change coin that was never
+         created filed as awaiting a position. `reconcileK1CoinFromChain` then
+         answers `spent` about that nonce for ever, so the coin the account
+         still demonstrably holds is invisible to every future spend — the
+         balance is gone and no screen can say why.
+         A failed transaction spent NOTHING (MIP-0012 INV-5), so the store is
+         left exactly as it was and the position the proof verified against is
+         put back at the head rather than left mid-rotation. */
+      const status = finalizedStatus(finalized);
+      if (status !== (await succeededEntirely())) {
+        console.warn(
+          `[account-custody] the chain did not accept the payment (${status ?? 'no status'})`,
+        );
+        restartK1CoinCandidates(account, colour);
+        /* A TRANSACTION EXISTS, whatever it came to, so the record says so:
+           `custodyShieldedSendOutcome` tells somebody nothing was sent only
+           while `sendTxId` is null, and this one was sent and refused. */
+        onPhase?.({ step: 'confirm', txId: chainHash ?? identifier ?? undefined });
+        throw new Error(status === null ? CUSTODY_SEND_UNCONFIRMED : CUSTODY_SEND_FAILED);
+      }
 
       /* BEFORE ANYTHING IS ASKED OF ANYBODY. The change coin's description is
          the circuit's return value and exists nowhere else in the world; the
          write happens the instant the transaction is known to be on chain,
          rather than after the indexer has been polled for a window. */
       settleK1Coin(account, colour);
-      const identifier = finalizedTxId(finalized);
-      const chainHash = finalizedTxHash(finalized);
       const written = writeShieldedChange(account, colour, change, chainHash ?? identifier);
 
       /* CARRIED OUT THE MOMENT THE TRANSACTION EXISTS, and before the two slow
@@ -2183,6 +2211,32 @@ function finalizedTxHash(result: unknown): string | null {
   const view = result as { txHash?: unknown; public?: { txHash?: unknown } } | null;
   const value = view?.txHash ?? view?.public?.txHash;
   return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+/**
+ * The chain's verdict on the transaction, off either shape of finalised data.
+ *
+ * Null is "the finalised data did not carry one", which is NOT a success: a
+ * spend that cannot read the verdict has no business booking the coin as spent,
+ * and the sentence for it says so rather than claiming either outcome.
+ */
+function finalizedStatus(result: unknown): string | null {
+  const view = result as { status?: unknown; public?: { status?: unknown } } | null;
+  const value = view?.status ?? view?.public?.status;
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+/**
+ * midnight-js's own name for the one status that means the call ran.
+ *
+ * IMPORTED RATHER THAN SPELLED OUT, and dynamically, which is the idiom
+ * `passportContract.ts` established for the same constant: the string belongs
+ * to the library, and a copy of it here is a copy that stays behind when the
+ * library renames it.
+ */
+async function succeededEntirely(): Promise<string> {
+  const { SucceedEntirely } = await import('@midnight-ntwrk/midnight-js-types');
+  return SucceedEntirely;
 }
 
 /** The block it landed in, for the record and for nothing on screen. */

@@ -596,6 +596,7 @@ function harness(
             chain.authNonce += 1n;
             return Promise.resolve({
               txId: `id-${calls.length}`,
+              status: 'SucceedEntirely',
               ...(chain.finalHash === undefined ? {} : { txHash: chain.finalHash }),
               ...(chain.finalBlock === undefined ? {} : { blockHeight: chain.finalBlock }),
             });

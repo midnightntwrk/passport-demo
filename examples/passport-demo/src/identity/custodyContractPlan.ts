@@ -268,6 +268,33 @@ export const CUSTODY_PROVER_UNAVAILABLE =
 export const CUSTODY_PROOF_NOT_BUILT =
   'That payment could not be completed just now. Try again in a moment.';
 
+/**
+ * The refusal when the chain ANSWERED and the answer was no.
+ *
+ * A transaction the chain recorded as failed moved nothing: no coin was spent,
+ * no note was created, and the account holds exactly what it held before
+ * (MIP-0012 INV-5). So this is the one failure after submission that can be
+ * said plainly, and saying it plainly matters — the hedged sentence below in
+ * front of a verdict this definite would tell somebody to go and check a
+ * balance that cannot have changed.
+ */
+export const CUSTODY_SEND_FAILED = 'That payment did not go through, and nothing left your Passport.';
+
+/**
+ * The sentence for a payment that WAS submitted and whose outcome is unknown.
+ *
+ * TWO WAYS TO ARRIVE HERE, and they are the same thing to the person reading
+ * it: the finalised data carried no verdict this build could read, or the wait
+ * for one failed — a dropped socket during the wait is the shape of the
+ * outages of 2026/09/05 and 2026/09/07, and a socket is not a verdict. Either
+ * way the transaction is out there and one of two things is true of it, so the
+ * sentence hedges deliberately and points at the figure that settles it rather
+ * than guessing. Claiming "nothing was sent" here is the one answer that can be
+ * flatly wrong about somebody's money.
+ */
+export const CUSTODY_SEND_UNCONFIRMED =
+  'Your payment was sent and this Passport could not confirm it. Check your balance in a moment to see whether it left.';
+
 /** The `name` on the error carrying {@link CUSTODY_PROOF_NOT_BUILT}. */
 export const CUSTODY_PROOF_NOT_BUILT_NAME = 'CustodyProofNotBuilt';
 
