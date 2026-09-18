@@ -160,9 +160,10 @@ import EcosystemScreen from './screens/Ecosystem.js';
 import AliasReclaimModal from './screens/AliasReclaimModal.js';
 import RecoverByNameScreen from './screens/RecoverByName.js';
 /**
- * THE SECOND WAY TO BE INSIDE PASSPORT — a social sign-in rather than a passkey.
+ * THE ACCOUNT CUSTODY PASSPORT — the whole flow on Nicolas's contract, for a
+ * passkey and for a social sign-in alike.
  *
- * LAZY, AND NOT MERELY FOR TIDINESS. `DynamicPassport` reaches
+ * LAZY, AND NOT MERELY FOR TIDINESS. `CustodyPassport` reaches
  * `identity/custodyContractClient.ts`, which STATICALLY imports `lib/localWallet.ts`
  * — the wallet facade, its WASM ledger, and its chain sync. This file reaches
  * that module only through `import()` (line ~2102), deliberately, so none of it
@@ -174,9 +175,15 @@ import RecoverByNameScreen from './screens/RecoverByName.js';
  * identities, and the screen's own header for why the whole path is one screen
  * rather than a second set of branches through this file.
  */
-const DynamicPassport = lazy(() => import('./screens/DynamicPassport.js'));
+const CustodyPassport = lazy(() => import('./screens/CustodyPassport.js'));
 import { choosePassportIdentity } from './lib/dynamicSession.js';
 import { useDynamicSession } from './lib/dynamic.js';
+import { useDynamicCustodyArm, usePasskeyCustodyArm } from './lib/custodyArms.js';
+import {
+  loadCustodyPasskeyPointer,
+  passkeyPassportRoute,
+  saveCustodyPasskeyPointer,
+} from './lib/custodyRoute.js';
 /* The one-off account upgrade's SCREEN, statically — it is a stepper and a
    theme toggle and reaches nothing. The MACHINE behind it is imported inside
    the handler that runs it (`runUpgrade`), because `identity/accountUpgrade.js`
@@ -6014,6 +6021,112 @@ export default function PassportDemo() {
       dynamicStatus: dynamicSession.status,
       evmAddress: dynamicSession.evmAddress,
     }) === 'dynamic';
+
+  /* ------------------------------------------------------------------ */
+  /* WHICH CONTRACT THIS PASSKEY'S PASSPORT IS ON                        */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * The route, decided from what is stored and WITHOUT asking for a ceremony.
+   *
+   *   `legacy`  — this credential already has a prototype account on this
+   *               network. Nothing about it changes: the Passports in
+   *               production are not migrated (Hector, 2026/09/18) and this
+   *               file renders for them exactly what it rendered yesterday.
+   *   `custody` — this credential has an account custody Passport here. The
+   *               pointer says which one, and the screen opens it.
+   *   `new`     — neither, so a Passport made from here is made on the account
+   *               custody contract.
+   *
+   * THE PROTOTYPE RECORD WINS, and the order is the rule rather than an
+   * accident: a holder with a working Passport must never be routed anywhere
+   * but to it, whatever else a store has accumulated. `activeContractRecord`
+   * is ANY record — deployed, in flight, or failed — because a failed deploy
+   * is a Passport half made on the old contract, and its retry lives in the
+   * old flow.
+   *
+   * It is not asked until the wallet has settled on a network, because the
+   * record and the pointer are both per network and asking earlier would read
+   * "no Passport" for a Passport that is simply not addressable yet.
+   */
+  const passkeyCustodyUser =
+    profile && localWalletNetworkId
+      ? loadCustodyPasskeyPointer(
+          window.localStorage,
+          profile.passkey.credentialId,
+          localWalletNetworkId,
+        )
+      : null;
+  const passkeyRoute =
+    profile && localWalletNetworkId
+      ? passkeyPassportRoute({
+          hasPrototypeAccount: activeContractRecord !== null,
+          custodyUser: passkeyCustodyUser,
+        })
+      : 'legacy';
+  /**
+   * The 32 bytes the account custody screen's device is derived from.
+   *
+   * ONE USER-VERIFIED ASSERTION, and the same one every other contract path in
+   * this file takes: `PASSPORT_CONTRACT_SCOPE` through a one-shot provider.
+   * The caller zeroes what comes back; nothing here keeps it.
+   */
+  const passportContractRoot = useCallback(async (): Promise<Uint8Array> => {
+    const passkey = profile?.passkey;
+    if (!passkey?.credentialId) {
+      throw new PasskeyPresenceError(
+        'presence-unavailable',
+        'Passport cannot find the passkey this session signed in with. Sign in again, then retry.',
+      );
+    }
+    let oneShot: DiscoveredPassportPasskey;
+    try {
+      oneShot = await withPasskeyWatchdog(() => WebAuthnPrfKeyProvider.assertOnce(passkey));
+    } catch (cause) {
+      throw midSessionCeremonyFailure(cause);
+    }
+    try {
+      const { deriveWalletSeed } = await import('./lib/localWallet.js');
+      return await deriveWalletSeed(oneShot, PASSPORT_CONTRACT_SCOPE);
+    } finally {
+      oneShot.dispose();
+    }
+  }, [profile]);
+
+  const rememberPasskeyPassport = useCallback(
+    (userKey: string) => {
+      const credentialId = profile?.passkey.credentialId;
+      if (!credentialId || !localWalletNetworkId) return;
+      saveCustodyPasskeyPointer(
+        window.localStorage,
+        credentialId,
+        localWalletNetworkId,
+        userKey,
+      );
+    },
+    [localWalletNetworkId, profile],
+  );
+
+  const passkeyArm = usePasskeyCustodyArm({
+    contractRoot: passportContractRoot,
+    knownUserKey: passkeyCustodyUser,
+    remember: rememberPasskeyPassport,
+    ready: localSessionActive && localWalletNetworkId !== null,
+  });
+  const dynamicArm = useDynamicCustodyArm(dynamicSession);
+  /**
+   * Whether this render belongs to the account custody screen, and with which
+   * arm behind it.
+   *
+   * `null` is every Passport in production: a passkey holder with a prototype
+   * account, and a build with no sign-in, both of which fall through to the
+   * ladder below exactly as they always have.
+   */
+  const custodyArm = dynamicOnly
+    ? dynamicArm
+    : localSessionActive && passkeyRoute !== 'legacy'
+      ? passkeyArm
+      : null;
   /* The two way-out panels hold the screen open in their own right. They have
      to: a failure that suppresses the error banner in favour of its panel
      would otherwise have nothing left keeping onboarding on screen. */
@@ -9528,13 +9641,19 @@ export default function PassportDemo() {
 
   return (
     <div className="passport-experience is-mobile">
-      {/* The social sign-in's own Passport, FIRST in the ladder and gated on a
-          condition that is false in every build shipped today. It is placed
-          above `showOnboarding` because it replaces onboarding rather than
-          following it: this person is not going to be asked for a passkey. */}
-      {dynamicOnly ? (
+      {/* The account custody Passport, FIRST in the ladder. It is placed above
+          `showOnboarding` because for a sign-in it REPLACES onboarding — that
+          person is not going to be asked for a passkey — and for a passkey it
+          FOLLOWS it: the ceremony has already happened, the wallet is open, and
+          what this branch decides is which contract the Passport that comes
+          next is made on. A passkey holder who already has a Passport on the
+          old contract never reaches it. */}
+      {custodyArm !== null ? (
         <Suspense fallback={<div className="passport-experience-loading" role="status" />}>
-          <DynamicPassport network={localWalletNetworkId ?? configuredWalletNetwork ?? selectedNetwork} />
+          <CustodyPassport
+            network={localWalletNetworkId ?? configuredWalletNetwork ?? selectedNetwork}
+            arm={custodyArm}
+          />
         </Suspense>
       ) : showOnboarding ? (
         <>

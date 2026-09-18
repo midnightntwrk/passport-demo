@@ -740,7 +740,7 @@ export function newCustodyShieldedSend(input: {
  *
  * `'unconfirmed'` was missing until 2026/09/17, and it is the most expensive
  * one to lose: it is written exactly when value has left the Passport and
- * nothing here can see which side holds it (`../screens/DynamicPassport.tsx`
+ * nothing here can see which side holds it (`../screens/CustodyPassport.tsx`
  * saves it before it throws). A record that will not parse is a record the
  * screen reads as "no payment in flight", so a reload replaced the one
  * sentence that says what happened with silence.

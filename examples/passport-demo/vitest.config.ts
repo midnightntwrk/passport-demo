@@ -763,6 +763,7 @@ export default mergeConfig(
           'src/lib/colour.ts',
           'src/lib/custodyAssets.ts',
           'src/lib/custodyDelivery.ts',
+          'src/lib/custodyRoute.ts',
           'src/lib/custodyScreenRules.ts',
           'src/lib/dynamicSession.ts',
           'src/lib/endpoints.ts',
