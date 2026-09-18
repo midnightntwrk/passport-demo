@@ -31,7 +31,9 @@ import {
   custodyMayReadHoldings,
   custodyPaymentDisclosure,
   custodyUnplacedDeliveries,
+  runCustodyKeepRecord,
   runCustodyWork,
+  CUSTODY_KEEP_RECORD_BUSY,
   type CustodyWalkOutcome,
 } from './custodyScreenRules.js';
 
@@ -239,6 +241,70 @@ describe('the order a payment and the read of its result happen in', () => {
     const cause = new Error('nothing to read after this either');
     expect((await runCustodyWork(flag, () => Promise.reject(cause), null)).failure).toBe(cause);
     expect(flag.current).toBe(false);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The record of what the account kept, written inside the payment            */
+/* -------------------------------------------------------------------------- */
+
+describe('writing down what the account kept', () => {
+  /* IT IS A GATED CALL. Started detached — which is what it was — it overlapped
+     whatever came next: the follow-up read, or a second Send. Two gated calls
+     against one account sign against the same `auth_nonce`, and the second is
+     refused by the node for a reason no sentence on the screen could explain.
+     So it is awaited by the payment, under the payment's own flag. */
+  it('runs to completion before the caller moves on', async () => {
+    const order: string[] = [];
+    await runCustodyKeepRecord(
+      (line) => order.push(`busy:${line}`),
+      async () => {
+        order.push('writing');
+        await Promise.resolve();
+        order.push('written');
+      },
+    );
+    order.push('after');
+
+    expect(order).toEqual([
+      `busy:${CUSTODY_KEEP_RECORD_BUSY}`,
+      'writing',
+      'written',
+      'after',
+    ]);
+  });
+
+  /* THE PAYMENT ALREADY SUCCEEDED. The recipient has their money; this is the
+     sender's own note of the remainder, and a failure to write it loses the
+     record and not the money. Reporting it would tell somebody their payment
+     failed when it did not. */
+  it('swallows its own failure, because the payment already succeeded', async () => {
+    await expect(
+      runCustodyKeepRecord(
+        () => undefined,
+        () => Promise.reject(new Error('the approval was dismissed')),
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  /* The line says what is happening rather than leaving "Sending" up over
+     something that has finished, and it names no machinery. */
+  it('says what is happening in words about the person, not the machinery', () => {
+    expect(CUSTODY_KEEP_RECORD_BUSY).toBe('Writing down what you kept');
+    for (const word of [
+      'wallet address',
+      'dust',
+      'contract',
+      'registry',
+      'indexer',
+      'resolver',
+      'sponsor',
+      'sdk',
+      'inbox',
+      'coin',
+    ]) {
+      expect(CUSTODY_KEEP_RECORD_BUSY.toLowerCase()).not.toContain(word);
+    }
   });
 });
 

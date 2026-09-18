@@ -140,8 +140,49 @@ export async function runCustodyWork(
 }
 
 /* -------------------------------------------------------------------------- */
-/* 2b. Whether the note a stopped payment left is here YET                    */
+/* 2b. The record of what the account kept, written INSIDE the payment        */
 /* -------------------------------------------------------------------------- */
+
+/** The busy line while the account's own note of the change is written. */
+export const CUSTODY_KEEP_RECORD_BUSY = 'Writing down what you kept';
+
+/**
+ * Write down what the account kept, as the last thing the payment does.
+ *
+ * INSIDE THE PAYMENT, WHICH IS THE WHOLE POINT. This is a GATED call — it
+ * costs an approval and it writes the coin store — and it used to be started
+ * detached, with the payment already resolved and the in-flight flag already
+ * cleared. So it overlapped whatever came next: the follow-up read of the
+ * holdings, or a second Send. Two gated calls against one account read the
+ * same device entry and sign against the same `auth_nonce`, and the one that
+ * arrives second is signed against a nonce the first has already moved on
+ * from — a transaction the node refuses, for a reason no sentence on the
+ * screen could explain. That is the practical trigger of the defect above this
+ * one: the second payment is submitted, the chain says no, and the store is
+ * asked to believe it.
+ *
+ * IT IS STILL NOT PART OF THE PAYMENT'S SUCCESS. The recipient has their money
+ * the moment the send lands; this is the sender's own note of the remainder. A
+ * failure here loses the record and not the money, so it is reported to the
+ * console and never to the person — the payment succeeded and saying otherwise
+ * would be false.
+ *
+ * The busy line is set rather than left as the send's, because the send is
+ * over and a line that still said "Sending" would be describing something that
+ * has finished.
+ */
+export async function runCustodyKeepRecord(
+  busy: (line: string) => void,
+  write: () => Promise<void>,
+): Promise<void> {
+  busy(CUSTODY_KEEP_RECORD_BUSY);
+  try {
+    await write();
+  } catch (cause) {
+    console.warn('[account-custody] the change was not written to the inbox', cause);
+  }
+}
+
 /* 3. What the walk found, as a figure                                        */
 /* -------------------------------------------------------------------------- */
 

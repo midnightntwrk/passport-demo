@@ -75,6 +75,7 @@ import {
   custodyInFlightRefusal,
   custodyPaymentDisclosure,
   custodyMayReadHoldings,
+  runCustodyKeepRecord,
   custodyUnplacedDeliveries,
   runCustodyWork,
 } from '../lib/custodyScreenRules.js'
@@ -945,15 +946,20 @@ export default function CustodyPassport({ network, arm }: CustodyPassportProps) 
         },
         sendPhase(stoppedRecord),
       )
-      void backfillChange({ wallet, record, identity, change: sent.change }).catch((cause) => {
-        console.warn('[account-custody] the change was not written to the inbox', cause)
-      })
       clearCustodyShieldedSend(window.localStorage, {
         network: record.network,
         accountAddress: account.address,
       })
       setStopped(null)
       setNotice(custodyShieldedSendOutcome({ ...stoppedRecord, stage: 'done' }))
+      /* THE TIDY-UP RUNS HERE, INSIDE THE PAYMENT. It is a gated call of its
+         own, so starting it detached let it overlap whatever came next — the
+         follow-up read, or a second Send — and two gated calls against one
+         account sign against the same `auth_nonce`. See
+         `../lib/custodyScreenRules.ts`. */
+      await runCustodyKeepRecord(setBusy, () =>
+        backfillChange({ wallet, record, identity, change: sent.change }),
+      )
     },
     [arm, backfillChange, ensureIdentity, sendPhase],
   )
@@ -1027,15 +1033,16 @@ export default function CustodyPassport({ network, arm }: CustodyPassportProps) 
         },
         sendPhase(stoppedRecord),
       )
-      void backfillChange({ wallet, record, identity, change: sent.change }).catch((cause) => {
-        console.warn('[account-custody] the change was not written to the inbox', cause)
-      })
       clearCustodyShieldedSend(window.localStorage, {
         network: record.network,
         accountAddress: account.address,
       })
       setStopped(null)
       setNotice(custodyShieldedSendOutcome({ ...stoppedRecord, stage: 'done' }))
+      /* As above: inside the payment, and last. */
+      await runCustodyKeepRecord(setBusy, () =>
+        backfillChange({ wallet, record, identity, change: sent.change }),
+      )
     },
     [arm, backfillChange, ensureIdentity, sendPhase],
   )
