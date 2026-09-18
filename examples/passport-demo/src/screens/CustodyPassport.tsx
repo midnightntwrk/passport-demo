@@ -1199,6 +1199,32 @@ export default function CustodyPassport({ network, arm }: CustodyPassportProps) 
       })
       saveCustodyRecord(window.localStorage, restored)
       saveCustodyName(window.localStorage, restoredUser, network, label)
+      /* THE VIEWING SECRET, SO A RECOVERED PASSPORT CAN DESCRIBE ITS OWN MONEY.
+         The account's whole coin store is rebuilt by opening its own list of
+         deliveries, and an entry opens with this secret or with nothing; a
+         Passport brought back on a second device has an empty store, so
+         `readHoldings` walks the list, opens nothing, and shows a balance of
+         zero over a chain that says otherwise.
+
+         A PASSKEY CAN FIX THAT AND A SIGN-IN CANNOT, which is the whole reason
+         the secret is derived on this arm: the same authenticator that produced
+         the device point produces the secret the account's entries were sealed
+         to, so it is in hand here with no further ceremony. A Dynamic device
+         carries none and the store keeps whatever it had, which for that arm is
+         what Dynamic's own storage restore is for.
+
+         Only where the store has NONE. An existing secret is this account's own
+         and is never written over — see `rememberK1EncSecretKey`'s caller at
+         the deploy, which files it when the account is created. */
+      if ('encSecretKeyHex' in identity.device && identity.device.encSecretKeyHex !== undefined) {
+        const { loadK1CoinStore, rememberK1EncSecretKey } = await import(
+          '../identity/k1CoinStore.js'
+        )
+        const account = { network, address }
+        if (loadK1CoinStore(account).encSecretKeyHex === null) {
+          rememberK1EncSecretKey(account, identity.device.encSecretKeyHex)
+        }
+      }
       refresh()
       return outcome
     },
