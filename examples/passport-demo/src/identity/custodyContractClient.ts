@@ -1682,16 +1682,25 @@ export type CustodyShieldedTarget =
       /** The recipient's account contract, raw 64-hex. */
       readonly contractAddress: string;
       /**
-       * The recipient's advertised encryption key, READ LIVE by the caller.
+       * The recipient's advertised encryption key, ASKED FOR AT SEAL TIME.
        *
        * The sender seals the coin it is about to send into the 192-byte inbox
        * entry the recipient's own claim carries, because the chain carries the
        * note and not its description: a coin deposited into one of these
        * accounts with no readable entry has demonstrably arrived and nobody can
-       * ever move it again. An account rotates this key, so a value read
-       * yesterday is the same defect.
+       * ever move it again.
+       *
+       * A FUNCTION, NOT A VALUE, AND THAT IS THE WHOLE OF IT. An account
+       * rotates this key — `rotate_enc_key` is one of its circuits — and the
+       * window between reading it and using it used to hold an approval and a
+       * proof, which on the passkey arm is a person walking to their phone. A
+       * rotation inside that window sealed the coin to a key its holder had
+       * already replaced, and the payment still lands: the money arrives and
+       * nobody can ever describe it again. So the key is read HERE, in the
+       * candidate loop, immediately before the seal — and read again for each
+       * retry, because a retry is another window.
        */
-      readonly recipientEncKeyHex: string;
+      readonly readRecipientEncKey: () => Promise<string>;
     };
 
 /** What a shielded spend needs beyond the session and the device. */
@@ -1977,7 +1986,13 @@ export async function spendShieldedK1(
         }
         sent = direct.sent;
         const { depositShieldedCustody } = await import('./custodyInbox.js');
-        const sealed = await depositShieldedCustody(payee.recipientEncKeyHex, {
+        /* READ NOW, AND NOT WHEN THE PAYMENT WAS SET UP. See
+           {@link CustodyShieldedTarget}: everything between the read and this
+           line — the approval, the proof — is time in which the recipient can
+           rotate the key, and a coin sealed to a rotated key arrives and can
+           never be moved again. */
+        const recipientEncKeyHex = await payee.readRecipientEncKey();
+        const sealed = await depositShieldedCustody(recipientEncKeyHex, {
           colour: direct.sent.colour,
           nonce: direct.sent.nonce,
           value: direct.sent.value,
@@ -2199,7 +2214,8 @@ export async function withdrawShieldedToContractK1(
   device: CustodyCallDevice,
   request: {
     readonly recipientAccountAddress: string;
-    readonly recipientEncKeyHex: string;
+    /** Asked at seal time — see {@link CustodyShieldedTarget}. */
+    readonly readRecipientEncKey: () => Promise<string>;
     readonly colourHex: string;
     readonly amount: bigint;
   },
@@ -2213,7 +2229,7 @@ export async function withdrawShieldedToContractK1(
       target: {
         kind: 'account',
         contractAddress: request.recipientAccountAddress,
-        recipientEncKeyHex: request.recipientEncKeyHex,
+        readRecipientEncKey: request.readRecipientEncKey,
       },
       colourHex: request.colourHex,
       amount: request.amount,

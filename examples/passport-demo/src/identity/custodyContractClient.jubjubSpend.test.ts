@@ -43,6 +43,7 @@ import {
   type CustodyStorage,
 } from './custodyContractPlan.js';
 import { jubjubDeviceSigner } from './custodyJubjubSigner.js';
+import { generateCustodyEncKeyPair, openCustodyInboxEntry } from './custodyInbox.js';
 import { heldK1Coin, putK1Coin, putK1CoinCandidates, type K1Account } from './k1CoinStore.js';
 import {
   appendChangeToInboxK1,
@@ -107,6 +108,28 @@ const ACCOUNT: K1Account = { network: 'stagenet', address: ADDRESS };
 const RECIPIENT_COIN_PK = new Uint8Array(32).fill(0x4d);
 const RECIPIENT_ENC_PK = new Uint8Array(32).fill(0x5e);
 
+/** The recipient's advertised encryption key, as the composed door asks for it. */
+const PEER_ENC_KEY = 'ab'.repeat(32);
+
+/**
+ * A reader of that key that counts how many times it was asked, and can be
+ * made to answer something different from one call to the next.
+ *
+ * COUNTED, because the whole of A6 is WHEN the key is read: the engine must
+ * ask at seal time, not take a value the screen read before the approval and
+ * the proof. A reader that answers a second key on its second call is a
+ * recipient rotating theirs inside that window.
+ */
+function encKeyReader(...answers: string[]): (() => Promise<string>) & { reads: number } {
+  const reader = (): Promise<string> => {
+    const answer = answers[reader.reads] ?? answers[answers.length - 1] ?? PEER_ENC_KEY;
+    reader.reads += 1;
+    return Promise.resolve(answer);
+  };
+  reader.reads = 0;
+  return reader;
+}
+
 /** A device scalar. Fixed rather than derived: the derivation is drilled next door. */
 const DEVICE_SCALAR = 0x51ee_2a3b_9c4d_7e18n;
 
@@ -155,6 +178,14 @@ function storageFake(): CustodyStorage & { data: Map<string, string> } {
 interface ChainFake {
   /** How many spends fail the way a wrong position fails, before one lands. */
   positionFailures?: number;
+  /**
+   * How many times the RECIPIENT'S CLAIM fails to build, before one does.
+   *
+   * The same trap, one step later — and the step matters here, because the
+   * seal happens between the two. A retry from this point is a retry that has
+   * already asked the recipient for their key once.
+   */
+  claimFailures?: number;
   /** What a wrong position says. The live shape is a bare WASM trap. */
   positionFailure?: () => Error;
 }
@@ -229,6 +260,12 @@ function harness(chain: ChainFake = {}) {
       contractAddress: string;
     };
     calls.push({ circuit: circuitId, args, options: callOptions });
+    if (circuitId === 'deposit_shielded' && (chain.claimFailures ?? 0) > 0) {
+      chain.claimFailures = (chain.claimFailures ?? 0) - 1;
+      const trap = new Error('unreachable');
+      trap.name = 'RuntimeError';
+      return Promise.reject(trap);
+    }
     if (circuitId.startsWith('withdraw_shielded') && (chain.positionFailures ?? 0) > 0) {
       chain.positionFailures = (chain.positionFailures ?? 0) - 1;
       /* THE LIVE SHAPE: `name` is `RuntimeError` and `message` is the single
@@ -524,7 +561,7 @@ describe('a passkey Passport pays another one of these accounts', () => {
       run.device,
       {
         recipientAccountAddress: PEER,
-        recipientEncKeyHex: 'ab'.repeat(32),
+        readRecipientEncKey: encKeyReader(),
         colourHex: COLOUR,
         amount: 4n,
       },
@@ -546,6 +583,73 @@ describe('a passkey Passport pays another one of these accounts', () => {
     expect(result.sent).toMatchObject({ value: 4n, nonce: SENT_NONCE });
   });
 
+  /* A6, 2026/09/18. The key the coin is sealed to used to be read by the
+     SCREEN, before the approval and before the proof — on the passkey arm,
+     before a person walked to their phone. `rotate_enc_key` is one of this
+     account's circuits, so a recipient rotating inside that window got a
+     payment sealed to a key they had already replaced: the money arrives, and
+     nobody can describe it again for as long as it exists. */
+  it('seals to the key the recipient advertises at seal time, not at setup', async () => {
+    const run = harness();
+    seedCoin();
+
+    const stale = generateCustodyEncKeyPair();
+    const current = generateCustodyEncKeyPair();
+    /* The recipient rotates between the payment being set up and the seal. */
+    const reader = encKeyReader(current.publicKeyHex);
+
+    await withdrawShieldedToContractK1(
+      null,
+      run.device,
+      {
+        recipientAccountAddress: PEER,
+        readRecipientEncKey: reader,
+        colourHex: COLOUR,
+        amount: 4n,
+      },
+      undefined,
+      run.deps,
+    );
+
+    /* ASKED ONCE, and asked by the engine rather than handed a value. */
+    expect(reader.reads).toBe(1);
+
+    const claim = run.calls.find((call) => call.circuit === 'deposit_shielded');
+    const entry = claim?.args[1] as Uint8Array;
+    /* THE RECIPIENT CAN OPEN IT with the key they hold now… */
+    await expect(openCustodyInboxEntry(current.secretKeyHex, entry)).resolves.toMatchObject({
+      nonce: SENT_NONCE,
+      value: 4n,
+    });
+    /* …and the key they had before opens nothing, which is what the defect
+       would have left them with. */
+    await expect(openCustodyInboxEntry(stale.secretKeyHex, entry)).resolves.toBeNull();
+  });
+
+  it('asks the recipient again for every attempt, because a retry is another window', async () => {
+    const run = harness({ claimFailures: 1 });
+    putK1CoinCandidates(ACCOUNT, { colour: COLOUR, nonce: NONCE, value: 10n }, [3n, 4n]);
+
+    const reader = encKeyReader();
+    await withdrawShieldedToContractK1(
+      null,
+      run.device,
+      {
+        recipientAccountAddress: PEER,
+        readRecipientEncKey: reader,
+        colourHex: COLOUR,
+        amount: 4n,
+      },
+      undefined,
+      run.deps,
+    );
+
+    expect(
+      run.calls.filter((call) => call.circuit === 'withdraw_shielded_to_contract_with_jubjub'),
+    ).toHaveLength(2);
+    expect(reader.reads).toBe(2);
+  });
+
   it('signs the direct transfer’s own challenge, which is not the address door’s', async () => {
     const run = harness();
     seedCoin();
@@ -555,7 +659,7 @@ describe('a passkey Passport pays another one of these accounts', () => {
       run.device,
       {
         recipientAccountAddress: PEER,
-        recipientEncKeyHex: 'ab'.repeat(32),
+        readRecipientEncKey: encKeyReader(),
         colourHex: COLOUR,
         amount: 4n,
       },
@@ -612,7 +716,7 @@ describe('a passkey Passport pays another one of these accounts', () => {
       run.device,
       {
         recipientAccountAddress: PEER,
-        recipientEncKeyHex: 'ab'.repeat(32),
+        readRecipientEncKey: encKeyReader(),
         colourHex: COLOUR,
         amount: 4n,
       },
@@ -637,7 +741,7 @@ describe('a passkey Passport pays another one of these accounts', () => {
       dynamic.device,
       {
         recipientAccountAddress: PEER,
-        recipientEncKeyHex: 'ab'.repeat(32),
+        readRecipientEncKey: encKeyReader(),
         colourHex: COLOUR,
         amount: 4n,
       },
@@ -712,7 +816,7 @@ describe('a passkey spend against a position that may be the wrong one', () => {
       run.device,
       {
         recipientAccountAddress: PEER,
-        recipientEncKeyHex: 'ab'.repeat(32),
+        readRecipientEncKey: encKeyReader(),
         colourHex: COLOUR,
         amount: 4n,
       },

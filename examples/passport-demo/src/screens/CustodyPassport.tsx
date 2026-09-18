@@ -826,18 +826,21 @@ export default function CustodyPassport({ network, arm }: CustodyPassportProps) 
       ])
       const indexerHttpUrl = wallet.network.indexerHttpUrl
       const held = store.heldK1Coin(account, asset.colourHex)
-      /* READ NOW, FROM THE CHAIN, and not remembered: an account rotates its
+      /* READ FROM THE CHAIN, never remembered: an account rotates its
          encryption key, and a description sealed to one it has rotated away
-         from is a coin its holder can never open. */
+         from is a coin its holder can never open.
+
+         THIS READ IS THE REFUSAL'S, NOT THE SEAL'S. It answers one question —
+         does this recipient advertise a key at all — so the payment can be
+         refused before anybody is asked to approve anything. The key the coin
+         is actually SEALED to is read again, by the send engine, immediately
+         before it seals: everything in between is an approval and a proof, and
+         on the passkey arm that is a person walking to their phone. */
+      const readRecipientEncKey = async (): Promise<string | null> =>
+        (await accountModule.readCustodyAccountView({ indexerHttpUrl }, params.recipientAccountAddress))
+          .encKeyHex
       const recipientEncKeyHex =
-        params.recipientModule === 'account-custody'
-          ? (
-              await accountModule.readCustodyAccountView(
-                { indexerHttpUrl },
-                params.recipientAccountAddress,
-              )
-            ).encKeyHex
-          : null
+        params.recipientModule === 'account-custody' ? await readRecipientEncKey() : null
       const input = {
         record,
         colourHex: asset.colourHex,
@@ -879,7 +882,16 @@ export default function CustodyPassport({ network, arm }: CustodyPassportProps) 
         identity,
         {
           recipientAccountAddress: plan.transfer.contractAddress,
-          recipientEncKeyHex: plan.transfer.recipientEncKeyHex,
+          /* READ AGAIN AT SEAL TIME. The plan's copy is what the refusal above
+             was decided on; the seal uses what the account advertises when the
+             seal happens, and refuses rather than sealing to nothing. */
+          readRecipientEncKey: async () => {
+            const live = await readRecipientEncKey()
+            if (live === null) {
+              throw new Error('This Passport could not prepare that payment. Nothing was sent.')
+            }
+            return live
+          },
           colourHex: plan.transfer.colourHex,
           amount: plan.transfer.amount,
         },
