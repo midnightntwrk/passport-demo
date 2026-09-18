@@ -270,9 +270,37 @@ export function custodyProofNotBuilt(): Error {
   return error;
 }
 
-/** Whether a cause is that error — the one a different position can fix. */
+/**
+ * Whether a cause is that error — the one a different position can fix.
+ *
+ * IT IS LOOKED FOR THROUGH A WRAPPER, because midnight-js does not rethrow what
+ * a provider threw. `submitTx` catches it and builds a NEW plain `Error` whose
+ * message is its own preamble with our error's `name: message` appended, and
+ * sets no `cause`:
+ *
+ * ```
+ * Error: Unexpected error submitting scoped transaction '<unnamed>': \
+ *   CustodyProofNotBuilt: That payment could not be completed just now. …
+ * ```
+ *
+ * So the wrapper's own `name` is `Error`, and reading only `cause.name` said
+ * "not that error" about exactly that error. Live on 2026/09/18: the coin's
+ * stored position was the first of two candidates and the true one was the
+ * second, the proof server declined, and the retry that exists to try the
+ * second candidate never fired — the payment stopped on the first refusal and
+ * the whole shielded send was written up as blocked. The `cause` chain is
+ * walked in case a future version does set one, and the name in the text is
+ * matched because today that is the only thing that survives the hop.
+ */
 export function isCustodyProofNotBuilt(cause: unknown): boolean {
-  return cause instanceof Error && cause.name === CUSTODY_PROOF_NOT_BUILT_NAME;
+  /* Bounded, because `cause` chains can be circular and a error-formatting
+     helper is not a place to hang the tab. */
+  for (let step: unknown = cause, depth = 0; step instanceof Error && depth < 8; depth += 1) {
+    if (step.name === CUSTODY_PROOF_NOT_BUILT_NAME) return true;
+    if (step.message.includes(`${CUSTODY_PROOF_NOT_BUILT_NAME}: `)) return true;
+    step = step.cause;
+  }
+  return false;
 }
 
 /**

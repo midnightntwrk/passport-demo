@@ -561,6 +561,35 @@ describe('a proving service that ran and declined to prove', () => {
     expect(isCustodyProofNotBuilt('a string')).toBe(false);
     expect(isCustodyProofNotBuilt(null)).toBe(false);
   });
+
+  /* THE SCENARIO: a wrong candidate position, refused by the proof server,
+     inside midnight-js's own wrapper. That is the shape the refusal really
+     arrives in — `submitTx` builds a new plain Error carrying our name and
+     message as text and no `cause` — and reading only `cause.name` made the
+     wrong-position retry sit out the one failure it exists for (live,
+     2026/09/18). */
+  it('sees the refusal through the wrapper midnight-js submits through', () => {
+    const wrapped = new Error(
+      `Unexpected error submitting scoped transaction '<unnamed>': ` +
+        `CustodyProofNotBuilt: ${CUSTODY_PROOF_NOT_BUILT}`,
+    );
+    expect(isCustodyProofNotBuilt(wrapped)).toBe(true);
+  });
+
+  it('sees the refusal through a wrapper that does set a cause', () => {
+    const wrapped = new Error('Unexpected error submitting scoped transaction', {
+      cause: custodyProofNotBuilt(),
+    });
+    expect(isCustodyProofNotBuilt(wrapped)).toBe(true);
+  });
+
+  /* A cause chain that points at itself must not hang the tab, and a chain of
+     unrelated errors must still say no. */
+  it('gives up on a circular cause chain rather than following it', () => {
+    const looping = new Error('one');
+    looping.cause = looping;
+    expect(isCustodyProofNotBuilt(looping)).toBe(false);
+  });
 });
 
 describe("a library's preamble around our own sentence", () => {

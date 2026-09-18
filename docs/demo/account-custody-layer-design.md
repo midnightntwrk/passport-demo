@@ -226,9 +226,17 @@ order the window gives them (`mtIndexCandidates`, head = the current guess); the
 spend tries the head; a failure naming the merkle path, a witness, or an unsatisfiable
 constraint retries with the next candidate; the one that proves is settled. An incorrect
 position cannot be proved, so nothing is submitted and nothing is spent (INV-5), which is
-what makes the retry free. **The actual output order is STILL not established** — see
-§3b — and until then candidate 0 is tried first because it is the first, not
-because anything says it is the change. Nothing stores a guess as a fact.
+what makes the retry free. **There IS no stable output order** — four live transactions
+against the same contract put the contract's coin first twice and second twice (§3b) —
+so the head stays candidate 0 because it is the first, not because anything says it is
+the change, and the retry is what decides. Nothing stores a guess as a fact.
+
+A refusal can reach the retry from either of two places, and both must be read as the
+same thing: the local runtime, when it cannot build a Merkle path for the position at
+all, and the proving service, when the path it built rebuilds a different root. The
+second arrives inside midnight-js's own wrapper, which is why
+`isCustodyProofNotBuilt` walks the `cause` chain and matches the error's name in the
+text (§3b, "Why a recoverable guess became a dead stop").
 
 ### 3b. What the live stagenet run of 2026/09/18 settled, and what it did not
 
@@ -253,30 +261,105 @@ identifier can never settle; the client renames the row to the hash once
 `zswapStartIndex`/`zswapEndIndex` both return `3772 / 3774` — so the unprefixed pair
 the client asks for first is enough and the fallback was not needed.
 
-**The change-coin output order is NOT established.** Every attempt at
-`withdraw_shielded_with_k256` was refused by the proof server with `400`, for BOTH
-candidate positions, so no candidate ever proved and nothing was learned about which
-output is the change. The default order stays "candidates in the order the window gave
-them, head first", which is what it was, and it remains a guess the store does not
-record as a fact. Establishing it needs the blocker below cleared.
+**There is no stable change-coin output order, and the store must not assume one.**
+Four live transactions, each with two shielded outputs, and the position the
+contract's own coin took inside the indexer's window:
 
-**The blocker, which is not the contract's.** The account custody proving route
-proves the gated k256 arm for every circuit whose prover key is under about
-128 MiB and refuses the one above it:
+| Transaction | Window | The contract's coin | Which output |
+|---|---|---|---|
+| `8f68bef2…254b` (a passkey Passport's `deposit_shielded` into D1) | `[3772, 3774)` | 3773 | second |
+| `ea677f52…9384` (D1's `withdraw_shielded_with_k256`, block 509111) | `[3795, 3797)` | 3795 | **first** |
+| `ffe8e5e7…e967` (D1's second withdrawal, block 509155) | `[3799, 3801)` | 3800 | second |
+| `acb6bd27…eb19` (D1 → D2, block 509189) | `[3803, 3805)` | 3803 | **first** |
 
-| Circuit | Prover key | Through the droplet's `/prover-v3` |
-|---|---|---|
-| `activate_initial_device_with_k256` | 28 MB | proved, 12.7 s and 14.9 s |
-| `withdraw_unshielded_with_k256` | 112 MB | proved, 54.1 s |
-| `withdraw_shielded_with_k256` | 224 MB | `400 Bad Request`, every time |
+Two of each, from the same circuit against the same contract within eighty
+blocks. The order is a property of how Zswap assembled that offer, not of the
+circuit, so no default order is correct and none is written as one. The head
+stays the first position the window gave, the rest stay beside it as
+candidates, and the RETRY is what decides — which is the reference's own rule
+(MIP-0012 INV-5: a wrong qualified description is an unsatisfiable witness, so
+nothing is submitted and nothing is lost).
 
-The sponsor uploads the prover key with every request
-(`httpClientProofProvider`), so the one circuit an order of magnitude larger than
-the rest is the one that cannot be proved. The gateway is not the limit — a
-250 MB body uploads and is answered — and the key on disk is not truncated. This
-is for whoever owns the proof server: a server that loads its keys from disk
-rather than by upload, which is the same conclusion §7a.1 reached for the browser
-and for the same reason.
+**The position is a fact the chain will tell you, if you ask the right thing
+for it.** `queryZSwapAndContractState(<address>)` returns the contract's OWN
+Zswap chain state, and that tree retains exactly this contract's leaves
+uncollapsed:
+
+```
+coin_coms: MerkleTree(root = Some(58eaa3de…5448)) {
+    0..=3772: <collapsed>,
+    3773: (c27caec4…2da4, Some(ContractAddress(0ffd70ad…2746))),
+    3774..=3794: <collapsed>,
+    3795: (58e84983…51c0, Some(ContractAddress(0ffd70ad…2746))),
+    3796..=3799: <collapsed>,
+    3800: (c77579d1…2bdd, Some(ContractAddress(0ffd70ad…2746))),
+    3801..=3802: <collapsed>,
+    3803: (84f92d26…0068, Some(ContractAddress(0ffd70ad…2746))),
+}
+```
+
+Every one of those four positions is in the table above. Nothing in this PR
+reads it — `ledger-v9` exposes the leaves only through `toString`, and a store
+that parses a debug format is a store that breaks on the next release — but it
+is where a later PR should get the position from, and it is why the retry is a
+backstop rather than the mechanism.
+
+**The blocker of 2026/09/17 was a WRONG POSITION, not the proof server.** The
+earlier write-up read the proof server's `400` as a body limit on the 235 MB
+prover key. It was not. The server's own log says:
+
+```
+ERROR midnight_zkir::ir_vm: Public transcript input mismatch idx=13
+  expected=Some(e5ab485c63577d557a595ae679003ac8e9599f5864457f7e66510471b31d9f3e)
+  computed=Some(1bff900ba21710e6750348a1529f5907432fe8475651d0e28a30605e1058f924)
+```
+
+`expected` is the ROOT of the contract's own Zswap tree, which the client's
+public transcript declares; `computed` is the root the circuit rebuilds from
+the coin commitment and the Merkle path at the position the `held_coin` witness
+names. The store's head was 3772 and the coin was at 3773, so the two roots
+differ and the constraint system is unsatisfiable. With the position corrected
+the SAME circuit proved on the SAME server in 62.6 s, and the node accepted the
+transaction (block 509111).
+
+The proof server is not a variable here. The same captured
+`/prove-account-custody` body, replayed against local `9.0.0-rc.3`, `9.0.0-rc.6`
+and `9.0.0-rc.7`, was refused with byte-identical `expected`/`computed` values;
+`10.0.0-alpha.1` refuses the wire format outright (`proof-preimage-versioned[v2]`)
+and cannot serve a `ledger-v9` 1.0.0-rc.3 client at all. A 235 MB prover key
+uploads and proves; there is no body limit and no version skew, and there is
+nothing here for whoever owns the proof server to do.
+
+**Why a recoverable guess became a dead stop.** `withdrawShieldedK1` already
+retried the next candidate, and it never fired, because midnight-js does not
+rethrow what a provider threw: `submitTx` builds a NEW plain `Error` whose
+message is its own preamble with our error's `name: message` appended and no
+`cause` set —
+
+```
+Error: Unexpected error submitting scoped transaction '<unnamed>': \
+  CustodyProofNotBuilt: That payment could not be completed just now. …
+```
+
+— so `isCustodyProofNotBuilt`, which read `cause.name`, said "not that error"
+about exactly that error. It now walks the `cause` chain and matches the name
+in the text, which is the only thing that survives the hop. The other arm of
+the retry was fine: when the position is one the local runtime cannot build a
+path for, it says so before any proving happens, and the retry fired on the
+first try (live, D1's third spend).
+
+**The mUSD send, end to end, three times.**
+
+| What | Result |
+|---|---|
+| D1 → `pkone2.night`, 20 mUSD | withdraw `ea677f52…9384` block 509111, deposit `00b4688d…bae0` block 509121; 161 s, proof 62.6 s |
+| D1 → `pkone2.night`, 15 mUSD **from the change coin** | withdraw `ffe8e5e7…e967` block 509155; 94 s, proof 26.0 s |
+| D1 → `dyntwo1.night`, 10 mUSD (Dynamic → Dynamic) | withdraw `acb6bd27…eb19` block 509189; 125 s, proof 27.3 s |
+
+D2's Home then read `dyntwo1.night · 0.0004 NIGHT · 10 MUSD`, opened from its
+own sealed inbox entry — a Dynamic Passport paying another Dynamic Passport a
+shielded token, and the recipient reading it out of the contract's public inbox
+with its own key.
 
 **What DID work end to end.** Setup and activation for two Dynamic Passports, a
 `.night` name for each, being paid mUSD by a passkey Passport and showing it as
