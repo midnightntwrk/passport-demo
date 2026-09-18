@@ -607,6 +607,18 @@ describe("a library's preamble around our own sentence", () => {
     ).toBe(CUSTODY_UNEXPECTED);
   });
 
+  /* A STACK OF RE-THROWS comes off in one pass, because the innermost message
+     begins after the LAST name however many there are. */
+  it('unwraps a stack of re-throws down to the sentence at the bottom', () => {
+    expect(
+      custodyFailureSentence(
+        new Error(
+          'AError: BError: CustodyProofNotBuilt: DError: There is nothing of that kind in this Passport to send.',
+        ),
+      ),
+    ).toBe('There is nothing of that kind in this Passport to send.');
+  });
+
   /* A plain sentence of ours is untouched. */
   it('leaves a sentence with no preamble exactly as it is', () => {
     expect(custodyFailureSentence(new Error('There is nothing of that kind in this Passport to send.'))).toBe(

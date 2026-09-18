@@ -31,6 +31,7 @@ import {
   putK1Coin,
   putK1CoinCandidates,
   queuedK1Coins,
+  k1UnreadChanges,
   renameK1AwaitingTx,
   dropK1Coin,
   reconcileK1CoinFromChain,
@@ -1139,5 +1140,110 @@ describe('a change coin waiting for its position', () => {
     expect(awaitingK1Coins(ALICE)).toEqual([
       { colour: NIGHT, nonce: NONCE, value: 60n, txId: 'tx-1' },
     ]);
+  });
+});
+
+describe('change this build could not describe', () => {
+  const TX = 'ab'.repeat(33);
+
+  /* THE DEFECT THIS CATCHES made a Passport quietly stop showing a token it had
+     been paid. The value moved, the circuit's return value could not be read,
+     and the colour was recorded as spent and vanished — with nothing to say a
+     payment had gone out or which transaction took it. */
+  it('keeps the colour and the transaction, rather than losing both', () => {
+    putK1Coin(ALICE, coin({ value: 100n, mtIndex: 3n }));
+    rememberK1ChangeCoin(ALICE, NIGHT, 'unreadable', TX);
+
+    expect(k1UnreadChanges(ALICE)).toEqual([{ colour: NIGHT, txId: TX }]);
+    /* The spend is still recorded in full: the coin is gone and its nonce is
+       remembered, so the inbox walk cannot resurrect it. */
+    expect(heldK1Coin(ALICE, NIGHT)).toBeNull();
+    expect(isK1NonceSpent(ALICE, NONCE)).toBe(true);
+    /* And nothing is claimed to be arriving, because nothing is described. */
+    expect(awaitingK1Coins(ALICE)).toEqual([]);
+  });
+
+  /* A later spend of the same colour that CAN be described clears the row. */
+  it('clears the row once a spend of that colour comes back readable', () => {
+    putK1Coin(ALICE, coin({ value: 100n, mtIndex: 3n }));
+    rememberK1ChangeCoin(ALICE, NIGHT, 'unreadable', TX);
+    putK1Coin(ALICE, coin({ nonce: OTHER_NONCE, value: 40n, mtIndex: 4n }));
+    rememberK1ChangeCoin(
+      ALICE,
+      NIGHT,
+      { colour: NIGHT, nonce: NONCE, value: 10n },
+      'cd'.repeat(33),
+    );
+    expect(k1UnreadChanges(ALICE)).toEqual([]);
+  });
+
+  it('is empty for an account that has never had one', () => {
+    expect(k1UnreadChanges(ALICE)).toEqual([]);
+  });
+
+  /* Read back the way every other row is: a stored blob this build did not
+     write must not throw, and a row that is not a transaction is dropped. */
+  it('drops unreadable rows when the stored blob is read back', () => {
+    window.localStorage.setItem(
+      'passport-k1-coins:v1',
+      JSON.stringify({
+        [k1AccountKey(ALICE)]: {
+          coins: {},
+          unreadChange: {
+            [NIGHT]: TX,
+            'not-a-colour': TX,
+            [OTHER_NONCE]: '',
+            ['cd'.repeat(32)]: 17,
+          },
+        },
+      }),
+    );
+    expect(k1UnreadChanges(ALICE)).toEqual([{ colour: NIGHT, txId: TX }]);
+  });
+
+  it('survives an unreadChange field that is not an object', () => {
+    window.localStorage.setItem(
+      'passport-k1-coins:v1',
+      JSON.stringify({ [k1AccountKey(ALICE)]: { coins: {}, unreadChange: 'nonsense' } }),
+    );
+    expect(k1UnreadChanges(ALICE)).toEqual([]);
+  });
+});
+
+describe('re-filing an awaiting coin under the chain hash', () => {
+  const TX = 'ab'.repeat(33);
+  const CHANGE = { colour: NIGHT, nonce: OTHER_NONCE, value: 60n };
+
+  it('does nothing when there is no transaction to file it under', () => {
+    putK1Coin(ALICE, coin());
+    rememberK1ChangeCoin(ALICE, NIGHT, CHANGE, 'midnight-js-identifier');
+    renameK1AwaitingTx(ALICE, NIGHT, '');
+    renameK1AwaitingTx(ALICE, NIGHT, '   ');
+    renameK1AwaitingTx(ALICE, NIGHT, 17 as unknown as string);
+    expect(awaitingK1Coins(ALICE)[0].txId).toBe('midnight-js-identifier');
+  });
+
+  it('does nothing when nothing of that colour is waiting', () => {
+    renameK1AwaitingTx(ALICE, NIGHT, TX);
+    expect(awaitingK1Coins(ALICE)).toEqual([]);
+  });
+});
+
+describe('a delivery of a coin that is already queued', () => {
+  /* The held slot holds another coin and the QUEUE holds this one: still not
+     news, and still not worth a question to the indexer. */
+  it('is known, and the chain is not asked', async () => {
+    putK1Coin(ALICE, coin({ value: 100n, mtIndex: 3n }));
+    enqueueK1Coin(ALICE, { colour: NIGHT, nonce: OTHER_NONCE, value: 25n, mtIndex: 9n });
+    const ask = vi.fn<K1CommitmentWindowReader>();
+
+    expect(
+      await reconcileK1CoinFromChain(
+        ALICE,
+        { colour: NIGHT, nonce: OTHER_NONCE, value: 25n, txId: 'ab'.repeat(33) },
+        ask,
+      ),
+    ).toEqual({ outcome: 'known', nonce: OTHER_NONCE });
+    expect(ask).not.toHaveBeenCalled();
   });
 });

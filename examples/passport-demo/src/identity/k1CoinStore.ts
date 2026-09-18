@@ -1339,9 +1339,10 @@ export async function reconcileK1CoinFromChain(
   const coin: K1HeldCoin = { colour, nonce, value, mtIndex: BigInt(start) };
   /* THE ENQUEUE RULE, not a write of the held slot: first coin of a colour is
      held, every later one queues behind it. */
-  const placement = enqueueK1Coin(target, coin);
-  if (placement === 'spent') return { outcome: 'spent', nonce };
-  if (placement === 'known') return { outcome: 'known', nonce };
+  /* `'spent'` and `'known'` cannot come back here: both were asked about above,
+     before the indexer was, and returned there. What is left is where the coin
+     went. */
+  const placement = enqueueK1Coin(target, coin) as 'held' | 'queued';
   return { outcome: 'learned', coin, placed: placement };
 }
 

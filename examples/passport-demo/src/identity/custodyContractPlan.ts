@@ -838,18 +838,18 @@ export function custodyFailureSentence(cause: unknown): string {
  * and which no sentence this layer writes contains.
  */
 function unwrapCustodyMessage(message: string): string {
-  const marker = /(?:^|[\s:])[A-Z][A-Za-z0-9_]{2,}:\s+/g;
-  let unwrapped = message;
-  for (let pass = 0; pass < 4; pass += 1) {
-    marker.lastIndex = 0;
-    let last: number | null = null;
-    for (let found = marker.exec(unwrapped); found !== null; found = marker.exec(unwrapped)) {
-      last = found.index + found[0].length;
-    }
-    if (last === null) return unwrapped.trim();
-    unwrapped = unwrapped.slice(last).trim();
+  /* ONE PASS, because it takes the LAST marker: however many layers a stack of
+     re-throws added, the innermost message begins after the final name, and a
+     second pass over what is left would have nothing further to find. */
+  /* The boundary is a LOOKBEHIND so it is not consumed: a matched name eats the
+     space in front of the next one, and a scan that consumed the boundary
+     skipped every other layer of a stack. */
+  const marker = /(?<![^\s:])[A-Z][A-Za-z0-9_]{2,}:\s+/g;
+  let last: number | null = null;
+  for (let found = marker.exec(message); found !== null; found = marker.exec(message)) {
+    last = found.index + found[0].length;
   }
-  return unwrapped;
+  return (last === null ? message : message.slice(last)).trim();
 }
 
 /** Whether two recovered points are the same point. */
