@@ -872,6 +872,31 @@ describe('a coin whose position the chain gave two answers for', () => {
     expect(k1CoinCandidates(ALICE, NIGHT)).toEqual([2n, 0n, 1n, 3n, 4n, 5n, 6n]);
   });
 
+  /* THE CASE D1 WAS STUCK IN, live on 2026/09/18. A coin that settled keeps its
+     winning position and drops its candidates — and if the chain later has it
+     somewhere else, that one position is the wrong one and there is nothing to
+     advance to. Its own position is the only thing known about it, so the sweep
+     goes around that. */
+  it('sweeps around a settled coin’s own position when it has no candidates', () => {
+    putK1CoinCandidates(ALICE, { colour: NIGHT, nonce: NONCE, value: 60n }, [3813n]);
+    /* SETTLED: the winning position kept, the candidates dropped. */
+    settleK1Coin(ALICE, NIGHT);
+    expect(k1CoinCandidates(ALICE, NIGHT)).toEqual([]);
+    expect(heldK1Coin(ALICE, NIGHT)?.mtIndex).toBe(3813n);
+
+    expect(widenK1CoinCandidates(ALICE, NIGHT)?.mtIndex).toBe(3809n);
+    /* The coin's own position stays at the head, so a later run still starts
+       where the chain last agreed it was; the neighbours follow it. */
+    expect(k1CoinCandidates(ALICE, NIGHT)).toEqual([
+      3813n, 3809n, 3810n, 3811n, 3812n, 3814n, 3815n, 3816n, 3817n,
+    ]);
+
+    /* AND ONCE ONLY. A spend's loop is `advance ?? widen`, so a widening that
+       kept finding more would be a loop that never ended. */
+    expect(widenK1CoinCandidates(ALICE, NIGHT)).toBeNull();
+    expect(k1CoinCandidates(ALICE, NIGHT)).toHaveLength(9);
+  });
+
   it('has nothing to widen without a list or without a coin', () => {
     expect(widenK1CoinCandidates(ALICE, NIGHT)).toBeNull();
     expect(widenK1CoinCandidates(ALICE, MUSD)).toBeNull();

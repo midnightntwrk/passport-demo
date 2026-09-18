@@ -1332,10 +1332,25 @@ export function widenK1CoinCandidates(account: K1Account, colour: string): K1Hel
   const target = requireAccount(account);
   const wanted = requireColour(colour);
   const draft = draftOf(loadK1CoinStore(target));
-  const list = Object.hasOwn(draft.mtIndexCandidates, wanted)
+  if (!Object.hasOwn(draft.coins, wanted)) return null;
+  const reported = Object.hasOwn(draft.mtIndexCandidates, wanted)
     ? draft.mtIndexCandidates[wanted]
     : [];
-  if (list.length === 0 || !Object.hasOwn(draft.coins, wanted)) return null;
+  /* A SETTLED COIN HAS NO LIST, AND IS THE CASE THAT MATTERS MOST (live,
+     2026/09/18). Reconciliation keeps the winning position and drops the
+     candidates, which is right — until the chain moves the coin and the one
+     position left is the wrong one. D1 sat in exactly that state: a coin
+     recorded at 3813 that the chain had at 3814, no candidates, and therefore
+     nothing for the retry to advance TO however well it recognised the failure.
+
+     Its own position is then the only thing known about it, so that is what the
+     sweep goes around. Seeding the list with it rather than sweeping here
+     directly is deliberate: the widening below is already idempotent for a list
+     whose head is a single position — the contiguous ascending prefix is just
+     that position, so a second call recomputes the same neighbours and adds
+     nothing — and a spend whose loop is `advance ?? widen` would never end if
+     widening kept finding more. */
+  const list = reported.length > 0 ? reported : [draft.coins[wanted].mtIndex];
   /* THE REPORTED WINDOW IS THE ASCENDING CONTIGUOUS PREFIX, and reading it back
      off the list is what makes this idempotent. The indexer reports
      `[startIndex, endIndex)`, which `putK1CoinCandidates` stores in order, and
