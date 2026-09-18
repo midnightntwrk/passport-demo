@@ -74,12 +74,14 @@ import {
   type CustodyAssetRow,
 } from '../lib/custodyAssets.js'
 import {
+  awaitCustodyStoppedNote,
   custodyArrivingCount,
   custodyDeliveryFailure,
   custodyInFlightRefusal,
   custodyMayReadHoldings,
   custodyUnplacedDeliveries,
   runCustodyWork,
+  type CustodyStoppedNoteOutcome,
 } from '../lib/custodyScreenRules.js'
 import type { PassportContractName } from '../identity/contractRuntime.js'
 import type { LocalMidnightWallet } from '../lib/localWallet.js'
@@ -1023,8 +1025,15 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
         setStopped(pending)
         return
       }
-      const note = await findStoppedNote(wallet, pending)
-      if (note === null) throw new Error(custodyShieldedSendOutcome(pending))
+      /* THE SAME LINE THE SEND ITSELF SHOWS while it waits for this, because it
+         is the same wait: the value has left the account and the wallet's sync
+         has to apply the arrival before anything can be sent on. */
+      setBusy('Waiting for it to settle')
+      const found = await findStoppedNote(wallet, pending)
+      /* NOTHING WRITTEN AND NOTHING SENT when the window closes. The record is
+         left exactly as it was, so the next press is the same press. */
+      if (found.kind === 'not-yet') throw new Error(found.sentence)
+      const note = found.note
       const withNote: CustodyShieldedSendRecord = {
         ...pending,
         stage: 'depositing',
@@ -1703,7 +1712,7 @@ async function readCustodyActions(indexerHttpUrl: string, address: string) {
 }
 
 /**
- * The note a stopped payment left behind, found again on a later open.
+ * The note a stopped payment left behind, WAITED FOR on a later open.
  *
  * BY ITS NONCE where the record kept one, which is exact: that nonce came out
  * of leg one's own result and names one note in the world. Where it did not —
@@ -1715,26 +1724,36 @@ async function readCustodyActions(indexerHttpUrl: string, address: string) {
  * unfunded by design, and a note of exactly that colour and size sitting in it
  * is this payment's note or is indistinguishable from it — and either way, the
  * amount reaches the person the holder chose.
+ *
+ * WAITED FOR, AND NOT READ ONCE (live re-run, 2026/09/18): the same button on
+ * the same payment failed in under a second 45 seconds after a re-open, before
+ * the wallet's sync had applied the arrival, and completed three minutes
+ * later. The window and the interval are the send path's own, and the decision
+ * — including the sentence for a window that closes — is
+ * `../lib/custodyScreenRules.ts`'s.
  */
 async function findStoppedNote(
   wallet: LocalMidnightWallet,
   record: CustodyShieldedSendRecord,
-): Promise<WalletShieldedNote | null> {
-  const [{ walletShieldedNotes }, { findArrivedNote }] = await Promise.all([
+): Promise<CustodyStoppedNoteOutcome<WalletShieldedNote>> {
+  const [{ walletShieldedNotes }, { findArrivedNote }, { SETTLE_WATCH_MS }] = await Promise.all([
     import('../identity/accountCustody.js'),
     import('../lib/shieldedNote.js'),
+    import('../lib/chainWait.js'),
   ])
-  const notes = await walletShieldedNotes(wallet)
-  const wanted = record.noteNonce
-  if (wanted !== null) {
-    const nonce = wanted.trim().toLowerCase().replace(/^0x/, '')
-    return notes.find((note) => note.nonce.toLowerCase().replace(/^0x/, '') === nonce) ?? null
-  }
-  return findArrivedNote(notes, {
-    tokenType: record.colourHex,
-    amount: BigInt(record.amount),
-    heldBefore: new Set<string>(),
-  })
+  return awaitCustodyStoppedNote(
+    record.noteNonce,
+    {
+      notes: () => walletShieldedNotes(wallet),
+      withoutNonce: (notes) =>
+        findArrivedNote(notes, {
+          tokenType: record.colourHex,
+          amount: BigInt(record.amount),
+          heldBefore: new Set<string>(),
+        }),
+    },
+    { windowMs: SETTLE_WATCH_MS, intervalMs: NOTE_POLL_MS },
+  )
 }
 
 /**

@@ -27,6 +27,12 @@
  *      and {@link runCustodyWork} is the ORDER those two imply: the read that
  *      shows what a payment changed cannot run inside the payment that is
  *      holding the store, or it is refused and the figure stays stale.
+ *   2b. WHETHER THE NOTE A STOPPED PAYMENT LEFT IS HERE YET. Finish read the
+ *      wallet's notes once, so the same button on the same payment failed in
+ *      under a second 45 seconds after a re-open and completed three minutes
+ *      later (live re-run, 2026/09/18). {@link awaitCustodyStoppedNote} is the
+ *      wait the send path already had, and the one sentence for a window that
+ *      closed with nothing written and nothing sent.
  *   3. WHAT THE WALK'S OUTCOMES MEAN FOR THE FIGURE SHOWN. A delivery the chain
  *      could not place is money that has arrived and cannot be spent yet, which
  *      is neither a balance nor nothing. {@link custodyUnplacedDeliveries} and
@@ -43,6 +49,7 @@
  * it.
  */
 
+import { pollUntilTrue } from './chainWait.js';
 import type { CustodyShieldedSendStage } from '../identity/custodyContractSend.js';
 
 /* -------------------------------------------------------------------------- */
@@ -191,6 +198,96 @@ export async function runCustodyWork(
     if (failure === null) failure = cause;
   }
   return { failure };
+}
+
+/* -------------------------------------------------------------------------- */
+/* 2b. Whether the note a stopped payment left is here YET                    */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * What Finish says when the note leg one paid is not in this Passport's hands
+ * yet.
+ *
+ * NOT A FAILURE, AND IT NAMES THE BUTTON. The value has left the account and
+ * the wallet's own sync has not applied the arrival; the one thing a person can
+ * do is press the same button again in a moment, so the sentence says that and
+ * nothing about a sync, a note, or a leg.
+ */
+export const CUSTODY_FINISH_NOT_SETTLED_YET =
+  'This payment has not settled yet, so it cannot be sent on. Give it a moment and press Finish this payment again.';
+
+/** Where this payment's note is: here, or not here yet. */
+export type CustodyStoppedNoteOutcome<TNote> =
+  | { readonly kind: 'here'; readonly note: TNote }
+  | { readonly kind: 'not-yet'; readonly sentence: string };
+
+/** How this payment's note is looked for, read afresh on every look. */
+export interface CustodyStoppedNoteLook<TNote extends { readonly nonce: string }> {
+  /** Every shielded note this Passport's own wallet holds, now. */
+  readonly notes: () => Promise<readonly TNote[]>;
+  /**
+   * Which of them is this payment's, for a record that kept NO nonce.
+   *
+   * A payment interrupted between leg one landing and the note being identified
+   * has no nonce to go on, and the snapshot of what was held before went with
+   * the tab. `../lib/shieldedNote.ts`'s rule is the fall-back and it is the
+   * caller's, not this one's.
+   */
+  readonly withoutNonce: (notes: readonly TNote[]) => TNote | null;
+}
+
+/**
+ * Waits for the note a stopped payment left behind, the way the send itself
+ * waits for it.
+ *
+ * THE DEFECT THIS IS THE REPAIR FOR (live re-run, 2026/09/18). Finish read the
+ * wallet's notes ONCE. Pressed 45 seconds after a Passport was re-opened it
+ * failed in under a second — the wallet had not applied the arrival yet — and
+ * pressed three minutes later the same button completed the same payment. A
+ * person cannot tell those two presses apart, so the difference read as a
+ * payment that sometimes works: the wait belongs on both paths, with the same
+ * window and the same line on screen.
+ *
+ * BY THE NONCE WHERE THERE IS ONE, which is exact: that nonce came out of leg
+ * one's own result and names one note in the world. A `0x` prefix and case are
+ * not part of the name.
+ *
+ * `'not-yet'` IS NOT `'gone'`. The window closing says nothing about whether
+ * the note exists — `pollUntilTrue` counts a read that threw as a no — so
+ * nothing is written, nothing is sent, and the record is left exactly as it
+ * was for the next press.
+ */
+export async function awaitCustodyStoppedNote<TNote extends { readonly nonce: string }>(
+  noteNonce: string | null,
+  look: CustodyStoppedNoteLook<TNote>,
+  wait: {
+    readonly windowMs: number;
+    readonly intervalMs: number;
+    readonly now?: () => number;
+    readonly sleep?: (milliseconds: number) => Promise<void>;
+  },
+): Promise<CustodyStoppedNoteOutcome<TNote>> {
+  const wanted = bareNonce(noteNonce);
+  /* A BOX, because what the poll finds has to survive the closure it is found
+     in — the same shape the screen's own note wait uses. */
+  const found: { note: TNote | null } = { note: null };
+  await pollUntilTrue(async () => {
+    const notes = await look.notes();
+    found.note =
+      wanted.length > 0
+        ? notes.find((note) => bareNonce(note.nonce) === wanted) ?? null
+        : look.withoutNonce(notes);
+    return found.note !== null;
+  }, wait);
+  if (found.note === null) {
+    return { kind: 'not-yet', sentence: CUSTODY_FINISH_NOT_SETTLED_YET };
+  }
+  return { kind: 'here', note: found.note };
+}
+
+/** A nonce with nothing on it that is not the nonce. */
+function bareNonce(nonce: string | null): string {
+  return typeof nonce === 'string' ? nonce.trim().toLowerCase().replace(/^0x/, '') : '';
 }
 
 /* -------------------------------------------------------------------------- */
