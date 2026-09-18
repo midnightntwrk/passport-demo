@@ -223,6 +223,16 @@ export interface K1CoinStoreState {
    * hold. A holder sees it as arriving rather than as balance.
    */
   readonly awaiting: Record<string, AwaitingK1CoinRow>;
+  /**
+   * Colours whose last spend returned change this build could not READ.
+   *
+   * The value moved and its description — the circuit's own return value —
+   * exists nowhere else, so nothing can say what is left. Dropping the colour
+   * would make a Passport quietly stop showing a token it had been paid;
+   * keeping a row with the transaction that spent it says what happened and
+   * leaves somebody a hash to go and look with. Colour → transaction.
+   */
+  readonly unreadChange: Record<string, string>;
 }
 
 /** An awaiting coin as it is STORED. Strings, for the module header's reason. */
@@ -440,6 +450,17 @@ function readAll(): Record<string, K1CoinStoreState> {
           awaiting[parsedRow.colorHex] = parsedRow;
         }
       }
+      const unreadChange = emptyMap<string>();
+      if (entry.unreadChange && typeof entry.unreadChange === 'object') {
+        for (const [colourKey, txId] of Object.entries(
+          entry.unreadChange as Record<string, unknown>,
+        )) {
+          const colour = normalisedColourHex(colourKey);
+          if (colour !== null && typeof txId === 'string' && txId.trim().length > 0) {
+            unreadChange[colour] = txId;
+          }
+        }
+      }
       accounts[key] = {
         encSecretKeyHex: typeof entry.encSecretKeyHex === 'string' ? entry.encSecretKeyHex : null,
         coins,
@@ -447,6 +468,7 @@ function readAll(): Record<string, K1CoinStoreState> {
         spentNonces: nonceListFrom(entry.spentNonces),
         mtIndexCandidates,
         awaiting,
+        unreadChange,
       };
     }
     return accounts;
@@ -520,6 +542,7 @@ export function emptyK1CoinStoreState(): K1CoinStoreState {
     spentNonces: [],
     mtIndexCandidates: emptyMap(),
     awaiting: emptyMap(),
+    unreadChange: emptyMap(),
   };
 }
 
@@ -557,6 +580,7 @@ interface K1StoreDraft {
   spentNonces: string[];
   mtIndexCandidates: Record<string, string[]>;
   awaiting: Record<string, AwaitingK1CoinRow>;
+  unreadChange: Record<string, string>;
 }
 
 function draftOf(state: K1CoinStoreState): K1StoreDraft {
@@ -570,6 +594,8 @@ function draftOf(state: K1CoinStoreState): K1StoreDraft {
   }
   const awaiting = emptyMap<AwaitingK1CoinRow>();
   Object.assign(awaiting, state.awaiting);
+  const unreadChange = emptyMap<string>();
+  Object.assign(unreadChange, state.unreadChange);
   return {
     encSecretKeyHex: state.encSecretKeyHex,
     coins,
@@ -577,6 +603,7 @@ function draftOf(state: K1CoinStoreState): K1StoreDraft {
     spentNonces: [...state.spentNonces],
     mtIndexCandidates,
     awaiting,
+    unreadChange,
   };
 }
 
@@ -623,6 +650,7 @@ function saveDraft(account: K1Account, draft: K1StoreDraft): void {
     encSecretKeyHex: draft.encSecretKeyHex,
     coins: draft.coins,
     queued: draft.queued,
+    unreadChange: draft.unreadChange,
     spentNonces: draft.spentNonces,
     mtIndexCandidates: draft.mtIndexCandidates,
     awaiting: draft.awaiting,
@@ -837,21 +865,27 @@ export function enqueueK1Coin(
 export function rememberK1ChangeCoin(
   account: K1Account,
   spentColour: string,
-  change: { colour: string; nonce: string; value: bigint } | null,
+  change: { colour: string; nonce: string; value: bigint } | null | 'unreadable',
   txId: string,
 ): void {
   const target = requireAccount(account);
   const spent = requireColour(spentColour);
+  /* `'unreadable'` is a spend whose change this build could not describe — see
+     {@link K1CoinStoreState.unreadChange}. It behaves like no change at all
+     except that the colour keeps a row naming the transaction, so nothing
+     silently stops being shown. */
+  const unreadable = change === 'unreadable';
+  const described = unreadable ? null : change;
   const row =
-    change === null
+    described === null
       ? null
       : awaitingRowFrom({
-          nonceHex: change.nonce,
-          colorHex: change.colour,
-          value: change.value.toString(),
+          nonceHex: described.nonce,
+          colorHex: described.colour,
+          value: described.value.toString(),
           txId,
         });
-  if (change !== null && row === null) {
+  if (described !== null && row === null) {
     throw new Error('A change coin needs a 64-hex nonce, a 64-hex colour, a value, and the transaction that produced it.');
   }
   editStore(target, (draft) => {
@@ -859,6 +893,12 @@ export function rememberK1ChangeCoin(
     delete draft.coins[spent];
     delete draft.mtIndexCandidates[spent];
     if (row !== null) draft.awaiting[row.colorHex] = row;
+    /* Written in the SAME write as the spend, for the reason the awaiting slot
+       is: a description that exists nowhere else must not be lost between two
+       writes, and the fact that there is no description is itself the thing
+       worth not losing. */
+    if (unreadable) draft.unreadChange[spent] = txId;
+    else delete draft.unreadChange[spent];
     /* Only when there is no change. A colour whose change coin is awaiting a
        position must NOT promote a queued coin into the held slot, or the
        change would land behind it and the account would spend them out of
@@ -936,6 +976,14 @@ export function renameK1AwaitingTx(account: K1Account, colour: string, txId: str
     if (!Object.hasOwn(draft.awaiting, wanted)) return;
     draft.awaiting[wanted] = { ...draft.awaiting[wanted], txId };
   });
+}
+
+/** The colours whose last spend returned change nothing could read, with its tx. */
+export function k1UnreadChanges(account: K1Account): { colour: string; txId: string }[] {
+  const state = loadK1CoinStore(account);
+  return Object.entries(state.unreadChange)
+    .map(([colour, txId]) => ({ colour, txId }))
+    .sort((a, b) => (a.colour < b.colour ? -1 : 1));
 }
 
 /* -------------------------------------------------------------------------- */

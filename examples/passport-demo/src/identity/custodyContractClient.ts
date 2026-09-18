@@ -1461,7 +1461,7 @@ function writeShieldedChange(
        change could not be described, and a later run has the hash to go and
        look. */
     console.warn('[account-custody] the withdrawal succeeded and its change could not be read');
-    rememberK1ChangeCoin(account, colour, null, identifier ?? 'unknown');
+    rememberK1ChangeCoin(account, colour, 'unreadable', identifier ?? 'unknown');
     return { change, txId: identifier ?? 'unknown' };
   }
   if (change.outcome === 'none') {

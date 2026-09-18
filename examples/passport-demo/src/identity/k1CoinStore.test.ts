@@ -66,6 +66,7 @@ const EMPTY_STORE = {
   spentNonces: [],
   mtIndexCandidates: {},
   awaiting: {},
+  unreadChange: {},
 };
 
 function coin(patch: Partial<K1HeldCoin> = {}): K1HeldCoin {
@@ -136,6 +137,7 @@ describe('a coin survives the thing that loses it today', () => {
       spentNonces: [],
       mtIndexCandidates: {},
       awaiting: {},
+      unreadChange: {},
     });
     expect(heldK1Coin(ALICE, NIGHT)?.value).toBe(2n ** 70n);
     expect(heldK1Coin(ALICE, NIGHT)?.mtIndex).toBe(9007199254740993n);
