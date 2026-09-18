@@ -455,16 +455,18 @@ second from the click to the last screen:
   computed=Some(cde320b0…484f)`, the client logged `retrying the spend against
   candidate position 1 of this coin`, and the second candidate proved. One
   refusal, one retry, one proof, nothing submitted on the wrong position.
-- **Two defects, one fixed here.** `custodyActionHistoryQuery` selected
+- **Two defects, both fixed.** `custodyActionHistoryQuery` selected
   `transactionResult` on the `Transaction` interface rather than inside
   `... on RegularTransaction`, so the v4 endpoint refused the whole query and
   every delivery came back `'unavailable'`: Home said "One payment is still
-  arriving" about money it had already spent. Fixed. Not fixed, and reported:
-  `finishStoppedSend` reads the wallet's notes ONCE, so pressing **Finish**
-  before the wallet has synced the note fails in under a second with a sentence
-  promising an automatic finish that nothing performs — the send path waits for
-  the note (`awaitShieldedNote`), and this path should either wait the same way
-  or stop saying so.
+  arriving" about money it had already spent. Fixed. And `finishStoppedSend`
+  read the wallet's notes ONCE, so pressing **Finish** before the wallet had
+  synced the note failed in under a second (45 s after a re-open it failed,
+  three minutes later the same press completed): **Finish** now waits for the
+  note exactly as the send path does — `awaitCustodyStoppedNote`, the same
+  `SETTLE_WATCH_MS` window and the same line on screen — and a window that
+  closes says so in one sentence naming the button, with nothing written and
+  nothing sent.
 
 **The mUSD send, end to end, three times.**
 
@@ -478,6 +480,17 @@ D2's Home then read `dyntwo1.night · 0.0004 NIGHT · 10 MUSD`, opened from its
 own sealed inbox entry — a Dynamic Passport paying another Dynamic Passport a
 shielded token, and the recipient reading it out of the contract's public inbox
 with its own key.
+
+**What landed AFTER this run, and is unit-drilled only.** Two repairs from the spot
+review of the same day are not in anything above, and step R3's record of the candidate
+rotation is the OLD behaviour: the list was consumed and the coin left on the last guess.
+Since then the list is rotated through and never discarded, the head is put back on the
+coin by any exit from the retry loop that is not a retry (`restartK1CoinCandidates`), and
+the sponsor's prove route tells a proof server's VERDICT (`400`/`422`, an allowlist) from
+a proof server or gateway that never judged the transaction (`503 prover-unavailable`) —
+so a restarted prover or a Caddy `404` no longer spends an approval per candidate. Every
+one of those paths is drilled in unit tests; none of them has been seen live, and the next
+live run is what would settle them.
 
 **What DID work end to end.** Setup and activation for two Dynamic Passports, a
 `.night` name for each, being paid mUSD by a passkey Passport and showing it as
