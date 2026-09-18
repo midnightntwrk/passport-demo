@@ -1750,7 +1750,7 @@ describe('the shielded withdrawal', () => {
   /* And when they run out, the sentence is the plain one — not a word about
      witnesses in front of somebody who chose Google. */
   it('gives up in the plain sentence when the service declines every candidate', async () => {
-    const { test, account, session, device } = await readyPassport({ proofRefusals: 5 });
+    const { test, account, session, device } = await readyPassport({ proofRefusals: 50 });
     putK1CoinCandidates(account, { colour: COLOUR, nonce: NONCE, value: 100n }, [5n, 6n]);
 
     await expect(
@@ -1767,11 +1767,13 @@ describe('the shielded withdrawal', () => {
         test.deps,
       ),
     ).rejects.toThrow('That payment could not be completed just now. Try again in a moment.');
-    expect(test.calls.filter((c) => c.circuit === 'withdraw_shielded_with_k256')).toHaveLength(2);
+    /* The two reported positions, then the eight the sweep adds around them,
+       and not one attempt more. */
+    expect(test.calls.filter((c) => c.circuit === 'withdraw_shielded_with_k256')).toHaveLength(10);
   });
 
   it('gives up rather than looping when the candidates run out', async () => {
-    const { test, account, session, device } = await readyPassport({ spendFailures: 5 });
+    const { test, account, session, device } = await readyPassport({ spendFailures: 50 });
     putK1CoinCandidates(account, { colour: COLOUR, nonce: NONCE, value: 100n }, [5n, 6n]);
 
     await expect(
@@ -1788,7 +1790,7 @@ describe('the shielded withdrawal', () => {
         test.deps,
       ),
     ).rejects.toThrow(/merkle/);
-    expect(test.calls.filter((c) => c.circuit === 'withdraw_shielded_with_k256')).toHaveLength(2);
+    expect(test.calls.filter((c) => c.circuit === 'withdraw_shielded_with_k256')).toHaveLength(10);
   });
 
   it('refuses before anything is signed when there is nothing to send', async () => {

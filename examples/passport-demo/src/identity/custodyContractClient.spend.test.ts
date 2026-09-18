@@ -756,8 +756,40 @@ describe('a spend against a position that may be the wrong one', () => {
     expect(isK1NonceSpent(ACCOUNT, NONCE)).toBe(false);
   });
 
+  it('sweeps around the window ONLY after every reported position has failed', async () => {
+    /* Nicolas, 2026/09/18: the rule is candidate retry over the reported
+       start/end window, and the sweep is insurance for a coin claimed by a
+       grafted intent, which can escape position attribution. So the two
+       reported positions go first, in order, and the third attempt is the
+       first swept one. */
+    const test = harness({ positionFailures: 2 });
+    const { session, device } = deviceFake();
+    putK1CoinCandidates(ACCOUNT, { colour: COLOUR, nonce: NONCE, value: 100n }, [5n, 6n]);
+
+    await withdrawShieldedK1(
+      session,
+      device,
+      {
+        recipientCoinPublicKey: new Uint8Array(32),
+        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+        colourHex: COLOUR,
+        amount: 40n,
+      },
+      undefined,
+      test.deps,
+    );
+
+    /* Three attempts: 5, 6, then the first position the sweep added. */
+    expect(
+      test.calls.filter((call) => call.circuit === 'withdraw_shielded_with_k256'),
+    ).toHaveLength(3);
+    /* And the third one proved, so the position is settled and the list is
+       gone: a settled position is a fact from then on. */
+    expect(k1CoinCandidates(ACCOUNT, COLOUR)).toEqual([]);
+  });
+
   it('gives up with the failure’s own words when every candidate has been tried', async () => {
-    const test = harness({ positionFailures: 5 });
+    const test = harness({ positionFailures: 50 });
     const { session, device } = deviceFake();
     putK1CoinCandidates(ACCOUNT, { colour: COLOUR, nonce: NONCE, value: 100n }, [5n, 6n]);
 
@@ -783,11 +815,16 @@ describe('a spend against a position that may be the wrong one', () => {
        store holds, so no later read rebuilt it (review, 2026/09/18). */
     expect(heldK1Coin(ACCOUNT, COLOUR)?.nonce).toBe(NONCE);
     expect(heldK1Coin(ACCOUNT, COLOUR)?.mtIndex).toBe(5n);
-    expect(k1CoinCandidates(ACCOUNT, COLOUR)).toEqual([5n, 6n]);
+    /* Appended, never substituted: the reported window keeps its place at the
+       head of the list, so a later run still starts where the chain's own
+       answer put it. */
+    expect(k1CoinCandidates(ACCOUNT, COLOUR)).toEqual([5n, 6n, 1n, 2n, 3n, 4n, 7n, 8n, 9n, 10n]);
     expect(isK1NonceSpent(ACCOUNT, NONCE)).toBe(false);
     expect(Object.keys(loadK1CoinStore(ACCOUNT).coins)).toEqual([COLOUR]);
+    /* Two reported positions and the eight the sweep adds around them, and not
+       one attempt more: the list is what bounds the approvals. */
     expect(test.calls.filter((call) => call.circuit === 'withdraw_shielded_with_k256')).toHaveLength(
-      2,
+      10,
     );
   });
 

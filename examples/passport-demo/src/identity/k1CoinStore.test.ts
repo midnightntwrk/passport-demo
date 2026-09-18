@@ -25,6 +25,7 @@ import {
   k1AwaitingTxNeedsChainHash,
   k1ColourHoldings,
   restartK1CoinCandidates,
+  widenK1CoinCandidates,
   k1CoinCandidates,
   k1ColourBalance,
   k1PrivateStateId,
@@ -848,6 +849,32 @@ describe('a coin whose position the chain gave two answers for', () => {
     /* And with no coin to advance at all, which is a resumed run against a
        store somebody has reset in another tab. */
     expect(advanceK1CoinCandidate(ALICE, MUSD)).toBeNull();
+  });
+
+  it('sweeps around the reported window, once, and never around its own sweep', () => {
+    /* Nicolas, 2026/09/18: the reported window is the rule and the sweep is
+       insurance for a coin claimed by a grafted intent. So the window keeps the
+       head of the list, the neighbours are appended after it, and a second call
+       adds nothing — a sweep computed from the whole list would widen around
+       its own last addition for ever. */
+    putK1CoinCandidates(ALICE, { colour: NIGHT, nonce: NONCE, value: 60n }, [10n, 11n]);
+    expect(widenK1CoinCandidates(ALICE, NIGHT)?.mtIndex).toBe(6n);
+    expect(k1CoinCandidates(ALICE, NIGHT)).toEqual([
+      10n, 11n, 6n, 7n, 8n, 9n, 12n, 13n, 14n, 15n,
+    ]);
+    expect(widenK1CoinCandidates(ALICE, NIGHT)).toBeNull();
+    expect(k1CoinCandidates(ALICE, NIGHT)).toHaveLength(10);
+  });
+
+  it('clamps the sweep at zero, and widens a one-position window too', () => {
+    putK1CoinCandidates(ALICE, { colour: NIGHT, nonce: NONCE, value: 60n }, [2n]);
+    expect(widenK1CoinCandidates(ALICE, NIGHT)?.mtIndex).toBe(0n);
+    expect(k1CoinCandidates(ALICE, NIGHT)).toEqual([2n, 0n, 1n, 3n, 4n, 5n, 6n]);
+  });
+
+  it('has nothing to widen without a list or without a coin', () => {
+    expect(widenK1CoinCandidates(ALICE, NIGHT)).toBeNull();
+    expect(widenK1CoinCandidates(ALICE, MUSD)).toBeNull();
   });
 
   it('tries the head when the position held is not one of the candidates', () => {

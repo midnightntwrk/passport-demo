@@ -143,6 +143,7 @@ import {
   restartK1CoinCandidates,
   settleK1AwaitingCoinByChainHash,
   settleK1Coin,
+  widenK1CoinCandidates,
   type K1Account,
   type K1CoinStoreState,
 } from './k1CoinStore.js';
@@ -1619,6 +1620,14 @@ export async function spendShieldedK1(
         unprovenTx = graftIntent(unprovenTx, claim.private.unprovenTx);
       }
 
+      /* SUBMITTED, NOT COMPOSED, BY midnight-js. On 5.0.0-beta.7 `submitTx`
+         proves, balances, and sends whatever transaction it is handed and
+         reads `circuitId` for nothing — its own multi-call path is a MERGE,
+         which duplicates the claimed output and fails balancing (MIP-0012
+         §6.6, and the reference client's conformance test says so in as many
+         words). So the graft above is made at the ledger level and this is
+         handed the finished transaction. The circuit names still travel,
+         because the proof provider is what names them to the service. */
       const finalized = await contracts.submitTx(providers, {
         unprovenTx,
         circuitId: [...circuits],
@@ -1675,7 +1684,15 @@ export async function spendShieldedK1(
         restartK1CoinCandidates(account, colour);
         throw cause;
       }
-      const nextCandidate = advanceK1CoinCandidate(account, colour);
+      /* THE REPORTED WINDOW FIRST, AND THE SWEEP ONLY AFTER IT (Nicolas,
+         2026/09/18). The rule is candidate retry over the positions the
+         indexer reported for the transaction; the composed-transfer run found
+         the recipient's coin inside that window and the sweep never fired.
+         It is tried at all because a coin claimed by a GRAFTED intent can
+         escape position attribution altogether — insurance, once, and only
+         when every reported position has failed. */
+      const nextCandidate =
+        advanceK1CoinCandidate(account, colour) ?? widenK1CoinCandidates(account, colour);
       if (nextCandidate === null) throw cause;
       attempt += 1;
       console.info(
@@ -2030,15 +2047,23 @@ function custodyPrivateState(record: Pick<CustodyAccountRecord, 'network' | 'add
 }
 
 /**
- * Whether a circuit's proof has to go to the service that holds the big keys.
+ * Whether a transaction's proof has to go to the service that holds the big keys.
  *
- * The gated circuits' prover keys are 235 MB and cannot cross a browser, so
- * they go to the sponsor's own proving route ({@link custodyProofProvider}).
- * The permissionless ones — the deposits — are 0.4 MB and 11 MB and prove
- * through the ordinary v3 route `createContractProviders` already built, which
- * is the route every other contract in this app uses. Sending a deposit to the
- * big-key service would work and would put a queue for 235 MB proofs in front
- * of a payment that does not need one.
+ * NOTHING HERE IS PROVED IN THE TAB, AND NOTHING CAN BE (Nicolas, 2026/09/18).
+ * The whole account custody contract is ZKIR v3 and there is no in-browser v3
+ * prover, so every proof of every one of its circuits is made somewhere else.
+ * The only question is WHICH somewhere: the gated circuits' prover keys are
+ * 235 MB and cannot cross a browser at all, so they go to the sponsor's own
+ * route, which holds the keys and is handed the transaction
+ * ({@link custodyProofProvider}); the permissionless deposits are 0.4 MB and
+ * 11 MB, so the browser can upload their keys to the proof server through the
+ * ordinary v3 route `createContractProviders` already built. Either way the
+ * proof is made on the droplet and the service that makes it sees the coin and
+ * the amount — that is a property of this build, not a bug in it, and it is
+ * recorded in `docs/demo/account-custody-layer-design.md`.
+ *
+ * Sending a deposit to the big-key service would work and would put a queue for
+ * 235 MB proofs in front of a payment that does not need one.
  */
 function custodyNeedsBigKeyProver(circuits: readonly string[]): boolean {
   /* ANY of them. A composed transaction pairs a gated spend with a
