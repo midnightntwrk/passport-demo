@@ -61,11 +61,8 @@ import {
   rememberK1ChangeCoin,
   type K1Account,
 } from './k1CoinStore.js';
-import { openCustodyInboxEntry, generateCustodyEncKeyPair } from './custodyInbox.js';
 import {
-  custodyPermissionlessCallAt,
   custodyWitnesses,
-  depositShieldedIntoCustody,
   resetCustodySessionState,
   withdrawShieldedK1,
   type CustodyDeps,
@@ -101,7 +98,6 @@ vi.mock('./contractRuntime.js', async (importOriginal) => ({
 /* -------------------------------------------------------------------------- */
 
 const ADDRESS = 'ab'.repeat(32);
-const PEER = 'dd'.repeat(32);
 const COLOUR = '1a'.repeat(32);
 const OTHER_COLOUR = '2b'.repeat(32);
 const NONCE = '7f'.repeat(32);
@@ -148,6 +144,26 @@ function pureFake(): CustodyPureCircuits {
         /* THE COIN IS IN THE CHALLENGE, and its position with it — which is
            what makes "was the challenge rebuilt for the next candidate" a
            question this fake can answer. */
+        coin.value,
+        coin.mt_index,
+        nonce,
+      ),
+    challenge_withdraw_shielded_to_contract_with_k256: (
+      self,
+      pk,
+      recipient,
+      color,
+      amount,
+      coin,
+      nonce,
+    ) =>
+      tag(
+        'ch-wsc',
+        bytesToHex(self.bytes),
+        pk.x,
+        bytesToHex(recipient.bytes),
+        color,
+        amount,
         coin.value,
         coin.mt_index,
         nonce,
@@ -216,22 +232,66 @@ interface ChainFake {
   /** A failure a different position could not fix. */
   otherFailure?: string;
   /**
+   * What a wrong position says when it fails. The default is the runtime naming
+   * the merkle path; the LIVE shape is a bare trap with no words in it at all
+   * (2026/09/18), which is why it is settable.
+   */
+  positionFailureMessage?: string;
+  /**
+   * A failure raised from inside `submitTx` AFTER the proof came back — a
+   * balancing or submission failure. The transaction may be away, so nothing
+   * may retry it however the failure is worded.
+   */
+  submitFailure?: string;
+  /**
+   * The chain's verdict on the transaction, as the finalised data carries it.
+   *
+   * `undefined` is the ordinary success. `null` is finalised data with NO
+   * status in it at all — the shape this build cannot read a verdict out of,
+   * which is not the same as a verdict of no.
+   */
+  submitStatus?: string | null;
+  /**
+   * A failure raised while WAITING for the chain's verdict.
+   *
+   * The node has the transaction and the wait for finality failed — a dropped
+   * socket, which is what the outages of 2026/09/05 and 2026/09/07 were. It
+   * says nothing about whether the transaction landed.
+   */
+  watchFailure?: string;
+  /**
    * What the indexer answers when a row still filed under an identifier is
    * asked about again — `settleK1AwaitingCoinByChainHash`'s second chance.
    */
   chainHashLater?: (txId: string) => string | null;
 }
 
+/** An unproven CALL, as the fake `createUnprovenCallTx` hands it back. */
+interface FakeCallTx {
+  readonly circuit: string;
+  readonly args: readonly unknown[];
+  /** The proof provider serialises the transaction it is given. */
+  readonly serialize: () => Uint8Array;
+  /** Every intent grafted onto this one — the direct transfer's claim. */
+  readonly grafted: readonly unknown[];
+  readonly intents: Map<number, unknown>;
+  addIntent(segment: { tag: string }, intent: unknown): FakeCallTx;
+}
+
 interface SpendHarness {
   deps: Partial<CustodyDeps>;
   storage: CustodyStorage & { data: Map<string, string> };
-  calls: { circuit: string; args: unknown[] }[];
+  calls: { circuit: string; args: unknown[]; options?: unknown }[];
+  /** How many intents each submitted transaction carried grafted onto it. */
+  grafts: number[];
   connections: { privateStateId: string; account: unknown }[];
   opened: string[];
   /** Every commitment-window question asked, by transaction. */
   windowQuestions: string[];
   /** Every identifier the settle asked the indexer to name the hash of. */
   hashQuestions: string[];
+  /** Every transaction the run waited on the chain's verdict for. */
+  watched: string[];
   chain: ChainFake;
 }
 
@@ -258,42 +318,110 @@ function harness(
   };
   saveCustodyRecord(storage, record);
 
-  const calls: { circuit: string; args: unknown[] }[] = [];
+  const calls: { circuit: string; args: unknown[]; options?: unknown }[] = [];
+  /** How many intents each submitted transaction carried grafted onto it. */
+  const grafts: number[] = [];
   const connections: { privateStateId: string; account: unknown }[] = [];
   const opened: string[] = [];
   const windowQuestions: string[] = [];
   const hashQuestions: string[] = [];
+  const watched: string[] = [];
   let submitted = 0;
 
-  const callTx = new Proxy(
-    {},
-    {
-      get:
-        (_target, circuit: string) =>
-        (...args: unknown[]) => {
-          calls.push({ circuit, args });
-          if (circuit.startsWith('withdraw_shielded')) {
-            if ((chain.positionFailures ?? 0) > 0) {
-              chain.positionFailures = (chain.positionFailures ?? 0) - 1;
-              return Promise.reject(new Error('could not build the merkle path for this coin'));
-            }
-            if (chain.otherFailure !== undefined) {
-              return Promise.reject(new Error(chain.otherFailure));
-            }
-          }
-          submitted += 1;
-          return Promise.resolve({
-            public: { txId: `id-${submitted}` },
-            private: { result: chain.circuitResult, nextPrivateState: { coins: {} } },
-          });
-        },
-    },
-  );
+  /** An unproven call, with the two members a graft needs. */
+  const unprovenCall = (circuit: string, args: readonly unknown[]): FakeCallTx => {
+    /* THE INTENTS MAP GROWS, as the real `addIntent` grows it. A fake whose
+       map stayed one long would drill a world in which a graft that attached
+       nothing is indistinguishable from one that worked — which is the world
+       the silent `?? sender` fallback lived in, and it ends in a transaction
+       that spends the sender's coin and pays nobody. */
+    const make = (grafted: readonly unknown[], intents: Map<number, unknown>): FakeCallTx => ({
+      circuit,
+      args,
+      grafted,
+      serialize: () => new Uint8Array([1, 2, 3]),
+      intents,
+      addIntent: (segment, intent) => {
+        if (segment.tag !== 'random') throw new Error('a claim goes into a random segment');
+        const next = new Map(intents);
+        next.set(next.size, intent);
+        return make([...grafted, intent], next);
+      },
+    });
+    return make([], new Map([[0, { intentFor: circuit }]]));
+  };
+
+  /* THE SPEND IS BUILT HERE AND SENT BELOW. A wrong coin position traps while
+     the circuit is executed against the contract's own Zswap tree, which is
+     this step; the proving service's own refusal comes one step later. */
+  const createUnprovenCallTx = (_providers: unknown, callOptions: unknown) => {
+    const { circuitId, args, contractAddress } = callOptions as {
+      circuitId: string;
+      args: unknown[];
+      contractAddress: string;
+    };
+    calls.push({ circuit: circuitId, args, options: callOptions });
+    opened.push(contractAddress);
+    if (circuitId.startsWith('withdraw_shielded')) {
+      if ((chain.positionFailures ?? 0) > 0) {
+        chain.positionFailures = (chain.positionFailures ?? 0) - 1;
+        return Promise.reject(
+          new Error(chain.positionFailureMessage ?? 'could not build the merkle path for this coin'),
+        );
+      }
+      if (chain.otherFailure !== undefined) {
+        return Promise.reject(new Error(chain.otherFailure));
+      }
+    }
+    return Promise.resolve({
+      private: {
+        result: circuitId === 'deposit_shielded' ? null : chain.circuitResult,
+        unprovenTx: unprovenCall(circuitId, args),
+        nextPrivateState: { coins: {} },
+      },
+    });
+  };
+
+  /* REAL `submitTxAsync` PROVES, BALANCES, THEN SUBMITS, behind one call —
+     which is why the caller cannot tell those three apart from the outside and
+     why the proof provider reports the boundary. It comes back with the id the
+     moment the node has the transaction and says NOTHING about what became of
+     it; that is a second question, below. The fake does the same, so a test can
+     fail on any of the four. */
+  const submitTxAsync = async (submitProviders: unknown, submitOptions: unknown) => {
+    const { unprovenTx } = submitOptions as { unprovenTx: FakeCallTx };
+    const prover = (submitProviders as {
+      proofProvider?: { proveTx(tx: unknown): Promise<unknown> };
+    }).proofProvider;
+    if (prover) await prover.proveTx(unprovenTx);
+    grafts.push(unprovenTx.grafted.length);
+    submitted += 1;
+    if (chain.submitFailure !== undefined) throw new Error(chain.submitFailure);
+    return `id-${submitted}`;
+  };
+
+  /* THE CHAIN'S ANSWER, ASKED FOR SEPARATELY. The status is part of it, and the
+     real one carries it whether the chain took the transaction or refused it: a
+     fake that answered only an id would drill a world in which arriving is the
+     same as succeeding, which is exactly the world the defect lived in. */
+  const watchForTxData = (txId: string) => {
+    watched.push(txId);
+    if (chain.watchFailure !== undefined) return Promise.reject(new Error(chain.watchFailure));
+    return Promise.resolve({
+      txId,
+      ...(chain.submitStatus === null ? {} : { status: chain.submitStatus ?? 'SucceedEntirely' }),
+    });
+  };
+
+  /* The library's own composition of the two, for anything that wants it. */
+  const submitTx = async (submitProviders: unknown, submitOptions: unknown) =>
+    watchForTxData(await submitTxAsync(submitProviders, submitOptions));
 
   const providers: Record<string, unknown> = {
     publicDataProvider: {
       queryContractState: () =>
         Promise.resolve({ data: 'state', serialize: () => new Uint8Array([1]) }),
+      watchForTxData,
     },
     privateStateProvider: {
       setContractAddress: () => undefined,
@@ -310,10 +438,12 @@ function harness(
   return {
     storage,
     calls,
+    grafts,
     connections,
     opened,
     windowQuestions,
     hashQuestions,
+    watched,
     chain,
     deps: {
       storage: () => storage,
@@ -345,11 +475,10 @@ function harness(
       contracts: () =>
         Promise.resolve({
           createUnprovenDeployTx: () => Promise.reject(new Error('not used here')),
-          submitTx: () => Promise.reject(new Error('not used here')),
-          findDeployedContract: (_providers: unknown, callOptions: unknown) => {
-            opened.push((callOptions as { contractAddress: string }).contractAddress);
-            return Promise.resolve({ callTx });
-          },
+          createUnprovenCallTx,
+          submitTx,
+          submitTxAsync,
+          findDeployedContract: () => Promise.reject(new Error('not used here')),
         } as never),
       resolveChainHash: (_indexer: string, txId: string) => {
         hashQuestions.push(txId);
@@ -399,9 +528,29 @@ async function until(condition: () => boolean, what: string): Promise<void> {
   throw new Error(`the run never reached: ${what}`);
 }
 
+/** What the stubbed proving service answers next. Set by the phase tests. */
+let proveAnswer: () => Promise<Response> = () =>
+  Promise.resolve({
+    ok: true,
+    status: 200,
+    text: () => Promise.resolve(JSON.stringify({ provenTx: 'ab' })),
+  } as Response);
+
 beforeEach(() => {
   resetCustodySessionState();
   resolveHashWith = (_indexer, identifier) => Promise.resolve(chainHashOf(identifier));
+  /* THE PROVING SERVICE, STUBBED. `custodyProviders` builds the real
+     `custodyProofProvider` around `globalThis.fetch`, and the whole point of
+     these drills is that the provider's `onProved` is what tells a spend which
+     side of the proof it failed on — so the provider is exercised rather than
+     replaced. */
+  proveAnswer = () =>
+    Promise.resolve({
+      ok: true,
+      status: 200,
+      text: () => Promise.resolve(JSON.stringify({ provenTx: 'ab' })),
+    } as Response);
+  vi.stubGlobal('fetch', () => proveAnswer());
   const coins = new Map<string, string>();
   Object.defineProperty(globalThis, 'window', {
     configurable: true,
@@ -435,7 +584,10 @@ describe('the change coin reaches storage before anything slow happens', () => {
     const pending = withdrawShieldedK1(
       session,
       device,
-      { recipientCoinPublicKey: new Uint8Array(32).fill(0x11), colourHex: COLOUR, amount: 40n },
+      {
+        recipientCoinPublicKey: new Uint8Array(32).fill(0x11),
+        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+        colourHex: COLOUR, amount: 40n },
       undefined,
       test.deps,
     );
@@ -466,7 +618,10 @@ describe('the change coin reaches storage before anything slow happens', () => {
     const result = await withdrawShieldedK1(
       session,
       device,
-      { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 40n },
+      {
+        recipientCoinPublicKey: new Uint8Array(32),
+        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+        colourHex: COLOUR, amount: 40n },
       undefined,
       test.deps,
     );
@@ -507,7 +662,10 @@ describe('the change coin reaches storage before anything slow happens', () => {
     const result = await withdrawShieldedK1(
       session,
       device,
-      { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 40n },
+      {
+        recipientCoinPublicKey: new Uint8Array(32),
+        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+        colourHex: COLOUR, amount: 40n },
       undefined,
       test.deps,
     );
@@ -530,7 +688,10 @@ describe('the change coin reaches storage before anything slow happens', () => {
     const result = await withdrawShieldedK1(
       session,
       device,
-      { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 40n },
+      {
+        recipientCoinPublicKey: new Uint8Array(32),
+        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+        colourHex: COLOUR, amount: 40n },
       undefined,
       test.deps,
     );
@@ -554,7 +715,10 @@ describe('the change coin reaches storage before anything slow happens', () => {
     const pending = withdrawShieldedK1(
       session,
       device,
-      { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 40n },
+      {
+        recipientCoinPublicKey: new Uint8Array(32),
+        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+        colourHex: COLOUR, amount: 40n },
       undefined,
       test.deps,
     );
@@ -584,7 +748,10 @@ describe('the change coin reaches storage before anything slow happens', () => {
     const result = await withdrawShieldedK1(
       session,
       device,
-      { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 40n },
+      {
+        recipientCoinPublicKey: new Uint8Array(32),
+        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+        colourHex: COLOUR, amount: 40n },
       undefined,
       test.deps,
     );
@@ -594,25 +761,117 @@ describe('the change coin reaches storage before anything slow happens', () => {
     expect(heldK1Coin(ACCOUNT, COLOUR)?.mtIndex).toBe(8n);
   });
 
-  it('records a spend whose change it could not read, rather than losing the colour', async () => {
+  /* FLIPPED 2026/09/18. This used to assert that a spend whose change could not
+     be read was SUBMITTED and the colour given a row naming the transaction.
+     That is the wrong half of the choice: the description is the circuit's
+     return value and exists nowhere else in the world, so submitting without it
+     strands the remainder of somebody's balance on chain permanently, and the
+     row naming the transaction buys nobody anything they can spend. The read
+     happens on the unproven call, so refusing costs exactly nothing. */
+  it('refuses to send a payment whose change it could not read, and sends nothing', async () => {
     const test = harness({ circuitResult: { is_some: true, value: 'not a coin' } });
     const { session, device } = deviceFake();
     putK1Coin(ACCOUNT, { colour: COLOUR, nonce: NONCE, value: 100n, mtIndex: 5n });
 
-    const result = await withdrawShieldedK1(
-      session,
-      device,
-      { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 40n },
-      undefined,
-      test.deps,
-    );
+    await expect(
+      withdrawShieldedK1(
+        session,
+        device,
+        {
+          recipientCoinPublicKey: new Uint8Array(32),
+          recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+          colourHex: COLOUR, amount: 40n },
+        undefined,
+        test.deps,
+      ),
+    ).rejects.toThrow('This Passport could not prepare that payment. Nothing was sent.');
 
-    expect(result.change.outcome).toBe('unreadable');
-    expect(result.changePosition).toBe('none');
-    /* The colour keeps a row naming the transaction, so nothing silently stops
-       being shown and somebody has a hash to go and look with. */
-    expect(loadK1CoinStore(ACCOUNT).unreadChange[COLOUR]).toBe('id-1');
-    expect(isK1NonceSpent(ACCOUNT, NONCE)).toBe(true);
+    /* NOTHING WAS SUBMITTED, so nothing moved and the store is untouched: the
+       coin is still held, its nonce is not spent, and no colour carries a row
+       saying a payment left. */
+    expect(test.grafts).toEqual([]);
+    expect(heldK1Coin(ACCOUNT, COLOUR)?.nonce).toBe(NONCE);
+    expect(isK1NonceSpent(ACCOUNT, NONCE)).toBe(false);
+    expect(loadK1CoinStore(ACCOUNT).unreadChange).toEqual({});
+    expect(awaitingK1Coins(ACCOUNT)).toEqual([]);
+  });
+
+  /* ---------------------------------------------------------------------- */
+  /* THE CHAIN'S VERDICT (R1)                                                */
+  /*                                                                         */
+  /* `submitTx` resolves with the finalised data for a transaction that      */
+  /* FAILED exactly as it does for one that succeeded. Booking the spend on  */
+  /* the strength of the promise resolving deletes the held coin, marks its  */
+  /* nonce spent for ever, and files a change coin the chain never created — */
+  /* and `reconcileK1CoinFromChain` then answers 'spent' about a coin the    */
+  /* account still holds, which is a balance that cannot come back.          */
+  /* ---------------------------------------------------------------------- */
+
+  it('leaves the coin held when the chain refused the transaction', async () => {
+    const test = harness({ circuitResult: changeResult(60n), submitStatus: 'FailFallible' });
+    const { session, device } = deviceFake();
+    putK1CoinCandidates(ACCOUNT, { colour: COLOUR, nonce: NONCE, value: 100n }, [5n, 6n]);
+
+    const seen: string[] = [];
+    await expect(
+      withdrawShieldedK1(
+        session,
+        device,
+        {
+          recipientCoinPublicKey: new Uint8Array(32),
+          recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+          colourHex: COLOUR,
+          amount: 40n,
+        },
+        (phase) => {
+          if (phase.txId !== undefined) seen.push(phase.txId);
+        },
+        test.deps,
+      ),
+    ).rejects.toThrow('That payment did not go through, and nothing left your Passport.');
+
+    /* A FAILED TRANSACTION SPENT NOTHING, so the store says nothing happened. */
+    expect(heldK1Coin(ACCOUNT, COLOUR)?.nonce).toBe(NONCE);
+    expect(heldK1Coin(ACCOUNT, COLOUR)?.mtIndex).toBe(5n);
+    expect(isK1NonceSpent(ACCOUNT, NONCE)).toBe(false);
+    expect(awaitingK1Coins(ACCOUNT)).toEqual([]);
+    /* THE GUESSES DO NOT COME BACK, and that is right: the proof verified
+       against position 5, which is the chain agreeing with it, and that stays
+       true whatever the transaction carrying it came to afterwards. Putting the
+       list back would cost an approval per position on the next press. */
+    expect(k1CoinCandidates(ACCOUNT, COLOUR)).toEqual([]);
+    /* ONE ATTEMPT. A refused transaction is not a wrong position, and a second
+       candidate would be a second approval and a second transaction. */
+    expect(test.calls.filter((call) => call.circuit === 'withdraw_shielded_with_k256')).toHaveLength(
+      1,
+    );
+    /* And the transaction is still named, because one exists: the record must
+       not tell somebody nothing was sent when something was. */
+    expect(seen).toEqual(['id-1']);
+  });
+
+  it('hedges rather than guessing when the finalised data carried no verdict', async () => {
+    const test = harness({ circuitResult: changeResult(60n), submitStatus: null });
+    const { session, device } = deviceFake();
+    putK1Coin(ACCOUNT, { colour: COLOUR, nonce: NONCE, value: 100n, mtIndex: 5n });
+
+    await expect(
+      withdrawShieldedK1(
+        session,
+        device,
+        {
+          recipientCoinPublicKey: new Uint8Array(32),
+          recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+          colourHex: COLOUR,
+          amount: 40n,
+        },
+        undefined,
+        test.deps,
+      ),
+    ).rejects.toThrow('Your payment was sent and this Passport could not confirm it.');
+
+    expect(heldK1Coin(ACCOUNT, COLOUR)?.nonce).toBe(NONCE);
+    expect(isK1NonceSpent(ACCOUNT, NONCE)).toBe(false);
   });
 
   it('promotes the next payment when the spend consumed the coin exactly', async () => {
@@ -624,7 +883,10 @@ describe('the change coin reaches storage before anything slow happens', () => {
     const result = await withdrawShieldedK1(
       session,
       device,
-      { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 100n },
+      {
+        recipientCoinPublicKey: new Uint8Array(32),
+        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+        colourHex: COLOUR, amount: 100n },
       undefined,
       test.deps,
     );
@@ -648,7 +910,10 @@ describe('a spend against a position that may be the wrong one', () => {
     await withdrawShieldedK1(
       session,
       device,
-      { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 40n },
+      {
+        recipientCoinPublicKey: new Uint8Array(32),
+        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+        colourHex: COLOUR, amount: 40n },
       undefined,
       test.deps,
     );
@@ -675,7 +940,10 @@ describe('a spend against a position that may be the wrong one', () => {
       withdrawShieldedK1(
         session,
         device,
-        { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 40n },
+        {
+        recipientCoinPublicKey: new Uint8Array(32),
+        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+        colourHex: COLOUR, amount: 40n },
         undefined,
         test.deps,
       ),
@@ -691,8 +959,40 @@ describe('a spend against a position that may be the wrong one', () => {
     expect(isK1NonceSpent(ACCOUNT, NONCE)).toBe(false);
   });
 
+  it('sweeps around the window ONLY after every reported position has failed', async () => {
+    /* Nicolas, 2026/09/18: the rule is candidate retry over the reported
+       start/end window, and the sweep is insurance for a coin claimed by a
+       grafted intent, which can escape position attribution. So the two
+       reported positions go first, in order, and the third attempt is the
+       first swept one. */
+    const test = harness({ circuitResult: changeResult(60n), positionFailures: 2 });
+    const { session, device } = deviceFake();
+    putK1CoinCandidates(ACCOUNT, { colour: COLOUR, nonce: NONCE, value: 100n }, [5n, 6n]);
+
+    await withdrawShieldedK1(
+      session,
+      device,
+      {
+        recipientCoinPublicKey: new Uint8Array(32),
+        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+        colourHex: COLOUR,
+        amount: 40n,
+      },
+      undefined,
+      test.deps,
+    );
+
+    /* Three attempts: 5, 6, then the first position the sweep added. */
+    expect(
+      test.calls.filter((call) => call.circuit === 'withdraw_shielded_with_k256'),
+    ).toHaveLength(3);
+    /* And the third one proved, so the position is settled and the list is
+       gone: a settled position is a fact from then on. */
+    expect(k1CoinCandidates(ACCOUNT, COLOUR)).toEqual([]);
+  });
+
   it('gives up with the failure’s own words when every candidate has been tried', async () => {
-    const test = harness({ positionFailures: 5 });
+    const test = harness({ positionFailures: 50 });
     const { session, device } = deviceFake();
     putK1CoinCandidates(ACCOUNT, { colour: COLOUR, nonce: NONCE, value: 100n }, [5n, 6n]);
 
@@ -700,7 +1000,10 @@ describe('a spend against a position that may be the wrong one', () => {
       withdrawShieldedK1(
         session,
         device,
-        { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 40n },
+        {
+        recipientCoinPublicKey: new Uint8Array(32),
+        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+        colourHex: COLOUR, amount: 40n },
         undefined,
         test.deps,
       ),
@@ -715,11 +1018,16 @@ describe('a spend against a position that may be the wrong one', () => {
        store holds, so no later read rebuilt it (review, 2026/09/18). */
     expect(heldK1Coin(ACCOUNT, COLOUR)?.nonce).toBe(NONCE);
     expect(heldK1Coin(ACCOUNT, COLOUR)?.mtIndex).toBe(5n);
-    expect(k1CoinCandidates(ACCOUNT, COLOUR)).toEqual([5n, 6n]);
+    /* Appended, never substituted: the reported window keeps its place at the
+       head of the list, so a later run still starts where the chain's own
+       answer put it. */
+    expect(k1CoinCandidates(ACCOUNT, COLOUR)).toEqual([5n, 6n, 1n, 2n, 3n, 4n, 7n, 8n, 9n, 10n]);
     expect(isK1NonceSpent(ACCOUNT, NONCE)).toBe(false);
     expect(Object.keys(loadK1CoinStore(ACCOUNT).coins)).toEqual([COLOUR]);
+    /* Two reported positions and the eight the sweep adds around them, and not
+       one attempt more: the list is what bounds the approvals. */
     expect(test.calls.filter((call) => call.circuit === 'withdraw_shielded_with_k256')).toHaveLength(
-      2,
+      10,
     );
   });
 
@@ -737,7 +1045,10 @@ describe('a spend against a position that may be the wrong one', () => {
       withdrawShieldedK1(
         session,
         device,
-        { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 40n },
+        {
+        recipientCoinPublicKey: new Uint8Array(32),
+        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+        colourHex: COLOUR, amount: 40n },
         undefined,
         test.deps,
       ),
@@ -750,6 +1061,183 @@ describe('a spend against a position that may be the wrong one', () => {
     /* The guess, the list, and the coin are all exactly as they were. */
     expect(heldK1Coin(ACCOUNT, COLOUR)?.mtIndex).toBe(5n);
     expect(k1CoinCandidates(ACCOUNT, COLOUR)).toEqual([5n, 6n]);
+    expect(isK1NonceSpent(ACCOUNT, NONCE)).toBe(false);
+  });
+
+  /* ---------------------------------------------------------------------- */
+  /* THE PROOF BOUNDARY (defect 19, fixed 2026/09/18)                        */
+  /*                                                                         */
+  /* A spend may be retried while it is still in this tab's own hands and    */
+  /* never once a proof has come back, because `submitTx` goes on from there */
+  /* to balance and submit. The three drills below fix that line in place.   */
+  /* Note what the first two have in common: the SAME words, `RuntimeError:  */
+  /* unreachable`, on either side of the proof — one retried, one not. That  */
+  /* is the whole point. The old code decided this on the wording and got it */
+  /* exactly backwards, so a stale position could not be retried at all.     */
+  /* ---------------------------------------------------------------------- */
+
+  it('retries the bare runtime trap a stale position really produces', async () => {
+    const test = harness({
+      circuitResult: changeResult(60n),
+      positionFailures: 1,
+      /* NO MERKLE, NO WITNESS, NO WORDS AT ALL — what D1 produced live against
+         a coin the chain had moved on from. */
+      positionFailureMessage: 'RuntimeError: unreachable',
+    });
+    const { session, device, signed } = deviceFake();
+    putK1CoinCandidates(ACCOUNT, { colour: COLOUR, nonce: NONCE, value: 100n }, [5n, 6n]);
+
+    await withdrawShieldedK1(
+      session,
+      device,
+      {
+        recipientCoinPublicKey: new Uint8Array(32),
+        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+        colourHex: COLOUR,
+        amount: 40n,
+      },
+      undefined,
+      test.deps,
+    );
+
+    /* Two candidates tried, and ONE approval each — not one per failure. */
+    expect(test.calls.filter((call) => call.circuit === 'withdraw_shielded_with_k256')).toHaveLength(
+      2,
+    );
+    expect(signed).toHaveLength(2);
+    expect(heldK1Coin(ACCOUNT, COLOUR)?.nonce).toBe(CHANGE_NONCE);
+  });
+
+  it('never retries a failure raised after the proof came back, whatever it says', async () => {
+    const test = harness({
+      circuitResult: changeResult(60n),
+      /* THE SAME WORDS as the drill above, on the far side of the proof. */
+      submitFailure: 'RuntimeError: unreachable',
+    });
+    const { session, device, signed } = deviceFake();
+    putK1CoinCandidates(ACCOUNT, { colour: COLOUR, nonce: NONCE, value: 100n }, [5n, 6n]);
+
+    await expect(
+      withdrawShieldedK1(
+        session,
+        device,
+        {
+          recipientCoinPublicKey: new Uint8Array(32),
+          recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+          colourHex: COLOUR,
+          amount: 40n,
+        },
+        undefined,
+        test.deps,
+      ),
+    ).rejects.toThrow('unreachable');
+
+    /* ONE build and ONE approval. The transaction was proved, so it may be on
+       its way; building it again would be a second payment. */
+    expect(test.calls.filter((call) => call.circuit === 'withdraw_shielded_with_k256')).toHaveLength(
+      1,
+    );
+    expect(signed).toHaveLength(1);
+    /* And the store is left canonical rather than mid-rotation. Nothing was
+       written, because the failure came before there was an id to write
+       anything under — the transaction was never acknowledged. */
+    expect(heldK1Coin(ACCOUNT, COLOUR)?.mtIndex).toBe(5n);
+    expect(k1CoinCandidates(ACCOUNT, COLOUR)).toEqual([5n, 6n]);
+    expect(awaitingK1Coins(ACCOUNT)).toEqual([]);
+  });
+
+  /* ---------------------------------------------------------------------- */
+  /* THE WAIT FOR A VERDICT IS NOT THE SUBMISSION (R2)                       */
+  /*                                                                         */
+  /* `submitTx` is `submitTxAsync` followed by an unbounded wait for         */
+  /* finality, so writing only after it returns puts the change coin's ONLY  */
+  /* description behind a socket that has dropped twice in this build's      */
+  /* history (2026/09/05, 2026/09/07). Split, the id arrives at submission   */
+  /* and the write happens there — so a wait that fails loses nothing.       */
+  /* ---------------------------------------------------------------------- */
+
+  it('keeps the change and names the transaction when the wait for a verdict fails', async () => {
+    const test = harness({
+      circuitResult: changeResult(60n),
+      /* The shape of a dropped socket: the node took it, the wait did not
+         survive long enough to hear what became of it. */
+      watchFailure: 'WebSocket is not connected',
+    });
+    const { session, device, signed } = deviceFake();
+    putK1CoinCandidates(ACCOUNT, { colour: COLOUR, nonce: NONCE, value: 100n }, [5n, 6n]);
+
+    const seen: string[] = [];
+    await expect(
+      withdrawShieldedK1(
+        session,
+        device,
+        {
+          recipientCoinPublicKey: new Uint8Array(32),
+          recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+          colourHex: COLOUR,
+          amount: 40n,
+        },
+        (phase) => {
+          if (phase.txId !== undefined) seen.push(phase.txId);
+        },
+        test.deps,
+      ),
+    ).rejects.toThrow('Your payment was sent and this Passport could not confirm it.');
+
+    /* THE DESCRIPTION SURVIVED, which is the whole of the fix: it exists
+       nowhere else in the world, and the wait is exactly where it used to be
+       lost. The coin is filed under the identifier it was submitted with. */
+    expect(awaitingK1Coins(ACCOUNT)).toEqual([
+      { colour: COLOUR, nonce: CHANGE_NONCE, value: 60n, txId: 'id-1' },
+    ]);
+    expect(isK1NonceSpent(ACCOUNT, NONCE)).toBe(true);
+    expect(heldK1Coin(ACCOUNT, COLOUR)).toBeNull();
+    /* The record names the transaction, so the screen hedges rather than
+       telling somebody nothing was sent. */
+    expect(seen).toEqual(['id-1']);
+    /* And still one approval: the transaction may be away. */
+    expect(signed).toHaveLength(1);
+    expect(test.watched).toEqual(['id-1']);
+  });
+
+  it('restores the head and keeps the list when every candidate has been tried', async () => {
+    const test = harness({
+      circuitResult: changeResult(60n),
+      positionFailures: 99,
+      positionFailureMessage: 'RuntimeError: unreachable',
+    });
+    const { session, device } = deviceFake();
+    putK1CoinCandidates(ACCOUNT, { colour: COLOUR, nonce: NONCE, value: 100n }, [5n, 6n]);
+
+    await expect(
+      withdrawShieldedK1(
+        session,
+        device,
+        {
+          recipientCoinPublicKey: new Uint8Array(32),
+          recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+          colourHex: COLOUR,
+          amount: 40n,
+        },
+        undefined,
+        test.deps,
+      ),
+    ).rejects.toThrow('unreachable');
+
+    /* THE HEAD IS THE FIRST POSITION THE CHAIN OFFERED, again. A coin left on
+       the last candidate is a coin whose next press starts at the end of the
+       list and runs it out after one approval, never trying the position the
+       window reported first.
+
+       THE LIST SURVIVES, AND IT IS LONGER THAN IT WAS: exhausting the reported
+       window appends the ±4 sweep once, so the next press still has somewhere
+       to go. What must NOT have happened is the list being cleared or the head
+       being left at the end of it. */
+    const candidates = k1CoinCandidates(ACCOUNT, COLOUR);
+    expect(heldK1Coin(ACCOUNT, COLOUR)?.mtIndex).toBe(5n);
+    expect(candidates[0]).toBe(5n);
+    expect(candidates).toContain(6n);
+    expect(candidates.length).toBeGreaterThan(2);
     expect(isK1NonceSpent(ACCOUNT, NONCE)).toBe(false);
   });
 
@@ -779,7 +1267,10 @@ describe('a spend against a position that may be the wrong one', () => {
       withdrawShieldedK1(
         dismissing,
         device,
-        { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 40n },
+        {
+        recipientCoinPublicKey: new Uint8Array(32),
+        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+        colourHex: COLOUR, amount: 40n },
         undefined,
         test.deps,
       ),
@@ -802,7 +1293,10 @@ describe('a spend against a position that may be the wrong one', () => {
       withdrawShieldedK1(
         session,
         device,
-        { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 40n },
+        {
+        recipientCoinPublicKey: new Uint8Array(32),
+        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+        colourHex: COLOUR, amount: 40n },
         undefined,
         test.deps,
       ),
@@ -819,7 +1313,10 @@ describe('a spend against a position that may be the wrong one', () => {
       withdrawShieldedK1(
         session,
         device,
-        { recipientCoinPublicKey: new Uint8Array(32), colourHex: 'not-a-colour', amount: 40n },
+        {
+        recipientCoinPublicKey: new Uint8Array(32),
+        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+        colourHex: 'not-a-colour', amount: 40n },
         undefined,
         test.deps,
       ),
@@ -910,104 +1407,3 @@ describe('held_coin, read out of the private state the connection serves', () =>
   });
 });
 
-/* -------------------------------------------------------------------------- */
-/* Paying another one of these accounts                                       */
-/* -------------------------------------------------------------------------- */
-
-describe('a deposit into somebody else’s account', () => {
-  it('seals a description only the recipient can open, and sends it with the note', async () => {
-    const test = harness();
-    const { session, device } = deviceFake();
-    const recipient = generateCustodyEncKeyPair();
-
-    await depositShieldedIntoCustody(
-      session,
-      device,
-      {
-        targetAddress: PEER,
-        recipientEncKeyHex: recipient.publicKeyHex,
-        coin: { colour: COLOUR, nonce: NONCE, value: 250n },
-      },
-      undefined,
-      test.deps,
-    );
-
-    const call = test.calls.find((row) => row.circuit === 'deposit_shielded');
-    expect(call?.args).toHaveLength(2);
-    const entry = call?.args[1] as Uint8Array;
-    /* EXACTLY 192 BYTES, which is what the compiled ABI takes and what the
-       recipient's list of deliveries holds. */
-    expect(entry).toBeInstanceOf(Uint8Array);
-    expect(entry.length).toBe(192);
-    const opened = await openCustodyInboxEntry(recipient.secretKeyHex, entry);
-    expect(opened).toMatchObject({ colour: COLOUR, nonce: NONCE, value: 250n });
-
-    /* The call went to the RECIPIENT's address, and the connection was opened
-       without this Passport's own coin store behind it. */
-    expect(test.opened).toEqual([PEER]);
-    expect(test.connections.at(-1)?.account).toBeNull();
-    expect(test.connections.at(-1)?.privateStateId).toContain(PEER);
-  });
-
-  it('refuses a key that is not one before anything is submitted', async () => {
-    const test = harness();
-    const { session, device } = deviceFake();
-
-    await expect(
-      depositShieldedIntoCustody(
-        session,
-        device,
-        {
-          targetAddress: PEER,
-          recipientEncKeyHex: 'not-a-key',
-          coin: { colour: COLOUR, nonce: NONCE, value: 250n },
-        },
-        undefined,
-        test.deps,
-      ),
-    ).rejects.toThrow();
-    expect(test.calls).toEqual([]);
-    expect(test.opened).toEqual([]);
-  });
-
-  it('refuses an address that is not one, and pays nobody', async () => {
-    const test = harness();
-    const { session, device } = deviceFake();
-
-    await expect(
-      custodyPermissionlessCallAt(
-        session,
-        device,
-        'not-an-address',
-        { operation: 'deposit_unshielded', args: [] },
-        undefined,
-        test.deps,
-      ),
-    ).rejects.toThrow('That Passport cannot be paid from here.');
-    expect(test.calls).toEqual([]);
-  });
-
-  it('puts a note back into this Passport’s own account by the same route', async () => {
-    /* THE DEPOSIT-BACK. One more permissionless deposit, to the sender's own
-       address, sealed to the sender's own key — no approval from anybody. */
-    const test = harness();
-    const { session, device } = deviceFake();
-    const own = generateCustodyEncKeyPair();
-
-    await depositShieldedIntoCustody(
-      session,
-      device,
-      {
-        targetAddress: ADDRESS,
-        recipientEncKeyHex: own.publicKeyHex,
-        coin: { colour: COLOUR, nonce: NONCE, value: 40n },
-      },
-      undefined,
-      test.deps,
-    );
-
-    expect(test.opened).toEqual([ADDRESS]);
-    const entry = test.calls.at(-1)?.args[1] as Uint8Array;
-    expect(await openCustodyInboxEntry(own.secretKeyHex, entry)).toMatchObject({ value: 40n });
-  });
-});

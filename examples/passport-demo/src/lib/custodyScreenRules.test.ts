@@ -26,14 +26,14 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-  CUSTODY_FINISH_NOT_SETTLED_YET,
-  awaitCustodyStoppedNote,
   custodyArrivingCount,
-  custodyDeliveryFailure,
   custodyInFlightRefusal,
   custodyMayReadHoldings,
+  custodyPaymentDisclosure,
   custodyUnplacedDeliveries,
+  runCustodyKeepRecord,
   runCustodyWork,
+  CUSTODY_KEEP_RECORD_BUSY,
   type CustodyWalkOutcome,
 } from './custodyScreenRules.js';
 
@@ -49,60 +49,6 @@ const FORBIDDEN = [
   'SDK',
   'Dynamic',
 ];
-
-/* -------------------------------------------------------------------------- */
-/* Putting a note back, or not                                                */
-/* -------------------------------------------------------------------------- */
-
-describe('a last leg that did not land', () => {
-  it('puts the note back when the wallet still holds it', () => {
-    expect(custodyDeliveryFailure({ stillHeld: true })).toEqual({
-      stage: 'returning',
-      deposit: true,
-    });
-  });
-
-  /* THE DEFECT THIS CATCHES would have paid nobody twice and told somebody
-     their money was on its way home. A leg can throw after its transaction was
-     broadcast — a dropped socket, a confirmation wait running out — and the
-     recipient has the note. Re-sending it is a double spend the node refuses,
-     and the screen would have said "putting it back in your Passport" first. */
-  it('sends nothing anywhere when the note has gone from the wallet', () => {
-    const decided = custodyDeliveryFailure({ stillHeld: false });
-    expect(decided).toEqual({ stage: 'unconfirmed', deposit: false });
-  });
-
-  /* A WALLET THAT COULD NOT BE ASKED IS NOT AN ANSWER, and the two mistakes are
-     different sizes: a deposit-back of a note that is gone is refused by the
-     node and costs a fee, while not returning a note that IS held leaves the
-     value where no screen can reach it — Home sweeps NIGHT and cannot see a
-     shielded note. */
-  it('takes the recoverable branch when the wallet could not be asked', () => {
-    expect(custodyDeliveryFailure({ stillHeld: null })).toEqual({
-      stage: 'returning',
-      deposit: true,
-    });
-  });
-
-  it('reports where the value is, and stops, when the return leg fails too', () => {
-    for (const stillHeld of [true, false, null]) {
-      expect(custodyDeliveryFailure({ stillHeld, returnFailed: true })).toEqual({
-        stage: 'stranded',
-        deposit: false,
-      });
-    }
-  });
-
-  it('treats a return leg that has not been tried as one that has not failed', () => {
-    expect(custodyDeliveryFailure({ stillHeld: true, returnFailed: false }).stage).toBe(
-      'returning',
-    );
-  });
-});
-
-/* -------------------------------------------------------------------------- */
-/* One thing at a time                                                        */
-/* -------------------------------------------------------------------------- */
 
 describe('a second piece of work while one is running', () => {
   it('is refused in one sentence', () => {
@@ -299,132 +245,100 @@ describe('the order a payment and the read of its result happen in', () => {
 });
 
 /* -------------------------------------------------------------------------- */
-/* Whether the note a stopped payment left is here yet                        */
+/* The record of what the account kept, written inside the payment            */
 /* -------------------------------------------------------------------------- */
 
-/**
- * WHAT THIS PROTECTS: the Finish button on a payment that stopped between its
- * legs.
- *
- * It read the wallet's notes ONCE. Pressed 45 seconds after a Passport was
- * re-opened it failed in under a second — the wallet's sync had not applied the
- * arrival — and pressed three minutes later the same button completed the same
- * payment (live re-run, 2026/09/18). A person cannot tell those two presses
- * apart, so a payment that sometimes works is what they saw.
- *
- * The clock is hand-wound here: a drill that really waited two minutes would be
- * a suite nobody runs.
- */
-describe('the note a stopped payment left, on a later open', () => {
-  /** A wound clock and the sleeps taken against it. */
-  function clock(): { now: () => number; sleep: (ms: number) => Promise<void>; slept: number[] } {
-    let at = 1_000;
-    const slept: number[] = [];
-    return {
-      now: () => at,
-      sleep: (ms: number) => {
-        slept.push(ms);
-        at += ms;
-        return Promise.resolve();
+describe('writing down what the account kept', () => {
+  /* IT IS A GATED CALL. Started detached — which is what it was — it overlapped
+     whatever came next: the follow-up read, or a second Send. Two gated calls
+     against one account sign against the same `auth_nonce`, and the second is
+     refused by the node for a reason no sentence on the screen could explain.
+     So it is awaited by the payment, under the payment's own flag. */
+  it('runs to completion before the caller moves on', async () => {
+    const order: string[] = [];
+    await runCustodyKeepRecord(
+      (line) => order.push(`busy:${line}`),
+      async () => {
+        order.push('writing');
+        await Promise.resolve();
+        order.push('written');
       },
-      slept,
-    };
-  }
-
-  const WAIT = { windowMs: 5_000, intervalMs: 1_000 };
-  const NONCE = 'a1'.repeat(32);
-
-  it('delivers the note that is already here, asking once', async () => {
-    const wound = clock();
-    let looks = 0;
-    const outcome = await awaitCustodyStoppedNote(
-      NONCE,
-      {
-        notes: () => {
-          looks += 1;
-          return Promise.resolve([{ nonce: `0x${NONCE.toUpperCase()}` }]);
-        },
-        withoutNonce: () => null,
-      },
-      { ...WAIT, now: wound.now, sleep: wound.sleep },
     );
+    order.push('after');
 
-    /* A `0x` and a capital are not part of a nonce's name. */
-    expect(outcome).toEqual({ kind: 'here', note: { nonce: `0x${NONCE.toUpperCase()}` } });
-    expect(looks).toBe(1);
-    expect(wound.slept).toEqual([]);
+    expect(order).toEqual([
+      `busy:${CUSTODY_KEEP_RECORD_BUSY}`,
+      'writing',
+      'written',
+      'after',
+    ]);
   });
 
-  it('delivers a note that arrives while the wait is still running', async () => {
-    const wound = clock();
-    let looks = 0;
-    const outcome = await awaitCustodyStoppedNote(
-      NONCE,
-      {
-        notes: () => {
-          looks += 1;
-          /* The wallet applies the arrival on the third look. */
-          if (looks < 3) return Promise.resolve([]);
-          return Promise.resolve([{ nonce: NONCE }]);
-        },
-        withoutNonce: () => null,
-      },
-      { ...WAIT, now: wound.now, sleep: wound.sleep },
-    );
-
-    expect(outcome).toEqual({ kind: 'here', note: { nonce: NONCE } });
-    expect(looks).toBe(3);
-    expect(wound.slept).toEqual([1_000, 1_000]);
+  /* THE PAYMENT ALREADY SUCCEEDED. The recipient has their money; this is the
+     sender's own note of the remainder, and a failure to write it loses the
+     record and not the money. Reporting it would tell somebody their payment
+     failed when it did not. */
+  it('swallows its own failure, because the payment already succeeded', async () => {
+    await expect(
+      runCustodyKeepRecord(
+        () => undefined,
+        () => Promise.reject(new Error('the approval was dismissed')),
+      ),
+    ).resolves.toBeUndefined();
   });
 
-  it('says so in one sentence when the note never turns up, and sends nothing', async () => {
-    const wound = clock();
-    let looks = 0;
-    const outcome = await awaitCustodyStoppedNote(
-      NONCE,
-      {
-        notes: () => {
-          looks += 1;
-          /* A read that throws is the same silence as an empty wallet. */
-          return looks === 2 ? Promise.reject(new Error('not answering')) : Promise.resolve([]);
-        },
-        withoutNonce: () => null,
-      },
-      { ...WAIT, now: wound.now, sleep: wound.sleep },
-    );
-
-    expect(outcome).toEqual({ kind: 'not-yet', sentence: CUSTODY_FINISH_NOT_SETTLED_YET });
-    /* The whole window was used up — six looks a second apart across five
-       seconds — and the caller has nothing to write down. */
-    expect(looks).toBe(6);
-  });
-
-  /* THE SENTENCE NAMES THE BUTTON, because pressing it again is the whole of
-     what a person can do — and it says nothing about a sync, a note, or a leg. */
-  it('names the button to press again, in the vocabulary of somebody who chose a sign-in', () => {
-    expect(CUSTODY_FINISH_NOT_SETTLED_YET).toContain('Finish this payment');
-    expect(CUSTODY_FINISH_NOT_SETTLED_YET.split('. ').length).toBeLessThanOrEqual(2);
-    for (const word of FORBIDDEN) {
-      expect(CUSTODY_FINISH_NOT_SETTLED_YET.toLowerCase()).not.toContain(word.toLowerCase());
+  /* The line says what is happening rather than leaving "Sending" up over
+     something that has finished, and it names no machinery. */
+  it('says what is happening in words about the person, not the machinery', () => {
+    expect(CUSTODY_KEEP_RECORD_BUSY).toBe('Writing down what you kept');
+    for (const word of [
+      'wallet address',
+      'dust',
+      'contract',
+      'registry',
+      'indexer',
+      'resolver',
+      'sponsor',
+      'sdk',
+      'inbox',
+      'coin',
+    ]) {
+      expect(CUSTODY_KEEP_RECORD_BUSY.toLowerCase()).not.toContain(word);
     }
   });
+});
 
-  it('falls back to the colour and the amount for a record with no nonce', async () => {
-    const wound = clock();
-    const notes = [{ nonce: 'b2'.repeat(32) }];
-    const outcome = await awaitCustodyStoppedNote(
-      null,
-      { notes: () => Promise.resolve(notes), withoutNonce: (held) => held[0] ?? null },
-      { ...WAIT, now: wound.now, sleep: wound.sleep },
-    );
-    expect(outcome).toEqual({ kind: 'here', note: notes[0] });
+/* -------------------------------------------------------------------------- */
+/* What a payment publishes about the two parties                             */
+/* -------------------------------------------------------------------------- */
 
-    /* And a record whose nonce is not a nonce takes the same fall-back. */
-    const blank = await awaitCustodyStoppedNote(
-      '   ',
-      { notes: () => Promise.resolve(notes), withoutNonce: (held) => held[0] ?? null },
-      { ...WAIT, now: wound.now, sleep: wound.sleep },
+describe('the sentence that says what a payment will publish', () => {
+  it('says both Passports are named when a shielded amount goes to a name', () => {
+    expect(custodyPaymentDisclosure({ typed: 'alice', shielded: true })).toBe(
+      'Both Passports are named on chain for this payment.',
     );
-    expect(blank).toEqual({ kind: 'here', note: notes[0] });
+    /* Whitespace around a name is a name. */
+    expect(custodyPaymentDisclosure({ typed: '  alice  ', shielded: true })).toBe(
+      'Both Passports are named on chain for this payment.',
+    );
+  });
+
+  it('says neither is named when the same amount goes to a shielded address', () => {
+    expect(
+      custodyPaymentDisclosure({ typed: 'mn_shield-addr_stagenet1abc', shielded: true }),
+    ).toBe('This payment names neither Passport on chain.');
+    /* The prefix is matched however it was typed or pasted. */
+    expect(
+      custodyPaymentDisclosure({ typed: 'MN_SHIELD-ADDR_stagenet1abc', shielded: true }),
+    ).toBe('This payment names neither Passport on chain.');
+  });
+
+  it('says nothing before there is a recipient to say it about', () => {
+    expect(custodyPaymentDisclosure({ typed: '', shielded: true })).toBeNull();
+    expect(custodyPaymentDisclosure({ typed: '   ', shielded: true })).toBeNull();
+  });
+
+  it('says nothing about the account’s NIGHT, which moves a different way', () => {
+    expect(custodyPaymentDisclosure({ typed: 'alice', shielded: false })).toBeNull();
   });
 });

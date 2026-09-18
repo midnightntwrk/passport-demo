@@ -451,56 +451,6 @@ describe('depositShielded, into the newer build', () => {
 });
 
 /* -------------------------------------------------------------------------- */
-/* The one helper another surface calls                                       */
-/* -------------------------------------------------------------------------- */
-
-describe('payCustodyAccount', () => {
-  it('pays NIGHT without the caller naming a circuit', async () => {
-    readAccountBuild.mockResolvedValue('account-custody');
-    const { payCustodyAccount, nightColourHex } = await loadModule();
-    await payCustodyAccount(walletHolding(10n), {
-      targetAddress: PEER,
-      kind: 'night',
-      colourHex: nightColourHex(),
-      amount: 5n,
-    });
-    expect(calls[0]?.circuit).toBe('deposit_unshielded');
-  });
-
-  it('pays a shielded amount, sealed, and answers with what it could establish', async () => {
-    const keys = generateCustodyEncKeyPair();
-    recipient.encKeyHex = keys.publicKeyHex;
-    readAccountBuild.mockResolvedValue('account-custody');
-    onCall = (circuit, args) => {
-      recipient.entries.set(recipient.inboxCount.toString(), args[1] as Uint8Array);
-      recipient.inboxCount += 1n;
-    };
-    const { payCustodyAccount } = await loadModule();
-    const result = await payCustodyAccount(walletHolding(0n), {
-      targetAddress: PEER,
-      kind: 'shielded',
-      coin: COIN,
-    });
-    expect(calls[0]?.circuit).toBe('deposit_shielded');
-    expect(calls[0]?.args).toHaveLength(2);
-    expect(result.delivery).toBe('delivered');
-  });
-
-  it('routes the same payment into a prototype account with the older words', async () => {
-    readAccountBuild.mockResolvedValue('account');
-    const { payCustodyAccount } = await loadModule();
-    const result = await payCustodyAccount(walletHolding(0n), {
-      targetAddress: PEER,
-      kind: 'shielded',
-      coin: COIN,
-    });
-    expect(calls[0]?.circuit).toBe('deposit_shielded');
-    expect(calls[0]?.args).toHaveLength(1);
-    expect(result.delivery).toBeUndefined();
-  });
-});
-
-/* -------------------------------------------------------------------------- */
 /* The label, in two places, agreeing                                         */
 /* -------------------------------------------------------------------------- */
 
@@ -620,13 +570,12 @@ describe('a recipient whose build cannot be read', () => {
     expect(calls).toHaveLength(0);
   });
 
-  it('refuses a payment through the one helper another surface calls', async () => {
+  it('refuses a NIGHT payment the same way, rather than guessing a circuit', async () => {
     readAccountBuild.mockResolvedValue(null);
-    const { payCustodyAccount, nightColourHex } = await loadModule();
+    const { depositNight, nightColourHex } = await loadModule();
     await expect(
-      payCustodyAccount(walletHolding(10n), {
-        targetAddress: PEER,
-        kind: 'night',
+      depositNight(walletHolding(10n), {
+        contractAddress: PEER,
         colourHex: nightColourHex(),
         amount: 5n,
       }),

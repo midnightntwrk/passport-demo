@@ -1016,6 +1016,65 @@ function dropAwaitingRow(draft: K1StoreDraft, colour: string, nonceHex: string):
 }
 
 /**
+ * Take {@link rememberK1ChangeCoin} back, in ONE write, for a transaction that
+ * turned out not to have happened.
+ *
+ * THE ONE CALLER IS A SPEND WHOSE TRANSACTION THE CHAIN REFUSED. A payment is
+ * booked at SUBMISSION, not at finality, because the change coin's description
+ * is the circuit's return value and exists nowhere else in the world — a tab
+ * closed during the wait for a verdict must not be the thing that loses it. The
+ * price of writing that early is that the verdict can come back no, and a
+ * refused transaction spent nothing (MIP-0012 INV-5): the coin was never
+ * consumed, the change was never created, and leaving the write in place would
+ * mark a live nonce spent for ever and file a coin that does not exist.
+ *
+ * So this is the exact inverse of that write and nothing more:
+ *
+ *   - the change coin's awaiting row goes, addressed by its nonce;
+ *   - the spent nonce is forgotten, so the coin can be offered again;
+ *   - whatever was promoted into the held slot behind the spend goes back to
+ *     the FRONT of its queue, oldest-first order intact;
+ *   - the coin the spend consumed is put back, at the position it was held at.
+ *
+ * THE CANDIDATE LIST IS NOT RESTORED, AND MUST NOT BE. `settleK1Coin` ran on a
+ * proof that verified against this position, and a proof verifying is the chain
+ * agreeing with it — that is a fact about the coin whatever the transaction
+ * carrying it came to afterwards. Putting the guesses back would make the next
+ * spend of this colour re-try positions the chain has already settled, at one
+ * approval each.
+ */
+export function undoK1ChangeCoin(
+  account: K1Account,
+  coin: K1HeldCoin,
+  change: { readonly colour: string; readonly nonce: string } | null,
+): void {
+  const target = requireAccount(account);
+  const restored = requireCoin(coin);
+  editStore(target, (draft) => {
+    if (change !== null) {
+      dropAwaitingRow(draft, requireColour(change.colour), requireColour(change.nonce));
+    }
+    draft.spentNonces = draft.spentNonces.filter((nonce) => nonce !== restored.nonce);
+    /* WHATEVER TOOK THE SLOT GOES BACK WHERE IT CAME FROM. A spend that left no
+       change promotes the next queued coin of the colour into the held slot;
+       the coin being restored is the one that was there before it, so the
+       promoted coin returns to the front of the queue rather than being
+       overwritten by the restore. */
+    const occupant = Object.hasOwn(draft.coins, restored.colour)
+      ? draft.coins[restored.colour]
+      : null;
+    if (occupant !== null) {
+      const queue = Object.hasOwn(draft.queued, restored.colour)
+        ? draft.queued[restored.colour]
+        : [];
+      queue.unshift(occupant);
+      draft.queued[restored.colour] = queue;
+    }
+    draft.coins[restored.colour] = rowFromCoin(restored);
+  });
+}
+
+/**
  * Every coin this account holds that has no position yet — colour order, and
  * oldest first within a colour.
  *
@@ -1295,6 +1354,88 @@ export function advanceK1CoinCandidate(account: K1Account, colour: string): K1He
     return null;
   }
   draft.coins[wanted] = { ...draft.coins[wanted], mtIndex: list[next] };
+  saveDraft(target, draft);
+  return coinFromStoredRow(draft.coins[wanted]);
+}
+
+/**
+ * How far either side of the reported window the sweep looks.
+ *
+ * The reference client's own numbers (`contract/src/tests/custody-payments.ts`,
+ * the direct-transfer test): four before the first reported position and four
+ * after the last.
+ */
+export const K1_CANDIDATE_SWEEP = 4;
+
+/**
+ * Widen a coin's candidate list past the window the indexer reported.
+ *
+ * OPTIONAL INSURANCE, AND ONLY AFTER THE REPORTED WINDOW IS EXHAUSTED (Nicolas,
+ * 2026/09/18). The rule is candidate retry over the reported start/end window;
+ * the composed-transfer run found the recipient's coin inside it and this sweep
+ * never fired. It is here because a coin claimed by a GRAFTED intent — the
+ * direct transfer's second call — may escape the indexer's position attribution
+ * altogether, and the reference client saw exactly that once. So the reported
+ * positions are tried first, in order, and only when every one of them has
+ * failed does this append the neighbours.
+ *
+ * APPENDED, NEVER SUBSTITUTED: the list keeps its head, so a later run still
+ * starts where the reconciliation put it. A second call adds nothing, because
+ * every swept position is already in the list — which is what bounds the
+ * approvals a person can be asked for at one guess each.
+ *
+ * Returns the coin at the first NEW position, or null when there was nothing to
+ * widen or nothing left to add.
+ */
+export function widenK1CoinCandidates(account: K1Account, colour: string): K1HeldCoin | null {
+  const target = requireAccount(account);
+  const wanted = requireColour(colour);
+  const draft = draftOf(loadK1CoinStore(target));
+  if (!Object.hasOwn(draft.coins, wanted)) return null;
+  const reported = Object.hasOwn(draft.mtIndexCandidates, wanted)
+    ? draft.mtIndexCandidates[wanted]
+    : [];
+  /* A SETTLED COIN HAS NO LIST, AND IS THE CASE THAT MATTERS MOST (live,
+     2026/09/18). Reconciliation keeps the winning position and drops the
+     candidates, which is right — until the chain moves the coin and the one
+     position left is the wrong one. D1 sat in exactly that state: a coin
+     recorded at 3813 that the chain had at 3814, no candidates, and therefore
+     nothing for the retry to advance TO however well it recognised the failure.
+
+     Its own position is then the only thing known about it, so that is what the
+     sweep goes around. Seeding the list with it rather than sweeping here
+     directly is deliberate: the widening below is already idempotent for a list
+     whose head is a single position — the contiguous ascending prefix is just
+     that position, so a second call recomputes the same neighbours and adds
+     nothing — and a spend whose loop is `advance ?? widen` would never end if
+     widening kept finding more. */
+  const list = reported.length > 0 ? reported : [draft.coins[wanted].mtIndex];
+  /* THE REPORTED WINDOW IS THE ASCENDING CONTIGUOUS PREFIX, and reading it back
+     off the list is what makes this idempotent. The indexer reports
+     `[startIndex, endIndex)`, which `putK1CoinCandidates` stores in order, and
+     the sweep is appended after it — so the prefix is still the window on a
+     second call, the same neighbours are computed, and nothing is added. A
+     sweep computed from the WHOLE list would widen around its own last
+     addition every time and never run out, which is a person asked for an
+     approval per round for ever. */
+  let span = 1;
+  while (span < list.length && BigInt(list[span]) === BigInt(list[span - 1]) + 1n) span += 1;
+  const first = BigInt(list[0]);
+  const last = BigInt(list[span - 1]);
+  const sweep = BigInt(K1_CANDIDATE_SWEEP);
+  const lo = first > sweep ? first - sweep : 0n;
+  const hi = last + sweep + 1n;
+  const held = new Set(list);
+  const added: string[] = [];
+  for (let index = lo; index < hi; index += 1n) {
+    const text = index.toString();
+    if (held.has(text)) continue;
+    held.add(text);
+    added.push(text);
+  }
+  if (added.length === 0) return null;
+  draft.mtIndexCandidates[wanted] = [...list, ...added];
+  draft.coins[wanted] = { ...draft.coins[wanted], mtIndex: added[0] };
   saveDraft(target, draft);
   return coinFromStoredRow(draft.coins[wanted]);
 }

@@ -327,6 +327,15 @@ export interface CustodyPureCircuits {
     coin: QualifiedCoin,
     nonce_value: bigint,
   ): Uint8Array;
+  challenge_withdraw_shielded_to_contract_with_k256(
+    self_addr: ContractAddressArg,
+    pk: CurvePoint,
+    recipient: ContractAddressArg,
+    color: Uint8Array,
+    amount: bigint,
+    coin: QualifiedCoin,
+    nonce_value: bigint,
+  ): Uint8Array;
   challenge_withdraw_unshielded_with_k256(
     self_addr: ContractAddressArg,
     pk: CurvePoint,
@@ -560,6 +569,37 @@ export const k256Challenges = {
       addressArg(context),
       pk,
       { bytes: recipient },
+      color,
+      amount,
+      coin,
+      context.authNonce,
+    );
+  },
+
+  /**
+   * The DIRECT-TRANSFER spend (MIP-0012 §6.6), whose recipient is a contract.
+   *
+   * The same argument list as {@link k256Challenges.withdrawShielded} with one
+   * difference that is the whole of the difference: `recipient` is another
+   * account's ADDRESS rather than somebody's coin public key, and the contract
+   * gives it its own domain-separation tag
+   * (`midnight:account:auth:k1:v1:withdraw_shielded_to_contract`) so a
+   * signature over one can never be replayed as the other. The bytes are the
+   * same 32 either way, which is exactly why the tags have to differ.
+   */
+  withdrawShieldedToContract(
+    pure: CustodyPureCircuits,
+    context: K1CallContext,
+    pk: CurvePoint,
+    recipientContract: Uint8Array,
+    color: Uint8Array,
+    amount: bigint,
+    coin: QualifiedCoin,
+  ): Uint8Array {
+    return pure.challenge_withdraw_shielded_to_contract_with_k256(
+      addressArg(context),
+      pk,
+      { bytes: recipientContract },
       color,
       amount,
       coin,

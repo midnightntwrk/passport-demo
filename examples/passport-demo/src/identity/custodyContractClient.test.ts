@@ -34,12 +34,11 @@ import {
 } from './k1CoinStore.js';
 import {
   activateK1Device,
+  appendChangeToInboxK1,
   appendInboxK1,
   deployCustodyAccount,
-  custodyPermissionlessCallAt,
   custodyPrivateStateId,
   custodyProofProvider,
-  depositShieldedIntoCustody,
   k1Call,
   custodyPermissionlessCall,
   custodyUserKey,
@@ -152,6 +151,8 @@ function pureFake(): CustodyPureCircuits {
     compute_public_point_with_k256: (scalar) => ({ x: scalar, y: scalar, identity: false }),
     challenge_withdraw_shielded_with_k256: (self, pk, recipient, color, amount, coin, nonce) =>
       tag('ch-ws', bytesToHex(self.bytes), pk.x, bytesToHex(recipient.bytes), color, amount, coin.value, nonce),
+    challenge_withdraw_shielded_to_contract_with_k256: (self, pk, recipient, color, amount, coin, nonce) =>
+      tag('ch-wsc', bytesToHex(self.bytes), pk.x, bytesToHex(recipient.bytes), color, amount, coin.value, nonce),
     challenge_withdraw_unshielded_with_k256: (self, pk, color, amount, recipient, nonce) =>
       tag('ch-wu', bytesToHex(self.bytes), pk.x, color, amount, bytesToHex(recipient.bytes), nonce),
     challenge_append_inbox_with_k256: (self, pk, entry, nonce) =>
@@ -219,6 +220,10 @@ interface FakeChain {
   chainHash?: string | null;
   /** How many more spends fail the way a wrong coin POSITION fails. */
   spendFailures?: number;
+  /** The hash the finalised transaction data carries, when it carries one. */
+  finalHash?: string;
+  /** The block the finalised transaction data names. */
+  finalBlock?: number;
   /**
    * How many more spends fail the way the PROVING SERVICE reports one.
    *
@@ -227,7 +232,20 @@ interface FakeChain {
    * service declining to prove rather than as a runtime naming a merkle path.
    */
   proofRefusals?: number;
+  /**
+   * What the service said about the refusal, as it carries it on the error.
+   *
+   * THE DEFAULT READS LIKE A POSITION, because that is what the retry exists
+   * for: an unsatisfiable witness is how a wrong `mt_index` reaches a prover.
+   * Set it to something that does not and the same code arms nothing, which is
+   * the whole of A2.
+   */
+  proofRefusalDetail?: string | null;
 }
+
+/** The sponsor's `detail` for a refusal a different position could fix. */
+const POSITION_DETAIL =
+  'The proof server could not prove withdraw_shielded_with_k256: unsatisfiable constraint system';
 
 function moduleFake(chain: FakeChain): CustodyContractModule {
   const pure = pureFake();
@@ -249,6 +267,30 @@ interface FakeTx {
   kind: 'tx';
   deploys: string[] | null;
   inserts: string[] | null;
+}
+
+/** An unproven CALL, as the fake `createUnprovenCallTx` hands it back. */
+interface FakeCallTx {
+  readonly circuit: string;
+  readonly args: readonly unknown[];
+  /** Every intent grafted onto this one — the direct transfer's claim. */
+  readonly grafted: readonly unknown[];
+  readonly intents: Map<number, unknown>;
+  addIntent(segment: { tag: string }, intent: unknown): FakeCallTx;
+}
+
+function fakeCallTx(circuit: string, args: readonly unknown[]): FakeCallTx {
+  const make = (grafted: readonly unknown[]): FakeCallTx => ({
+    circuit,
+    args,
+    grafted,
+    intents: new Map([[0, { intentFor: circuit, args }]]),
+    addIntent: (segment, intent) => {
+      if (segment.tag !== 'random') throw new Error('a claim is grafted into a random segment');
+      return make([...grafted, intent]);
+    },
+  });
+  return make([]);
 }
 
 /** The ledger-v9 constructors, as objects that record what they were built with. */
@@ -361,7 +403,7 @@ interface Harness {
   storage: ReturnType<typeof storageFake>;
   chain: FakeChain;
   built: unknown[][];
-  calls: { circuit: string; args: unknown[] }[];
+  calls: { circuit: string; args: unknown[]; options?: unknown }[];
   /** Every connection opened: the id it was opened under, and whose store it serves. */
   connections: { privateStateId: string; account: unknown }[];
   /** Every address `findDeployedContract` was pointed at. */
@@ -394,7 +436,7 @@ function harness(
   };
   const storage = overrides.storage ?? storageFake();
   const built: unknown[][] = [];
-  const calls: { circuit: string; args: unknown[] }[] = [];
+  const calls: { circuit: string; args: unknown[]; options?: unknown }[] = [];
   const state = { submits: 0, clock: 1_700_000_000_000 };
 
   /* Every fake resolves rather than being `async`: a promise-returning stub with
@@ -440,6 +482,18 @@ function harness(
     indexerHttpUrl: '',
     deserialiseUnbound: (bytes: Uint8Array) => ({ proven: bytes.length }),
   };
+  /* THE CHAIN'S ANSWER ABOUT A SUBMITTED CALL, in one place: a spend submits
+     and then asks the connection what became of it, so the same data has to
+     come back from `watchForTxData` as `submitTx` used to answer with. */
+  (providers.publicDataProvider as Record<string, unknown>).watchForTxData = (txId: string) =>
+    Promise.resolve(finalisedCall(txId));
+
+  const finalisedCall = (txId: string) => ({
+    txId,
+    status: 'SucceedEntirely',
+    ...(chain.finalHash === undefined ? {} : { txHash: chain.finalHash }),
+    ...(chain.finalBlock === undefined ? {} : { blockHeight: chain.finalBlock }),
+  });
 
   const callTx = new Proxy(
     {},
@@ -480,7 +534,13 @@ function harness(
               /* What the proving service's refusal reaches the caller as: a
                  plain sentence, and the signal on the error's NAME. */
               chain.proofRefusals = (chain.proofRefusals ?? 0) - 1;
-              return Promise.reject(custodyProofNotBuilt());
+              return Promise.reject(
+                custodyProofNotBuilt(
+                  chain.proofRefusalDetail === undefined
+                    ? POSITION_DETAIL
+                    : chain.proofRefusalDetail,
+                ),
+              );
             }
             if (circuit.startsWith('withdraw_shielded') && (chain.spendFailures ?? 0) > 0) {
               /* The failure a wrong position gives: no transaction is
@@ -507,6 +567,9 @@ function harness(
     },
   );
 
+  /* Named, because `submitTxAsync` is the same submission read for its id. */
+  let contractsFake: { submitTx(providers: unknown, options: unknown): Promise<unknown> };
+
   const deps: Partial<CustodyDeps> = {
     storage: () => storage,
     randomBytes: (length) => new Uint8Array(length).fill(7),
@@ -522,6 +585,38 @@ function harness(
     ledger: () => Promise.resolve(ledgerFake(chain, built)),
     contracts: () =>
       Promise.resolve({
+        /* SUBMIT AND WAIT, SPLIT, exactly as the library splits them: the real
+           `submitTx` is `submitTxAsync` followed by `watchForTxData`, and a
+           spend uses the two halves so it can write the change down between
+           them. The fake composes them the same way round. */
+        submitTxAsync: async (submitProviders: unknown, options: unknown) => {
+          const data = (await contractsFake.submitTx(submitProviders, options)) as {
+            txId?: string;
+            public?: { txId?: string };
+          };
+          return data.txId ?? data.public?.txId ?? '';
+        },
+        /* THE SPEND IS BUILT AND NOT SENT, which is where a wrong coin position
+           now fails: the circuit is EXECUTED here, against the contract's own
+           Zswap tree, so a position the tree does not carry traps before any
+           transaction exists. The proving service's own refusal arrives one
+           step later, in `submitTx`. */
+        createUnprovenCallTx: (_providers: unknown, options: unknown) => {
+          const { circuitId, args } = options as { circuitId: string; args: unknown[] };
+          calls.push({ circuit: circuitId, args, options });
+          if (circuitId.startsWith('withdraw_shielded') && (chain.spendFailures ?? 0) > 0) {
+            chain.spendFailures = (chain.spendFailures ?? 0) - 1;
+            return Promise.reject(new Error('could not build the merkle path for this coin'));
+          }
+          return Promise.resolve({
+            private: {
+              result:
+                circuitId === 'deposit_shielded' ? null : chain.circuitResult,
+              unprovenTx: fakeCallTx(circuitId, args),
+              input: 'ZK-aligned input, which must never leave',
+            },
+          });
+        },
         createUnprovenDeployTx: () =>
           Promise.resolve({
             public: { initialContractState: { serialize: () => new Uint8Array([30]) } },
@@ -534,6 +629,24 @@ function harness(
              accepting it. `dropSubmissions` is the node that accepts and never
              applies — a real and unremarkable outcome — and it is what holds
              the rule that a wave is recorded only once the chain shows it. */
+          const call = (options as { unprovenTx: FakeCallTx }).unprovenTx;
+          if (typeof call.circuit === 'string') {
+            /* A CALL, not a wave. The proving service's refusal — which is what
+               a wrong position looks like once the transaction is built and
+               sent away to be proved — lands here. */
+            if (call.circuit.startsWith('withdraw_shielded') && (chain.proofRefusals ?? 0) > 0) {
+              chain.proofRefusals = (chain.proofRefusals ?? 0) - 1;
+              return Promise.reject(
+                custodyProofNotBuilt(
+                  chain.proofRefusalDetail === undefined
+                    ? POSITION_DETAIL
+                    : chain.proofRefusalDetail,
+                ),
+              );
+            }
+            chain.authNonce += 1n;
+            return Promise.resolve(finalisedCall(`id-${calls.length}`));
+          }
           if (!overrides.dropSubmissions) {
             const tx = (options as { unprovenTx: FakeTx }).unprovenTx;
             if (tx.deploys) {
@@ -553,6 +666,9 @@ function harness(
           opened.push((options as { contractAddress: string }).contractAddress);
           return Promise.resolve({ callTx });
         },
+      }).then((api) => {
+        contractsFake = api;
+        return api;
       }),
     /* A CLOCK THAT MOVES. `awaitAuthorityCounter` gives up on a deadline, and a
        frozen clock would spin for ever in the one drill that wants to see it
@@ -695,7 +811,7 @@ describe('the server proof provider', () => {
     const provider = custodyProofProvider({
       endpoint: 'https://example.test/balancer/prove-account-custody',
       network: 'stagenet',
-      circuit: 'append_inbox_with_k256',
+      circuits: ['append_inbox_with_k256'],
       deserialise: (bytes) => ({ bytes }),
       fetchFn: fetchFn,
     });
@@ -705,7 +821,7 @@ describe('the server proof provider', () => {
     expect(url).toBe('https://example.test/balancer/prove-account-custody');
     expect(init.method).toBe('POST');
     expect(JSON.parse(init.body as string)).toEqual({
-      circuit: 'append_inbox_with_k256',
+      circuits: ['append_inbox_with_k256'],
       unprovenTx: 'abcd',
       network: 'stagenet',
     });
@@ -719,7 +835,7 @@ describe('the server proof provider', () => {
     const provider = custodyProofProvider({
       endpoint: 'https://example.test/balancer/prove-account-custody',
       network: 'stagenet',
-      circuit: 'append_inbox_with_k256',
+      circuits: ['append_inbox_with_k256'],
       deserialise: (bytes) => bytes,
       fetchFn: () => Promise.reject(new Error('ECONNREFUSED')),
     });
@@ -733,7 +849,7 @@ describe('the server proof provider', () => {
     const provider = custodyProofProvider({
       endpoint: 'https://example.test/balancer/prove-account-custody',
       network: 'stagenet',
-      circuit: 'append_inbox_with_k256',
+      circuits: ['append_inbox_with_k256'],
       deserialise: (bytes) => bytes,
       fetchFn: () =>
         Promise.resolve(
@@ -751,7 +867,7 @@ describe('the server proof provider', () => {
     const provider = custodyProofProvider({
       endpoint: 'https://example.test/balancer/prove-account-custody',
       network: 'stagenet',
-      circuit: 'append_inbox_with_k256',
+      circuits: ['append_inbox_with_k256'],
       deserialise: (bytes) => bytes,
       fetchFn: () => Promise.resolve(new Response('<html>502 Bad Gateway</html>', { status: 200 })),
     });
@@ -1131,6 +1247,67 @@ describe('a gated call', () => {
  * by network and address — and a witness reading one while the store writes
  * the other is a Passport that can be paid and can never spend.
  */
+describe('the change, written into this account’s own inbox', () => {
+  async function readyPassport() {
+    const test = harness();
+    const fake = deviceFake();
+    await deployCustodyAccount(fake.session, fake.device, undefined, test.deps);
+    await activateK1Device(fake.session, fake.device, undefined, test.deps);
+    return { test, ...fake };
+  }
+
+  const ENC_KEY = 'ab'.repeat(32);
+
+  it('appends 192 bytes only the account itself can open', async () => {
+    const { test, session, device } = await readyPassport();
+    const step = await appendChangeToInboxK1(
+      session,
+      device,
+      {
+        change: { outcome: 'change', nonce: '7f'.repeat(32), colour: '1a'.repeat(32), value: 60n },
+        ownEncKeyHex: ENC_KEY,
+      },
+      undefined,
+      test.deps,
+    );
+
+    expect(step).not.toBeNull();
+    const call = test.calls.find((c) => c.circuit === 'append_inbox_with_k256');
+    /* The entry, then the four authorisation arguments: it is a gated call like
+       every other operation on this contract, which is why it costs a second
+       approval and why it runs after the payment rather than inside it. */
+    expect((call?.args[0] as Uint8Array).length).toBe(192);
+    expect(call?.args).toHaveLength(5);
+  });
+
+  it('writes nothing at all when there is no change to describe', async () => {
+    const { test, session, device } = await readyPassport();
+    const before = test.calls.length;
+    expect(
+      await appendChangeToInboxK1(
+        session,
+        device,
+        { change: { outcome: 'none' }, ownEncKeyHex: ENC_KEY },
+        undefined,
+        test.deps,
+      ),
+    ).toBeNull();
+    expect(
+      await appendChangeToInboxK1(
+        session,
+        device,
+        {
+          change: { outcome: 'change', nonce: '7f'.repeat(32), colour: '1a'.repeat(32), value: 60n },
+          ownEncKeyHex: null,
+        },
+        undefined,
+        test.deps,
+      ),
+    ).toBeNull();
+    expect(test.calls.length).toBe(before);
+  });
+});
+
 describe('the private state a connection is opened with', () => {
   async function readyPassport() {
     const test = harness();
@@ -1198,67 +1375,7 @@ describe('the private state a connection is opened with', () => {
   });
 });
 
-/* -------------------------------------------------------------------------- */
 
-/**
- * Paying somebody else's Passport: the same permissionless circuit, a
- * different contract at the other end, and — deliberately — none of this
- * Passport's own private state served to it.
- */
-describe('a permissionless call on another account', () => {
-  async function readyPassport() {
-    const test = harness();
-    const fake = deviceFake();
-    await deployCustodyAccount(fake.session, fake.device, undefined, test.deps);
-    await activateK1Device(fake.session, fake.device, undefined, test.deps);
-    return { test, ...fake };
-  }
-
-  const PEER = 'cd'.repeat(32);
-
-  it('calls the circuit on the target, with the circuit\'s own arguments only', async () => {
-    const { test, session, device } = await readyPassport();
-    const coin = { nonce: new Uint8Array(32), color: new Uint8Array(32), value: 40n };
-    const entry = new Uint8Array(192).fill(3);
-
-    const result = await custodyPermissionlessCallAt(
-      session,
-      device,
-      PEER,
-      { operation: 'deposit_shielded', args: [coin, entry] },
-      undefined,
-      test.deps,
-    );
-
-    const call = test.calls.find((c) => c.circuit === 'deposit_shielded');
-    /* Two arguments and no authorisation trailer: nobody signs a deposit. */
-    expect(call?.args).toEqual([coin, entry]);
-    expect(test.opened[test.opened.length - 1]).toBe(PEER);
-    expect(result.txHash).toBe('id-2');
-
-    /* The connection was made under an id of the RECIPIENT's address, with no
-       account — so the store this Passport spends from is never served to a
-       connection addressed at somebody else's account. */
-    const connection = test.connections[test.connections.length - 1];
-    expect(connection.privateStateId).toBe(`passport-account-custody-peer-stagenet-${PEER}`);
-    expect(connection.account).toBeNull();
-  });
-
-  it('refuses an address that is not one', async () => {
-    const { test, session, device } = await readyPassport();
-    await expect(
-      custodyPermissionlessCallAt(session, device, 'not-an-address', { operation: 'deposit_shielded', args: [] }, undefined, test.deps),
-    ).rejects.toThrow(/cannot be paid from here/);
-  });
-
-  it('refuses before this Passport is finished being set up', async () => {
-    const test = harness();
-    const { session, device } = deviceFake();
-    await expect(
-      custodyPermissionlessCallAt(session, device, PEER, { operation: 'deposit_shielded', args: [] }, undefined, test.deps),
-    ).rejects.toThrow(/not finished being set up/);
-  });
-});
 
 /* -------------------------------------------------------------------------- */
 
@@ -1530,7 +1647,7 @@ describe('the proving deadline', () => {
     const provider = custodyProofProvider({
       endpoint: 'https://example.test/balancer/prove-account-custody',
       network: 'stagenet',
-      circuit: 'append_inbox_with_k256',
+      circuits: ['append_inbox_with_k256'],
       deserialise: (bytes) => bytes,
       fetchFn,
     });
@@ -1545,7 +1662,7 @@ describe('the proving deadline', () => {
     const provider = custodyProofProvider({
       endpoint: 'https://example.test/balancer/prove-account-custody',
       network: 'stagenet',
-      circuit: 'append_inbox_with_k256',
+      circuits: ['append_inbox_with_k256'],
       deserialise: (bytes) => bytes,
       timeoutMs: 1,
       /* A request that never answers, exactly as a hung socket does not. */
@@ -1616,7 +1733,12 @@ describe('the shielded withdrawal', () => {
     await withdrawShieldedK1(
       session,
       device,
-      { recipientCoinPublicKey: ownKey, colourHex: COLOUR, amount: 40n },
+      {
+        recipientCoinPublicKey: ownKey,
+        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+        colourHex: COLOUR,
+        amount: 40n,
+      },
       undefined,
       test.deps,
     );
@@ -1639,7 +1761,12 @@ describe('the shielded withdrawal', () => {
     const result = await withdrawShieldedK1(
       session,
       device,
-      { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 40n },
+      {
+        recipientCoinPublicKey: new Uint8Array(32),
+        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+        colourHex: COLOUR,
+        amount: 40n,
+      },
       undefined,
       test.deps,
     );
@@ -1671,7 +1798,12 @@ describe('the shielded withdrawal', () => {
     const result = await withdrawShieldedK1(
       session,
       device,
-      { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 40n },
+      {
+        recipientCoinPublicKey: new Uint8Array(32),
+        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+        colourHex: COLOUR,
+        amount: 40n,
+      },
       undefined,
       test.deps,
     );
@@ -1690,7 +1822,12 @@ describe('the shielded withdrawal', () => {
     const result = await withdrawShieldedK1(
       session,
       device,
-      { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 40n },
+      {
+        recipientCoinPublicKey: new Uint8Array(32),
+        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+        colourHex: COLOUR,
+        amount: 40n,
+      },
       undefined,
       test.deps,
     );
@@ -1711,7 +1848,12 @@ describe('the shielded withdrawal', () => {
     const result = await withdrawShieldedK1(
       session,
       device,
-      { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 100n },
+      {
+        recipientCoinPublicKey: new Uint8Array(32),
+        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+        colourHex: COLOUR,
+        amount: 100n,
+      },
       undefined,
       test.deps,
     );
@@ -1734,7 +1876,12 @@ describe('the shielded withdrawal', () => {
     const result = await withdrawShieldedK1(
       session,
       device,
-      { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 40n },
+      {
+        recipientCoinPublicKey: new Uint8Array(32),
+        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+        colourHex: COLOUR,
+        amount: 40n,
+      },
       undefined,
       test.deps,
     );
@@ -1764,7 +1911,12 @@ describe('the shielded withdrawal', () => {
     const result = await withdrawShieldedK1(
       session,
       device,
-      { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 40n },
+      {
+        recipientCoinPublicKey: new Uint8Array(32),
+        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+        colourHex: COLOUR,
+        amount: 40n,
+      },
       undefined,
       test.deps,
     );
@@ -1777,35 +1929,113 @@ describe('the shielded withdrawal', () => {
   /* And when they run out, the sentence is the plain one — not a word about
      witnesses in front of somebody who chose Google. */
   it('gives up in the plain sentence when the service declines every candidate', async () => {
-    const { test, account, session, device } = await readyPassport({ proofRefusals: 5 });
+    const { test, account, session, device } = await readyPassport({
+      circuitResult: changeResult(60n),
+      proofRefusals: 50,
+    });
     putK1CoinCandidates(account, { colour: COLOUR, nonce: NONCE, value: 100n }, [5n, 6n]);
 
     await expect(
       withdrawShieldedK1(
         session,
         device,
-        { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 40n },
+        {
+        recipientCoinPublicKey: new Uint8Array(32),
+        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+        colourHex: COLOUR,
+        amount: 40n,
+      },
         undefined,
         test.deps,
       ),
     ).rejects.toThrow('That payment could not be completed just now. Try again in a moment.');
-    expect(test.calls.filter((c) => c.circuit === 'withdraw_shielded_with_k256')).toHaveLength(2);
+    /* The two reported positions, then the eight the sweep adds around them,
+       and not one attempt more. */
+    expect(test.calls.filter((c) => c.circuit === 'withdraw_shielded_with_k256')).toHaveLength(10);
   });
 
-  it('gives up rather than looping when the candidates run out', async () => {
-    const { test, account, session, device } = await readyPassport({ spendFailures: 5 });
+  /* A2, 2026/09/18. `proving-failed` is the service's code for "the prover ran
+     and declined", and a wrong candidate position is only ONE of the things
+     that reaches. A verifier key that does not match reaches it too, and
+     rotating on the code alone asked the holder to approve ten times for a
+     failure no position could fix — and then reported the same sentence it
+     would have reported after the first. The service's own words are what
+     decide it now. */
+  it('stops after one attempt when the refusal says nothing about a position', async () => {
+    const { test, account, session, device } = await readyPassport({
+      circuitResult: changeResult(60n),
+      proofRefusals: 50,
+      proofRefusalDetail:
+        'The proof server could not prove withdraw_shielded_with_k256: verifier key mismatch',
+    });
     putK1CoinCandidates(account, { colour: COLOUR, nonce: NONCE, value: 100n }, [5n, 6n]);
 
     await expect(
       withdrawShieldedK1(
         session,
         device,
-        { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 40n },
+        {
+          recipientCoinPublicKey: new Uint8Array(32),
+          recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+          colourHex: COLOUR,
+          amount: 40n,
+        },
+        undefined,
+        test.deps,
+      ),
+    ).rejects.toThrow('That payment could not be completed just now. Try again in a moment.');
+
+    expect(test.calls.filter((c) => c.circuit === 'withdraw_shielded_with_k256')).toHaveLength(1);
+    /* And the store is left canonical: the head is the position the chain
+       offered first, and the list is intact for the next press. */
+    expect(k1CoinCandidates(account, COLOUR)).toEqual([5n, 6n]);
+  });
+
+  it('stops after one attempt when the refusal carried no words at all', async () => {
+    const { test, account, session, device } = await readyPassport({
+      circuitResult: changeResult(60n),
+      proofRefusals: 50,
+      proofRefusalDetail: null,
+    });
+    putK1CoinCandidates(account, { colour: COLOUR, nonce: NONCE, value: 100n }, [5n, 6n]);
+
+    await expect(
+      withdrawShieldedK1(
+        session,
+        device,
+        {
+          recipientCoinPublicKey: new Uint8Array(32),
+          recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+          colourHex: COLOUR,
+          amount: 40n,
+        },
+        undefined,
+        test.deps,
+      ),
+    ).rejects.toThrow('That payment could not be completed just now. Try again in a moment.');
+
+    expect(test.calls.filter((c) => c.circuit === 'withdraw_shielded_with_k256')).toHaveLength(1);
+  });
+
+  it('gives up rather than looping when the candidates run out', async () => {
+    const { test, account, session, device } = await readyPassport({ spendFailures: 50 });
+    putK1CoinCandidates(account, { colour: COLOUR, nonce: NONCE, value: 100n }, [5n, 6n]);
+
+    await expect(
+      withdrawShieldedK1(
+        session,
+        device,
+        {
+        recipientCoinPublicKey: new Uint8Array(32),
+        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+        colourHex: COLOUR,
+        amount: 40n,
+      },
         undefined,
         test.deps,
       ),
     ).rejects.toThrow(/merkle/);
-    expect(test.calls.filter((c) => c.circuit === 'withdraw_shielded_with_k256')).toHaveLength(2);
+    expect(test.calls.filter((c) => c.circuit === 'withdraw_shielded_with_k256')).toHaveLength(10);
   });
 
   it('refuses before anything is signed when there is nothing to send', async () => {
@@ -1815,7 +2045,12 @@ describe('the shielded withdrawal', () => {
       withdrawShieldedK1(
         session,
         device,
-        { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 40n },
+        {
+        recipientCoinPublicKey: new Uint8Array(32),
+        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+        colourHex: COLOUR,
+        amount: 40n,
+      },
         undefined,
         test.deps,
       ),
@@ -1824,7 +2059,12 @@ describe('the shielded withdrawal', () => {
       withdrawShieldedK1(
         session,
         device,
-        { recipientCoinPublicKey: new Uint8Array(32), colourHex: 'not-a-colour', amount: 40n },
+        {
+        recipientCoinPublicKey: new Uint8Array(32),
+        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+        colourHex: 'not-a-colour',
+        amount: 40n,
+      },
         undefined,
         test.deps,
       ),
@@ -1838,7 +2078,12 @@ describe('the shielded withdrawal', () => {
       withdrawShieldedK1(
         session,
         device,
-        { recipientCoinPublicKey: new Uint8Array(32), colourHex: COLOUR, amount: 40n },
+        {
+        recipientCoinPublicKey: new Uint8Array(32),
+        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+        colourHex: COLOUR,
+        amount: 40n,
+      },
         undefined,
         test.deps,
       ),
@@ -1848,56 +2093,6 @@ describe('the shielded withdrawal', () => {
 
 /* -------------------------------------------------------------------------- */
 
-describe('leg three into another one of these accounts', () => {
-  it('seals a description the recipient can open and sends it with the note', async () => {
-    const test = harness();
-    const fake = deviceFake();
-    await deployCustodyAccount(fake.session, fake.device, undefined, test.deps);
-    await activateK1Device(fake.session, fake.device, undefined, test.deps);
-    const peer = 'cd'.repeat(32);
-
-    await depositShieldedIntoCustody(
-      fake.session,
-      fake.device,
-      {
-        targetAddress: peer,
-        recipientEncKeyHex: 'ab'.repeat(32),
-        coin: { colour: '1a'.repeat(32), nonce: '7f'.repeat(32), value: 40n },
-      },
-      undefined,
-      test.deps,
-    );
-
-    const call = test.calls.find((c) => c.circuit === 'deposit_shielded');
-    expect(call?.args).toHaveLength(2);
-    expect(call?.args[0]).toEqual({
-      nonce: hexToBytes('7f'.repeat(32)),
-      color: hexToBytes('1a'.repeat(32)),
-      value: 40n,
-    });
-    /* 192 bytes, whatever is in them — the container is a fixed size so an
-       observer counting bytes learns nothing about the coin. */
-    expect((call?.args[1] as Uint8Array).length).toBe(192);
-    expect(test.opened[test.opened.length - 1]).toBe(peer);
-  });
-});
-
-/* -------------------------------------------------------------------------- */
-/* The same entry points, taken by a PASSKEY                                  */
-/* -------------------------------------------------------------------------- */
-
-/**
- * Every widened entry point, driven by a jubjub device and NO session at all.
- *
- * WHAT IS BEING HELD HERE. Until 2026/09/18 each of these read
- * `k1UserKey(session)` — the lower-cased Dynamic address — to decide whose
- * record to load and whose wallet to open. A passkey Passport has no such
- * address, so every one of them either filed a real account under `''` or
- * refused to find one that was there; the jubjub arm had no caller from the UI
- * and so the defect had nowhere to show itself. They read
- * `custodyUserKey(session, device)` now, which on this arm is the device point,
- * and `null` is the honest session rather than a stub with an empty address.
- */
 describe('a passkey Passport, through the widened entry points', () => {
   /** The device, and the user key every store should be under. */
   function passkeyFake(): { session: null; device: JubjubSigner; user: string } {
@@ -1987,52 +2182,6 @@ describe('a passkey Passport, through the widened entry points', () => {
     /* No authorisation trailer: nobody signs a deposit, on either arm. */
     expect(test.calls.find((c) => c.circuit === 'deposit_unshielded')?.args).toHaveLength(2);
     expect(loadCustodyRecord(test.storage, user, 'stagenet')?.txHashes.length).toBe(before + 1);
-  });
-
-  it('pays another Passport, and writes only the hash into its own record', async () => {
-    const test = harness();
-    const { session, device, user } = passkeyFake();
-    await deployCustodyAccount(session, device, undefined, test.deps);
-    await activateK1Device(session, device, undefined, test.deps);
-    const peer = 'cd'.repeat(32);
-
-    await custodyPermissionlessCallAt(
-      session,
-      device,
-      peer,
-      { operation: 'deposit_shielded', args: [{}, new Uint8Array(192)] },
-      undefined,
-      test.deps,
-    );
-
-    expect(test.opened[test.opened.length - 1]).toBe(peer);
-    /* The RECIPIENT's record is not ours and is not written; ours gains the
-       hash, which is the only thing this Passport learned. */
-    expect(loadCustodyRecord(test.storage, user, 'stagenet')?.txHashes.length).toBeGreaterThan(0);
-    expect(test.connections.at(-1)?.account).toBeNull();
-  });
-
-  it('seals a deposit description with the sender’s own hands on this arm too', async () => {
-    const test = harness();
-    const { session, device } = passkeyFake();
-    await deployCustodyAccount(session, device, undefined, test.deps);
-    await activateK1Device(session, device, undefined, test.deps);
-
-    await depositShieldedIntoCustody(
-      session,
-      device,
-      {
-        targetAddress: 'cd'.repeat(32),
-        recipientEncKeyHex: 'ab'.repeat(32),
-        coin: { colour: '1a'.repeat(32), nonce: '7f'.repeat(32), value: 40n },
-      },
-      undefined,
-      test.deps,
-    );
-
-    const call = test.calls.find((c) => c.circuit === 'deposit_shielded');
-    expect(call?.args).toHaveLength(2);
-    expect((call?.args[1] as Uint8Array).length).toBe(192);
   });
 
   it('starts again by throwing away THIS device’s record and nobody else’s', async () => {

@@ -14,8 +14,16 @@
  * the TRANSACTION rather than the key.
  *
  * So the contract is: the client posts the serialised unproven transaction and
- * the name of the circuit it is calling, and gets back the same transaction
- * with proofs in it. The three marker strings are the whole of it —
+ * the names of the circuits it is calling, and gets back the same transaction
+ * with proofs in it. ONE TRANSACTION MAY CARRY SEVERAL CALLS — the direct
+ * transfer of MIP-0012 §6.6 is a sender's `withdraw_shielded_to_contract_with_
+ * k256` with the payee's `deposit_shielded` grafted onto it — so the request
+ * names a LIST, and every name on it is checked and staged before the proof
+ * starts. The proof itself is unchanged: `httpClientProofProvider` walks the
+ * transaction's own calls and asks the key provider for each one, so what the
+ * list buys is the refusal — a composed transaction whose second circuit is not
+ * staged is refused in a millisecond, by name, instead of several seconds later
+ * in a prover's own words. The three marker strings are the whole of it —
  * `Transaction<SignatureEnabled, PreProof, PreBinding>` in, `Transaction<
  * SignatureEnabled, Proof, PreBinding>` out — because it is the client's own
  * wallet that binds and submits. This service never sees a key of the account's
@@ -112,6 +120,17 @@ export const MAX_UNPROVEN_TX_BYTES = 2 * 1024 * 1024;
 export const PROVE_ACCOUNT_CUSTODY_TIMEOUT_MS = 180_000;
 
 /**
+ * How many circuits ONE transaction may name.
+ *
+ * Four, against a direct transfer's two, because the bound is here to stop a
+ * caller asking this box to stage-check and prove an arbitrary list rather than
+ * to express a shape anybody builds. Every name costs three `existsSync` calls
+ * before the queue is touched and up to 224 MB of prover key inside it, so the
+ * list is bounded for the same reason the waiting room is.
+ */
+export const PROVE_ACCOUNT_CUSTODY_MAX_CIRCUITS = 4;
+
+/**
  * How many callers may wait for the running proof before the rest are refused.
  *
  * Four, and four LIVE ones: a waiter whose request closes is evicted
@@ -191,7 +210,8 @@ function refuse(
  */
 const REFUSAL_DETAIL: Readonly<Record<string, string>> = {
   'invalid-request':
-    'The request body must be JSON of the form {"circuit": "…", "unprovenTx": "<hex>", "network": "…"}, with the transaction as an even number of hex digits and no 0x prefix.',
+    'The request body must be JSON of the form {"circuits": ["…"], "unprovenTx": "<hex>", "network": "…"}, with the transaction as an even number of hex digits and no 0x prefix. A single circuit may travel as {"circuit": "…"} instead.',
+  'too-many-circuits': `A transaction may name at most ${PROVE_ACCOUNT_CUSTODY_MAX_CIRCUITS} circuits.`,
   'unsupported-network': 'This service cannot prove a transaction for that network.',
   'transaction-too-large': `An unproven transaction may be at most ${MAX_UNPROVEN_TX_BYTES} bytes.`,
   'unknown-circuit': 'That is not a circuit of the account-custody build.',
@@ -324,7 +344,15 @@ export class CustodyProofQueue {
 
 /** One proof, as the engine takes it. */
 export interface CustodyProofJob {
-  readonly circuit: string;
+  /**
+   * Every circuit the transaction calls, in the order the caller named them.
+   *
+   * The engine does not read this — `httpClientProofProvider` walks the
+   * transaction's own calls — and it is here because a job is what the journal
+   * and the drills name a proof by, and a composed transaction that said only
+   * its first circuit would be a line nobody could match to what was proved.
+   */
+  readonly circuits: readonly string[];
   readonly unprovenTx: Uint8Array;
   /** The directory holding `keys/` and `zkir/` for the `account-custody` build. */
   readonly assetsPath: string;
@@ -645,7 +673,12 @@ export function createCustodyProver(options: CustodyProverOptions): CustodyProve
     /* PARSED AND CHECKED BEFORE THE QUEUE IS TOUCHED. A malformed body is the
        caller's mistake and must not cost anybody else a slot — the rule
        `/balance-only` already follows, for the same reason. */
-    let parsed: { circuit?: unknown; unprovenTx?: unknown; network?: unknown };
+    let parsed: {
+      circuit?: unknown;
+      circuits?: unknown;
+      unprovenTx?: unknown;
+      network?: unknown;
+    };
     try {
       parsed = JSON.parse(
         (typeof rawBody === 'string' ? rawBody : rawBody.toString('utf8')) || '{}',
@@ -654,17 +687,47 @@ export function createCustodyProver(options: CustodyProverOptions): CustodyProve
       return refused(
         400,
         'invalid-request',
-        'The request body must be JSON of the form {"circuit": "…", "unprovenTx": "<hex>", "network": "…"}.',
+        'The request body must be JSON of the form {"circuits": ["…"], "unprovenTx": "<hex>", "network": "…"}.',
       );
     }
     if (parsed === null || typeof parsed !== 'object') {
       return refused(400, 'invalid-request', 'The request body must be a JSON object.');
     }
 
-    const circuit = typeof parsed.circuit === 'string' ? parsed.circuit.trim() : '';
-    if (circuit.length === 0) {
+    /* ONE NAME OR A LIST, and the list is the general case. `circuit` is the
+       shape every client built before the composed transaction existed and is
+       still what a single gated call sends, so it is read as a one-element
+       list rather than deprecated — a sponsor that stopped answering it would
+       break every Passport already installed. */
+    const named = parsed.circuits ?? parsed.circuit;
+    if (named !== undefined && parsed.circuits !== undefined && parsed.circuit !== undefined) {
+      return refused(
+        400,
+        'invalid-request',
+        'The request named both "circuit" and "circuits"; it must carry one or the other.',
+      );
+    }
+    const listed: unknown[] = Array.isArray(named) ? named : [named];
+    if (listed.some((entry) => typeof entry !== 'string')) {
+      return refused(
+        400,
+        'invalid-request',
+        'Every circuit named must be a string.',
+      );
+    }
+    const wanted = (listed as string[]).map((entry) => entry.trim()).filter((entry) => entry.length > 0);
+    if (wanted.length === 0) {
       return refused(400, 'invalid-request', 'The request must name the circuit to prove.');
     }
+    if (wanted.length > PROVE_ACCOUNT_CUSTODY_MAX_CIRCUITS) {
+      return refused(
+        400,
+        'too-many-circuits',
+        `A transaction may name at most ${PROVE_ACCOUNT_CUSTODY_MAX_CIRCUITS} circuits; this one named ${wanted.length}.`,
+      );
+    }
+    /* What the journal and every refusal below call this request. */
+    const circuit = wanted.join(' + ');
 
     const network = typeof parsed.network === 'string' ? parsed.network.trim() : '';
     if (network.length === 0) {
@@ -715,11 +778,12 @@ export function createCustodyProver(options: CustodyProverOptions): CustodyProve
         `The compiled account-custody build could not be read on this host: ${cause instanceof Error ? cause.message : String(cause)}`,
       );
     }
-    if (!known.includes(circuit)) {
+    const unknown = wanted.filter((name) => !known.includes(name));
+    if (unknown.length > 0) {
       return refused(
         400,
         'unknown-circuit',
-        `${circuit} is not a circuit of the account-custody build. It has ${known.length}, among them ${known.slice(0, 3).join(', ')}.`,
+        `${unknown.join(', ')} is not a circuit of the account-custody build. It has ${known.length}, among them ${known.slice(0, 3).join(', ')}.`,
       );
     }
 
@@ -740,17 +804,20 @@ export function createCustodyProver(options: CustodyProverOptions): CustodyProve
        engine so that a half-finished rsync answers in a millisecond with the
        circuit's name in it, instead of several seconds later in a prover's own
        words. */
-    const missing = [
-      join(options.assetsPath, 'keys', `${circuit}.prover`),
-      join(options.assetsPath, 'keys', `${circuit}.verifier`),
-      join(options.assetsPath, 'zkir', `${circuit}.bzkir`),
-    ].filter((file) => !existsSync(file));
-    if (missing.length > 0) {
-      return refused(
-        503,
-        'prover-unavailable',
-        `The key material for ${circuit} is not staged on this host (${missing.length} of 3 files missing). Re-run the artefacts rsync.`,
-      );
+    const assets = options.assetsPath;
+    for (const name of wanted) {
+      const missing = [
+        join(assets, 'keys', `${name}.prover`),
+        join(assets, 'keys', `${name}.verifier`),
+        join(assets, 'zkir', `${name}.bzkir`),
+      ].filter((file) => !existsSync(file));
+      if (missing.length > 0) {
+        return refused(
+          503,
+          'prover-unavailable',
+          `The key material for ${name} is not staged on this host (${missing.length} of 3 files missing). Re-run the artefacts rsync.`,
+        );
+      }
     }
 
     /* THE DEADLINE STARTS HERE, not when the slot comes free. What the caller
@@ -805,9 +872,9 @@ export function createCustodyProver(options: CustodyProverOptions): CustodyProve
     }
 
     const job: CustodyProofJob = {
-      circuit,
+      circuits: wanted,
       unprovenTx: bytesFromHex(hex),
-      assetsPath: options.assetsPath,
+      assetsPath: assets,
       proverUrl: options.proverUrl,
       timeoutMs: remainingMs,
     };

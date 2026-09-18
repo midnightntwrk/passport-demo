@@ -11,14 +11,7 @@
  * has a wrong answer that costs a payment and none of them is visible while it
  * is being made:
  *
- *   1. WHETHER TO PUT A NOTE BACK. The last leg of a shielded payment can throw
- *      after the transaction was broadcast — a dropped socket, a confirmation
- *      wait running out — and the recipient has the money. Depositing it "back"
- *      in that case is a second spend of a note that is gone, which the node
- *      refuses, after a screen has told somebody it is held for them. So the
- *      decision is made on what the WALLET says it holds, re-read after the
- *      failure, and {@link custodyDeliveryFailure} is that decision alone.
- *   2. WHETHER A SECOND PIECE OF WORK MAY START. The screen's payments read and
+ *   1. WHETHER A SECOND PIECE OF WORK MAY START. The screen's payments read and
  *      write one coin store. Two at once file a delivery over a coin the other
  *      has just spent, or spend the same coin twice — and the store's own
  *      guards then refuse a proof for reasons no sentence on the screen could
@@ -27,12 +20,12 @@
  *      and {@link runCustodyWork} is the ORDER those two imply: the read that
  *      shows what a payment changed cannot run inside the payment that is
  *      holding the store, or it is refused and the figure stays stale.
- *   2b. WHETHER THE NOTE A STOPPED PAYMENT LEFT IS HERE YET. Finish read the
- *      wallet's notes once, so the same button on the same payment failed in
- *      under a second 45 seconds after a re-open and completed three minutes
- *      later (live re-run, 2026/09/18). {@link awaitCustodyStoppedNote} is the
- *      wait the send path already had, and the one sentence for a window that
- *      closed with nothing written and nothing sent.
+ *   2. WHETHER THE RECORD OF WHAT THE ACCOUNT KEPT IS PART OF THE PAYMENT. It
+ *      is a gated call of its own, so starting it beside the payment rather
+ *      than inside it let two gated calls sign against one `auth_nonce`.
+ *      {@link runCustodyKeepRecord} is that order, and the rule that its own
+ *      failure is never the payment's — the recipient has their money either
+ *      way.
  *   3. WHAT THE WALK'S OUTCOMES MEAN FOR THE FIGURE SHOWN. A delivery the chain
  *      could not place is money that has arrived and cannot be spent yet, which
  *      is neither a balance nor nothing. {@link custodyUnplacedDeliveries} and
@@ -42,77 +35,17 @@
  * screen already has by the time it decides, which is why this file is in the
  * coverage denominator (`../../vitest.config.ts`) at 100%.
  *
- * THE COPY RULE HOLDS HERE TOO. The one sentence in this file reaches somebody
- * who chose a sign-in, not a chain: it names no wallet address, fee token,
+ * THE COPY RULE HOLDS HERE TOO. Every sentence in this file reaches somebody
+ * who chose a sign-in or a fingerprint, not a chain: none names a wallet
+ * address, fee token,
  * contract, name registry, indexer, resolver, fee sponsor, SDK, or sign-in
  * vendor, and `custodyScreenRules.test.ts` asserts that rather than trusting
  * it.
  */
 
-import { pollUntilTrue } from './chainWait.js';
-import type { CustodyShieldedSendStage } from '../identity/custodyContractSend.js';
 
 /* -------------------------------------------------------------------------- */
-/* 1. Putting a note back, or not                                             */
-/* -------------------------------------------------------------------------- */
-
-/**
- * What a failed last leg means, and what is to be done about it.
- *
- * `stage` is the record's next stage — the one place that answers "where is my
- * money" for a payment that stopped (`../identity/custodyContractSend.ts`'s
- * `custodyShieldedSendOutcome` reads it) — and `deposit` says whether there is
- * a return leg left to run.
- */
-export interface CustodyDeliveryDecision {
-  readonly stage: CustodyShieldedSendStage;
-  /** Whether the note is to be deposited back into the sender's own account. */
-  readonly deposit: boolean;
-}
-
-/** What the wallet said when it was asked whether it still holds the note. */
-export interface CustodyDeliveryFailureInput {
-  /**
-   * Whether the note paid by leg one is STILL HELD by this wallet, by nonce.
-   *
-   * Three values and they mean three different things. `true` is the note here
-   * and undelivered. `false` is the note gone — either the recipient has it or
-   * something else does, and this screen cannot tell which. `null` is a wallet
-   * that could not be asked, which is not the same as an answer.
-   */
-  readonly stillHeld: boolean | null;
-  /** Whether the return leg has ALSO failed. Only then is the value stranded. */
-  readonly returnFailed?: boolean;
-}
-
-/**
- * Whether to put the note back, and what the record says either way.
- *
- * A NOTE THAT IS GONE IS NEVER SENT ANYWHERE. `stillHeld: false` is the case
- * this function exists for: the leg threw, and the transaction it threw out of
- * had already been broadcast. Re-sending that note is a double spend the node
- * refuses, and doing it under the line "putting it back in your Passport"
- * tells somebody their money is coming home when it may well be with the
- * person they paid. So the record goes to `'unconfirmed'`, whose sentence says
- * exactly that much and no more.
- *
- * A WALLET THAT COULD NOT BE ASKED IS TREATED AS STILL HOLDING IT. The two
- * mistakes are not the same size: a deposit-back of a note that is gone is
- * refused by the node and costs a fee, while not returning a note that IS held
- * leaves the value in a wallet with no screen that can reach it — Home sweeps
- * NIGHT and cannot see a shielded note. So an unanswerable wallet takes the
- * recoverable branch.
- */
-export function custodyDeliveryFailure(
-  input: CustodyDeliveryFailureInput,
-): CustodyDeliveryDecision {
-  if (input.returnFailed === true) return { stage: 'stranded', deposit: false };
-  if (input.stillHeld === false) return { stage: 'unconfirmed', deposit: false };
-  return { stage: 'returning', deposit: true };
-}
-
-/* -------------------------------------------------------------------------- */
-/* 2. One thing at a time                                                     */
+/* 1. One payment at a time                                                   */
 /* -------------------------------------------------------------------------- */
 
 /**
@@ -201,96 +134,49 @@ export async function runCustodyWork(
 }
 
 /* -------------------------------------------------------------------------- */
-/* 2b. Whether the note a stopped payment left is here YET                    */
+/* 2b. The record of what the account kept, written INSIDE the payment        */
 /* -------------------------------------------------------------------------- */
 
-/**
- * What Finish says when the note leg one paid is not in this Passport's hands
- * yet.
- *
- * NOT A FAILURE, AND IT NAMES THE BUTTON. The value has left the account and
- * the wallet's own sync has not applied the arrival; the one thing a person can
- * do is press the same button again in a moment, so the sentence says that and
- * nothing about a sync, a note, or a leg.
- */
-export const CUSTODY_FINISH_NOT_SETTLED_YET =
-  'This payment has not settled yet, so it cannot be sent on. Give it a moment and press Finish this payment again.';
-
-/** Where this payment's note is: here, or not here yet. */
-export type CustodyStoppedNoteOutcome<TNote> =
-  | { readonly kind: 'here'; readonly note: TNote }
-  | { readonly kind: 'not-yet'; readonly sentence: string };
-
-/** How this payment's note is looked for, read afresh on every look. */
-export interface CustodyStoppedNoteLook<TNote extends { readonly nonce: string }> {
-  /** Every shielded note this Passport's own wallet holds, now. */
-  readonly notes: () => Promise<readonly TNote[]>;
-  /**
-   * Which of them is this payment's, for a record that kept NO nonce.
-   *
-   * A payment interrupted between leg one landing and the note being identified
-   * has no nonce to go on, and the snapshot of what was held before went with
-   * the tab. `../lib/shieldedNote.ts`'s rule is the fall-back and it is the
-   * caller's, not this one's.
-   */
-  readonly withoutNonce: (notes: readonly TNote[]) => TNote | null;
-}
+/** The busy line while the account's own note of the change is written. */
+export const CUSTODY_KEEP_RECORD_BUSY = 'Writing down what you kept';
 
 /**
- * Waits for the note a stopped payment left behind, the way the send itself
- * waits for it.
+ * Write down what the account kept, as the last thing the payment does.
  *
- * THE DEFECT THIS IS THE REPAIR FOR (live re-run, 2026/09/18). Finish read the
- * wallet's notes ONCE. Pressed 45 seconds after a Passport was re-opened it
- * failed in under a second — the wallet had not applied the arrival yet — and
- * pressed three minutes later the same button completed the same payment. A
- * person cannot tell those two presses apart, so the difference read as a
- * payment that sometimes works: the wait belongs on both paths, with the same
- * window and the same line on screen.
+ * INSIDE THE PAYMENT, WHICH IS THE WHOLE POINT. This is a GATED call — it
+ * costs an approval and it writes the coin store — and it used to be started
+ * detached, with the payment already resolved and the in-flight flag already
+ * cleared. So it overlapped whatever came next: the follow-up read of the
+ * holdings, or a second Send. Two gated calls against one account read the
+ * same device entry and sign against the same `auth_nonce`, and the one that
+ * arrives second is signed against a nonce the first has already moved on
+ * from — a transaction the node refuses, for a reason no sentence on the
+ * screen could explain. That is the practical trigger of the defect above this
+ * one: the second payment is submitted, the chain says no, and the store is
+ * asked to believe it.
  *
- * BY THE NONCE WHERE THERE IS ONE, which is exact: that nonce came out of leg
- * one's own result and names one note in the world. A `0x` prefix and case are
- * not part of the name.
+ * IT IS STILL NOT PART OF THE PAYMENT'S SUCCESS. The recipient has their money
+ * the moment the send lands; this is the sender's own note of the remainder. A
+ * failure here loses the record and not the money, so it is reported to the
+ * console and never to the person — the payment succeeded and saying otherwise
+ * would be false.
  *
- * `'not-yet'` IS NOT `'gone'`. The window closing says nothing about whether
- * the note exists — `pollUntilTrue` counts a read that threw as a no — so
- * nothing is written, nothing is sent, and the record is left exactly as it
- * was for the next press.
+ * The busy line is set rather than left as the send's, because the send is
+ * over and a line that still said "Sending" would be describing something that
+ * has finished.
  */
-export async function awaitCustodyStoppedNote<TNote extends { readonly nonce: string }>(
-  noteNonce: string | null,
-  look: CustodyStoppedNoteLook<TNote>,
-  wait: {
-    readonly windowMs: number;
-    readonly intervalMs: number;
-    readonly now?: () => number;
-    readonly sleep?: (milliseconds: number) => Promise<void>;
-  },
-): Promise<CustodyStoppedNoteOutcome<TNote>> {
-  const wanted = bareNonce(noteNonce);
-  /* A BOX, because what the poll finds has to survive the closure it is found
-     in — the same shape the screen's own note wait uses. */
-  const found: { note: TNote | null } = { note: null };
-  await pollUntilTrue(async () => {
-    const notes = await look.notes();
-    found.note =
-      wanted.length > 0
-        ? notes.find((note) => bareNonce(note.nonce) === wanted) ?? null
-        : look.withoutNonce(notes);
-    return found.note !== null;
-  }, wait);
-  if (found.note === null) {
-    return { kind: 'not-yet', sentence: CUSTODY_FINISH_NOT_SETTLED_YET };
+export async function runCustodyKeepRecord(
+  busy: (line: string) => void,
+  write: () => Promise<void>,
+): Promise<void> {
+  busy(CUSTODY_KEEP_RECORD_BUSY);
+  try {
+    await write();
+  } catch (cause) {
+    console.warn('[account-custody] the change was not written to the inbox', cause);
   }
-  return { kind: 'here', note: found.note };
 }
 
-/** A nonce with nothing on it that is not the nonce. */
-function bareNonce(nonce: string | null): string {
-  return typeof nonce === 'string' ? nonce.trim().toLowerCase().replace(/^0x/, '') : '';
-}
-
-/* -------------------------------------------------------------------------- */
 /* 3. What the walk found, as a figure                                        */
 /* -------------------------------------------------------------------------- */
 
@@ -349,4 +235,43 @@ export function custodyArrivingCount(input: CustodyArrivingInput): number {
   const unplaced =
     input.unplaced !== null && Number.isFinite(input.unplaced) ? Math.max(0, input.unplaced) : 0;
   return rows + unplaced;
+}
+
+/* -------------------------------------------------------------------------- */
+
+/** What a payment about to be made will put on the chain about the two parties. */
+export interface CustodyPaymentDisclosureInput {
+  /** Exactly what was typed into "Send to". */
+  readonly typed: string;
+  /** Whether the chosen asset is a shielded token rather than the account's NIGHT. */
+  readonly shielded: boolean;
+}
+
+/**
+ * The sentence that says what a payment publishes, or null when there is
+ * nothing yet to say.
+ *
+ * THE PER-PAYMENT CHOICE OF MIP-0012 §6.6, SAID BEFORE IT IS MADE. The direct
+ * transfer is one transaction carrying a call on the sender's account and a
+ * call on the recipient's, so the chain records that those two accounts
+ * transacted — the amount and the note stay shielded, and the pair does not.
+ * The same money to a pasted shielded address is one call on one account and
+ * names nobody. Which of the two happens is decided by what is typed into a
+ * single field, so the difference has to be visible at that field and not in a
+ * specification.
+ *
+ * SAID FOR THE SHIELDED ROUTE ONLY. The account's NIGHT moves by a different
+ * pair of legs and this sentence would be describing a transaction that is not
+ * the one about to be made.
+ */
+export function custodyPaymentDisclosure(
+  input: CustodyPaymentDisclosureInput,
+): string | null {
+  if (!input.shielded) return null;
+  const typed = input.typed.trim();
+  if (typed.length === 0) return null;
+  if (/^mn_shield-addr/i.test(typed)) {
+    return 'This payment names neither Passport on chain.';
+  }
+  return 'Both Passports are named on chain for this payment.';
 }

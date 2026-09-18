@@ -268,14 +268,69 @@ export const CUSTODY_PROVER_UNAVAILABLE =
 export const CUSTODY_PROOF_NOT_BUILT =
   'That payment could not be completed just now. Try again in a moment.';
 
+/**
+ * The refusal when the chain ANSWERED and the answer was no.
+ *
+ * A transaction the chain recorded as failed moved nothing: no coin was spent,
+ * no note was created, and the account holds exactly what it held before
+ * (MIP-0012 INV-5). So this is the one failure after submission that can be
+ * said plainly, and saying it plainly matters — the hedged sentence below in
+ * front of a verdict this definite would tell somebody to go and check a
+ * balance that cannot have changed.
+ */
+export const CUSTODY_SEND_FAILED = 'That payment did not go through, and nothing left your Passport.';
+
+/**
+ * The sentence for a payment that WAS submitted and whose outcome is unknown.
+ *
+ * TWO WAYS TO ARRIVE HERE, and they are the same thing to the person reading
+ * it: the finalised data carried no verdict this build could read, or the wait
+ * for one failed — a dropped socket during the wait is the shape of the
+ * outages of 2026/09/05 and 2026/09/07, and a socket is not a verdict. Either
+ * way the transaction is out there and one of two things is true of it, so the
+ * sentence hedges deliberately and points at the figure that settles it rather
+ * than guessing. Claiming "nothing was sent" here is the one answer that can be
+ * flatly wrong about somebody's money.
+ */
+export const CUSTODY_SEND_UNCONFIRMED =
+  'Your payment was sent and this Passport could not confirm it. Check your balance in a moment to see whether it left.';
+
 /** The `name` on the error carrying {@link CUSTODY_PROOF_NOT_BUILT}. */
 export const CUSTODY_PROOF_NOT_BUILT_NAME = 'CustodyProofNotBuilt';
 
-/** The error the proving provider throws when the prover declined to prove. */
-export function custodyProofNotBuilt(): Error {
-  const error = new Error(CUSTODY_PROOF_NOT_BUILT);
+/**
+ * The error the proving provider throws when the prover declined to prove.
+ *
+ * `detail` IS THE SERVICE'S OWN WORDS AND IS NEVER SHOWN. A refusal arms a
+ * retry against the next candidate position, and a retry costs the holder an
+ * approval — so the retry has to be able to ask whether this refusal was about
+ * a position at all. The message cannot answer that: it is the one sentence
+ * written for the person reading it. The service says what the proof server
+ * said in `detail`, so that is what travels, for
+ * {@link custodyProofNotBuiltDetail} to hand to `spendPositionMayBeWrong`.
+ */
+export function custodyProofNotBuilt(detail: string | null = null): Error {
+  const error = new Error(CUSTODY_PROOF_NOT_BUILT) as Error & { detail: string | null };
   error.name = CUSTODY_PROOF_NOT_BUILT_NAME;
+  error.detail = detail;
   return error;
+}
+
+/**
+ * The service's `detail` off that error, or null.
+ *
+ * Walked exactly as {@link isCustodyProofNotBuilt} walks, and for the same
+ * reason: the error may arrive wrapped. Null is "nothing said", and a caller
+ * that rotates a position on nothing said is a caller asking for up to ten
+ * approvals for a failure that was never about a position.
+ */
+export function custodyProofNotBuiltDetail(cause: unknown): string | null {
+  for (let step: unknown = cause, depth = 0; step instanceof Error && depth < 8; depth += 1) {
+    const detail = (step as { detail?: unknown }).detail;
+    if (typeof detail === 'string' && detail.length > 0) return detail;
+    step = step.cause;
+  }
+  return null;
 }
 
 /**
@@ -361,8 +416,18 @@ export function custodyProvingEndpoint(sponsorBaseUrl: string | null | undefined
 
 /** The request body `POST /prove-account-custody` takes. */
 export interface ProveCustodyRequest {
-  /** The circuit being proved, e.g. `append_inbox_with_k256`. */
-  readonly circuit: string;
+  /**
+   * Every circuit the transaction calls, e.g. `['append_inbox_with_k256']`.
+   *
+   * A LIST BECAUSE A TRANSACTION MAY HAVE TWO CALLS IN IT. The direct transfer
+   * of MIP-0012 §6.6 is the sender's gated spend to a contract recipient with
+   * the payee's own permissionless claim grafted onto the same transaction, and
+   * both have to be staged where the proof is made. The proving service walks
+   * the transaction's own calls either way; naming them buys the refusal — an
+   * unstaged second circuit is refused by name rather than several seconds
+   * later in a prover's own words.
+   */
+  readonly circuits: readonly string[];
   /** Lower-case hex, no `0x`, of the serialised UNPROVEN transaction. */
   readonly unprovenTx: string;
   /** The network the transaction is for, e.g. `stagenet`. */
@@ -383,11 +448,14 @@ export interface ProveCustodyError {
 
 /** Build the request body. Hex, because JSON has no bytes. */
 export function proveAccountCustodyRequest(
-  circuit: string,
+  circuits: readonly string[],
   unprovenTx: Uint8Array,
   network: string,
 ): ProveCustodyRequest {
-  return { circuit, unprovenTx: bytesToHex(unprovenTx), network };
+  if (circuits.length === 0) {
+    throw new Error('a proof request must name the circuits its transaction calls');
+  }
+  return { circuits: [...circuits], unprovenTx: bytesToHex(unprovenTx), network };
 }
 
 /**
@@ -416,6 +484,21 @@ export function parseProveCustodyResponse(body: unknown): Uint8Array {
  */
 export function proveAccountCustodyRefused(body: unknown): boolean {
   return (body as { error?: unknown } | null)?.error === 'proving-failed';
+}
+
+/**
+ * What the service said about the refusal, verbatim, or null.
+ *
+ * FOR THE RETRY TO JUDGE, AND FOR NO SCREEN. The sponsor's `detail` carries the
+ * proof server's own message — "The proof server could not prove
+ * withdraw_shielded_with_k256: …" — and the only question asked of it is
+ * whether it reads like a coin at the wrong position. It is never painted:
+ * {@link custodyFailureSentence} would refuse most of it anyway, and the
+ * sentence somebody reads is {@link CUSTODY_PROOF_NOT_BUILT}.
+ */
+export function proveAccountCustodyDetail(body: unknown): string | null {
+  const detail = (body as { detail?: unknown } | null)?.detail;
+  return typeof detail === 'string' && detail.trim().length > 0 ? detail : null;
 }
 
 /**
@@ -820,6 +903,15 @@ const RUNTIME_ERROR_NAMES: ReadonlySet<string> = new Set([
   'SyntaxError',
   'EvalError',
   'URIError',
+  /* THE ONE A LEDGER TRAP ARRIVES UNDER, and the one that reached a screen.
+     A WebAssembly trap is `name: 'RuntimeError'`, `message: 'unreachable'` —
+     nine characters, no vocabulary in them, and therefore through both of the
+     checks above and painted verbatim. "unreachable", alone, on the screen of
+     somebody who pressed Send. It is the most likely of the lot to be raised
+     here, because this layer's position guesses are exactly what makes the
+     on-chain runtime trap (see `spendPositionMayBeWrong`), and it is no more
+     ours than a `TypeError` is. */
+  'RuntimeError',
 ]);
 
 /**

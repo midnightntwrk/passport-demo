@@ -45,7 +45,11 @@ import { fileURLToPath } from 'node:url';
 
 import { expect, test, type Page } from '@playwright/test';
 
-import { installNetworkBoundary } from './mocks.js';
+import {
+  PASSPORT_ACCOUNT_ADDRESS,
+  RESOLVABLE_NAME,
+  installNetworkBoundary,
+} from './mocks.js';
 import { installVirtualAuthenticator } from './passkey.js';
 import { SIGN_IN_BUTTON, walkContextOptions } from './walkContext.js';
 
@@ -372,5 +376,210 @@ test.describe('a passkey that already holds one', () => {
     await expect(page.getByRole('button', { name: 'Create my Passport' })).toBeVisible();
 
     await context.close();
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* What a passkey Passport can pay, and what it says before it pays it        */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * A THROWAWAY SHIELDED ADDRESS, for the door that is one call rather than two.
+ *
+ * It is a real stagenet address in shape and belongs to nobody: what the walk
+ * needs from it is that `decodeShieldedRecipient` reads two keys out of it, and
+ * that the field's own branch takes the address door rather than the registry.
+ */
+const THROWAWAY_ADDRESS =
+  'mn_shield-addr_stagenet1rp8w5asc5y6k0yvy8awxkzay78gqfmfzurjv9mlncktwdluc2nz5px' +
+  'tqtvfk7z5dtthx7kk6ewhluygc3xp2wrmyp3erzwdwns78fus5nm2xk';
+
+/** Opens a passkey Passport that already holds 250 mUSD, on Home. */
+async function passkeyPassportOnHome(browser: import('@playwright/test').Browser): Promise<{
+  page: Page;
+  close: () => Promise<void>;
+}> {
+  const context = await browser.newContext(
+    walkContextOptions({ viewport: { width: 420, height: 900 } }),
+  );
+  const page = await context.newPage();
+  await installNetworkBoundary(page);
+  await serveAccountCustodyState(page, [ACCOUNT_CUSTODY_ADDRESS, PASSPORT_ACCOUNT_ADDRESS]);
+  const authenticator = await installVirtualAuthenticator(context, page);
+  await page.goto(WALK);
+  await page.getByRole('button', { name: SIGN_IN_BUTTON }).click();
+  await expect(page.getByRole('heading', { name: /Set up\s*your Passport/ })).toBeVisible({
+    timeout: 60_000,
+  });
+
+  /* THE KEY THIS PASSPORT IS REALLY FILED UNDER, and it cannot be invented.
+     A passkey Passport is keyed by its DEVICE POINT, which is derived from the
+     authenticator — so a record seeded under a made-up key is a record Home
+     will show (Home reads the pointer) and every payment will refuse, because
+     a payment settles the identity first and then looks the record up under
+     it. The two walks below are about payments, so the setup is started once
+     purely to make the app derive and record the point, and the record is then
+     seeded under the point it derived. */
+  await page.getByRole('button', { name: 'Create my Passport' }).click();
+  const seeded = await page.waitForFunction(() => {
+    const credentialId = window.localStorage.getItem('passport-last-passkey');
+    const raw = window.localStorage.getItem('passport-account-custody-passkey:v1');
+    if (credentialId === null || raw === null) return null;
+    const pointers = JSON.parse(raw) as Record<string, string>;
+    const entry = Object.entries(pointers)[0];
+    return entry === undefined ? null : { credentialId, userKey: entry[1] };
+  }, undefined, { timeout: 60_000 });
+  const identity = (await seeded.jsonValue()) as { credentialId: string; userKey: string };
+
+  await seedPasskeyPassport(page, {
+    credentialId: identity.credentialId,
+    userKey: identity.userKey,
+    name: 'walker',
+    musd: '250',
+  });
+  await page.goto(WALK);
+  await expect(page.getByRole('heading', { name: 'walker.night' })).toBeVisible({
+    timeout: 60_000,
+  });
+  return {
+    page,
+    close: async () => {
+      await authenticator.remove();
+      await context.close();
+    },
+  };
+}
+
+test.describe('a passkey Passport paying somebody', () => {
+  test('says which of the two payments this one is, before it is made', async ({ browser }) => {
+    const { page, close } = await passkeyPassportOnHome(browser);
+
+    await page.getByLabel('What to send').selectOption({ label: 'mUSD' });
+
+    /* NOTHING TO SAY YET. The field decides which transaction gets built, so
+       there is nothing to disclose until somebody has typed into it. */
+    await expect(page.locator('.mnob-disclosure')).toHaveCount(0);
+
+    /* A NAME IS THE DIRECT TRANSFER: one transaction carrying a call on each
+       account, so the chain records that the two of them transacted. That is
+       the per-payment choice of MIP-0012 §6.6 and it is said at the field that
+       makes it. */
+    await page.getByLabel('Send to').fill(RESOLVABLE_NAME);
+    await expect(
+      page.getByText('Both Passports are named on chain for this payment.'),
+    ).toBeVisible();
+
+    /* THE SAME MONEY THE OTHER WAY NAMES NOBODY. */
+    await page.getByLabel('Send to').fill(THROWAWAY_ADDRESS);
+    await expect(
+      page.getByText('This payment names neither Passport on chain.'),
+    ).toBeVisible();
+
+    /* And it is about the shielded route only: the account's NIGHT moves by a
+       different pair of legs and this sentence would describe the wrong one. */
+    await page.getByLabel('What to send').selectOption({ label: 'NIGHT' });
+    await expect(page.locator('.mnob-disclosure')).toHaveCount(0);
+
+    await close();
+  });
+
+  test('plans a payment to a name and stops where every payment stops', async ({ browser }) => {
+    const { page, close } = await passkeyPassportOnHome(browser);
+
+    await page.getByLabel('Send to').fill(RESOLVABLE_NAME);
+    await page.getByLabel('What to send').selectOption({ label: 'mUSD' });
+    await page.getByLabel('Amount').fill('10');
+    await page.getByRole('button', { name: /^Send/ }).click();
+
+    /* ONE SENTENCE, AND THE CONTROL BACK. There is no proving service behind
+       this tier, so the payment is planned in full — the coin chosen out of
+       the store, the recipient read off the chain as one of these accounts,
+       the amount checked against what one payment can draw on — and then
+       stops. What is held is the property that holds whatever the refusal is,
+       exactly as the k256 walk next door holds it. */
+    const alert = page.getByRole('alert');
+    await expect(alert).toBeVisible({ timeout: 60_000 });
+    const sentence = (await alert.innerText()).trim();
+    expect(sentence).not.toContain('not built yet');
+    expect(sentence).not.toContain('Paying somebody from this Passport is coming');
+    await expect(page.getByRole('button', { name: /^Send/ })).toBeEnabled();
+
+    /* AND THE PASSPORT SAYS WHERE THE MONEY IS: nothing went out, and the
+       figure it started with is the figure it still holds. */
+    await expect(
+      page.getByText('Nothing was sent, and it is all still in your Passport.'),
+    ).toBeVisible();
+    await expect(page.locator('.mndyn-holding-figure')).toHaveText('250');
+
+    await close();
+  });
+
+  test('plans a payment to a shielded address and stops the same way', async ({ browser }) => {
+    const { page, close } = await passkeyPassportOnHome(browser);
+
+    await page.getByLabel('Send to').fill(THROWAWAY_ADDRESS);
+    await page.getByLabel('What to send').selectOption({ label: 'mUSD' });
+    await page.getByLabel('Amount').fill('5');
+    await page.getByRole('button', { name: /^Send/ }).click();
+
+    const alert = page.getByRole('alert');
+    await expect(alert).toBeVisible({ timeout: 60_000 });
+    const sentence = (await alert.innerText()).trim();
+    expect(sentence).not.toContain('not built yet');
+    expect(sentence).not.toContain('Paying somebody from this Passport is coming');
+    await expect(page.getByRole('button', { name: /^Send/ })).toBeEnabled();
+    await expect(page.locator('.mndyn-holding-figure')).toHaveText('250');
+
+    await close();
+  });
+
+  /* A7, 2026/09/18. The decode of a pasted address is also the check that it
+     belongs to this network, and it used to run AFTER the stopped-send record
+     was written and after the approval. So an address this Passport cannot pay
+     cost a touch of the authenticator and left a card on Home saying a payment
+     was in flight — for a payment that was never built. The check asks nothing
+     of anybody and can only refuse, so it goes first. */
+  test('refuses an address it cannot pay without writing a payment down', async ({ browser }) => {
+    const { page, close } = await passkeyPassportOnHome(browser);
+
+    /* Shaped like an address the field will accept and take the address door
+       for, and not one this Passport can pay. */
+    await page.getByLabel('Send to').fill('mn_shield-addr_stagenet1qqqqqqqqqqqqqqqqqqq');
+    await page.getByLabel('What to send').selectOption({ label: 'mUSD' });
+    await page.getByLabel('Amount').fill('5');
+    await page.getByRole('button', { name: /^Send/ }).click();
+
+    await expect(page.getByRole('alert')).toBeVisible({ timeout: 60_000 });
+    /* AND NO PAYMENT WAS WRITTEN DOWN. The card below is what a stopped
+       payment puts on Home, and nothing here was ever in flight. */
+    await expect(
+      page.getByText('Nothing was sent, and it is all still in your Passport.'),
+    ).toHaveCount(0);
+    await expect(page.locator('.mndyn-holding-figure')).toHaveText('250');
+    await expect(page.getByRole('button', { name: /^Send/ })).toBeEnabled();
+
+    await close();
+  });
+
+  test('refuses the account’s NIGHT in one sentence, and says the rest works', async ({
+    browser,
+  }) => {
+    const { page, close } = await passkeyPassportOnHome(browser);
+
+    await page.getByLabel('Send to').fill(RESOLVABLE_NAME);
+    await page.getByLabel('What to send').selectOption({ label: 'NIGHT' });
+    await page.getByLabel('Amount').fill('0.5');
+    await page.getByRole('button', { name: /^Send/ }).click();
+
+    /* THE ONE THING STILL COMING, and it is the ROUTE rather than the arm: the
+       account's NIGHT still moves in two legs, the second of which goes through
+       this Passport's own wallet. Everything else on this screen works, which
+       is why the sentence can say so. */
+    await expect(
+      page.getByText('Paying somebody from this Passport is coming. Everything else here works.'),
+    ).toBeVisible({ timeout: 60_000 });
+    await expect(page.getByRole('button', { name: /^Send/ })).toBeEnabled();
+
+    await close();
   });
 });
