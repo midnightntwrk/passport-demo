@@ -79,6 +79,7 @@ import {
   custodyInFlightRefusal,
   custodyMayReadHoldings,
   custodyUnplacedDeliveries,
+  runCustodyWork,
 } from '../lib/custodyScreenRules.js'
 import type { PassportContractName } from '../identity/contractRuntime.js'
 import type { LocalMidnightWallet } from '../lib/localWallet.js'
@@ -281,7 +282,21 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
    * use to somebody.
    */
   const run = useCallback(
-    async (label: string, work: () => Promise<void>): Promise<void> => {
+    async (
+      label: string,
+      work: () => Promise<void>,
+      /**
+       * The read that shows what the work changed, run once the work has let
+       * the coin store go.
+       *
+       * NOT A LINE AT THE END OF `work`. The flag below makes `readHoldings`
+       * refuse while a payment is running, so a payment that read its own
+       * result from inside itself read nothing at all — "Sent." over the
+       * figure from before the payment, until Refresh (live, 2026/09/18). The
+       * order is `../lib/custodyScreenRules.ts`'s `runCustodyWork`.
+       */
+      after: (() => Promise<void>) | null = null,
+    ): Promise<void> => {
       /* NOTHING ELSE READS THE STORE WHILE THIS RUNS. `readHoldings` fires from
          an effect, and the inbox walk inside it writes coins — so a walk that
          landed in the middle of a payment could file a delivery over the coin
@@ -300,21 +315,19 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
         setError(refusal)
         return
       }
-      inFlight.current = true
       setBusy(label)
       setError(null)
-      try {
-        await work()
-      } catch (cause) {
-        console.warn('[account-custody] that step did not finish', cause)
-        if (cause instanceof Error && cause.message === CUSTODY_SETUP_INTERRUPTED) {
-          setInterrupted(true)
-        }
-        setError(custodyFailureSentence(cause))
-      } finally {
-        inFlight.current = false
-        setBusy(null)
+      /* THE LABEL STAYS UP ACROSS THE FOLLOW-UP READ, on purpose: the flag is
+         already clear by then, so the only thing left holding a second press
+         off the store is the busy state the buttons read. */
+      const { failure } = await runCustodyWork(inFlight, work, after)
+      setBusy(null)
+      if (failure === null) return
+      console.warn('[account-custody] that step did not finish', failure)
+      if (failure instanceof Error && failure.message === CUSTODY_SETUP_INTERRUPTED) {
+        setInterrupted(true)
       }
+      setError(custodyFailureSentence(failure))
     },
     [],
   )
@@ -963,8 +976,10 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
         } else {
           await sendNight(shared)
         }
-        await readHoldings()
-      })
+        /* The figures are read by `run` AFTER this returns — see its `after`
+           argument. A read from here reads nothing: the payment still holds
+           the store. */
+      }, readHoldings)
     },
     [custodyContext, network, readHoldings, run, sendNight, sendShielded],
   )
@@ -1002,8 +1017,8 @@ export default function DynamicPassport({ network }: DynamicPassportProps) {
       }
       saveCustodyShieldedSend(window.localStorage, withNote)
       await deliverNote(wallet, withNote, note, pending.recipientLabel)
-      await readHoldings()
-    })
+      /* Read once the store is free again, not from in here. */
+    }, readHoldings)
   }, [custodyContext, deliverNote, readHoldings, run])
 
   /** Forgets a payment the person has been told about. */

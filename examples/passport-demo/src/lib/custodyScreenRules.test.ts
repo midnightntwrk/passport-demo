@@ -31,6 +31,7 @@ import {
   custodyInFlightRefusal,
   custodyMayReadHoldings,
   custodyUnplacedDeliveries,
+  runCustodyWork,
   type CustodyWalkOutcome,
 } from './custodyScreenRules.js';
 
@@ -208,5 +209,89 @@ describe('the figure for payments still arriving', () => {
     expect(
       custodyArrivingCount({ awaitingRows: Number.POSITIVE_INFINITY, unplaced: null }),
     ).toBe(0);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The order a payment and its follow-up read happen in                       */
+/* -------------------------------------------------------------------------- */
+
+describe('the order a payment and the read of its result happen in', () => {
+  /* THE DEFECT THIS IS THE DRILL FOR (live, 2026/09/18): "Sent." appeared over
+     the figure the Passport held BEFORE the payment, because the follow-up read
+     ran inside the payment — where `custodyMayReadHoldings` refuses it — and
+     only Refresh or a reload moved the figure afterwards. */
+  it('reads what the Passport holds only once the payment has let the store go', async () => {
+    const flag = { current: false };
+    const seen: string[] = [];
+    const outcome = await runCustodyWork(
+      flag,
+      () => {
+        seen.push(`work:${flag.current}`);
+        return Promise.resolve();
+      },
+      () => {
+        /* What `readHoldings` asks, in the one form that matters here. */
+        seen.push(`read:${custodyMayReadHoldings(flag.current)}`);
+        return Promise.resolve();
+      },
+    );
+
+    expect(seen).toEqual(['work:true', 'read:true']);
+    expect(outcome.failure).toBeNull();
+    expect(flag.current).toBe(false);
+  });
+
+  it('reads again even when the payment failed, because that is when the figures lie', async () => {
+    const flag = { current: false };
+    const cause = new Error('the last leg threw after the value had moved');
+    let read = 0;
+
+    const outcome = await runCustodyWork(
+      flag,
+      () => Promise.reject(cause),
+      () => {
+        read += 1;
+        expect(flag.current).toBe(false);
+        return Promise.resolve();
+      },
+    );
+
+    expect(read).toBe(1);
+    expect(outcome.failure).toBe(cause);
+  });
+
+  it('tells somebody about the payment’s own failure, not the read’s', async () => {
+    const flag = { current: false };
+    const cause = new Error('the payment failed');
+
+    const outcome = await runCustodyWork(
+      flag,
+      () => Promise.reject(cause),
+      () => Promise.reject(new Error('and the read after it failed too')),
+    );
+
+    expect(outcome.failure).toBe(cause);
+    expect(flag.current).toBe(false);
+  });
+
+  it('reports a failed read when the payment itself finished', async () => {
+    const flag = { current: false };
+    const cause = new Error('the read failed');
+
+    const outcome = await runCustodyWork(flag, () => Promise.resolve(), () =>
+      Promise.reject(cause),
+    );
+
+    expect(outcome.failure).toBe(cause);
+  });
+
+  it('runs work with nothing to read afterwards, and clears the flag either way', async () => {
+    const flag = { current: false };
+    expect((await runCustodyWork(flag, () => Promise.resolve())).failure).toBeNull();
+    expect(flag.current).toBe(false);
+    const cause = new Error('nothing to read after this either');
+    expect((await runCustodyWork(flag, () => Promise.reject(cause), null)).failure).toBe(cause);
+    expect(flag.current).toBe(false);
   });
 });
