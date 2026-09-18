@@ -482,7 +482,15 @@ test.describe('a Passport that has been paid', () => {
     await context.close();
   });
 
-  test('offers a NIGHT payment to a Passport of the same kind, which used to be refused', async ({
+  /* A5, 2026/09/18. This used to assert that the NIGHT payment ran the same
+     course as every other one. It no longer runs at all, on either arm: the
+     second of its two legs paid the recipient from this Passport's OWN wallet,
+     so the value left the account into a wallet the app builds and a tab closed
+     between the legs left somebody's money where neither party owned it. That
+     is the route the shielded send had taken out of it, and it is now out of
+     this one too — refused before the name is resolved and before anything is
+     signed, in the sentence the passkey arm already showed. */
+  test('refuses a NIGHT payment on this arm too, in the same sentence', async ({
     browser,
   }) => {
     const context = await browser.newContext(
@@ -503,16 +511,19 @@ test.describe('a Passport that has been paid', () => {
     await page.getByLabel('Amount').fill('0.5');
     await page.getByRole('button', { name: /^Send/ }).click();
 
-    const alert = page.getByRole('alert');
-    await expect(alert).toBeVisible({ timeout: 60_000 });
-    const sentence = (await alert.innerText()).trim();
-
-    /* THE SENTENCE THAT IS GONE. Until 2026/09/17 a Passport of this kind
-       paying another one was told "paying one of those is not built yet" —
-       after the withdrawal had already gone out of the account. The payment now
-       runs the same course as every other one, and stops where this box stops
-       every account custody call (see the walk above). */
+    await expect(
+      page.getByText('Paying somebody from this Passport is coming. Everything else here works.'),
+    ).toBeVisible({ timeout: 60_000 });
+    /* AND THE OLD SENTENCE IS STILL GONE: this is a route that is not offered,
+       not a Passport of this kind being told it cannot pay anybody. The
+       shielded send above is what works, on the same screen. */
+    const sentence = (await page.getByRole('alert').innerText()).trim();
     expect(sentence).not.toContain('not built yet');
+    /* NOTHING WENT OUT, so no payment is written down and the control comes
+       back. */
+    await expect(
+      page.getByText('Nothing was sent, and it is all still in your Passport.'),
+    ).toHaveCount(0);
     await expect(page.getByRole('button', { name: /^Send/ })).toBeEnabled();
 
     await context.close();
