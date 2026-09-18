@@ -301,7 +301,7 @@ identifier can never settle; the client renames the row to the hash once
 the client asks for first is enough and the fallback was not needed.
 
 **There is no stable change-coin output order, and the store must not assume one.**
-Four live transactions, each with two shielded outputs, and the position the
+Seven live transactions, each with two shielded outputs, and the position the
 contract's own coin took inside the indexer's window:
 
 | Transaction | Window | The contract's coin | Which output |
@@ -310,9 +310,12 @@ contract's own coin took inside the indexer's window:
 | `ea677f52…9384` (D1's `withdraw_shielded_with_k256`, block 509111) | `[3795, 3797)` | 3795 | **first** |
 | `ffe8e5e7…e967` (D1's second withdrawal, block 509155) | `[3799, 3801)` | 3800 | second |
 | `acb6bd27…eb19` (D1 → D2, block 509189) | `[3803, 3805)` | 3803 | **first** |
+| `3a1ff153…82cf` (D1 → `pkone2`, 5 mUSD, block 510575) | `[3806, 3808)` | 3807 | second |
+| `6443f552…3274` (D1 → D2, 4 mUSD, block 510695) | `[3810, 3812)` | 3810 | **first** |
+| `3ac9fd63…11eb` (D1 → `pkone2`, 2 mUSD, block 510758) | `[3813, 3815)` | 3814 | second |
 
-Two of each, from the same circuit against the same contract within eighty
-blocks. The order is a property of how Zswap assembled that offer, not of the
+Three first and four second, from the same circuit against the same contract
+across a thousand blocks. The order is a property of how Zswap assembled that offer, not of the
 circuit, so no default order is correct and none is written as one. The head
 stays the first position the window gave, the rest stay beside it as
 candidates, and the RETRY is what decides — which is the reference's own rule
@@ -403,6 +406,47 @@ Measured by seeding a wrong head deliberately and driving the same send:
 The third is why the retry is a backstop and the contract's own Zswap state is
 the answer: a position that is wrong in that particular way costs three minutes
 and still tells nobody anything.
+
+**The re-run of 2026/09/18 04:00–04:27 UTC — both fixes, watched live.**
+Recorded in full in `scratchpad/live-proxy/RUN.md` ("The re-run of 2026/09/18").
+Four more payments on the same two Passports, with the coin store sampled every
+second from the click to the last screen:
+
+| What | Result |
+|---|---|
+| D1 → `pkone2.night`, 5 mUSD | withdraw `3a1ff153…82cf` block 510575, deposit `31eafb55…8654` block 510583; 106 s, proof 29.0 s, first candidate |
+| D1 → `dyntwo1.night`, 4 mUSD | head 3806 refused, **retried onto 3807**; withdraw `6443f552…3274` block 510695, deposit `b93dde47…18a0` block 510701; 107 s, proof 17.0 s |
+| D1 → `pkone2.night`, 2 mUSD, **tab closed mid-payment** | withdraw `3ac9fd63…11eb` block 510758, proof 18.8 s; the offer on re-open told the truth and **Finish** delivered it — deposit `8693cb7b…5aea2` block 510828, 41 s |
+
+- **The by-hash reader places the change immediately.** In both completed
+  spends the change was in `awaiting` under midnight-js's identifier one second
+  and in `coins` with a position the next — `3806` with `[3806, 3807]` beside
+  it, then `3810` with `[3810, 3811]` — with no read of Home in between. That
+  is what §3a's last paragraph is about: before this, the default reader asked
+  `{ identifier: … }`, which this indexer cannot answer, and the coin waited for
+  the next Home open.
+- **The awaiting row is named by its transaction.** Each row was stored as a
+  one-element list under its colour carrying its own `txId`, renamed to the
+  chain's hash by `renameK1AwaitingTx`, and settled by that hash. Two rows in
+  one colour at the same time was not producible live, because settling now
+  takes a second; that case stays on its unit drill.
+- **The middle shape of a wrong position is now a live result, not a unit
+  test.** The 5 mUSD spend's change was stored at 3806 and the chain retains
+  3807, so the next spend was refused by the proof server with
+  `Public transcript input mismatch idx=13 expected=Some(a7d2d427…1445)
+  computed=Some(cde320b0…484f)`, the client logged `retrying the spend against
+  candidate position 1 of this coin`, and the second candidate proved. One
+  refusal, one retry, one proof, nothing submitted on the wrong position.
+- **Two defects, one fixed here.** `custodyActionHistoryQuery` selected
+  `transactionResult` on the `Transaction` interface rather than inside
+  `... on RegularTransaction`, so the v4 endpoint refused the whole query and
+  every delivery came back `'unavailable'`: Home said "One payment is still
+  arriving" about money it had already spent. Fixed. Not fixed, and reported:
+  `finishStoppedSend` reads the wallet's notes ONCE, so pressing **Finish**
+  before the wallet has synced the note fails in under a second with a sentence
+  promising an automatic finish that nothing performs — the send path waits for
+  the note (`awaitShieldedNote`), and this path should either wait the same way
+  or stop saying so.
 
 **The mUSD send, end to end, three times.**
 
