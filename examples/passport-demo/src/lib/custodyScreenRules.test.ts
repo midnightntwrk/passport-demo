@@ -29,6 +29,7 @@ import {
   custodyArrivingCount,
   custodyInFlightRefusal,
   custodyMayReadHoldings,
+  custodyPaymentDisclosure,
   custodyUnplacedDeliveries,
   runCustodyWork,
   type CustodyWalkOutcome,
@@ -244,3 +245,38 @@ describe('the order a payment and the read of its result happen in', () => {
 /* -------------------------------------------------------------------------- */
 /* Whether the note a stopped payment left is here yet                        */
 /* -------------------------------------------------------------------------- */
+
+/* -------------------------------------------------------------------------- */
+/* What a payment publishes about the two parties                             */
+/* -------------------------------------------------------------------------- */
+
+describe('the sentence that says what a payment will publish', () => {
+  it('says both Passports are named when a shielded amount goes to a name', () => {
+    expect(custodyPaymentDisclosure({ typed: 'alice', shielded: true })).toBe(
+      'Both Passports are named on chain for this payment.',
+    );
+    /* Whitespace around a name is a name. */
+    expect(custodyPaymentDisclosure({ typed: '  alice  ', shielded: true })).toBe(
+      'Both Passports are named on chain for this payment.',
+    );
+  });
+
+  it('says neither is named when the same amount goes to a shielded address', () => {
+    expect(
+      custodyPaymentDisclosure({ typed: 'mn_shield-addr_stagenet1abc', shielded: true }),
+    ).toBe('This payment names neither Passport on chain.');
+    /* The prefix is matched however it was typed or pasted. */
+    expect(
+      custodyPaymentDisclosure({ typed: 'MN_SHIELD-ADDR_stagenet1abc', shielded: true }),
+    ).toBe('This payment names neither Passport on chain.');
+  });
+
+  it('says nothing before there is a recipient to say it about', () => {
+    expect(custodyPaymentDisclosure({ typed: '', shielded: true })).toBeNull();
+    expect(custodyPaymentDisclosure({ typed: '   ', shielded: true })).toBeNull();
+  });
+
+  it('says nothing about the account’s NIGHT, which moves a different way', () => {
+    expect(custodyPaymentDisclosure({ typed: 'alice', shielded: false })).toBeNull();
+  });
+});

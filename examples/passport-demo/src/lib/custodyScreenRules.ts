@@ -201,3 +201,42 @@ export function custodyArrivingCount(input: CustodyArrivingInput): number {
     input.unplaced !== null && Number.isFinite(input.unplaced) ? Math.max(0, input.unplaced) : 0;
   return rows + unplaced;
 }
+
+/* -------------------------------------------------------------------------- */
+
+/** What a payment about to be made will put on the chain about the two parties. */
+export interface CustodyPaymentDisclosureInput {
+  /** Exactly what was typed into "Send to". */
+  readonly typed: string;
+  /** Whether the chosen asset is a shielded token rather than the account's NIGHT. */
+  readonly shielded: boolean;
+}
+
+/**
+ * The sentence that says what a payment publishes, or null when there is
+ * nothing yet to say.
+ *
+ * THE PER-PAYMENT CHOICE OF MIP-0012 §6.6, SAID BEFORE IT IS MADE. The direct
+ * transfer is one transaction carrying a call on the sender's account and a
+ * call on the recipient's, so the chain records that those two accounts
+ * transacted — the amount and the note stay shielded, and the pair does not.
+ * The same money to a pasted shielded address is one call on one account and
+ * names nobody. Which of the two happens is decided by what is typed into a
+ * single field, so the difference has to be visible at that field and not in a
+ * specification.
+ *
+ * SAID FOR THE SHIELDED ROUTE ONLY. The account's NIGHT moves by a different
+ * pair of legs and this sentence would be describing a transaction that is not
+ * the one about to be made.
+ */
+export function custodyPaymentDisclosure(
+  input: CustodyPaymentDisclosureInput,
+): string | null {
+  if (!input.shielded) return null;
+  const typed = input.typed.trim();
+  if (typed.length === 0) return null;
+  if (/^mn_shield-addr/i.test(typed)) {
+    return 'This payment names neither Passport on chain.';
+  }
+  return 'Both Passports are named on chain for this payment.';
+}

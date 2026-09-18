@@ -73,6 +73,7 @@ import {
 import {
   custodyArrivingCount,
   custodyInFlightRefusal,
+  custodyPaymentDisclosure,
   custodyMayReadHoldings,
   custodyUnplacedDeliveries,
   runCustodyWork,
@@ -746,6 +747,17 @@ export default function CustodyPassport({ network, arm }: CustodyPassportProps) 
       recipientModule: PassportContractName
     }): Promise<void> => {
       const { wallet, record, label, amount } = params
+      /* THE ONE THING ON THIS SCREEN THE PASSKEY ARM STILL CANNOT DO, and the
+         sentence that used to stand in front of the shielded send. The account's
+         NIGHT still moves in the two legs below, and the second of them goes
+         through this Passport's own wallet — which is the shape the ruling of
+         2026/09/18 took out of the shielded path and has not yet taken out of
+         this one. The refusal is therefore about the ROUTE and not about the
+         arm's signatures: it is refused here, whole, rather than allowed to
+         reach a gated call whose challenge this arm cannot build. */
+      if (arm.session === null) {
+        throw new Error('Paying somebody from this Passport is coming. Everything else here works.')
+      }
       const { nightColourBytes, nightColourHex, payCustodyAccount } = await import(
         '../identity/accountCustody.js'
       )
@@ -1571,6 +1583,12 @@ function HomeStep(props: {
   const payable = props.name ?? props.address ?? null
   const asset = props.rows.find((row) => row.id === assetId) ?? props.rows[0]
   const arriving = custodyArrivingSentence(props.arriving)
+  /* WHAT THIS PAYMENT WILL PUBLISH, said at the field that decides it. See
+     `custodyPaymentDisclosure`. */
+  const disclosure = custodyPaymentDisclosure({
+    typed: recipient,
+    shielded: asset.mode === 'shielded',
+  })
 
   return (
     <Shell label="Passport">
@@ -1684,6 +1702,9 @@ function HomeStep(props: {
           onChange={(event) => setAmount(event.target.value)}
           disabled={props.busy !== null}
         />
+        {disclosure ? (
+          <p className="mnob-hint mnob-disclosure">{disclosure}</p>
+        ) : null}
         {props.notice ? (
           <p className="mnob-hint" role="status">
             {props.notice}
