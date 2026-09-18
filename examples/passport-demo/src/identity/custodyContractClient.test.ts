@@ -165,6 +165,17 @@ interface FakeChain {
   circuitResult?: unknown;
   /** Where the indexer says a transaction's shielded outputs landed. */
   window?: { startIndex: number; endIndex: number } | null;
+  /**
+   * The CHAIN's hash for the identifier a coin was filed under, or null for an
+   * indexer that cannot name the transaction yet.
+   *
+   * This harness's wallet carries no indexer url, so the spend's own hash walk
+   * hands back midnight-js's identifier — which is the state a row has to be
+   * renamed out of before a position can be asked about at all
+   * (`settleK1AwaitingCoinByChainHash`). A drill that wants a settled position
+   * has to say what the chain calls the transaction.
+   */
+  chainHash?: string | null;
   /** How many more spends fail the way a wrong coin POSITION fails. */
   spendFailures?: number;
   /**
@@ -486,6 +497,7 @@ function harness(
     },
     sleep: () => Promise.resolve(undefined),
     commitmentWindow: () => Promise.resolve(chain.window ?? null),
+    resolveChainHash: () => Promise.resolve(chain.chainHash ?? null),
   };
 
   return {
@@ -1501,6 +1513,9 @@ describe('the shielded withdrawal', () => {
   const COLOUR = '1a'.repeat(32);
   const NONCE = '7f'.repeat(32);
   const CHANGE_NONCE = 'a1'.repeat(32);
+  /* 32 bytes, as a chain hash is: the shape is what tells a row that is ready
+     to settle from one still filed under midnight-js's 33-byte identifier. */
+  const CHAIN_HASH = 'bc'.repeat(32);
 
   function changeResult(value: bigint) {
     return {
@@ -1527,6 +1542,7 @@ describe('the shielded withdrawal', () => {
     const { test, session, device } = await readyPassport({
       circuitResult: changeResult(60n),
       window: { startIndex: 8, endIndex: 9 },
+      chainHash: CHAIN_HASH,
     });
     const ownKey = new Uint8Array(32).fill(0x11);
 
@@ -1550,6 +1566,7 @@ describe('the shielded withdrawal', () => {
     const { test, account, session, device } = await readyPassport({
       circuitResult: changeResult(60n),
       window: { startIndex: 8, endIndex: 9 },
+      chainHash: CHAIN_HASH,
     });
 
     const result = await withdrawShieldedK1(
@@ -1581,6 +1598,7 @@ describe('the shielded withdrawal', () => {
     const { test, account, session, device } = await readyPassport({
       circuitResult: changeResult(60n),
       window: { startIndex: 8, endIndex: 10 },
+      chainHash: CHAIN_HASH,
     });
 
     const result = await withdrawShieldedK1(
@@ -1640,6 +1658,7 @@ describe('the shielded withdrawal', () => {
     const { test, account, session, device } = await readyPassport({
       circuitResult: changeResult(60n),
       window: { startIndex: 20, endIndex: 21 },
+      chainHash: CHAIN_HASH,
       /* The first attempt fails the way a wrong position fails. */
       spendFailures: 1,
     });
@@ -1670,6 +1689,7 @@ describe('the shielded withdrawal', () => {
     const { test, account, session, device } = await readyPassport({
       circuitResult: changeResult(60n),
       window: { startIndex: 20, endIndex: 21 },
+      chainHash: CHAIN_HASH,
       proofRefusals: 1,
     });
     putK1CoinCandidates(account, { colour: COLOUR, nonce: NONCE, value: 100n }, [5n, 6n]);
