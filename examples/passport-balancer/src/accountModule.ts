@@ -24,27 +24,52 @@
  * both prototypes are v2. That contract is not ours and no copy of it is kept
  * here; it is consumed unchanged at the revision
  * `scripts/account-custody-contract.lock.json` pins. It is told apart by a
- * circuit of its own; see {@link K256_WITHDRAWAL_OPERATION_NAME}.
+ * circuit of its own; see {@link CUSTODY_DEPOSIT_OPERATION_NAME}.
  */
 export type AccountModuleName = 'account' | 'account-v1' | 'account-custody';
 
 /**
- * @param carriesOneTxTransfer whether the deployed state carries
- *   {@link ONE_TX_TRANSFER_OPERATION_NAME} — the question that separates the
- *   two prototype builds.
- * @param carriesK256Withdrawal whether it carries
- *   {@link K256_WITHDRAWAL_OPERATION_NAME}, which separates the account
- *   custody contract from both of them. Asked SECOND in the argument list and FIRST in
- *   the body: a custody account has no `transfer_shielded_to_account` either, so the
- *   first question answers `false` for it and would send it to `account-v1`.
- *   Defaulting to `null` keeps every existing caller — and every existing test
- *   — asking exactly the question it asked before.
+ * THREE POSITIVE MARKERS, and the order they are asked in.
+ *
+ * Every question here is "does this state declare the circuit only that build
+ * has", because the alternative — concluding a build from what a state does
+ * NOT carry — is how an account that has landed one wave of four gets opened
+ * with a module it has never heard of.
+ *
+ * That is not hypothetical. The discriminator this replaced was
+ * `withdraw_shielded_with_k256`, and a JUBJUB-BORN account does not carry it
+ * until its third maintenance update: wave 1 lands the two deposits and the
+ * eight jubjub device circuits, and the k256 arm arrives two updates later.
+ * For the minute and a half in between, a perfectly good custody account
+ * answered "not the custody build", fell through to the absence test, and was
+ * sent to `account-v1` — twelve circuits it does not have and verifier keys
+ * nothing like its own.
+ *
+ * @param carriesOneTxTransfer whether the state declares
+ *   {@link ONE_TX_TRANSFER_OPERATION_NAME} — the twelve-circuit prototype.
+ * @param carriesCustodyDeposit whether it declares
+ *   {@link CUSTODY_DEPOSIT_OPERATION_NAME}. Asked SECOND in the argument list
+ *   and FIRST in the body, because it is the decisive one: a custody account
+ *   has no `transfer_shielded_to_account` either. Defaulting to `null` keeps
+ *   every existing caller asking exactly the question it asked before.
+ * @param carriesLegacyWithdrawal whether it declares
+ *   {@link LEGACY_WITHDRAWAL_OPERATION_NAME} — the eleven-circuit prototype
+ *   saying what it IS, rather than the twelve-circuit build saying what it is
+ *   not.
  */
 export function accountModuleFor(
   carriesOneTxTransfer: boolean | null,
-  carriesK256Withdrawal: boolean | null = null,
+  carriesCustodyDeposit: boolean | null = null,
+  carriesLegacyWithdrawal: boolean | null = null,
 ): AccountModuleName {
-  if (carriesK256Withdrawal === true) return 'account-custody';
+  if (carriesCustodyDeposit === true) return 'account-custody';
+  if (carriesOneTxTransfer === true) return 'account';
+  if (carriesLegacyWithdrawal === true) return 'account-v1';
+  /* Nothing positive was found, so the two-build answer stands exactly as it
+     did: `false` on the one-transaction circuit is the eleven-circuit build for
+     every caller that has only that answer, and a chain that could not be asked
+     chooses the current module — the retry ladder around each call reads the
+     state afresh on the next attempt. */
   return carriesOneTxTransfer === false ? 'account-v1' : 'account';
 }
 
@@ -59,6 +84,23 @@ export function carriesOneTxTransferIn(state: unknown): boolean | null {
   return operationNamesIn(state)?.includes(ONE_TX_TRANSFER_OPERATION_NAME) ?? null;
 }
 
+/**
+ * The eleven-circuit prototype's own marker: a BARE `withdraw_shielded`.
+ *
+ * Both prototype builds declare it and the account custody contract declares
+ * nothing of the sort — every gated operation there carries an arm suffix, so
+ * its withdrawals are `withdraw_shielded_with_jubjub` and
+ * `withdraw_shielded_with_k256`. Paired with the custody marker being asked
+ * first, this is what lets the eleven-circuit build be recognised by what it
+ * has rather than by what the twelve-circuit build has and it lacks.
+ */
+export const LEGACY_WITHDRAWAL_OPERATION_NAME = 'withdraw_shielded';
+
+/** The same reading as {@link carriesOneTxTransferIn}, for the prototype builds. */
+export function carriesLegacyWithdrawalIn(state: unknown): boolean | null {
+  return operationNamesIn(state)?.includes(LEGACY_WITHDRAWAL_OPERATION_NAME) ?? null;
+}
+
 /* -------------------------------------------------------------------------- */
 /* The third build: the account custody contract                             */
 /* -------------------------------------------------------------------------- */
@@ -66,23 +108,32 @@ export function carriesOneTxTransferIn(state: unknown): boolean | null {
 /**
  * The circuit that says an account is the ACCOUNT CUSTODY CONTRACT.
  *
- * The account custody contract carries every gated operation once per
- * authorisation arm — `<operation>_with_jubjub` and `<operation>_with_k256` — so a single
- * k256 name is enough to tell it apart from both prototype builds, neither of
- * which has an arm suffix on anything. `withdraw_shielded_with_k256` is chosen
- * over the other twenty-nine because it is the one a Passport cannot exist
- * without: it is how value leaves, and a build without it is not this build.
+ * `deposit_unshielded`, and it is chosen for one property none of the other
+ * twenty-nine has: it is in WAVE 1, whichever arm the account was born on.
+ * The two deposits are permissionless and armless, so they go in with the
+ * constructor for a jubjub-born account and for a k256-born one alike, and an
+ * account is therefore this build from its first block rather than from its
+ * third maintenance update.
+ *
+ * The marker it replaced, `withdraw_shielded_with_k256`, was chosen for a
+ * different property — it is how value leaves, so no Passport can exist
+ * without it — which is true of a FINISHED account and false of one halfway
+ * through its waves. A jubjub-born account carries the jubjub withdrawal in
+ * wave 1 and the k256 one in wave 3, so between those blocks the sponsor
+ * decided it was not a custody account at all.
+ *
+ * Neither prototype declares it: they call the same deposit `deposit_night`.
  */
-export const K256_WITHDRAWAL_OPERATION_NAME = 'withdraw_shielded_with_k256';
+export const CUSTODY_DEPOSIT_OPERATION_NAME = 'deposit_unshielded';
 
 /** The same reading as {@link carriesOneTxTransferIn}, for the account custody build. */
-export function carriesK256WithdrawalIn(state: unknown): boolean | null {
-  return operationNamesIn(state)?.includes(K256_WITHDRAWAL_OPERATION_NAME) ?? null;
+export function carriesCustodyDepositIn(state: unknown): boolean | null {
+  return operationNamesIn(state)?.includes(CUSTODY_DEPOSIT_OPERATION_NAME) ?? null;
 }
 
 /**
  * `ContractState.operations()` as plain strings, or `null` when the state
- * cannot say. Both readings above are this question asked twice.
+ * cannot say. Every reading above is this question asked once more.
  */
 function operationNamesIn(state: unknown): string[] | null {
   const operations = (state as { operations?: () => (string | Uint8Array)[] } | null)?.operations;
@@ -106,13 +157,19 @@ function operationNamesIn(state: unknown): string[] | null {
  * only through {@link carriesOneTxTransferIn} answers `false` and would be
  * opened with `account-v1` — a module whose twelve circuits it does not have
  * and whose verifier keys are nothing like its own.
+ *
+ * This is the one place in the sponsor that decides a build, and everything
+ * that needs the answer — the funding pre-flight, the gift desk, the opening
+ * of a deployed contract — asks it here rather than fingerprinting its own way
+ * to a second opinion.
  */
 export function accountModuleForState(state: unknown): AccountModuleName {
   const names = operationNamesIn(state);
-  if (names === null) return accountModuleFor(null, null);
+  if (names === null) return accountModuleFor(null, null, null);
   return accountModuleFor(
     names.includes(ONE_TX_TRANSFER_OPERATION_NAME),
-    names.includes(K256_WITHDRAWAL_OPERATION_NAME),
+    names.includes(CUSTODY_DEPOSIT_OPERATION_NAME),
+    names.includes(LEGACY_WITHDRAWAL_OPERATION_NAME),
   );
 }
 
