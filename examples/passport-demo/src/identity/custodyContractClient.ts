@@ -2010,24 +2010,26 @@ export async function spendShieldedK1(
         unprovenTx = graftIntent(unprovenTx, claim.private.unprovenTx);
       }
 
-      /* SUBMITTED, NOT COMPOSED, BY midnight-js. On 5.0.0-beta.7 `submitTx`
-         proves, balances, and sends whatever transaction it is handed and
+      /* SUBMITTED, NOT COMPOSED, BY midnight-js. On 5.0.0-beta.7 the submit
+         path proves, balances, and sends whatever transaction it is handed and
          reads `circuitId` for nothing — its own multi-call path is a MERGE,
          which duplicates the claimed output and fails balancing (MIP-0012
          §6.6, and the reference client's conformance test says so in as many
          words). So the graft above is made at the ledger level and this is
          handed the finished transaction. The circuit names still travel,
-         because the proof provider is what names them to the service. */
-      /* SUBMITTED AND WATCHED SEPARATELY, WHICH IS THE WHOLE OF R2. `submitTx`
-         is `submitTxAsync` followed by `watchForTxData`, and doing both behind
-         one call puts the ONLY description of the change coin — the circuit's
-         return value, which is on no chain and in no inbox — behind an
-         unbounded wait for finality. A socket dropped during that wait (the
-         outages of 2026/09/05 and 2026/09/07) threw before a single line of the
-         bookkeeping had run: the held slot kept a coin that had just been spent,
-         the change was gone for good, `sendTxId` stayed null, and the screen
-         told somebody nothing had been sent about a transaction that was away.
-         Split, the id arrives at submission and the write happens THERE. */
+         because the proof provider is what names them to the service.
+
+         AND SUBMITTED AND WATCHED SEPARATELY, which is what lets the write
+         below happen at all. `submitTx` is `submitTxAsync` followed by an
+         unbounded `watchForTxData`, and behind one call that puts the ONLY
+         description of the change coin — the circuit's return value, which is
+         on no chain and in no inbox — behind the wait for finality. A socket
+         dropped during that wait (the outages of 2026/09/05 and 2026/09/07)
+         threw before a single line of the bookkeeping had run: the held slot
+         kept a coin that had just been spent, the change was gone for good,
+         `sendTxId` stayed null, and the screen told somebody nothing had been
+         sent about a transaction that was away. Split, the id arrives at
+         submission and the write happens THERE. */
       phase = 'submitting';
       const identifier = await contracts.submitTxAsync(providers, {
         unprovenTx,
