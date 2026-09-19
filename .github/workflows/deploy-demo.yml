@@ -325,7 +325,7 @@ jobs:
       # ---------------------------------------------------------------------
       - name: Restore the pinned ZK artefacts
         id: zk-cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  #v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  #v6.1.0
         with:
           key: zk-artefacts-${{ hashFiles('examples/passport-balancer/contracts-stagenet/managed/*/compiler/contract-manifest.json') }}
           path: |
@@ -390,7 +390,7 @@ jobs:
       # they ship today, and `?prover=browser` on the live site needs them.
       - name: Stage the browser prover's parameters
         id: zk-params-cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  #v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  #v6.1.0
         with:
           key: zk-params-${{ hashFiles('examples/passport-demo/scripts/fetch-zk-params.mjs') }}
           path: examples/passport-demo/public/zk-params
