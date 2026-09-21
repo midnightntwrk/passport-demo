@@ -251,22 +251,37 @@ afterEach(() => {
  * Runs a payment's delivery watch out, in fake time, and hands back what it
  * answered.
  *
- * ADVANCED UNTIL THE PAYMENT SETTLES rather than by a fixed number of steps.
- * The watch does not exist yet when this starts: the sealing in front of it is
- * AES-GCM through `crypto.subtle`, which resolves off the event loop rather
- * than in a microtask, so a fixed count can spend every step before there is a
- * timer to advance and then wait for ever on timers that are no longer moving.
- * Bounded so a watch that genuinely never settles fails the drill rather than
- * hanging it.
+ * ADVANCED UNTIL THE PAYMENT SETTLES, and only when there is a timer to
+ * advance. The watch does not exist yet when this starts: the sealing in front
+ * of it is AES-GCM through `crypto.subtle`, and the recipient's state is read
+ * through promises that resolve off the event loop rather than in a microtask.
+ * A loop that spent a fixed number of fake steps could use them all before the
+ * watch had set its first timer and then wait for ever on timers that no
+ * longer moved — which is exactly what happened on the shared CI runner on
+ * 2026/09/21, where the sealing is slower than on a laptop. So each turn asks
+ * whether a fake timer is pending: if one is, it is advanced; if none is, a
+ * sliver of REAL time is yielded (through the setTimeout captured before the
+ * clock was faked) so the off-loop work can finish and set one. Bounded so a
+ * watch that genuinely never settles fails the drill rather than hanging it.
  */
+const realSetTimeout = globalThis.setTimeout.bind(globalThis);
+const yieldRealTime = (): Promise<void> =>
+  new Promise((resolve) => {
+    realSetTimeout(resolve, 5);
+  });
+
 async function runOutTheDeliveryWatch<T>(pending: Promise<T>): Promise<T> {
   let settled = false;
   const mark = (): void => {
     settled = true;
   };
   void pending.then(mark, mark);
-  for (let tick = 0; tick < 200 && !settled; tick += 1) {
-    await vi.advanceTimersByTimeAsync(3_000);
+  for (let turn = 0; turn < 6_000 && !settled; turn += 1) {
+    if (vi.getTimerCount() > 0) {
+      await vi.advanceTimersByTimeAsync(3_000);
+    } else {
+      await yieldRealTime();
+    }
   }
   return pending;
 }
