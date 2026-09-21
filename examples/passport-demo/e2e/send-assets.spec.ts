@@ -266,6 +266,78 @@ test('an address for the wrong ledger is refused by name, never silently obeyed'
   await expect(refusal()).toHaveCount(0);
 });
 
+/**
+ * The pause that keeps a Passport spendable (2026/09/18).
+ *
+ * The account build every Passport is on today splits a shielded coin when it
+ * is asked for PART of one, and the remainder it re-registers is refused by the
+ * network for ever after — so the first partial payment to a raw address works
+ * and every later shielded send from that account, `.night` name payments
+ * included, does not. The whole-coin branch has none of that, and it is the one
+ * the name path has used for weeks.
+ *
+ * So the rule is the AMOUNT, and this is the browser's half of it: the control
+ * is disabled with the sentence under the field before anything is spent or
+ * signed, the way out the sentence names really fills in the whole amount, and
+ * the route that still divides — a name — is untouched. The rule itself is pure
+ * and drilled on every combination in `src/lib/addressSendPolicy.test.ts`.
+ */
+test('part of a shielded balance cannot go to an address, all of it can, and a name still takes either', async () => {
+  // Still on mUSD, with the shielded address accepted, from the test above.
+  await expect(picker()).toHaveValue(/^[0-9a-f]{64}$/);
+  await recipient().fill('');
+  await recipient().fill(SHIELDED);
+  await expect(refusal()).toHaveCount(0);
+
+  const amount = page.locator('.mnhome-send-amount input');
+  const paused = page.locator('#mnhome-send-amount-error');
+  await amount.fill('10');
+
+  /* THE REFUSAL IS UNDER THE FIELD, and it is the amount's field: the address
+     is fine, and saying so beneath it would send somebody looking for a better
+     address. */
+  await expect(paused).toBeVisible();
+  await expect(paused).toHaveText(
+    'For now, sending to an address sends all of your mUSD — Max fills in the whole amount. To send part of it, send to a .night name.',
+  );
+  /* Nothing can be pressed, so nothing can be proved, signed, or spent. */
+  await expect(page.getByRole('button', { name: /^Review$/ })).toBeDisabled();
+
+  /* THE WAY OUT THE SENTENCE NAMES. The whole coin takes the branch that
+     removes the entry rather than the one that re-registers it, so it is the
+     send this Passport can make — and the sheet lets it be made. */
+  await page.getByRole('button', { name: 'Send the whole mUSD balance' }).click();
+  await expect(amount).toHaveValue('100');
+  await expect(paused).toHaveCount(0);
+  await expect(page.getByRole('button', { name: /^Review$/ })).toBeEnabled();
+
+  /* AND THE NAME ROUTE IS UNTOUCHED, for the same part of the same balance.
+     It withdraws the whole coin and pays out of it, so there is no split to
+     avoid — pausing it would be this fix taking away the one send that works. */
+  await recipient().fill('');
+  await recipient().fill(`${RESOLVABLE_NAME}.night`);
+  await expect(page.locator('.mnhome-send-resolved')).toBeVisible({ timeout: 30_000 });
+  await amount.fill('10');
+  await expect(paused).toHaveCount(0);
+  await expect(refusal()).toHaveCount(0);
+  await expect(page.getByRole('button', { name: /^Review$/ })).toBeEnabled();
+
+  /* AND SO IS NIGHT TO AN ADDRESS, whole or partial. The unshielded withdrawal
+     has no coin to split and no remainder to re-register, so there is nothing
+     here for this pause to be about — and a fix that quietly took a working
+     send away would be a worse defect than the one it was written for. */
+  await picker().selectOption('night');
+  await recipient().fill('');
+  await recipient().fill(UNSHIELDED);
+  await page.getByPlaceholder('0.0').fill('0.000001');
+  await expect(paused).toHaveCount(0);
+  await expect(refusal()).toHaveCount(0);
+  await expect(page.getByRole('button', { name: /^Review$/ })).toBeEnabled();
+
+  // Left on the shielded asset, which is where the test below carries on from.
+  await chooseShielded();
+});
+
 test('a name takes a shielded asset too, and is reviewed as the two steps it is', async () => {
   /* THE DEAD END THIS UNIT REMOVED. Until 2026/08/31 this pair earned "a name
      is always paid in NIGHT, so mUSD cannot go to one" — a fact about what had
