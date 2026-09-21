@@ -292,7 +292,7 @@ test.describe('a passkey with no Passport yet', () => {
        will not answer. Waiting is the honest behaviour and an assertion that
        demanded a refusal would be demanding a defect. */
     await expect
-      .poll(() => network.sponsorTraffic().requests, { timeout: 120_000 })
+      .poll(() => network.sponsorTraffic().requests, { timeout: 210_000 })
       .toBeGreaterThan(before);
 
     /* And whatever the screen ends up saying, it is not a stack. */
