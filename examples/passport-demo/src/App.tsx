@@ -192,6 +192,11 @@ import {
   passkeyPassportRoute,
   saveCustodyPasskeyPointer,
 } from './lib/custodyRoute.js';
+/* The recovery hand-off. Nothing at run time but the standard library, which is
+   why it may be reached statically from here — see the module header. */
+import { adoptionStage, clearAdoption, loadAdoption } from './lib/custodyAdoption.js';
+/* A TYPE, which is erased: naming it here pulls nothing into the entry chunk. */
+import type { K256DeviceIdentity } from './identity/custodyContractSigning.js';
 /* The one-off account upgrade's SCREEN, statically — it is a stepper and a
    theme toggle and reaches nothing. The MACHINE behind it is imported inside
    the handler that runs it (`runUpgrade`), because `identity/accountUpgrade.js`
@@ -6154,6 +6159,27 @@ export default function PassportDemo() {
     [localWalletNetworkId, profile],
   );
 
+  /* ------------------------------------------------------------------ */
+  /* COMING BACK ON A NEW DEVICE                                         */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * The recovery in flight, if there is one.
+   *
+   * Read from storage rather than held in the screen that started it, because
+   * the screen that started it is GONE by the time the second half runs: a key
+   * made on this device wins the identity question the moment it exists, and
+   * `CustodyPassport` is re-created under the device key's own arm. See
+   * `./lib/custodyAdoption.ts`.
+   *
+   * Re-read when the profile changes, which is exactly the event that separates
+   * the two halves.
+   */
+  const [adoption, setAdoption] = useState(() => loadAdoption(window.localStorage));
+  useEffect(() => {
+    setAdoption(loadAdoption(window.localStorage));
+  }, [profile, localWalletNetworkId]);
+
   const passkeyArm = usePasskeyCustodyArm({
     contractRoot: passportContractRoot,
     knownUserKey: passkeyCustodyUser,
@@ -6174,6 +6200,94 @@ export default function PassportDemo() {
     : localSessionActive && passkeyRoute !== 'legacy'
       ? passkeyArm
       : null;
+
+  /**
+   * THE SIGN-IN, AS A SPARE KEY (2026/09/21).
+   *
+   * Narrow on purpose: whether somebody is signed in, what to call the provider,
+   * how to open the overlay, and how to reach the key behind it. The custody
+   * screen needs no more than that, and giving it more would put a vendor inside
+   * a screen whose whole design is that there is not one.
+   *
+   * Null where the build has no sign-in at all, which is most builds — and then
+   * the screen renders exactly what it rendered before the spare key existed.
+   */
+  /** The network every custody decision on this render is about. */
+  const custodyNetwork = localWalletNetworkId ?? configuredWalletNetwork ?? selectedNetwork;
+
+  const custodySocial = useMemo(
+    () =>
+      dynamicSession.status === 'disabled'
+        ? null
+        : {
+            status: dynamicSession.status,
+            provider: dynamicSession.provider,
+            handle: dynamicSession.handle,
+            address: dynamicSession.evmAddress,
+            openAuthFlow: dynamicSession.openAuthFlow,
+            device: async () => {
+              const identity = await dynamicArm.ensureIdentity();
+              return identity.device as K256DeviceIdentity;
+            },
+          },
+    [dynamicArm, dynamicSession],
+  );
+
+  /**
+   * Which half of a recovery is next, asked on every render and costing
+   * nothing. See `./lib/custodyAdoption.ts`.
+   *
+   * `alreadyAdopted` is the POINTER, not the chain: a pointer for this
+   * credential is this browser's own record that the key it holds already opens
+   * that Passport, which is precisely what the second half writes.
+   */
+  const adoptStage = adoptionStage({
+    handoff: adoption,
+    /* THE NETWORK THE APP IS ON, not the one an open wallet reports. A device
+       with no key on it has no wallet, and that is the whole population this
+       flow exists for — reading the wallet here would make a resumed recovery
+       permanently idle on exactly the device it is meant to rescue. */
+    network: custodyNetwork,
+    hasDeviceKey: profile !== null,
+    socialSignedIn:
+      dynamicSession.status === 'signed-in' && (dynamicSession.evmAddress ?? '').length > 0,
+    alreadyAdopted: passkeyCustodyUser !== null,
+  });
+
+  /* One at a time, and never restarted by a re-render. A second run would ask
+     for a second approval for a transaction that is already away. */
+  const adoptRunning = useRef(false);
+  useEffect(() => {
+    if (adoptStage !== 'adopt' || adoptRunning.current) return;
+    const handoff = adoption;
+    const credentialId = profile?.passkey.credentialId;
+    const session = dynamicArm.session;
+    if (handoff === null || !credentialId || session === null) return;
+    adoptRunning.current = true;
+    void (async () => {
+      try {
+        const [{ adoptDeviceKey }, identity] = await Promise.all([
+          import('./identity/custodyAdopt.js'),
+          dynamicArm.ensureIdentity(),
+        ]);
+        await adoptDeviceKey({
+          handoff,
+          contractRoot: passportContractRoot,
+          credentialId,
+          session,
+          socialDevice: identity.device as K256DeviceIdentity,
+          storage: window.localStorage,
+        });
+        /* CLEARED ONLY ON SUCCESS. A failure is a recovery to be resumed, and
+           this is the one line that decides which of the two it was. */
+        clearAdoption(window.localStorage);
+        setAdoption(null);
+      } catch (cause) {
+        console.warn('[account-custody] could not bring that Passport here yet', cause);
+        adoptRunning.current = false;
+      }
+    })();
+  }, [adoptStage, adoption, dynamicArm, passportContractRoot, profile]);
   /* The two way-out panels hold the screen open in their own right. They have
      to: a failure that suppresses the error banner in favour of its panel
      would otherwise have nothing left keeping onboarding on screen. */
@@ -9742,9 +9856,24 @@ export default function PassportDemo() {
       {custodyArm !== null ? (
         <Suspense fallback={<div className="passport-experience-loading" role="status" />}>
           <CustodyPassport
-            network={localWalletNetworkId ?? configuredWalletNetwork ?? selectedNetwork}
+            network={custodyNetwork}
             arm={custodyArm}
             notice={passkeyOtherKeyNotice}
+            social={custodySocial}
+            /* The enrolment that makes a key on THIS device, for a Passport a
+               sign-in has just found. It is the same deliberate enrolment the
+               two onboarding dead ends offer, and it is the host's because it
+               replaces the screen that asked for it. */
+            onEnrolDeviceKey={() => startPasskeyOnboarding('enrol-new')}
+            adoption={
+              adoption === null || adoptStage === 'idle'
+                ? null
+                : { name: adoption.name, stage: adoptStage }
+            }
+            onAbandonAdoption={() => {
+              clearAdoption(window.localStorage);
+              setAdoption(null);
+            }}
           />
         </Suspense>
       ) : showOnboarding ? (

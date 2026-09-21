@@ -120,3 +120,59 @@
 .mndyn-icon:hover {
   color: var(--mn-text-strong, inherit);
 }
+
+/*
+ * THE OFFER OF A SPARE KEY.
+ *
+ * A panel and not a banner: it asks for something, so it is allowed to take
+ * room, and it sits between what the Passport holds and what it can do with
+ * it. The sunken surface is the same one the pay-me line uses, so the card
+ * reads as part of the sheet rather than as a notice pasted onto it.
+ *
+ * No hex values here either — see the header.
+ */
+.mndyn-backup {
+  margin: 16px 0 6px;
+  padding: 14px;
+  border: 1px solid var(--mn-border, rgba(127, 127, 127, 0.3));
+  border-radius: 12px;
+  background: var(--mn-surface-sunken, rgba(127, 127, 127, 0.08));
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.mndyn-backup-title {
+  margin: 0;
+  font-family: var(--mn-font-display, inherit);
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--mn-text-strong, inherit);
+}
+
+.mndyn-backup-copy {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--mn-text-muted, inherit);
+}
+
+/* The sentence about what a new device will NOT bring back. Quieter than the
+   offer above it and still ordinary body text: it is a fact about the choice,
+   not a warning, and styling it as a warning would read as a refusal. */
+.mndyn-backup-limit {
+  font-size: 12px;
+  opacity: 0.85;
+}
+
+.mndyn-backup-action {
+  margin-top: 2px;
+}
+
+.mndyn-backup-done {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 12px 0 4px;
+}

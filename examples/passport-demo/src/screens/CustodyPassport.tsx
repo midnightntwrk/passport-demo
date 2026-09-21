@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
-import { ArrowRight, BadgeCheck, Copy, Loader2, RefreshCw, Search, ShieldCheck } from 'lucide-react'
+import { ArrowRight, BadgeCheck, Copy, KeyRound, Loader2, RefreshCw, Search, ShieldCheck } from 'lucide-react'
 
 import { normaliseNameForRecovery, type NameRecoveryOutcome } from '../lib/nameRecovery.js'
 import type { CustodyArm, CustodyIdentity } from '../lib/custodyArm.js'
@@ -7,6 +7,7 @@ import { parseEndpointList } from '../lib/endpoints.js'
 import { type K256DeviceIdentity } from '../identity/custodyContractSigning.js'
 import {
   activateK1Device,
+  addDeviceK1,
   appendChangeToInboxK1,
   defaultCustodyDeps,
   deployCustodyAccount,
@@ -57,6 +58,16 @@ import {
   custodyActionRowsFrom,
   custodyTxIdForInboxIndex,
 } from '../identity/custodyInboxIndex.js'
+import {
+  BACKUP_COPY,
+  backupOffer,
+  backupRefusal,
+  loadBackupRecord,
+  saveBackupRecord,
+  type BackupOffer,
+  type BackupRecord,
+} from '../lib/backupDevice.js'
+import { ADOPT_COPY, saveAdoption } from '../lib/custodyAdoption.js'
 import { NIGHT_COLOUR_HEX } from '../lib/colour.js'
 import {
   custodyAmountFigure,
@@ -203,11 +214,69 @@ export interface CustodyPassportProps {
    * Passport on one browser is a legitimate thing to want.
    */
   notice?: string | null
+  /**
+   * The OTHER way in, where this build has one — the social sign-in, as a
+   * spare key rather than as a Passport of its own.
+   *
+   * Null in every build with no `VITE_DYNAMIC_ENVIRONMENT_ID`, which is most of
+   * them, and then this screen renders exactly what it rendered before the
+   * spare key existed: no offer, no reminder, and no way back in by name for
+   * anybody but the key on this device.
+   *
+   * It is a narrow shape on purpose. The screen needs to know whether somebody
+   * is signed in, what to call the provider, how to open the overlay, and how
+   * to get the key behind it — and nothing else. See `../lib/custodyArms.ts`,
+   * which is where the vendor actually lives.
+   */
+  social?: CustodySocial | null
+  /**
+   * Make a key on THIS device, for a Passport a sign-in has just found.
+   *
+   * The host owns it, because making one changes which Passport the app thinks
+   * it is showing and therefore replaces this screen mid-ceremony. See
+   * `../lib/custodyAdoption.ts` for the hand-off that survives that.
+   */
+  onEnrolDeviceKey?: () => void
+  /**
+   * A recovery the HOST can see and this component cannot.
+   *
+   * Once a key exists on this device the app is showing a different Passport —
+   * this component is re-created under the device key's own arm — so the
+   * recovery that is halfway through has to be handed back in. Null whenever
+   * there is not one. See `../lib/custodyAdoption.ts`.
+   */
+  adoption?: { readonly name: string; readonly stage: 'enrol' | 'adopt' | 'blocked' } | null
+  /** Give up on the recovery in flight. */
+  onAbandonAdoption?: () => void
+}
+
+/** The half of the sign-in this screen reads. Nothing of the vendor in it. */
+export interface CustodySocial {
+  /** `disabled`, `loading`, `signed-out`, `signed-in`. */
+  readonly status: string
+  /** What a reader calls it: Google, Microsoft, X, Discord. */
+  readonly provider: string | null
+  /** The handle that provider knows them by. */
+  readonly handle: string | null
+  /** The embedded key's address, or null while there is not one yet. */
+  readonly address: string | null
+  /** Opens the sign-in overlay. */
+  readonly openAuthFlow: () => void
+  /** The device behind this sign-in, settled on demand. */
+  readonly device: () => Promise<K256DeviceIdentity>
 }
 
 type Screen = 'create' | 'name' | 'home' | 'recover'
 
-export default function CustodyPassport({ network, arm, notice: browserNotice = null }: CustodyPassportProps) {
+export default function CustodyPassport({
+  network,
+  arm,
+  notice: browserNotice = null,
+  social = null,
+  onEnrolDeviceKey,
+  adoption = null,
+  onAbandonAdoption,
+}: CustodyPassportProps) {
   /**
    * The key every store this Passport owns is filed under.
    *
@@ -273,6 +342,21 @@ export default function CustodyPassport({ network, arm, notice: browserNotice = 
      away rather than offering to create a Passport and throwing
      `CUSTODY_SETUP_INTERRUPTED` at whoever pressed it. */
   const [interrupted, setInterrupted] = useState(false)
+  /* What this browser knows about this Passport's spare key. See
+     `../lib/backupDevice.ts`, which holds the rule this state is read by. */
+  const [backup, setBackup] = useState<BackupRecord | null>(null)
+  /**
+   * The name of a Passport a sign-in has just found, while its new key is being
+   * made and added — or null.
+   *
+   * IT IS NOT A `Screen`. `refresh` sets the screen from what is stored, and
+   * what is stored the moment a recovery succeeds is a finished Passport, which
+   * would put this reader on Home under a sign-in that is meant to be their
+   * spare. So the adoption holds the screen in its own right.
+   */
+  const [adopting, setAdopting] = useState<string | null>(null)
+  /* Whether a press on the backup offer is waiting for a sign-in to finish. */
+  const backupAsked = useRef(false)
   const device = useRef<CustodyIdentity | null>(null)
   /* Whether a payment or a setup is running. See {@link run}. */
   const inFlight = useRef(false)
@@ -284,6 +368,7 @@ export default function CustodyPassport({ network, arm, notice: browserNotice = 
     const next = readDynamicPassport({ storage: window.localStorage, user: settled, network })
     setView(next)
     setInterrupted(dynamicSetupInterrupted(next.record))
+    setBackup(loadBackupRecord(window.localStorage, settled, network))
     setScreen(next.stage === 'home' ? 'home' : next.stage === 'name' ? 'name' : 'create')
     return next
   }, [network])
@@ -1237,11 +1322,113 @@ export default function CustodyPassport({ network, arm, notice: browserNotice = 
           rememberK1EncSecretKey(account, identity.device.encSecretKeyHex)
         }
       }
+      /* A SIGN-IN THAT FINDS A PASSPORT DOES NOT OPEN IT HERE.
+         Until 2026/09/21 it did, and that WAS the product: a Passport whose
+         only key was the sign-in. The decision of that day retires it. A
+         sign-in is a spare key, so what a successful find starts now is the
+         other half of coming back — a key made on this device, added to the
+         account by the sign-in that just proved it is theirs — and the record
+         written above is what that half reads to make the call.
+
+         The hand-off is in storage rather than in this component's state
+         because making that key replaces this screen; see
+         `../lib/custodyAdoption.ts`. */
+      if (arm.kind === 'dynamic') {
+        saveAdoption(window.localStorage, {
+          network,
+          address,
+          name: label,
+          socialUser: restoredUser,
+        })
+        setAdopting(label)
+        return outcome
+      }
       refresh()
       return outcome
     },
-    [ensureIdentity, network, refresh],
+    [arm.kind, ensureIdentity, network, refresh],
   )
+
+  /* ---------------------------------------------------------------------- */
+  /* The spare key                                                          */
+  /* ---------------------------------------------------------------------- */
+
+  /**
+   * Add the signed-in key to this Passport, with the key on this device
+   * approving it.
+   *
+   * THE DEVICE KEY SIGNS, AND THAT IS THE WHOLE SHAPE OF THE DECISION. The
+   * Passport belongs to the key that made it; a spare is something that key
+   * grants, never something a sign-in helps itself to. One approval, one
+   * transaction, and the account's device set gains an entry.
+   */
+  const runBackup = useCallback(async () => {
+    if (social === null) return
+    await run(BACKUP_COPY.busy, async () => {
+      const identity = await ensureIdentity()
+      const spare = await social.device()
+      await addDeviceK1(arm.session, identity.device, spare, (phase) =>
+        setBusy(PHASE_LABELS[phase.step]),
+      )
+      const settled = userRef.current
+      if (settled === null) return
+      saveBackupRecord(window.localStorage, settled, network, {
+        doneAt: Date.now(),
+        ...(social.provider === null ? {} : { provider: social.provider }),
+      })
+      setBackup(loadBackupRecord(window.localStorage, settled, network))
+    })
+  }, [arm.session, ensureIdentity, network, run, social])
+
+  /**
+   * The press.
+   *
+   * A reader who is not signed in yet is sent to the overlay and the work is
+   * picked up when they come back — which is why this is a flag and not an
+   * `await`: the overlay resolves through the sign-in store, in another React
+   * root, and nothing here can wait on it.
+   */
+  const askForBackup = useCallback(() => {
+    if (social === null) return
+    const refusal = backupRefusal({ status: social.status, hasKey: social.address !== null })
+    if (refusal !== null) {
+      setError(refusal)
+      return
+    }
+    if (social.status === 'signed-in') {
+      void runBackup()
+      return
+    }
+    backupAsked.current = true
+    social.openAuthFlow()
+  }, [runBackup, social])
+
+  useEffect(() => {
+    if (!backupAsked.current) return
+    if (social === null || social.status !== 'signed-in' || social.address === null) return
+    /* Cleared BEFORE the work, so a session that publishes twice — which it
+       does, once for the user and once for the key — cannot start it twice. */
+    backupAsked.current = false
+    void runBackup()
+  }, [runBackup, social])
+
+  /** "Not now", honoured for a day. See `../lib/backupDevice.ts`. */
+  const dismissBackup = useCallback(() => {
+    const settled = userRef.current
+    if (settled === null) return
+    saveBackupRecord(window.localStorage, settled, network, { dismissedAt: Date.now() })
+    setBackup(loadBackupRecord(window.localStorage, settled, network))
+  }, [network])
+
+  /** What the offer does on this visit, or `hidden`. */
+  const backupState: BackupOffer = backupOffer({
+    onHome: screen === 'home',
+    hasName: (view?.name ?? null) !== null,
+    socialAvailable: social !== null && social.status !== 'disabled',
+    heldBySocial: arm.kind === 'dynamic',
+    record: backup,
+    now: Date.now(),
+  })
 
   /* ---------------------------------------------------------------------- */
   /* What is on screen                                                      */
@@ -1256,6 +1443,32 @@ export default function CustodyPassport({ network, arm, notice: browserNotice = 
   }
 
 
+
+  /* THE SECOND HALF OF COMING BACK, and it is checked before the stored screen
+     because what is stored by then is a finished Passport. See {@link adopting}.
+
+     TWO SOURCES, ONE STEP. The sign-in that finds the Passport sets `adopting`
+     here; the host sets `adoption` for every render AFTER a key is made on this
+     device, because by then this component has been replaced — the key wins the
+     identity question the moment it exists — and its own state went with it. */
+  const adoptionView =
+    adoption ?? (adopting === null ? null : { name: adopting, stage: 'enrol' as const })
+  if (adoptionView !== null) {
+    return (
+      <AdoptStep
+        name={adoptionView.name}
+        stage={adoptionView.stage}
+        error={error}
+        onEnrol={() => onEnrolDeviceKey?.()}
+        onSignIn={() => social?.openAuthFlow()}
+        onBack={() => {
+          setAdopting(null)
+          onAbandonAdoption?.()
+          setScreen('create')
+        }}
+      />
+    )
+  }
 
   if (screen === 'recover') {
     return (
@@ -1301,7 +1514,56 @@ export default function CustodyPassport({ network, arm, notice: browserNotice = 
         onSend={sendToName}
         onDismissStopped={dismissStoppedSend}
         onDismissError={() => setError(null)}
+        backup={backupState}
+        backupProvider={backup?.provider ?? null}
+        onBackUp={askForBackup}
+        onDismissBackup={dismissBackup}
       />
+    )
+  }
+
+  /**
+   * A SIGN-IN IS OFFERED NO PASSPORT OF ITS OWN (2026/09/21).
+   *
+   * It could make one until that day, and this branch is the retirement of it.
+   * A Passport made from a sign-in alone has no key on any device, which makes
+   * the sign-in the only thing standing between its holder and their money —
+   * the shape the whole design exists to avoid. What a sign-in is FOR now is
+   * the spare key on a Passport a device key made, and the one thing it can do
+   * from this screen is bring such a Passport back.
+   *
+   * Existing ones are untouched: this is the screen for a sign-in with NO
+   * Passport, and a sign-in that already holds one never reaches it.
+   */
+  if (arm.kind === 'dynamic') {
+    return (
+      <Shell label="Passport">
+        <p className="mnob-kicker">{arm.kicker}</p>
+        <h1 className="mnob-title">
+          <span>Bring your</span>
+          <span>Passport here</span>
+        </h1>
+        <p className="mnob-lede">{ADOPT_COPY.socialCannotCreate}</p>
+        <div className="mndyn-actions">
+          <button
+            type="button"
+            className="mnob-primary"
+            onClick={() => setScreen('recover')}
+            disabled={busy !== null}
+          >
+            <span className="mnob-primary-copy">
+              <Search size={17} strokeWidth={2} aria-hidden="true" />
+              I already have a Passport
+            </span>
+            <ArrowRight size={17} strokeWidth={2.2} aria-hidden="true" />
+          </button>
+          {error ? (
+            <div className="mnob-unusable" role="alert">
+              <p className="mnob-unusable-copy">{error}</p>
+            </div>
+          ) : null}
+        </div>
+      </Shell>
     )
   }
 
@@ -1545,6 +1807,148 @@ function RecoverStep(props: {
   )
 }
 
+/**
+ * THE SECOND HALF OF COMING BACK ON A NEW DEVICE.
+ *
+ * The name has been checked against the chain and the sign-in behind it really
+ * is part of that Passport. What is left is a key on THIS device, and this
+ * screen is the one press that makes one. Everything after the press belongs to
+ * the host: making a key replaces this screen, and `../lib/custodyAdoption.ts`
+ * is what carries the Passport across that.
+ *
+ * THE LIMITATION IS ON THE SCREEN AND NOT IN A FOOTNOTE. Tokens sent to this
+ * Passport before today were described in a way only the device that received
+ * them can read, and nothing a sign-in can do on a new device reproduces it.
+ * Somebody bringing a Passport back is entitled to know that before they start,
+ * in words, once.
+ */
+function AdoptStep(props: {
+  name: string
+  /** Which half is next. See `../lib/custodyAdoption.ts`. */
+  stage: 'enrol' | 'adopt' | 'blocked'
+  error: string | null
+  onEnrol: () => void
+  onSignIn: () => void
+  onBack: () => void
+}) {
+  const working = props.stage === 'adopt'
+  return (
+    <Shell label="Passport">
+      <p className="mnob-kicker">
+        <BadgeCheck size={13} aria-hidden="true" /> Found
+      </p>
+      <h1 className="mnob-title">
+        <span>{ADOPT_COPY.title}</span>
+      </h1>
+      <p className="mnob-lede">
+        {props.stage === 'blocked' ? ADOPT_COPY.blocked : ADOPT_COPY.found(props.name)}
+      </p>
+      <div className="mndyn-actions">
+        {props.stage === 'blocked' ? (
+          <button type="button" className="mnob-primary" onClick={props.onSignIn}>
+            <span className="mnob-primary-copy">
+              <KeyRound size={17} strokeWidth={2} aria-hidden="true" />
+              Sign in again
+            </span>
+            <ArrowRight size={17} strokeWidth={2.2} aria-hidden="true" />
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="mnob-primary"
+            onClick={props.onEnrol}
+            disabled={working}
+          >
+            <span className="mnob-primary-copy">
+              {working ? (
+                <Loader2
+                  className="mnob-working-spinner"
+                  size={17}
+                  strokeWidth={2}
+                  aria-hidden="true"
+                />
+              ) : (
+                <KeyRound size={17} strokeWidth={2} aria-hidden="true" />
+              )}
+              {working ? ADOPT_COPY.busy : ADOPT_COPY.action}
+            </span>
+            <ArrowRight size={17} strokeWidth={2.2} aria-hidden="true" />
+          </button>
+        )}
+        <p className="mnob-hint">{ADOPT_COPY.limit}</p>
+        {props.error ? (
+          <div className="mnob-unusable" role="alert">
+            <p className="mnob-unusable-copy">{props.error}</p>
+          </div>
+        ) : null}
+        <button type="button" className="mnob-alt" onClick={props.onBack} disabled={working}>
+          Go back
+        </button>
+      </div>
+    </Shell>
+  )
+}
+
+/**
+ * THE OFFER OF A SPARE KEY, on Home and nowhere else.
+ *
+ * One card, one press, and a "Not now" that is honoured for a day — which is
+ * the whole of the decision that this is optional and still asked for again.
+ * `../lib/backupDevice.ts` holds the rule; this is what it looks like.
+ *
+ * It renders NOTHING in a build with no other way in, which is most of them:
+ * `backupOffer` answers `hidden` and this returns null on its first line.
+ */
+function BackupCard(props: {
+  state: BackupOffer
+  provider: string | null
+  busy: string | null
+  onBackUp: () => void
+  onDismiss: () => void
+}) {
+  if (props.state === 'hidden') return null
+  if (props.state === 'done') {
+    return (
+      <p className="mnob-hint mndyn-backup-done" role="status">
+        <ShieldCheck size={14} strokeWidth={2} aria-hidden="true" /> {BACKUP_COPY.done(props.provider)}
+      </p>
+    )
+  }
+  return (
+    <section className="mndyn-backup" aria-labelledby="custody-backup-title">
+      <h2 className="mndyn-backup-title" id="custody-backup-title">
+        {BACKUP_COPY.title}
+      </h2>
+      <p className="mndyn-backup-copy">{BACKUP_COPY.lede}</p>
+      <p className="mndyn-backup-copy mndyn-backup-limit">{BACKUP_COPY.limit}</p>
+      <button
+        type="button"
+        className="mnob-primary mndyn-backup-action"
+        onClick={props.onBackUp}
+        disabled={props.busy !== null}
+      >
+        <span className="mnob-primary-copy">
+          {props.busy !== null ? (
+            <Loader2 className="mnob-working-spinner" size={17} strokeWidth={2} aria-hidden="true" />
+          ) : (
+            <ShieldCheck size={17} strokeWidth={2} aria-hidden="true" />
+          )}
+          {props.busy ?? BACKUP_COPY.action}
+        </span>
+        <ArrowRight size={17} strokeWidth={2.2} aria-hidden="true" />
+      </button>
+      <button
+        type="button"
+        className="mnob-alt"
+        onClick={props.onDismiss}
+        disabled={props.busy !== null}
+      >
+        {BACKUP_COPY.dismiss}
+      </button>
+    </section>
+  )
+}
+
 function HomeStep(props: {
   badge: string
   name: string | null
@@ -1564,6 +1968,12 @@ function HomeStep(props: {
   onSend: (name: string, amount: string, asset: CustodyAssetRow) => void
   onDismissStopped: () => void
   onDismissError: () => void
+  /** What the spare-key offer does on this visit. See `../lib/backupDevice.ts`. */
+  backup: BackupOffer
+  /** The provider the spare key was added with, where there is one. */
+  backupProvider: string | null
+  onBackUp: () => void
+  onDismissBackup: () => void
 }) {
   const [recipient, setRecipient] = useState('')
   const [amount, setAmount] = useState('')
@@ -1615,6 +2025,17 @@ function HomeStep(props: {
       ) : null}
 
       {arriving ? <p className="mnob-hint">{arriving}</p> : null}
+
+      {/* THE SPARE KEY, offered under what the Passport holds and above what it
+          can do with it. Placed here rather than at the foot because a card
+          below the send form is a card nobody scrolls to. */}
+      <BackupCard
+        state={props.backup}
+        provider={props.backupProvider}
+        busy={props.busy}
+        onBackUp={props.onBackUp}
+        onDismiss={props.onDismissBackup}
+      />
 
       {props.offer.kind === 'none' ? null : (
         /* A SENTENCE AND A DISMISS, and no third thing to press. A send is one
