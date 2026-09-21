@@ -18,15 +18,9 @@ import './onboarding.css'
  * WebAuthn discoverable credentials mean the assertion path also covers a
  * passkey synced from another device.
  *
- * This is the only way in, and in every build shipped today it is the only
- * control on the screen: nothing here waits on a vendor, and the boot cannot
- * be held hostage to one.
- *
- * Since 2026/09/14 a build given a `VITE_DYNAMIC_ENVIRONMENT_ID` also renders
- * `<ContinueWithSocial />` beneath the hint. It is not a second way in. It
- * proves who somebody is to a provider and then hands them straight back to
- * the button above, because the passkey is still what this device's Passport
- * is held by — see that component's header and `docs/demo/dynamic-integration.md`.
+ * Dynamic is the secondary sign-in route. Its button stays visible while
+ * loading or unavailable; only a ready session can open authentication.
+ * Passkey onboarding stays independent of the vendor's availability.
  */
 export interface OnboardingProps {
   stage: 'welcome' | 'working'
@@ -359,10 +353,7 @@ export default function OnboardingScreen(props: OnboardingProps) {
               </span>
               <ArrowRight size={17} strokeWidth={2.2} aria-hidden="true" />
             </button>
-            {/* Renders nothing at all unless this build was given a Dynamic
-                environment id, which no build shipped today has — so there is
-                no condition to write here. See the component's own header, and
-                the note about "the only way in" at the top of this file. */}
+            {/* Both sign-in choices stay visible while Dynamic starts. */}
             <ContinueWithSocial />
             <div className="mnob-privacy-note">
               <ShieldCheck size={17} strokeWidth={1.8} aria-hidden="true" />

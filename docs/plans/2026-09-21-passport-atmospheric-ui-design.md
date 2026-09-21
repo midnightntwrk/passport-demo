@@ -17,7 +17,7 @@ Refresh the Passport demo into a richer, calmer product experience without chang
 
 ## Experience
 
-The entry screen leads with a quiet eclipse, a compact brand bar, and one clear promise: “Your private identity for the Midnight network.” Passkey remains the primary action. Dynamic is a visually related secondary sign-in path whenever its environment is configured. A brief privacy reassurance explains the interaction model without adding another decision.
+The entry screen leads with a quiet eclipse, a compact brand bar, and one clear promise: “Your private identity for the Midnight network.” Passkey remains the primary action. Dynamic stays visible as a visually related secondary sign-in path, with an explanatory disabled state while loading or unavailable. A brief privacy reassurance explains the interaction model without adding another decision.
 
 The identity-creation journey carries the same hierarchy, glass-like raised surfaces, and compact motion. The signed-in shell shifts from onboarding to utility: the active Midnight name becomes the hero, Send and Receive become the primary actions, assets are easier to scan, and navigation behaves like a floating dock.
 
@@ -31,7 +31,7 @@ The identity-creation journey carries the same hierarchy, glass-like raised surf
 
 ## Scope boundaries
 
-This refresh changes presentation and product copy only. Existing passkey discovery, enrolment, recovery, custody, Dynamic session, and transaction behaviour remain intact. Dynamic continues to render only when `VITE_DYNAMIC_ENVIRONMENT_ID` is configured.
+Existing passkey discovery, enrolment, recovery, custody, Dynamic session, and transaction behaviour remain intact. The Dynamic button always renders for a signed-out visitor; opening authentication requires a configured, ready Dynamic session.
 
 ## Verification
 

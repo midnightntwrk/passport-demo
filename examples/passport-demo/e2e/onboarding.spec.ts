@@ -93,18 +93,21 @@ async function visibleText(): Promise<string> {
   return page.locator('body').innerText();
 }
 
-test('the landing screen offers one way in, and says what network this is', async () => {
+test('the landing screen keeps both sign-in choices visible, and says what network this is', async () => {
   await page.goto('/');
 
   await expect(page.getByRole('heading', { name: /Midnight\s*Passport/ })).toBeVisible();
   await expect(page.getByRole('button', { name: SIGN_IN_BUTTON })).toBeVisible();
   await expect(page.getByText(/Test network demo — not production/)).toBeVisible();
 
-  /* One primary action. There is no hosted route to offer and no vendor
-     sign-in to wait on, so a second primary button would be a promise this
-     demo cannot keep. */
+  /* The offline preview has no Dynamic environment. Keep its route visible
+     and explain availability, while passkey sign-in remains usable. */
+  await expect(page.getByRole('button', { name: 'Continue with Dynamic' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Continue with Dynamic' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: SIGN_IN_BUTTON })).toBeEnabled();
+  await expect(page.getByText('Dynamic sign-in is currently unavailable. You can continue with a passkey.')).toBeVisible();
   const primaries = await page.getByRole('button', { name: /Continue|Create|Sign in/i }).count();
-  expect(primaries).toBe(1);
+  expect(primaries).toBe(2);
 
   // Nothing about a wallet, a seed phrase, or a fee before anything has happened.
   const text = await visibleText();
