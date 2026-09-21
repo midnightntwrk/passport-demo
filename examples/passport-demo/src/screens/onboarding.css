@@ -418,7 +418,7 @@
   box-shadow: var(--mn-shadow-accent);
 }
 .mnob-primary:hover:not(:disabled) {
-  background: linear-gradient(115deg, #8878ff 0%, #4564ff 65%, #6282ff 100%);
+  background: linear-gradient(115deg, #655cff 0%, #0000d8 68%, #163be0 100%);
   transform: translateY(-1px);
 }
 .mnob-primary-copy svg { filter: drop-shadow(0 0 9px rgba(255, 255, 255, .26)); }

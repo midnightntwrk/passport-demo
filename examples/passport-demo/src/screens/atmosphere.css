@@ -48,9 +48,9 @@
   display: block;
   max-width: 570px;
   font-size: clamp(36px, 9.7vw, 58px);
-  font-weight: 700;
-  letter-spacing: -.045em;
-  line-height: .98;
+  font-weight: 500;
+  letter-spacing: -.035em;
+  line-height: 1.06;
   text-wrap: balance;
 }
 .mnob-title span { display: inline; }
@@ -71,9 +71,11 @@
 }
 .mnob-primary,
 .mnob-social {
+  width: 100%;
   min-height: 58px;
   border-radius: 18px;
   font-size: 15px;
+  font-weight: 600;
   letter-spacing: -.01em;
 }
 .mnob-primary {
@@ -90,6 +92,32 @@
   border-color: var(--mn-accent-violet);
   color: var(--mn-text-primary);
   background: color-mix(in srgb, var(--mn-accent-soft) 64%, var(--mn-surface-raised));
+}
+
+/* Fade only the artwork's perimeter; its orbital detail stays crisp. */
+.mnob-orbit-art {
+  mask-image: radial-gradient(circle, #000 48%, transparent 72%);
+}
+.mnob-alt { min-height: 44px; }
+.mnob-route-hint { font-size: 12px; }
+.mnob-privacy-note small { font-size: 12px; }
+
+/* The action group should stay within reach on a phone with both methods.
+   These rules live after the final visual layer, so short-screen sizing wins. */
+@media (max-width: 600px) and (max-height: 900px) {
+  .mnob-body { padding-top: 12px; padding-bottom: 16px; }
+  .mnob-orbit { width: clamp(146px, 44vw, 180px); margin: 0 auto 16px; }
+  .mnob-title { font-size: clamp(30px, 8.7vw, 40px); }
+  .mnob-lede { margin-top: 14px; }
+  .mnob-stage { margin-top: 26px; }
+  .mnob-primary, .mnob-social { min-height: 54px; }
+  .mnob-or { margin-block: 10px; }
+  .mnob-privacy-note { margin-top: 16px; }
+}
+
+@media (max-width: 360px) {
+  .mnob-bar-label { display: none; }
+  .mnob-theme { margin-left: auto; }
 }
 
 /* Identity journey ------------------------------------------------------ */
@@ -169,6 +197,7 @@
   font-weight: 700;
   letter-spacing: -.045em;
   line-height: .96;
+  overflow-wrap: anywhere;
 }
 .mnhome-section-title {
   margin: 8px 0 -10px;
@@ -192,7 +221,7 @@
   box-shadow: var(--mn-shadow-accent);
 }
 .mnhome-action-primary:hover,
-.mnhome-action-primary:active { background: linear-gradient(115deg, #8878ff, #4564ff 66%, #6282ff); }
+.mnhome-action-primary:active { background: linear-gradient(115deg, #655cff, #0000d8 68%, #163be0); }
 .mnhome-token-row > *,
 .mnassets-row > * { padding-block: 15px; }
 .mnhome-token-icon,
