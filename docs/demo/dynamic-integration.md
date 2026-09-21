@@ -156,12 +156,14 @@ an environment id, for somebody who has no passkey Passport on the device.
    and a coin whose position cannot be settled is shown as arriving rather than as
    balance); the name (or the account address) to be paid at; and a Send form that takes
    either asset.
-6. **Send, NIGHT.** Two legs, as on every build: `withdraw_unshielded_with_k256(colour,
-   amount, this device's receiving address)` — the one thing the holder approves, through
-   `signRawMessage` — then the recipient's permissionless deposit, chosen by asking the
-   chain what the recipient's account is built from. That covers a prototype account and
-   another Dynamic Passport alike (`deposit_night` and `deposit_unshielded`), through
-   `payCustodyAccount`.
+6. **Send, NIGHT — refused, on both arms** (2026/09/18). It took two legs, and the second
+   of them paid the recipient from this Passport's OWN wallet: the value left the account
+   into a wallet the app built, and a tab closed between the legs left somebody's money in
+   a place neither party owned. That is the route the ruling of 2026/09/18 took out of the
+   shielded path, and it is now out of this one too. Both arms answer with one sentence —
+   "Paying somebody from this Passport is coming. Everything else here works." — before
+   the name is resolved or anything is signed. The shielded send below is what works
+   today, and it is one transaction with no wallet in it.
 6b. **Send, a token.** Three legs: `withdraw_shielded_with_k256` for exactly the amount,
    out to this Passport's own shielded address, with the change coin coming back as the
    circuit's own return value and going straight into the store; the note identified in
@@ -183,7 +185,7 @@ an environment id, for somebody who has no passkey Passport on the device.
 | Real | The identity choice, the stage machine, the setup copy, the resumable deploy, the name claim, the balance reads, both send plans, the recovery checks, and every leg's call shape. |
 | Real | The approval. `signRawMessage` signs the contract's own challenge, and `k1Call` is the shipped gated-call path from the custody layer. |
 | Real | **Sending a shielded balance**, as built 2026/09/17: the qualified coin is bound into the challenge (AUTH-10) and answered by the `held_coin` witness out of the coin store, which IS the connection's private state. |
-| Real | **Paying somebody who holds one of these Passports** — `deposit_unshielded` and `deposit_shielded(coin, entry)` through `payCustodyAccount`, permissionless, on a connection addressed at the recipient's own account. |
+| Real | **Paying somebody who holds one of these Passports** — `deposit_shielded(coin, entry)` grafted onto the sender's own spend, permissionless, on a connection addressed at the recipient's own account. |
 | **Not deployed** | `POST /prove-account-custody` on the balancer (probed 2026/09/16: `404`). Every account custody transaction goes through it, so a live run stops at the first one. `custodyProofProvider` refuses immediately with one sentence rather than waiting out a ten-minute proof timeout. |
 | Deliberately absent | Migration of an existing passkey Passport. §6 of the build-out plan puts it out of this version; the two kinds coexist and can pay each other. |
 

@@ -457,6 +457,16 @@ function harness(
           return Promise.resolve({ public: { txId: `wave-${state.submits}` } });
         },
         findDeployedContract: () => Promise.resolve({ callTx }),
+        /* THE SPLIT SUBMIT, for the same reason as the composer below: nothing
+           in this drill submits a transaction it built itself. */
+        submitTxAsync: () =>
+          Promise.reject(new Error('this drill drives the deploy and activation path only')),
+        /* THIS DRILL DOES NOT COMPOSE. The shielded spend builds its own
+           transaction and is driven by `custodyContractClient.spend.test.ts`;
+           everything here goes through `callTx`, so the member is present to
+           satisfy the seam and refuses if anything reaches it. */
+        createUnprovenCallTx: () =>
+          Promise.reject(new Error('this drill drives the deploy and activation path only')),
       }),
     now: () => {
       state.clock += 5_000;

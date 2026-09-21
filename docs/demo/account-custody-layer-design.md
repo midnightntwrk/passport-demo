@@ -311,6 +311,66 @@ second call recomputes the same neighbours and adds nothing — which matters be
 spend's loop is `advance ?? widen` and a widening that kept finding more would never
 terminate.
 
+### 3a.1 The passkey arm through the same engine, live — 2026/09/18
+
+Recorded in full in `scratchpad/live-proxy/RUN-sends.md`. What it adds to §3a
+and §3c is that **the arm is not a second engine**: `spendShieldedK1` and its
+two doors, the retry, the store and the backfill are one code path, and the arm
+chooses the gated half of a circuit name and how the authorisation is built and
+nothing else.
+
+**Where the arm diverges, and it is two lines.** The circuit is
+`withdraw_shielded_with_${arm}` or `withdraw_shielded_to_contract_with_${arm}`;
+the authorisation is built either by the vendor over a socket (k256, four
+trailing arguments ending in the envelope) or synchronously from the passkey's
+derived scalar (jubjub, five, ending in `grind_nonce`). `deposit_shielded` is
+permissionless and therefore the SAME circuit whichever arm the sender is on —
+which is why a passkey Passport pays a social sign-in's Passport and the
+reverse, and why the recipient's arm never enters the sender's decision.
+
+**The four measurements, on a passkey Passport (`jjp9h5apyr7fe6.night`,
+account `098b18f2…dbee`) made and named live the same afternoon:**
+
+| | transaction | block | proof | window |
+|---|---|---|---|---|
+| Direct transfer to `dynone1.night`, 1 mUSD | `f865d6c942f7e5738b92480b4740de7d293b4c80755a0b042293614d624e752f` | 519005 | **58.6 s** (`…_to_contract_with_jubjub` + `deposit_shielded`, one request, 6353 bytes in) | `[3842, 3844)` |
+| The change backfill | `a8f0c2c22429fb3586b88dfbb30255df76cab11e92a58d6c7c29c85f8c38c9aa` | 519019 | **56.1 s** (`append_inbox_with_jubjub`) | `[3844, 3844)` — none, which is right |
+| To a shielded address, 1 mUSD | `47e1d1c1a0699479b2595d8cb34dd895bce31b01c89e4548a33828cb938435f3` | 519072 | **59.7 s** (`withdraw_shielded_with_jubjub`) | `[3844, 3845)` |
+| Being paid, from a social sign-in's Passport | `07e80bc7ecd8e21d4ec4b64f7c62f16e6d974c62a1ff574615c17349d0825323` | 518986 | 126.5 s | `[3841, 3842)` |
+
+Every one SUCCESS. Both composed transactions carry BOTH calls under a single
+hash, read off the indexer rather than off the client.
+
+**A jubjub proof is half a k256 one.** 58.6 s against 126.5 s for the same
+composed pair on the same box and the same proof server, minutes apart. The
+gated jubjub circuits verify a Schnorr signature over the embedded curve; the
+k256 ones verify ECDSA over a foreign one, which is the expensive half of the
+account custody contract and always was.
+
+**The retry fired on this arm, and the failure was the proof service's.** The
+address send's first attempt drew a `400` from `/prover-v3/prove` for the change
+coin's stored position (3842); the phase said nothing had been submitted, the
+next candidate (3843) was tried, and it proved. So the mechanism §3c rebuilt on
+the wording-to-phase argument works on an arm it had never run on. It also shows
+the mechanism's one cost plainly: the client cannot distinguish a service that
+refuses a position from a service that is unwell, so a transient proving failure
+also burns a candidate. Safe (nothing is submitted either way) and cheap (the
+list is short), but worth naming.
+
+**And an ordinary wallet finds what a passkey's contract created.** The
+throwaway recipient of the address send — no Passport, no account contract —
+synced from genesis and holds the coin as a spendable coin, under its own nonce,
+alongside the one an earlier k256 run gave it. `additionalCoinEncPublicKeyMappings`
+is what makes that true, and it is now shown on both arms.
+
+**What the run did NOT settle.** The sponsor's `/fund-account` still refuses an
+account custody account with `not-an-account` (§7a; the sibling sponsor PR is the
+fix), so a passkey Passport is still funded by being paid rather than by an
+opening balance. And the account's NIGHT still moves in the two legs of §3b,
+the second of which goes through the sender's own wallet — so the passkey arm
+refuses that one payment in a sentence rather than taking a route the ruling of
+2026/09/18 forbids.
+
 ### 3b. What the live stagenet run of 2026/09/18 settled, and what it did not
 
 Recorded in full in `scratchpad/live-proxy/RUN.md`.
@@ -593,7 +653,15 @@ Per candidate position, in `spendShieldedK1`:
    `privateStateId`**. This is deliberate and load-bearing: a connection
    addressed at somebody else's account must never be served this Passport's
    coin store.
-5. `graftIntent` — `txA.addIntent({tag:'random'}, [...txB.intents.values()][0]) ?? txA`.
+5. `graftIntent` — `txA.addIntent({tag:'random'}, [...txB.intents.values()][0])`, and
+   **the result is checked**: the returned transaction must carry one intent more
+   than the one handed in, or the payment is refused before anything is
+   submitted. It used to fall back to `?? txA` on a build that returned nothing,
+   which is the defensive read the deploy waves make of `addDeploy` — but the two
+   are not alike. A deploy that loses its addition fails loudly at the node; a
+   spend that loses its graft is a VALID transaction that takes the sender's
+   money and pays nobody, because the withdrawal half is intact and the claim
+   half is simply absent. See question 2 under "Open questions for Nicolas".
    **Never merge.** `mergeUnsubmittedCallTxData` is midnight-js's multi-call path
    and it is a MERGE, which is wrong here; it is reached only from `scoped()` and
    `submitCallTx`, both of which this code bypasses. The graft is at the ledger
@@ -683,6 +751,31 @@ walking the inbox rather than needing a store it does not have. Live:
 **It costs a second approval.** `append_inbox` is gated, so the person is asked
 to sign twice for one payment. Whether that is acceptable, or whether the entry
 should be batched into a later transaction, is an open question for Nicolas.
+
+#### Open questions for Nicolas
+
+1. **The change backfill's second approval**, above: acceptable, or batched into
+   a later transaction?
+2. **Can the claim's segment fail while the withdrawal's succeeds?** The
+   composed transaction carries two calls: the sender's gated
+   `withdraw_shielded_to_contract_with_<arm>` and the recipient's
+   permissionless `deposit_shielded`, grafted in as an intent in a RANDOM
+   segment. A transaction has a guaranteed part and fallible parts, and a
+   fallible segment can fail on its own — that is what `FailFallible` means. If
+   the segment carrying the claim can fail while the segment carrying the
+   withdrawal succeeds, the outcome is a shielded output owned by the
+   recipient's contract that their `deposit_shielded` never claimed and that
+   no inbox entry describes: money that has left the sender, does not appear in
+   the recipient's balance, and that nobody holds a description of. The client
+   cannot tell today — it reads one status for the whole transaction, and
+   `SucceedEntirely` is the only one it books a spend on, so the case would
+   reach it as a refusal and a restored store even though value HAD moved.
+   What we need from the contract side is whether the composition makes that
+   outcome reachable at all (one segment, or two?), and if it is, whether the
+   claim should be placed in the guaranteed part instead so the two cannot come
+   apart. Until it is answered the client treats anything but `SucceedEntirely`
+   as "nothing moved", which is right for a whole-transaction failure and would
+   be wrong for a split one.
 
 #### What a reopened Passport is owed
 
