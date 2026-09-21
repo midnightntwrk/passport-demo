@@ -28,7 +28,9 @@ import {
   CUSTODY_PROOF_NOT_BUILT,
   CUSTODY_UNEXPECTED,
   custodyProofNotBuilt,
+  custodyProofNotBuiltDetail,
   isCustodyProofNotBuilt,
+  proveAccountCustodyDetail,
   proveAccountCustodyRefused,
   CUSTODY_VERIFIER_BYTE_BUDGET,
   loadCustodyAuthorityKey,
@@ -201,9 +203,25 @@ describe('the proving endpoint', () => {
 });
 
 describe('the proving request and reply', () => {
-  it('carries the circuit, the transaction as hex, and the network', () => {
-    expect(proveAccountCustodyRequest('append_inbox_with_k256', new Uint8Array([0xde, 0xad]), 'stagenet')).toEqual(
-      { circuit: 'append_inbox_with_k256', unprovenTx: 'dead', network: 'stagenet' },
+  it('carries every circuit, the transaction as hex, and the network', () => {
+    expect(
+      proveAccountCustodyRequest(['append_inbox_with_k256'], new Uint8Array([0xde, 0xad]), 'stagenet'),
+    ).toEqual({ circuits: ['append_inbox_with_k256'], unprovenTx: 'dead', network: 'stagenet' });
+  });
+
+  it('carries BOTH circuits of a composed transaction', () => {
+    expect(
+      proveAccountCustodyRequest(
+        ['withdraw_shielded_to_contract_with_k256', 'deposit_shielded'],
+        new Uint8Array([0x01]),
+        'stagenet',
+      ).circuits,
+    ).toEqual(['withdraw_shielded_to_contract_with_k256', 'deposit_shielded']);
+  });
+
+  it('refuses a request that names no circuit at all', () => {
+    expect(() => proveAccountCustodyRequest([], new Uint8Array([0x01]), 'stagenet')).toThrow(
+      /name the circuits/,
     );
   });
 
@@ -515,6 +533,21 @@ describe('what a screen is allowed to paint', () => {
     );
   });
 
+  /* THE WASM TRAP, which is the one this layer produces most often: a coin at
+     a position the contract's Zswap tree has moved past makes the on-chain
+     runtime trap, and all that reaches here is the bare word. Nine characters,
+     none of the vocabulary, and a screen full of "unreachable" in front of
+     somebody who pressed Send. A trap is no more ours than a `TypeError`. */
+  it('refuses the bare word a WebAssembly trap arrives as', () => {
+    const trap = new Error('unreachable');
+    trap.name = 'RuntimeError';
+    expect(custodyFailureSentence(trap)).toBe(CUSTODY_UNEXPECTED);
+
+    const outOfBounds = new Error('memory access out of bounds');
+    outOfBounds.name = 'RuntimeError';
+    expect(custodyFailureSentence(outOfBounds)).toBe(CUSTODY_UNEXPECTED);
+  });
+
   it('refuses an empty message, a stack-shaped one, and a thrown non-error', () => {
     expect(custodyFailureSentence(new Error('   '))).toBe(CUSTODY_UNEXPECTED);
     expect(custodyFailureSentence(new Error('x'.repeat(161)))).toBe(CUSTODY_UNEXPECTED);
@@ -589,6 +622,56 @@ describe('a proving service that ran and declined to prove', () => {
     const looping = new Error('one');
     looping.cause = looping;
     expect(isCustodyProofNotBuilt(looping)).toBe(false);
+  });
+
+  /* ---------------------------------------------------------------------- */
+  /* WHAT THE SERVICE SAID, WHICH IS NOT WHAT THE PERSON READS (A2)          */
+  /*                                                                        */
+  /* The code `proving-failed` says the prover RAN and declined. A wrong     */
+  /* candidate position is one thing that reaches; a verifier key that does  */
+  /* not match is another. Rotating on the code alone cost up to ten         */
+  /* approvals for a failure no position could fix, so the retry judges the  */
+  /* service's own words — which travel on the error and reach no screen.    */
+  /* ---------------------------------------------------------------------- */
+
+  it('reads the detail off a refusal body, and nothing off one without it', () => {
+    expect(
+      proveAccountCustodyDetail({ error: 'proving-failed', detail: 'unsatisfiable constraints' }),
+    ).toBe('unsatisfiable constraints');
+    expect(proveAccountCustodyDetail({ error: 'proving-failed' })).toBeNull();
+    expect(proveAccountCustodyDetail({ error: 'proving-failed', detail: '   ' })).toBeNull();
+    expect(proveAccountCustodyDetail({ detail: 42 })).toBeNull();
+    expect(proveAccountCustodyDetail(null)).toBeNull();
+  });
+
+  it('carries the detail on the error, and keeps it out of the sentence', () => {
+    const error = custodyProofNotBuilt('The proof server could not prove it: unsatisfiable');
+    expect(custodyProofNotBuiltDetail(error)).toBe(
+      'The proof server could not prove it: unsatisfiable',
+    );
+    /* THE ONLY THING SOMEBODY READS is still the plain sentence. */
+    expect(error.message).toBe(CUSTODY_PROOF_NOT_BUILT);
+    expect(custodyFailureSentence(error)).toBe(CUSTODY_PROOF_NOT_BUILT);
+  });
+
+  it('says nothing for a refusal that carried no words, or no error at all', () => {
+    expect(custodyProofNotBuiltDetail(custodyProofNotBuilt())).toBeNull();
+    expect(custodyProofNotBuiltDetail(custodyProofNotBuilt(''))).toBeNull();
+    expect(custodyProofNotBuiltDetail(new Error('something else'))).toBeNull();
+    expect(custodyProofNotBuiltDetail('not an error')).toBeNull();
+  });
+
+  it('finds the detail through a wrapper that set a cause', () => {
+    const wrapped = new Error('Unexpected error submitting scoped transaction', {
+      cause: custodyProofNotBuilt('unsatisfiable constraint system'),
+    });
+    expect(custodyProofNotBuiltDetail(wrapped)).toBe('unsatisfiable constraint system');
+  });
+
+  it('gives up on a circular cause chain rather than following it for a detail', () => {
+    const looping = new Error('one');
+    looping.cause = looping;
+    expect(custodyProofNotBuiltDetail(looping)).toBeNull();
   });
 });
 

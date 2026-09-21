@@ -118,6 +118,8 @@ function fakePureCircuits(): CustodyPureCircuits & { calls: unknown[][] } {
       return POINT;
     },
     challenge_withdraw_shielded_with_k256: (...a) => record('ch_withdraw_shielded', a),
+    challenge_withdraw_shielded_to_contract_with_k256: (...a) =>
+      record('ch_withdraw_shielded_to_contract', a),
     challenge_withdraw_unshielded_with_k256: (...a) => record('ch_withdraw_unshielded', a),
     challenge_append_inbox_with_k256: (...a) => record('ch_append_inbox', a),
     challenge_add_device_with_k256: (...a) => record('ch_add_device', a),
@@ -284,6 +286,49 @@ describe('k256 challenges', () => {
         COIN,
         9n,
       ],
+    ]);
+  });
+
+  it('binds the held coin and the RECIPIENT CONTRACT into a direct transfer', () => {
+    const pure = fakePureCircuits();
+    const recipientContract = new Uint8Array(32).fill(0xbb);
+    const colour = new Uint8Array(32).fill(2);
+    k256Challenges.withdrawShieldedToContract(
+      pure,
+      CONTEXT,
+      POINT,
+      recipientContract,
+      colour,
+      100n,
+      COIN,
+    );
+    expect(pure.calls).toEqual([
+      [
+        'ch_withdraw_shielded_to_contract',
+        { bytes: CONTEXT.contractAddress },
+        POINT,
+        { bytes: recipientContract },
+        colour,
+        100n,
+        COIN,
+        9n,
+      ],
+    ]);
+  });
+
+  it('reaches a DIFFERENT circuit from the user-key spend, on identical bytes', () => {
+    /* Thirty-two bytes are thirty-two bytes: the only thing that stops a
+       signature approving a payment to a person being replayed as a payment to
+       a contract is that the two circuits carry different domain-separation
+       tags, which is to say that these two builders call different circuits. */
+    const pure = fakePureCircuits();
+    const target = new Uint8Array(32).fill(0xbb);
+    const colour = new Uint8Array(32).fill(2);
+    k256Challenges.withdrawShielded(pure, CONTEXT, POINT, target, colour, 100n, COIN);
+    k256Challenges.withdrawShieldedToContract(pure, CONTEXT, POINT, target, colour, 100n, COIN);
+    expect(pure.calls.map((call) => call[0])).toEqual([
+      'ch_withdraw_shielded',
+      'ch_withdraw_shielded_to_contract',
     ]);
   });
 
