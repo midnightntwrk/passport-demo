@@ -2278,3 +2278,251 @@ describe('the maintenance authority', () => {
     expect(test.built.filter((entry) => entry[0] === 'retire')).toHaveLength(1);
   });
 });
+
+/* -------------------------------------------------------------------------- */
+/* The same entry points, taken by a PASSKEY                                  */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Every widened entry point, driven by a jubjub device and NO session at all.
+ *
+ * WHAT IS BEING HELD HERE. Until 2026/09/18 each of these read
+ * `k1UserKey(session)` — the lower-cased Dynamic address — to decide whose
+ * record to load and whose wallet to open. A passkey Passport has no such
+ * address, so every one of them either filed a real account under `''` or
+ * refused to find one that was there; the jubjub arm had no caller from the UI
+ * and so the defect had nowhere to show itself. They read
+ * `custodyUserKey(session, device)` now, which on this arm is the device point,
+ * and `null` is the honest session rather than a stub with an empty address.
+ */
+describe('a passkey Passport, through the widened entry points', () => {
+  /** The device, and the user key every store should be under. */
+  function passkeyFake(): { session: null; device: JubjubSigner; user: string } {
+    /* A fixed scalar rather than a derivation: the plumbing is what is under
+       test, and `custodyJubjubSigner.test.ts` owns the derivation. */
+    const device = jubjubDeviceSigner({
+      pure: pureFake(),
+      secretScalar: 0x2a1fn,
+      randomBytes: (length) => new Uint8Array(length).fill(9),
+    });
+    return { session: null, device, user: custodyUserKey(null, device) };
+  }
+
+  it('names the Passport by its device point, not by an address it does not have', () => {
+    const { device, user } = passkeyFake();
+    expect(user).toBe(`jubjub:${device.pk.x.toString(16)}`);
+  });
+
+  it('refuses to name a social sign-in Passport with no sign-in behind it', () => {
+    expect(() =>
+      custodyUserKey(null, { arm: 'k256', pk: { x: 1n, y: 2n, identity: false } }),
+    ).toThrow(/needs the sign-in it is held by/);
+  });
+
+  it('deploys, and files the record under the device point', async () => {
+    const test = harness();
+    const { session, device, user } = passkeyFake();
+    await deployCustodyAccount(session, device, undefined, test.deps);
+
+    expect(loadCustodyRecord(test.storage, user, 'stagenet')?.address).toBe(ADDRESS);
+    /* Wave 1 carries the JUBJUB arm: the constructor's boot commitment binds
+       the arm, and no later wave can repair a deploy that left the activation
+       circuit out. */
+    const deploy = test.built.find((entry) => entry[0] === 'deploy');
+    expect(deploy?.[2]).toContain('activate_initial_device_with_jubjub');
+    expect(deploy?.[2]).toContain('deposit_unshielded');
+    /* And NOT the other arm's, which arrives with a later wave. */
+    expect(deploy?.[2]).not.toContain('activate_initial_device_with_k256');
+  });
+
+  it('activates with the point and the salt, and no envelope', async () => {
+    const test = harness();
+    const { session, device } = passkeyFake();
+    await deployCustodyAccount(session, device, undefined, test.deps);
+    await activateK1Device(session, device, undefined, test.deps);
+
+    const call = test.calls.find((c) => c.circuit === 'activate_initial_device_with_jubjub');
+    /* TWO arguments. The k256 arm's third is an envelope, which is a property
+       of a vendor wrapping bytes before signing them; there is no vendor here. */
+    expect(call?.args).toHaveLength(2);
+    expect(call?.args[0]).toEqual(device.pk);
+  });
+
+  it('signs a gated call with the derived scalar and no vendor round trip', async () => {
+    const test = harness();
+    const { session, device, user } = passkeyFake();
+    await deployCustodyAccount(session, device, undefined, test.deps);
+    await activateK1Device(session, device, undefined, test.deps);
+    await appendInboxK1(session, device, new Uint8Array(192), undefined, test.deps);
+
+    const call = test.calls.find((c) => c.circuit === 'append_inbox_with_jubjub');
+    /* (entry, pk, use_counter, sig_r, sig_s, grind_nonce) — six, against the
+       k256 arm's five, because a Schnorr signature carries its own nonce point
+       and the grind counter the challenge was found at. */
+    expect(call?.args).toHaveLength(6);
+    expect(call?.args[0]).toEqual(new Uint8Array(192));
+    expect(call?.args[1]).toEqual(device.pk);
+    expect(call?.args[2]).toBe(0n);
+    expect(loadCustodyRecord(test.storage, user, 'stagenet')?.txHashes.length).toBeGreaterThan(0);
+  });
+
+  it('makes a permissionless deposit into its own account, under its own record', async () => {
+    const test = harness();
+    const { session, device, user } = passkeyFake();
+    await deployCustodyAccount(session, device, undefined, test.deps);
+    await activateK1Device(session, device, undefined, test.deps);
+    const before = loadCustodyRecord(test.storage, user, 'stagenet')?.txHashes.length ?? 0;
+
+    await custodyPermissionlessCall(
+      session,
+      device,
+      { operation: 'deposit_unshielded', args: [new Uint8Array(32), 5n] },
+      undefined,
+      test.deps,
+    );
+
+    /* No authorisation trailer: nobody signs a deposit, on either arm. */
+    expect(test.calls.find((c) => c.circuit === 'deposit_unshielded')?.args).toHaveLength(2);
+    expect(loadCustodyRecord(test.storage, user, 'stagenet')?.txHashes.length).toBe(before + 1);
+  });
+
+  it('pays another Passport, and writes only the hash into its own record', async () => {
+    const test = harness();
+    const { session, device, user } = passkeyFake();
+    await deployCustodyAccount(session, device, undefined, test.deps);
+    await activateK1Device(session, device, undefined, test.deps);
+    const peer = 'cd'.repeat(32);
+
+    await custodyPermissionlessCallAt(
+      session,
+      device,
+      peer,
+      { operation: 'deposit_shielded', args: [{}, new Uint8Array(192)] },
+      undefined,
+      test.deps,
+    );
+
+    expect(test.opened[test.opened.length - 1]).toBe(peer);
+    /* The RECIPIENT's record is not ours and is not written; ours gains the
+       hash, which is the only thing this Passport learned. */
+    expect(loadCustodyRecord(test.storage, user, 'stagenet')?.txHashes.length).toBeGreaterThan(0);
+    expect(test.connections.at(-1)?.account).toBeNull();
+  });
+
+  it('seals a deposit description with the sender’s own hands on this arm too', async () => {
+    const test = harness();
+    const { session, device } = passkeyFake();
+    await deployCustodyAccount(session, device, undefined, test.deps);
+    await activateK1Device(session, device, undefined, test.deps);
+
+    await depositShieldedIntoCustody(
+      session,
+      device,
+      {
+        targetAddress: 'cd'.repeat(32),
+        recipientEncKeyHex: 'ab'.repeat(32),
+        coin: { colour: '1a'.repeat(32), nonce: '7f'.repeat(32), value: 40n },
+      },
+      undefined,
+      test.deps,
+    );
+
+    const call = test.calls.find((c) => c.circuit === 'deposit_shielded');
+    expect(call?.args).toHaveLength(2);
+    expect((call?.args[1] as Uint8Array).length).toBe(192);
+  });
+
+  it('starts again by throwing away THIS device’s record and nobody else’s', async () => {
+    const test = harness();
+    const { session, device, user } = passkeyFake();
+    await deployCustodyAccount(session, device, undefined, test.deps);
+    /* A Dynamic Passport in the same browser, which must survive. */
+    const other = deviceFake();
+    await deployCustodyAccount(other.session, other.device, undefined, test.deps);
+
+    await startCustodyAccountAgain(session, device, test.deps);
+
+    expect(loadCustodyRecord(test.storage, user, 'stagenet')).toBeNull();
+    expect(loadCustodyRecord(test.storage, k1UserKey(other.session), 'stagenet')).not.toBeNull();
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* Who may fix this account's circuits afterwards                             */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The maintenance authority, and Hector's decision of 2026/09/18: keep it.
+ *
+ * The reason is the week's prototype accounts, which cannot take a circuit fix
+ * — a retired authority makes an account immutable, so a defect means a fresh
+ * account and a migration of everything in the old one. A passkey Passport can
+ * afford to keep it because the key is DERIVED from the passkey and never
+ * written down; a social sign-in cannot, because there is nothing deterministic
+ * to derive from and a kept authority there would be backed by a sampled key
+ * living in one browser — an authority nobody holds.
+ */
+describe('the maintenance authority', () => {
+  function passkeyDevice(): JubjubSigner & { maintenanceSecretHex: string } {
+    const signer = jubjubDeviceSigner({
+      pure: pureFake(),
+      secretScalar: 0x2a1fn,
+      randomBytes: (length) => new Uint8Array(length).fill(9),
+    });
+    return { ...signer, sign: signer.sign.bind(signer), maintenanceSecretHex: 'dd'.repeat(32) };
+  }
+
+  it('is NOT retired for a passkey, so its circuits can be fixed later', async () => {
+    const test = harness();
+    const device = passkeyDevice();
+    await deployCustodyAccount(null, device, undefined, test.deps);
+
+    /* No wave retires it. The old plan's last wave replaced the committee with
+       an empty one, which is what made the account immutable. */
+    expect(test.built.filter((entry) => entry[0] === 'retire')).toHaveLength(0);
+  });
+
+  it('is the key the passkey derived, and not one this browser sampled', async () => {
+    const test = harness();
+    const device = passkeyDevice();
+    await deployCustodyAccount(null, device, undefined, test.deps);
+
+    /* The fake's `signingKeyFromBip340` tags what it was handed, so this is the
+       derived secret arriving at the authority rather than a sampled one. A
+       sampled key would be an authority that dies with this browser — the worst
+       of both answers. */
+    const committees = test.built.filter((entry) => entry[0] === 'authority');
+    expect(committees).toHaveLength(1);
+    /* ONE key in the committee, and not the empty committee a retirement
+       installs. */
+    expect(committees[0][1]).toBe(1);
+  });
+
+  it('IS retired for a social sign-in, exactly as it always was', async () => {
+    const test = harness();
+    const { session, device } = deviceFake();
+    await deployCustodyAccount(session, device, undefined, test.deps);
+
+    expect(test.built.filter((entry) => entry[0] === 'retire')).toHaveLength(1);
+    /* And the only committee it ever builds is the EMPTY one the retirement
+       installs — nothing derived is put behind it, because that arm has no key
+       to derive. */
+    const committees = test.built.filter((entry) => entry[0] === 'authority');
+    expect(committees).toHaveLength(1);
+    expect(committees[0][1]).toBe(0);
+  });
+
+  it('retires for a passkey that was asked for an account nobody can fix', async () => {
+    /* The developer surface's case, and the guard that makes the two halves
+       agree: a device with no key gets a plan that retires. */
+    const test = harness();
+    const signer = jubjubDeviceSigner({
+      pure: pureFake(),
+      secretScalar: 0x2a1fn,
+      randomBytes: (length) => new Uint8Array(length).fill(9),
+    });
+    await deployCustodyAccount(null, signer, undefined, test.deps);
+
+    expect(test.built.filter((entry) => entry[0] === 'retire')).toHaveLength(1);
+  });
+});
