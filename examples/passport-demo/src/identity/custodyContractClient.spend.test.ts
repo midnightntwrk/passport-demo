@@ -917,11 +917,12 @@ describe('held_coin, read out of the private state the connection serves', () =>
 describe('a deposit into somebody else’s account', () => {
   it('seals a description only the recipient can open, and sends it with the note', async () => {
     const test = harness();
-    const { session } = deviceFake();
+    const { session, device } = deviceFake();
     const recipient = generateCustodyEncKeyPair();
 
     await depositShieldedIntoCustody(
       session,
+      device,
       {
         targetAddress: PEER,
         recipientEncKeyHex: recipient.publicKeyHex,
@@ -950,11 +951,12 @@ describe('a deposit into somebody else’s account', () => {
 
   it('refuses a key that is not one before anything is submitted', async () => {
     const test = harness();
-    const { session } = deviceFake();
+    const { session, device } = deviceFake();
 
     await expect(
       depositShieldedIntoCustody(
         session,
+        device,
         {
           targetAddress: PEER,
           recipientEncKeyHex: 'not-a-key',
@@ -970,11 +972,12 @@ describe('a deposit into somebody else’s account', () => {
 
   it('refuses an address that is not one, and pays nobody', async () => {
     const test = harness();
-    const { session } = deviceFake();
+    const { session, device } = deviceFake();
 
     await expect(
       custodyPermissionlessCallAt(
         session,
+        device,
         'not-an-address',
         { operation: 'deposit_unshielded', args: [] },
         undefined,
@@ -988,11 +991,12 @@ describe('a deposit into somebody else’s account', () => {
     /* THE DEPOSIT-BACK. One more permissionless deposit, to the sender's own
        address, sealed to the sender's own key — no approval from anybody. */
     const test = harness();
-    const { session } = deviceFake();
+    const { session, device } = deviceFake();
     const own = generateCustodyEncKeyPair();
 
     await depositShieldedIntoCustody(
       session,
+      device,
       {
         targetAddress: ADDRESS,
         recipientEncKeyHex: own.publicKeyHex,
