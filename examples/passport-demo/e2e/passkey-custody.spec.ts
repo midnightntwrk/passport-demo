@@ -237,6 +237,20 @@ test.describe('a passkey with no Passport yet', () => {
        this file's default 90 s (2026/09/21), so the poll below never got to
        see the sponsor asked. The budget covers the poll it contains. */
     test.setTimeout(240_000);
+    /* The first wave is a DEPLOY of the account custody build, which needs
+       that build's verifier keys staged under /zk/account-custody. They are
+       compiler output, gitignored, and no CI runner carries them (the ZK
+       bundle pinned for CI holds the prototype modules only), so on such a
+       build the setup cannot even be constructed and this walk would assert
+       nothing true. It is skipped there, with the reason on record; the live
+       run on stagenet (RUN-onboard.md) is where this flow is proven. */
+    const probe = await page.request.get(
+      new URL('/zk/account-custody/keys/activate_initial_device_with_jubjub.verifier', WALK).href,
+    );
+    test.skip(
+      !probe.ok(),
+      'this build carries no account-custody verifier keys, so wave 1 cannot be built here',
+    );
     const context = await browser.newContext(
       walkContextOptions({ viewport: { width: 420, height: 900 } }),
     );
