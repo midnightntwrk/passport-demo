@@ -6,39 +6,31 @@
    sheets consume these custom properties and declare no colour values
    of their own.
 
-   DESIGN LANGUAGE — "Midnight, Base-inspired"
-   ===========================================
-   This system replaces the earlier strict-monochrome / zero-radius /
-   hard-offset-shadow direction. The new look is inspired by the
-   Base.org / base.app aesthetic: bright, roomy, confidently rounded,
-   with one electric blue doing all of the accent work. Midnight's own
-   wordmark and symbol remain the product marks; nothing here borrows
-   Base's trademarks, logo geometry, or typefaces.
+   DESIGN LANGUAGE — "Midnight, atmospheric"
+   ==========================================
+   The official Midnight brand system is the foundation: Midnight Black,
+   White, bright Midnight Blue, the clock-and-dots mark, and Outfit. The
+   Passport layer adds nocturnal depth, a restrained spectral edge, generous
+   geometry, and motion that makes state changes feel tangible without
+   competing with the brand.
 
    Palette
    -------
-   Accent (both themes)   #0052FF  electric blue — the ONE hue.
-     hover  light #0043D6 (darker)   dark #3D77FF (lighter)
-     soft   light rgba(0,82,255,.08) dark rgba(61,119,255,.16)
-     ink    light #0040CC (blue AS text, AA on white)
-            dark  #7DA2FF (blue AS text, AA on near-black)
+   Accent (both themes)   #0000FE  official Midnight Blue.
+     Violet appears only as a subordinate spectral transition in atmosphere
+     and gradients; it is never used as a standalone brand colour.
      text-on-accent: #FFFFFF in both themes.
-   Light (default): white page #FFFFFF, grey-wash cards #F5F6F8,
+   Light: white page #FFFFFF, grey-wash cards #F5F6F8,
      recessed strips #ECEEF2, near-black text #0A0B0D, secondary
      #464B55, muted #5B616E, hairlines #E2E6EB.
-   Dark (deliberate): page #0A0B0D, cards #16181D, raised #1E2127,
-     white text #F7F9FC, secondary #B4BAC6, muted #8A919E, hairlines
-     #23262C. The SAME #0052FF stays vivid for fills; blue-as-text
-     lightens to #7DA2FF for contrast.
+   Dark (default): page #0A0A0A, layered near-black surfaces, official white
+     text, and Midnight Blue for action and focus.
    "Inverted" surfaces (solid CTAs, active nav tab, NEW tags, ticked
-   consent boxes) are now the ACCENT BLUE with white text in BOTH
-   themes — the Base primary-action colour — no longer black/white
-   inversion.
+   consent boxes) use Midnight Blue with white text in both themes.
 
    Type scale
    ----------
-   One neo-grotesque family throughout: Inter (system stack). The
-   bundled Space Grotesk is deliberately retired from the stack.
+   Outfit, the official Midnight family, throughout.
      Display   clamp(44–82px), weight 800, tracking -0.03em, line ~0.95
      Heading   22–28px,        weight 700, tracking -0.02em
      Body      13–15px,        weight 400–500, tracking 0
@@ -69,10 +61,8 @@
 
    Themes
    ------
-   Light is the default. Dark is applied when the document element
-   carries [data-theme="dark"], and is also honoured from the
-   operating system when no explicit choice has been recorded (that
-   is, when no data-theme attribute is present at all). See
+   Dark is the default. Light remains available, and system preference is
+   honoured when explicitly selected. See
    ../lib/theme.ts, which writes the attribute and persists the
    preference under the localStorage key 'passport-theme'.
 
@@ -89,12 +79,11 @@
 /* ---------------------------------------------------------------- */
 
 :root {
-  /* Type — one neo-grotesque stack everywhere. Inter loads from the
-     system stack; the display slot simply carries heavier weight and
-     tighter tracking, set in the consuming sheets. */
-  --mn-font-display: Inter, ui-sans-serif, system-ui, -apple-system,
+  /* Outfit is bundled locally from Fontsource; system fallbacks keep the
+     first paint legible if a font file has not arrived yet. */
+  --mn-font-display: Outfit, ui-sans-serif, system-ui, -apple-system,
     BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
-  --mn-font-body: Inter, ui-sans-serif, system-ui, -apple-system,
+  --mn-font-body: Outfit, ui-sans-serif, system-ui, -apple-system,
     BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
   --mn-font-mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
   /* Every figure that can be compared column-to-column or that updates in
@@ -103,17 +92,20 @@
 
   /* Accent — the one hue. Theme blocks below re-tune hover/soft/ink;
      the fill itself stays the same vivid blue in both themes. */
-  --mn-accent: #0052ff;
+  --mn-accent: #0000fe;
+  --mn-accent-violet: #655cff;
+  --mn-accent-gradient: linear-gradient(115deg, #655cff 0%, #0000fe 68%, #2348ff 100%);
+  --mn-ambient-gradient: radial-gradient(circle at 70% 10%, rgba(0, 0, 254, .16), transparent 38%);
   --mn-accent-text: #ffffff;
-  --mn-accent-hover: #0043d6;
-  --mn-accent-soft: rgba(0, 82, 255, 0.08);
-  --mn-accent-ink: #0040cc;
+  --mn-accent-hover: #1616d8;
+  --mn-accent-soft: rgba(0, 0, 254, 0.08);
+  --mn-accent-ink: #0000c8;
 
   /* Geometry */
-  --mn-radius-sm: 8px;
-  --mn-radius-md: 12px;
-  --mn-radius: 16px; /* default card radius — legacy consumers inherit it */
-  --mn-radius-lg: 20px;
+  --mn-radius-sm: 10px;
+  --mn-radius-md: 14px;
+  --mn-radius: 18px; /* default card radius — legacy consumers inherit it */
+  --mn-radius-lg: 24px;
   --mn-radius-pill: 999px;
   --mn-hairline: 1px;
   --mn-nav-height: 76px;
@@ -125,19 +117,19 @@
      theme; the bridge below still paints the onboarding overscroll
      with the theme surface, and these remain for any consumer that
      wants a deliberate always-dark plate. */
-  --mn-ink-page: #0a0b0d;
-  --mn-ink-card: #16181d;
-  --mn-ink-raised: #1e2127;
-  --mn-ink-text: #f7f9fc;
-  --mn-ink-text-secondary: #b4bac6;
-  --mn-ink-text-muted: #8a919e;
-  --mn-ink-border-hairline: #23262c;
-  --mn-ink-border-medium: #3a3f48;
+  --mn-ink-page: #0a0a0a;
+  --mn-ink-card: #11131a;
+  --mn-ink-raised: #171a24;
+  --mn-ink-text: #ffffff;
+  --mn-ink-text-secondary: #afb6ca;
+  --mn-ink-text-muted: #8f96aa;
+  --mn-ink-border-hairline: #252938;
+  --mn-ink-border-medium: #3a4054;
   --mn-ink-border-strong: #f7f9fc;
-  --mn-ink-surface-inverted: #0052ff;
+  --mn-ink-surface-inverted: #0000fe;
   --mn-ink-text-inverted: #ffffff;
   --mn-ink-hover: rgba(247, 249, 252, 0.07);
-  --mn-ink-shadow-colour: rgba(0, 0, 0, 0.55);
+  --mn-ink-shadow-colour: rgba(0, 0, 0, 0.58);
   --mn-ink-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4), 0 2px 8px var(--mn-ink-shadow-colour);
   --mn-ink-shadow-md: 0 2px 6px rgba(0, 0, 0, 0.45), 0 10px 28px var(--mn-ink-shadow-colour);
   --mn-ink-scrim: rgba(4, 5, 7, 0.72);
@@ -185,9 +177,9 @@
   --mn-text-inverted-muted: rgba(255, 255, 255, 0.9);
 
   /* Accent tuning */
-  --mn-accent-hover: #0043d6;
-  --mn-accent-soft: rgba(0, 82, 255, 0.08);
-  --mn-accent-ink: #0040cc;
+  --mn-accent-hover: #1616d8;
+  --mn-accent-soft: rgba(0, 0, 254, 0.08);
+  --mn-accent-ink: #0000c8;
 
   /* Borders */
   --mn-border-hairline: #e2e6eb;
@@ -202,7 +194,7 @@
   /* Emphasis/hover elevation — the loudest neutral shadow. */
   --mn-shadow-ink: 0 4px 10px rgba(10, 11, 13, 0.08), 0 12px 32px rgba(10, 11, 13, 0.14);
   /* Blue glow, reserved for primary CTAs. */
-  --mn-shadow-accent: 0 6px 20px rgba(0, 82, 255, 0.3);
+  --mn-shadow-accent: 0 8px 28px rgba(0, 0, 254, 0.32), 0 3px 12px rgba(101, 92, 255, .2);
 
   /* Focus. styles.css sets a global white focus ring for the classic
      dark view; the bridge at the foot of this file re-points it at the
@@ -213,6 +205,7 @@
   --mn-wordmark-filter: none;
   /* App icons keep their own brand colour — the light plate frames them. */
   --mn-app-icon-filter: none;
+  --mn-orbit-image: url('/passport-eclipse-light.png');
 }
 
 /* ---------------------------------------------------------------- */
@@ -222,31 +215,31 @@
 :root[data-theme="dark"] {
   --mn-color-scheme: dark;
 
-  --mn-surface-sunken: #050608;
-  --mn-surface-page: #0a0b0d;
-  --mn-surface-card: #16181d;
-  --mn-surface-raised: #1e2127;
+  --mn-surface-sunken: #06070a;
+  --mn-surface-page: #0a0a0a;
+  --mn-surface-card: #11131a;
+  --mn-surface-raised: #171a24;
   --mn-surface-inverted: var(--mn-accent);
-  --mn-surface-skeleton: #262a31;
+  --mn-surface-skeleton: #242837;
 
   --mn-surface-hover: rgba(247, 249, 252, 0.06);
   --mn-surface-active: rgba(247, 249, 252, 0.11);
   --mn-scrim: rgba(4, 5, 7, 0.66);
 
-  --mn-text-primary: #f7f9fc;
-  --mn-text-secondary: #b4bac6;
-  --mn-text-muted: #8a919e;
+  --mn-text-primary: #ffffff;
+  --mn-text-secondary: #afb6ca;
+  --mn-text-muted: #8f96aa;
   --mn-text-inverted: #ffffff;
   --mn-text-inverted-muted: rgba(255, 255, 255, 0.9);
 
   /* The SAME blue kept vivid for fills; hover lightens, and blue used
      AS text lightens further for contrast on near-black. */
-  --mn-accent-hover: #2f66f0;
-  --mn-accent-soft: rgba(61, 119, 255, 0.16);
-  --mn-accent-ink: #7da2ff;
+  --mn-accent-hover: #3333ff;
+  --mn-accent-soft: rgba(0, 0, 254, 0.16);
+  --mn-accent-ink: #a8adff;
 
-  --mn-border-hairline: #23262c;
-  --mn-border-medium: #3a3f48;
+  --mn-border-hairline: #252938;
+  --mn-border-medium: #3a4054;
   --mn-border-strong: #f7f9fc;
 
   --mn-shadow-colour: rgba(0, 0, 0, 0.55);
@@ -254,12 +247,13 @@
   --mn-shadow-md: 0 2px 6px rgba(0, 0, 0, 0.45), 0 10px 28px var(--mn-shadow-colour);
   --mn-shadow-lg: 0 4px 10px rgba(0, 0, 0, 0.5), 0 20px 48px rgba(0, 0, 0, 0.6);
   --mn-shadow-ink: 0 4px 10px rgba(0, 0, 0, 0.5), 0 14px 36px rgba(0, 0, 0, 0.62);
-  --mn-shadow-accent: 0 6px 22px rgba(0, 82, 255, 0.42);
+  --mn-shadow-accent: 0 8px 30px rgba(0, 0, 254, 0.38), 0 3px 14px rgba(101, 92, 255, .24);
 
   --mn-focus-ring: var(--mn-accent-hover);
 
   --mn-wordmark-filter: invert(1);
   --mn-app-icon-filter: none;
+  --mn-orbit-image: url('/passport-eclipse.png');
 }
 
 /* ---------------------------------------------------------------- */
@@ -273,29 +267,29 @@
   :root:not([data-theme="light"]):not([data-theme="dark"]) {
     --mn-color-scheme: dark;
 
-    --mn-surface-sunken: #050608;
-    --mn-surface-page: #0a0b0d;
-    --mn-surface-card: #16181d;
-    --mn-surface-raised: #1e2127;
+    --mn-surface-sunken: #06070a;
+    --mn-surface-page: #0a0a0a;
+    --mn-surface-card: #11131a;
+    --mn-surface-raised: #171a24;
     --mn-surface-inverted: var(--mn-accent);
-    --mn-surface-skeleton: #262a31;
+    --mn-surface-skeleton: #242837;
 
     --mn-surface-hover: rgba(247, 249, 252, 0.06);
     --mn-surface-active: rgba(247, 249, 252, 0.11);
     --mn-scrim: rgba(4, 5, 7, 0.66);
 
-    --mn-text-primary: #f7f9fc;
-    --mn-text-secondary: #b4bac6;
-    --mn-text-muted: #8a919e;
+    --mn-text-primary: #ffffff;
+    --mn-text-secondary: #afb6ca;
+    --mn-text-muted: #8f96aa;
     --mn-text-inverted: #ffffff;
     --mn-text-inverted-muted: rgba(255, 255, 255, 0.9);
 
-    --mn-accent-hover: #2f66f0;
-    --mn-accent-soft: rgba(61, 119, 255, 0.16);
-    --mn-accent-ink: #7da2ff;
+    --mn-accent-hover: #3333ff;
+    --mn-accent-soft: rgba(0, 0, 254, 0.16);
+    --mn-accent-ink: #a8adff;
 
-    --mn-border-hairline: #23262c;
-    --mn-border-medium: #3a3f48;
+    --mn-border-hairline: #252938;
+    --mn-border-medium: #3a4054;
     --mn-border-strong: #f7f9fc;
 
     --mn-shadow-colour: rgba(0, 0, 0, 0.55);
@@ -303,12 +297,13 @@
     --mn-shadow-md: 0 2px 6px rgba(0, 0, 0, 0.45), 0 10px 28px var(--mn-shadow-colour);
     --mn-shadow-lg: 0 4px 10px rgba(0, 0, 0, 0.5), 0 20px 48px rgba(0, 0, 0, 0.6);
     --mn-shadow-ink: 0 4px 10px rgba(0, 0, 0, 0.5), 0 14px 36px rgba(0, 0, 0, 0.62);
-    --mn-shadow-accent: 0 6px 22px rgba(0, 82, 255, 0.42);
+    --mn-shadow-accent: 0 8px 30px rgba(0, 0, 254, 0.38), 0 3px 14px rgba(101, 92, 255, .24);
 
     --mn-focus-ring: var(--mn-accent-hover);
 
     --mn-wordmark-filter: invert(1);
     --mn-app-icon-filter: none;
+    --mn-orbit-image: url('/passport-eclipse.png');
   }
 }
 
@@ -326,6 +321,8 @@
    rather than the fixed ink plate. */
 body:has(.mnhome-screen),
 body:has(.mnapps-screen),
+body:has(.mnassets-screen),
+body:has(.mnid-screen),
 body:has(.mnob-screen) {
   background: var(--mn-surface-page);
 }

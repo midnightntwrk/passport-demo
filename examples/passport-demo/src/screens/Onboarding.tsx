@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { ArrowRight, Eraser, Fingerprint, Loader2, X } from 'lucide-react'
+import { ArrowRight, Eraser, Fingerprint, Loader2, ShieldCheck, X } from 'lucide-react'
 import ThemeToggle from './ThemeToggle'
 import ContinueWithSocial from './ContinueWithSocial'
 import './onboarding.css'
@@ -263,14 +263,19 @@ export default function OnboardingScreen(props: OnboardingProps) {
       </header>
 
       <div className="mnob-body">
-        <p className="mnob-kicker">Identity for the Midnight network</p>
-        <h1 className="mnob-title">
-          <span>Midnight</span>
-          <span>Passport</span>
+        <div className="mnob-orbit" aria-hidden="true">
+          <span className="mnob-orbit-art" />
+          <span className="mnob-orbit-pulse" />
+        </div>
+        <h1
+          className="mnob-title"
+          aria-label="Midnight Passport — your private identity for the Midnight network"
+        >
+          <span>Your private identity</span>
+          <span>for the Midnight network.</span>
         </h1>
         <p className="mnob-lede">
-          One passkey. Your names, addresses, and credentials — held on this
-          device, proven in private.
+          One identity. More control. A more private internet, together.
         </p>
 
         {error ? (
@@ -354,12 +359,19 @@ export default function OnboardingScreen(props: OnboardingProps) {
               </span>
               <ArrowRight size={17} strokeWidth={2.2} aria-hidden="true" />
             </button>
-            <p className="mnob-hint">{continueHint}</p>
             {/* Renders nothing at all unless this build was given a Dynamic
                 environment id, which no build shipped today has — so there is
                 no condition to write here. See the component's own header, and
                 the note about "the only way in" at the top of this file. */}
             <ContinueWithSocial />
+            <div className="mnob-privacy-note">
+              <ShieldCheck size={17} strokeWidth={1.8} aria-hidden="true" />
+              <span>
+                <strong>Your identity stays yours.</strong>
+                <small>Passport only shares what you approve.</small>
+              </span>
+            </div>
+            <p className="mnob-hint mnob-route-hint">{continueHint}</p>
             {onUseDifferentPasskey ? (
               <button
                 type="button"
@@ -401,7 +413,7 @@ export default function OnboardingScreen(props: OnboardingProps) {
       {/* The footer carries the honesty note alone — there is no second route
           to link to. */}
       <footer className="mnob-foot">
-        <span>Test network demo — not production</span>
+        <span>Midnight · Test network demo — not production</span>
       </footer>
     </section>
   )

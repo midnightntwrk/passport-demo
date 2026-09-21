@@ -1,10 +1,10 @@
-import { BadgeCheck, LoaderCircle } from 'lucide-react'
+import { BadgeCheck, LoaderCircle, Orbit } from 'lucide-react'
 import BrandMarks from './BrandMarks.js'
 
 import { useDynamicSession } from '../lib/dynamic.js'
 
 /**
- * "Continue with Google, Microsoft, X, or Discord" — the secondary way in,
+ * "Continue with Dynamic" — the secondary way in,
  * and the whole of stage 1 of passport-demo #20 on the welcome screen.
  *
  * IT RENDERS NOTHING IN EVERY BUILD SHIPPED TODAY
@@ -66,9 +66,20 @@ export default function ContinueWithSocial() {
   }
 
   return (
-    <button type="button" className="mnob-social" onClick={session.openAuthFlow}>
-      <BrandMarks />
-      <span className="mnob-social-copy">Continue with Google, Microsoft, X, or Discord</span>
-    </button>
+    <>
+      <div className="mnob-or" aria-hidden="true">
+        <span />
+        <small>or</small>
+        <span />
+      </div>
+      <button type="button" className="mnob-social" onClick={session.openAuthFlow}>
+        <Orbit size={18} strokeWidth={1.9} aria-hidden="true" />
+        <span className="mnob-social-copy">Continue with Dynamic</span>
+        <span className="mnob-social-arrow" aria-hidden="true">→</span>
+        <span className="mnob-social-providers">
+          <BrandMarks />
+        </span>
+      </button>
+    </>
   )
 }

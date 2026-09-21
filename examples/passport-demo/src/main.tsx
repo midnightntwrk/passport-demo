@@ -4,7 +4,11 @@ import './lib/bufferPolyfill.js';
 
 import React from 'react';
 import { createRoot } from 'react-dom/client';
-import '@fontsource/space-grotesk/700.css';
+import '@fontsource/outfit/400.css';
+import '@fontsource/outfit/500.css';
+import '@fontsource/outfit/600.css';
+import '@fontsource/outfit/700.css';
+import '@fontsource/outfit/800.css';
 
 // Theme first, and before anything renders. The blocking snippet in index.html
 // has already written `data-theme` ahead of first paint, so this call is
@@ -20,6 +24,7 @@ import { ErrorBoundary } from './lib/errorBoundary.js';
 // no screen sheet has been reached yet.
 import './screens/tokens.css';
 import './styles.css';
+import './screens/atmosphere.css';
 
 initTheme();
 

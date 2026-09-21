@@ -1,7 +1,7 @@
 @import './tokens.css';
 
 /* Bottom navigation — prefix "mnnav-".
-   Base-inspired Midnight direction: a floating pill bar lifted off the
+   Midnight atmospheric direction: a floating pill bar lifted off the
    page by the soft raised shadow, with the active tab carried by a solid
    accent-blue inner pill. Inactive tabs sit back at muted weight, so the
    blue pill is unambiguously the loudest thing in the bar. */
@@ -109,4 +109,56 @@
    (home.css), so the bar's edges stay flush with the content above it. */
 @media (min-width: 560px) {
   .mnnav { width: min(100% - 64px, 560px); }
+}
+
+/* Midnight atmospheric navigation: one quiet dark dock, with cobalt and the
+   violet spectral edge reserved for the current destination. */
+.mnnav-backdrop {
+  border-top-color: transparent;
+  background: linear-gradient(180deg, transparent, var(--mn-surface-page) 28%);
+}
+.mnnav {
+  height: 72px;
+  padding: 5px;
+  border-color: color-mix(in srgb, var(--mn-border-medium) 72%, transparent);
+  background: color-mix(in srgb, var(--mn-surface-raised) 90%, transparent);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, .38), inset 0 1px 0 rgba(255, 255, 255, .035);
+  backdrop-filter: blur(18px) saturate(1.15);
+}
+.mnnav-tab {
+  position: relative;
+  gap: 5px;
+  color: var(--mn-text-muted);
+  background: transparent;
+  font-size: 10px;
+  font-weight: 550;
+  letter-spacing: .02em;
+  text-transform: none;
+  transition: color .2s ease, transform .2s ease;
+}
+.mnnav-tab::after {
+  content: '';
+  position: absolute;
+  right: 34%;
+  bottom: 5px;
+  left: 34%;
+  height: 2px;
+  border-radius: 999px;
+  background: var(--mn-accent-gradient);
+  opacity: 0;
+  transform: scaleX(.35);
+  transition: opacity .2s ease, transform .25s cubic-bezier(.22, 1, .36, 1);
+}
+.mnnav-tab-active {
+  color: var(--mn-accent-ink);
+  background: linear-gradient(180deg, rgba(101, 92, 255, .11), rgba(0, 0, 254, .035));
+  font-weight: 650;
+}
+.mnnav-tab-active::after { opacity: 1; transform: scaleX(1); }
+.mnnav-tab-active svg { filter: drop-shadow(0 0 8px rgba(0, 0, 254, .55)); }
+.mnnav-tab:active { transform: scale(.97); }
+
+@media (prefers-reduced-motion: reduce) {
+  .mnnav-tab,
+  .mnnav-tab::after { transition: none; }
 }

@@ -1,0 +1,311 @@
+@import './tokens.css';
+
+/* Final visual layer for the Midnight-native Passport refresh.
+   Imported after the legacy global sheet so the product screens share one
+   cobalt-on-ink system without disturbing transaction and consent behaviour. */
+
+.mnob-screen,
+.mnid-screen,
+.mnhome-screen,
+.mnassets-screen,
+.mnapps-screen {
+  background-color: var(--mn-surface-page);
+  background-image:
+    radial-gradient(circle at 76% 3%, rgba(0, 0, 254, .12), transparent 28%),
+    radial-gradient(circle at 12% 76%, rgba(121, 104, 255, .05), transparent 30%);
+}
+
+.mnob-bar,
+.mnid-bar,
+.mnhome-bar,
+.mnassets-bar,
+.mnapps-bar {
+  border-bottom-color: color-mix(in srgb, var(--mn-border-hairline) 72%, transparent);
+}
+
+.mnhome-bar,
+.mnassets-bar,
+.mnapps-bar {
+  background: color-mix(in srgb, var(--mn-surface-page) 84%, transparent);
+  backdrop-filter: blur(16px) saturate(1.2);
+}
+
+.mnob-wordmark,
+.mnid-wordmark { width: 112px; }
+.mnhome-wordmark,
+.mnassets-wordmark,
+.mnapps-wordmark { width: 106px; }
+
+/* Authentication -------------------------------------------------------- */
+
+.mnob-body {
+  width: min(100% - 40px, 580px);
+  align-items: center;
+  padding-top: clamp(14px, 3svh, 28px);
+  text-align: center;
+}
+.mnob-title {
+  display: block;
+  max-width: 570px;
+  font-size: clamp(36px, 9.7vw, 58px);
+  font-weight: 700;
+  letter-spacing: -.045em;
+  line-height: .98;
+  text-wrap: balance;
+}
+.mnob-title span { display: inline; }
+.mnob-title span + span::before { content: ' '; }
+.mnob-lede {
+  max-width: 430px;
+  margin-top: 18px;
+  font-size: 15px;
+  line-height: 1.55;
+  text-wrap: balance;
+}
+.mnob-stage {
+  width: 100%;
+  max-width: 520px;
+  margin-top: clamp(28px, 5svh, 46px);
+  padding-top: 0;
+  text-align: left;
+}
+.mnob-primary,
+.mnob-social {
+  min-height: 58px;
+  border-radius: 18px;
+  font-size: 15px;
+  letter-spacing: -.01em;
+}
+.mnob-primary {
+  background: var(--mn-accent-gradient);
+  box-shadow: var(--mn-shadow-accent);
+}
+.mnob-social {
+  margin-top: 0;
+  border-color: color-mix(in srgb, var(--mn-accent-violet) 48%, var(--mn-border-medium));
+  background: color-mix(in srgb, var(--mn-surface-raised) 74%, transparent);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .03);
+}
+.mnob-social:hover {
+  border-color: var(--mn-accent-violet);
+  color: var(--mn-text-primary);
+  background: color-mix(in srgb, var(--mn-accent-soft) 64%, var(--mn-surface-raised));
+}
+
+/* Identity journey ------------------------------------------------------ */
+
+.mnid-bar,
+.mnid-body { width: min(100% - 40px, 560px); }
+.mnid-bar { min-height: 68px; }
+.mnid-body { padding-top: clamp(38px, 7svh, 72px); }
+.mnid-title {
+  max-width: 520px;
+  font-size: clamp(38px, 9.8vw, 54px);
+  font-weight: 700;
+  letter-spacing: -.045em;
+  line-height: .98;
+  text-wrap: balance;
+}
+.mnid-lede {
+  max-width: 440px;
+  margin-top: 18px;
+  font-size: 15px;
+}
+.mnid-field {
+  border-color: color-mix(in srgb, var(--mn-accent-violet) 36%, var(--mn-border-medium));
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--mn-surface-raised) 82%, transparent);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .025);
+  backdrop-filter: blur(12px);
+}
+.mnid-field input { height: 60px; }
+.mnid-panel,
+.mnid-card {
+  border-color: color-mix(in srgb, var(--mn-border-hairline) 82%, transparent);
+  background: linear-gradient(145deg, var(--mn-surface-raised), var(--mn-surface-card));
+}
+.mnid-point-mark {
+  color: var(--mn-accent-ink);
+  background: linear-gradient(145deg, rgba(101, 92, 255, .17), rgba(0, 0, 254, .08));
+  box-shadow: inset 0 0 0 1px rgba(101, 92, 255, .16);
+}
+.mnid-primary {
+  min-height: 56px;
+  border-color: transparent;
+  border-radius: 18px;
+  background: var(--mn-accent-gradient);
+  box-shadow: var(--mn-shadow-accent);
+}
+
+/* Signed-in shell ------------------------------------------------------- */
+
+.mnhome-bar,
+.mnhome-body,
+.mnassets-bar,
+.mnassets-head,
+.mnassets-shelf,
+.mnapps-bar,
+.mnapps-head,
+.mnapps-search,
+.mnapps-section,
+.mnapps-note,
+.mnapps-status {
+  width: min(100% - 40px, 560px);
+  margin-inline: auto;
+}
+.mnhome-body { gap: 24px; padding-top: 38px; }
+.mnhome-identity { min-height: 132px; padding-top: 12px; }
+.mnhome-kicker {
+  margin-bottom: 10px;
+  color: var(--mn-text-secondary);
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: -.01em;
+  text-transform: none;
+}
+.mnhome-name {
+  max-width: 84%;
+  font-size: clamp(40px, 11.5vw, 58px);
+  font-weight: 700;
+  letter-spacing: -.045em;
+  line-height: .96;
+}
+.mnhome-section-title {
+  margin: 8px 0 -10px;
+  color: var(--mn-text-secondary);
+  font-family: var(--mn-font-body);
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -.01em;
+}
+.mnhome-action {
+  min-height: 54px;
+  border-color: color-mix(in srgb, var(--mn-accent-violet) 38%, var(--mn-border-medium));
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--mn-surface-raised) 78%, transparent);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .025);
+  backdrop-filter: blur(12px);
+}
+.mnhome-action-primary {
+  border-color: transparent;
+  background: var(--mn-accent-gradient);
+  box-shadow: var(--mn-shadow-accent);
+}
+.mnhome-action-primary:hover,
+.mnhome-action-primary:active { background: linear-gradient(115deg, #8878ff, #4564ff 66%, #6282ff); }
+.mnhome-token-row > *,
+.mnassets-row > * { padding-block: 15px; }
+.mnhome-token-icon,
+.mnassets-row-icon {
+  width: 38px;
+  height: 38px;
+  color: var(--mn-accent-ink);
+  background: linear-gradient(145deg, rgba(101, 92, 255, .18), rgba(0, 0, 254, .08));
+  box-shadow: inset 0 0 0 1px rgba(101, 92, 255, .18);
+}
+
+/* Assets and apps ------------------------------------------------------- */
+
+.mnassets-head,
+.mnapps-head { padding-top: 28px; }
+.mnassets-title,
+.mnapps-title {
+  font-size: clamp(42px, 11.5vw, 58px);
+  font-weight: 700;
+  letter-spacing: -.045em;
+}
+.mnassets-count {
+  color: var(--mn-accent-ink);
+  background: var(--mn-accent-soft);
+}
+.mnassets-card,
+.mnapps-card {
+  border-color: color-mix(in srgb, var(--mn-border-hairline) 84%, transparent);
+  background: linear-gradient(145deg, var(--mn-surface-raised), var(--mn-surface-card));
+  box-shadow: 0 8px 28px rgba(0, 0, 0, .12), inset 0 1px 0 rgba(255, 255, 255, .025);
+}
+.mnapps-search {
+  border-color: var(--mn-border-hairline);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--mn-surface-raised) 80%, transparent);
+}
+.mnapps-section[aria-labelledby='mnapps-featured'] {
+  background: linear-gradient(145deg, rgba(0, 0, 254, .10), rgba(101, 92, 255, .055));
+  box-shadow: inset 0 0 0 1px rgba(101, 92, 255, .08);
+}
+
+/* Floating dock --------------------------------------------------------- */
+
+.mnnav-backdrop {
+  border-top-color: transparent;
+  background: linear-gradient(180deg, transparent, var(--mn-surface-page) 28%);
+}
+.mnnav {
+  height: 72px;
+  border-color: color-mix(in srgb, var(--mn-border-medium) 72%, transparent);
+  background: color-mix(in srgb, var(--mn-surface-raised) 90%, transparent);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, .38), inset 0 1px 0 rgba(255, 255, 255, .035);
+  backdrop-filter: blur(18px) saturate(1.15);
+}
+.mnnav-tab {
+  position: relative;
+  gap: 5px;
+  color: var(--mn-text-muted);
+  background: transparent;
+  font-size: 10px;
+  font-weight: 550;
+  letter-spacing: .02em;
+  text-transform: none;
+}
+.mnnav-tab-active {
+  color: var(--mn-accent-ink);
+  background: linear-gradient(180deg, rgba(101, 92, 255, .11), rgba(0, 0, 254, .035));
+  font-weight: 650;
+}
+
+/* Motion --------------------------------------------------------------- */
+
+.mnid-body > *,
+.mnhome-body > *,
+.mnassets-head,
+.mnassets-shelf,
+.mnapps-head,
+.mnapps-search,
+.mnapps-section {
+  animation: mn-atmosphere-enter .5s cubic-bezier(.22, 1, .36, 1) both;
+}
+.mnhome-body > :nth-child(2),
+.mnassets-shelf,
+.mnapps-search { animation-delay: .06s; }
+.mnhome-body > :nth-child(3),
+.mnapps-section { animation-delay: .12s; }
+.mnhome-body > :nth-child(n + 4) { animation-delay: .18s; }
+
+@keyframes mn-atmosphere-enter {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mnid-body > *,
+  .mnhome-body > *,
+  .mnassets-head,
+  .mnassets-shelf,
+  .mnapps-head,
+  .mnapps-search,
+  .mnapps-section { animation: none; }
+}
+
+@media (max-width: 460px) {
+  .mnhome-bar,
+  .mnassets-bar { width: min(100% - 32px, 560px); }
+  .mnhome-body,
+  .mnassets-head,
+  .mnassets-shelf,
+  .mnapps-bar,
+  .mnapps-head,
+  .mnapps-search,
+  .mnapps-section,
+  .mnapps-note,
+  .mnapps-status { width: min(100% - 32px, 560px); }
+}
