@@ -494,6 +494,58 @@ describe('deriveAccountDeviceSecret', () => {
   });
 });
 
+describe('derivePassportContractSecrets, on a fixed root', () => {
+  /**
+   * ALL FOUR, PINNED, AND NOT ONLY THE ONE WITH A CIRCUIT BEHIND IT.
+   *
+   * The device secret is checked above against the contract's own derivation,
+   * so a change to it fails loudly. The other three have no such partner and
+   * every one of them is a key somebody has to be able to derive again years
+   * from now: the recovery secret is split into public ledger state, the enc
+   * secret is what every depositor seals an inbox entry to, and the
+   * maintenance secret is an upgrade authority. A change to a label, to the
+   * padding, or to the order of the payload would move them in silence, and
+   * the reader who notices is the one whose inbox will not open.
+   *
+   * Computed by the implementation on 2026/09/18 and written down here. They
+   * are frozen from the first live Passport onwards, not from today.
+   */
+  const ROOT = Uint8Array.from({ length: 32 }, (_unused, index) => index * 3);
+  const hex = (bytes: Uint8Array): string =>
+    Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+
+  it('derives the four vectors it has always derived', async () => {
+    const secrets = await derivePassportContractSecrets(ROOT);
+    expect(hex(secrets.deviceSecret)).toBe(
+      '052114f778bfbfb23cc7aa59ee051f93a839ff5309f3748282891b324871276f',
+    );
+    expect(hex(secrets.recoverySecret)).toBe(
+      '95fce9819f3b11c458c356ad7a6a325d80ecc10e430615bbc969c68cf368b2b5',
+    );
+    expect(hex(secrets.encSecret)).toBe(
+      'f6b7dac39f23d77726b13673ce49890aa733ab58b926604c536a578a84c36cb8',
+    );
+    expect(hex(secrets.maintenanceSecret)).toBe(
+      '0c5de89510e487ccd8088e6adf1d2f401a08a7dd46f70ba31ff225406e741e35',
+    );
+  });
+
+  it('gives the four of them four different values', async () => {
+    const secrets = await derivePassportContractSecrets(ROOT);
+    const all = [
+      secrets.deviceSecret,
+      secrets.recoverySecret,
+      secrets.encSecret,
+      secrets.maintenanceSecret,
+    ];
+    /* Domain separation is the whole of what the labels are for: two secrets
+       that collided would mean a viewing key that can also spend, or a
+       recovery share that is the upgrade authority. */
+    expect(new Set(all.map(hex)).size).toBe(4);
+    expect(all.every((secret) => secret.length === 32)).toBe(true);
+  });
+});
+
 describe('unshieldedAddressBytes, on the address kinds a recipient field sees', () => {
   it('refuses a well-formed SHIELDED address with its own sentence', () => {
     /* A `mn_shield-addr…` parses as a Midnight address and then fails the

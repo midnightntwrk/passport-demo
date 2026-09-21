@@ -132,6 +132,71 @@ export function recoverySlotFillers(): [Uint8Array, Uint8Array, Uint8Array] {
   return [slot(), slot(), slot()];
 }
 
+/** The account contract's device (withdrawal and permission) authority. */
+export const PASSPORT_DEVICE_LABEL = 'midnight.passport.dev';
+
+/** The recovery secret, split 2-of-3 into public ledger state. */
+export const PASSPORT_RECOVERY_LABEL = 'midnight.passport.rec';
+
+/**
+ * The account's X25519 VIEWING secret — the secret half of the `enc_key` an
+ * account custody contract advertises in its constructor and every depositor
+ * seals an inbox entry to.
+ *
+ * A FOURTH LABEL, AND DERIVED RATHER THAN RANDOM, FOR ONE REASON: recovery by
+ * name. An account custody account's whole coin store is rebuilt by opening the
+ * inbox, and an inbox entry is opened with this secret or by nobody. The
+ * Dynamic arm can afford `custodyEncKeyPair`'s random secret because that
+ * Passport is reached by signing in to Dynamic, which can hand the same browser
+ * back its storage; a passkey Passport reinstalled on a new phone has the
+ * passkey and the `.night` name and NOTHING else, so a random viewing secret
+ * would be an account whose balance is on chain, whose device key re-derives
+ * fine, and whose coins can never be described again.
+ *
+ * WHAT IT COSTS. Deriving it means a passkey compromise is a VIEWING
+ * compromise as well as a spending one: whoever can complete the assertion
+ * reads every inbox entry the account has ever received, back to the
+ * constructor, not merely what they can steal from that moment. That is the
+ * same trust boundary the device key now sits behind (see
+ * `custodyJubjubSigner.ts`), and it is a question for Nicolas, not a decision
+ * this layer gets to make alone.
+ *
+ * The 32 bytes go into X25519 unreduced: the curve clamps them itself, so
+ * there is no rejection loop and no derived key weaker than another.
+ */
+export const PASSPORT_ENC_LABEL = 'midnight.passport.enc';
+
+/**
+ * The account's CONTRACT MAINTENANCE signing key, as 32 bytes of BIP-340 secret.
+ *
+ * A fifth label, and it exists so that "keep the maintenance authority" is a
+ * REAL alternative rather than a paragraph. The wave deploy retires the
+ * authority on its last wave, as Nicolas's reference does, and that choice is
+ * unchanged here — but he asked (2026/09/18) that we decide it rather than
+ * inherit it, because the two answers cost different things:
+ *
+ *   RETIRED (today's default). The account is immutable. No circuit fix, no
+ *   verifier-key replacement, ever — a defect in a circuit means a FRESH
+ *   account and a migration of everything in the old one. Nothing the passkey
+ *   holder does can change the code their money sits behind, which is also the
+ *   reason to want it.
+ *
+ *   KEPT. The passkey holder can apply a maintenance update later, so a circuit
+ *   fix reaches accounts that already exist. The cost is that a passkey
+ *   compromise then controls UPGRADES as well as spending: whoever can complete
+ *   the assertion can replace a verifier key and therefore replace the rule
+ *   that guards the coins, which is a strictly larger prize than the balance.
+ *
+ * Either way the key must not be a random one the browser wrote down.
+ * midnight-js samples the deploy's signing key and this app files it in
+ * `localStorage`; a Passport reinstalled on another phone has neither, so a
+ * KEPT authority backed by a sampled key is an authority nobody holds — which
+ * is the worst of both answers. Derived from the contract root, it survives
+ * device loss for exactly as long as the passkey does and is never stored at
+ * all. The choice itself is Hector's; the machinery is here either way.
+ */
+export const PASSPORT_MAINTENANCE_LABEL = 'midnight.passport.mnt';
+
 /**
  * The contract needs TWO independent 32-byte secrets: the device secret (the
  * withdrawal and permission authority) and the recovery secret (which gets
@@ -150,7 +215,12 @@ export function recoverySlotFillers(): [Uint8Array, Uint8Array, Uint8Array] {
  */
 export async function derivePassportContractSecrets(
   rootSecret: Uint8Array,
-): Promise<{ deviceSecret: Uint8Array; recoverySecret: Uint8Array }> {
+): Promise<{
+  deviceSecret: Uint8Array;
+  recoverySecret: Uint8Array;
+  encSecret: Uint8Array;
+  maintenanceSecret: Uint8Array;
+}> {
   if (rootSecret.length !== 32) {
     throw new Error(
       `The Passport contract root secret must be 32 bytes, received ${rootSecret.length}.`,
@@ -166,8 +236,10 @@ export async function derivePassportContractSecrets(
     return new Uint8Array(digest);
   };
   return {
-    deviceSecret: await derive('midnight.passport.dev'),
-    recoverySecret: await derive('midnight.passport.rec'),
+    deviceSecret: await derive(PASSPORT_DEVICE_LABEL),
+    recoverySecret: await derive(PASSPORT_RECOVERY_LABEL),
+    encSecret: await derive(PASSPORT_ENC_LABEL),
+    maintenanceSecret: await derive(PASSPORT_MAINTENANCE_LABEL),
   };
 }
 
