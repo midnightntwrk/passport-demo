@@ -1,0 +1,36 @@
+{
+  "_": [
+    "THE ACCOUNT CUSTODY CONTRACT IS NOT OURS, AND NO COPY OF IT IS IN THIS",
+    "REPOSITORY. It is Nicolas's, it lives at the path below on",
+    "midnightntwrk/passport, and it is consumed here exactly as provided. It is",
+    "never modified, copied, forked, renamed, or versioned in this repository;",
+    "anything that needs it to change goes to Nicolas (Hector's rule,",
+    "2026/09/17).",
+    "",
+    "This file pins WHICH revision of it the build under",
+    "examples/passport-balancer/contracts-stagenet/managed/account-custody was",
+    "compiled from, and how. scripts/sync-account-custody-contract.mjs",
+    "downloads that revision into a gitignored directory, refuses on a hash",
+    "mismatch, and compiles it; .github/workflows/verify-demo.yml downloads the",
+    "same revision and checks the same hash, so a lock that no longer describes",
+    "what upstream serves fails in CI rather than at the first proof.",
+    "",
+    "Moving to a newer upstream commit is an edit HERE plus a re-run of the sync",
+    "script. It is never an edit to the downloaded file."
+  ],
+  "repository": "midnightntwrk/passport",
+  "ref": "main",
+  "commit": "40072709e3f5ac5d9b89f9d92d02a4413cbe05cc",
+  "path": "contract/contracts/account.compact",
+  "sha256": "1064b1998a71b5ade418f136428d82721e6021d6d939ff2f12797383bb3f8d50",
+  "bytes": 105349,
+  "compiler": {
+    "version": "0.34.0",
+    "invocation": "compact compile +0.34.0 --feature-zkir-v3 <source> <output>",
+    "languageVersion": "0.26.0",
+    "runtimeVersion": "0.19.0",
+    "impureCircuits": 30
+  },
+  "output": "examples/passport-balancer/contracts-stagenet/managed/account-custody",
+  "download": "https://raw.githubusercontent.com/midnightntwrk/passport/40072709e3f5ac5d9b89f9d92d02a4413cbe05cc/contract/contracts/account.compact"
+}

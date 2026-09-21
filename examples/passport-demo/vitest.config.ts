@@ -432,6 +432,23 @@
  * machinery, and every wire code must be the one that was on the wire before,
  * because a copy fix that quietly re-coded failures is a breaking change in
  * disguise. A cause in, a reply out — no DOM, no React, no wallet.
+ * `src/lib/dynamicSession.ts` went IN on 2026/09/14, the day it was written.
+ * It is the gate the whole social sign-in slice hangs off — `isDynamicEnabled`
+ * decides whether an SDK that once cost this app 5.7 MB of entry chunk is
+ * fetched at all — plus the pure mapping from Dynamic's user object to the two
+ * strings a screen renders. It holds no DOM, no React, no network, and no SDK
+ * import, so every branch is reachable from a plain object in
+ * `dynamicSession.test.ts`. Its React half is next, and it is out:
+ *
+ * `src/lib/dynamic.tsx` is OUT, on the `.tsx` rule that keeps every other
+ * component out. It is the SDK's two `import()` calls, a bridge component, and
+ * a `useSyncExternalStore` wrapper; exercising any of it needs a DOM this
+ * workspace deliberately does not have, and there is no decision in it — the
+ * one computation it performs is `describeDynamicSession`, which lives next
+ * door and is drilled. What guards it instead is
+ * `src/lib/dynamicBundle.test.ts`, which walks the static import graph from
+ * `main.tsx` and fails if `@dynamic-labs` ever reappears on it. That is the
+ * property that actually broke last time, and it is not a coverage property.
  *
  * `src/lib/sendLegs.ts` and `src/lib/walletProver.ts` went IN on 2026/09/02.
  * Both were written on 2026/09/02 WITH their drills — `sendLegs.test.ts` and
@@ -469,6 +486,90 @@
  * in, the provider being built once, and the refusal that tells midnight-js the
  * server resolves the protocol builtins itself — are drilled against a local
  * HTTP server rather than a real prover.
+ *
+ * `src/identity/custodyContractSigning.ts` went IN on 2026/09/16, the day it was written,
+ * and it is in the denominator because every function in it decides what a key
+ * SIGNS. The custody account contract gates each asset-releasing circuit on a
+ * signature over a challenge, and that signature is single-use: the wrong
+ * digest, the wrong envelope id, or two signature scalars read out of the bytes
+ * in the wrong order all produce a call the circuit refuses AFTER somebody has
+ * been asked to approve it. None of those are visible from inside the app — a
+ * refused proof looks the same whichever of them caused it — so the rules are
+ * held directly, and two of them are held against evidence rather than against
+ * themselves: the digest fixtures are the values the compiled contract's own
+ * `envelope_digest` pure circuit returned, and the signature round trip goes
+ * back through the curve rather than comparing bigints to bigints.
+ *
+ * The module holds no React, no DOM, no network, no storage, and no contract
+ * module: the compiled contract's pure circuits are INJECTED, which is what
+ * makes it drillable at all — the real build is ~100 MB of prover keys that a
+ * unit test cannot load. It is not wired into the app; `App.tsx` is untouched.
+ *
+ * `src/identity/custodyJubjubSigner.ts` went IN on 2026/09/18, the day it was
+ * written, and it is in the denominator for the same reason as its neighbour
+ * one turn harder: it decides what the PASSKEY signs, and unlike the k256 arm
+ * there is no vendor between the rule and the key. Four rules live in it and
+ * each has exactly one right answer. The DERIVATION decides which key a
+ * reinstalled Passport comes back as — get the label, the counter byte, or the
+ * endianness wrong and the account is intact on chain with a device set nobody
+ * can sign for, which is not a bug anybody can repair afterwards. The
+ * REJECTION bound decides whether the scalar is uniform or quietly biased. The
+ * GRIND decides whether a challenge is in the subgroup at all, and it reads the
+ * hash LITTLE-endian while the derivation reads its own BIG-endian — two
+ * conventions one letter apart in the source and a universe apart in the
+ * result. The NONCE decides whether a second signature reveals the secret:
+ * Schnorr gives `sk` to anyone who sees two signatures under one `R`.
+ *
+ * None of that is visible from inside the app — every one of those failures is
+ * the same refused proof — so all of it is held against something other than
+ * itself in `custodyJubjubSigner.test.ts`: the seven challenge builders and the
+ * three derivations are compared with the COMPILED contract's own pure
+ * circuits, called directly in the generated argument order; the signature is
+ * compared with the reference signer's rule re-implemented from
+ * `nicolas-ref/contract/src/wallet/signer.ts`; and the result is put back
+ * through the curve — `s·G == R + c·pk`, the equation the circuit checks —
+ * using the runtime's own point arithmetic. The module holds no React, no DOM,
+ * no network, no storage, and no curve library: the pure circuits are injected,
+ * as next door.
+ *
+ * `src/identity/custodyContractPlan.ts` went IN on 2026/09/16, beside it, and for the
+ * same kind of reason one step further out: it holds the decisions a custody deploy
+ * makes BEFORE anything is signed. Three of them cost a sponsored transaction
+ * when they are wrong and cannot be checked by running the flow. A wave plan
+ * that leaves `activate_initial_device_with_k256` out of wave 1 deploys an
+ * account nobody can ever open, and no later wave can repair it. A proving
+ * endpoint on the wrong origin is a 404 arriving after a proof has been waited
+ * for — and the endpoint does not exist yet, so nothing else in the tree can
+ * hold it. A stale use counter derives a device entry the ledger does not hold,
+ * and the call is refused in-circuit after the holder has approved it. It holds
+ * no React, no DOM, no network and no contract module; its storage is an
+ * injected three-method interface.
+ *
+ * `src/identity/custodyContractSession.ts` and `src/identity/custodyContractSend.ts` went IN
+ * on 2026/09/16, the day they were written, on the same rule as the two modules
+ * above: they are the DECISIONS of the Dynamic-only path with none of its
+ * wiring. Which of the two identities a render belongs to, which step a setup is
+ * on and what it says, whether a resolved name is a Passport this sign-in can
+ * open, which deposit circuit a recipient's build takes, and whether a payment
+ * can be planned at all — all pure functions of their arguments, with an
+ * injected three-method storage where they touch storage at all.
+ *
+ * Every one of them is a way of telling somebody an untruth about their own
+ * Passport if it is wrong: showing a passkey holder somebody else's Passport,
+ * telling a person a name is not theirs because a read timed out, or planning a
+ * payment whose second leg names a circuit the recipient does not have. Their
+ * sockets — the wallet, the sponsor, the proof service, the screen — are
+ * `src/screens/DynamicPassport.tsx`, which stays out with the rest of the
+ * `.tsx`.
+ *
+ * `src/identity/custodyContractClient.ts` is deliberately OUT, and it is the sibling
+ * of the module above rather than an oversight. It is the half with the sockets
+ * on the end of it: a wallet, a sponsor, an indexer, a proof service that does
+ * not exist yet, and midnight-js's deploy and call entry points. Every decision
+ * it makes has been lifted into `custodyContractPlan.ts` precisely so that what is
+ * left is wiring, and it is drilled through its injected `CustodyDeps` seams in
+ * `custodyContractClient.test.ts` rather than being held to a percentage that would
+ * only measure how much of midnight-js a fake can imitate.
  *
  *   assert-shim.ts      A three-line stand-in for Node's `assert`, aliased in
  *                       by `vite.config.ts` for @subsquid/scale-codec. It has
@@ -540,6 +641,75 @@
  * credential may adopt a record written before any of them were labelled — and
  * `aliasStore.test.ts` holds both at 100%.
  *
+ * `src/identity/k1CoinStore.ts` went IN on 2026/09/16 with the module itself,
+ * and it is in the denominator because of what it holds rather than because of
+ * how much of it there is. A custody account's qualified shielded coins exist in
+ * exactly one place — this store — and the chain carries no copy: a description
+ * this module drops, mangles, or hands back under the wrong colour is a balance
+ * nobody can ever spend again, discovered at proving time with nothing to point
+ * at. Every branch in it is either a row it refuses to read back or a write it
+ * refuses to make, and both are met in `k1CoinStore.test.ts`. It holds no DOM,
+ * no React, no wallet SDK, and no network — the one thing it cannot do for
+ * itself, asking the indexer where a transaction's outputs landed, is INJECTED
+ * as a reader, and the real one (`contractRuntime.ts`'s
+ * `resolveTxCommitmentWindowOnce`) sits on the far side of that seam, in a
+ * module that is out for the reason given below.
+ *
+ * `src/identity/custodyInbox.ts` went IN on 2026/09/16 with the module itself, and
+ * it is the file in this list with the least room for a percentage below a
+ * hundred. It is a WIRE FORMAT: the bytes it writes are read by a program that
+ * is not this one, written by people who are not here, possibly a year from
+ * now, and a coin whose entry cannot be opened is a coin nobody can ever move
+ * again. Every branch is either a byte-layout decision, a skip rule the
+ * specification states in words (§6.4, §6.5), or a refusal to seal something
+ * that would open as nonsense, and all three are drilled in `custodyInbox.test.ts`
+ * against fixtures generated by the REFERENCE implementation rather than by
+ * this one. It holds no DOM, no React, and no network: keys, bytes, and an
+ * injected reader.
+ *
+ * `src/identity/custodyInboxIndex.ts` went IN on 2026/09/17 with the module
+ * itself. It answers "which transaction wrote inbox entry k" by COUNTING a
+ * contract's action history, and the count is the only thing standing between a
+ * recovered coin and a confident wrong position in the commitment tree — which
+ * proves nothing, for ever, while looking perfectly spendable. Every branch is
+ * either an entry point read off the compiled build as one that appends, one
+ * that may append and therefore stops the count, or a row the answer did not
+ * carry; all three are drilled in `custodyInboxIndex.test.ts`. It holds no
+ * network: a GraphQL document out, somebody else's answer in.
+ *
+ * `src/lib/custodyAssets.ts` went IN on 2026/09/17 with the module itself. It is
+ * what the Dynamic Passport's Home and Send read money through: which rows
+ * exist, what each is called, how many decimal places an amount of it carries,
+ * and what a typed amount means in atomic units. Both halves have an expensive
+ * wrong answer — a decimal scale applied to a colour that has none sends a
+ * millionth of what somebody typed, and a coin left off the rows is money the
+ * holder cannot see — so every branch is drilled in `custodyAssets.test.ts`,
+ * including the copy rule that none of its sentences names a vendor, a fee
+ * token, or a piece of machinery.
+ *
+ * `src/lib/custodyDelivery.ts` went IN on 2026/09/17 with the module itself. It
+ * decides ONE thing — whether a shielded payment into an account that keeps no
+ * readable balance was seen to arrive — and both wrong answers are a sentence
+ * on a screen that is not true: "they were paid" over a payment the network
+ * refused, or "not confirmed" over one that is demonstrably there. The list it
+ * walks is public and grows for everybody's payments, so the difference between
+ * "it grew" and "OUR delivery is in it" is the whole of the module, and the
+ * third answer — a list this build could not read at all — must never collapse
+ * into either. It holds no network, no clock, and no contract: an injected
+ * reader, two positions, and the bytes.
+ *
+ * `src/lib/custodyScreenRules.ts` went IN on 2026/09/17 with the module itself.
+ * It holds the three decisions `src/screens/DynamicPassport.tsx` makes about
+ * somebody's money that are invisible while they are being made, which is why
+ * they are not left in a `.tsx` the denominator excludes: whether to put a note
+ * back after the last leg of a payment threw (a note that is GONE must never be
+ * re-sent — the node refuses the double spend, after the screen has said it is
+ * coming home), whether a second piece of work may start while one is running
+ * (two of them read and write one coin store), and what a walk's unplaceable
+ * deliveries mean for the figure of payments still arriving (arriving, not
+ * balance, and not nothing). No React, no storage, no network, no wallet: the
+ * values the screen already holds go in and a decision comes out.
+ *
  * `src/identity/timestamps.ts` went IN on 2026/08/26 with the module itself: it
  * is the ISO-8601 reader `backup.ts` and `incentiveStore.ts` now share, it is
  * four lines of pure decision, and both of its answers are drilled by
@@ -607,6 +777,10 @@ export default mergeConfig(
           'src/lib/claimSteps.ts',
           'src/lib/companionLink.ts',
           'src/lib/colour.ts',
+          'src/lib/custodyAssets.ts',
+          'src/lib/custodyDelivery.ts',
+          'src/lib/custodyScreenRules.ts',
+          'src/lib/dynamicSession.ts',
           'src/lib/endpoints.ts',
           'src/lib/feeReadinessPoll.ts',
           'src/lib/feeRecheck.ts',
@@ -632,9 +806,17 @@ export default mergeConfig(
           'src/lib/walletProver.ts',
           'src/lib/waitingGame.ts',
           'src/lib/zkArtefactCache.ts',
+          'src/identity/custodyContractSigning.ts',
+          'src/identity/custodyJubjubSigner.ts',
+          'src/identity/custodyContractPlan.ts',
+          'src/identity/custodyContractSend.ts',
+          'src/identity/custodyContractSession.ts',
           'src/identity/aliasStore.ts',
           'src/identity/backup.ts',
           'src/identity/claimWarmup.ts',
+          'src/identity/k1CoinStore.ts',
+          'src/identity/custodyInbox.ts',
+          'src/identity/custodyInboxIndex.ts',
           'src/identity/midnamesText.ts',
           'src/identity/sponsoredAlias.ts',
           'src/identity/timestamps.ts',

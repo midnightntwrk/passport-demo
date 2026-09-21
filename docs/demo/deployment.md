@@ -66,6 +66,72 @@ unset fails by name rather than falling back to the staging project.
      examples/passport-balancer/contracts-stagenet/managed/midnames/zkir
    ```
 
+   **`account-custody` is packed when the tree has it, verifier keys and IR
+   only.** That build's prover keys are 3.2 GB (224 MB per k256 circuit) and
+   its proofs are made on the proving server, which holds them, so a browser
+   needs only the 74 KB of verifier keys and the IR. `tag-release.mjs` refuses
+   to pack a `.prover` under `managed/account-custody/keys`,
+   `prepare-zk-assets.mjs` leaves one behind, and `verify-zk-artefacts.mjs`
+   fails if one shipped. A checkout without those artefacts still builds: the
+   module is staged, the artefacts are reported absent, and nothing is served
+   under `/zk/account-custody` until `fetch-zk-artefacts.mjs` brings a bundle
+   that carries them.
+
+   **Those directories are gitignored, so whether they are here is a fact
+   about the machine and not about the commit.** `tag-release.mjs` treats them
+   the way `prepare-zk-assets.mjs` does: packed when present, and when absent
+   it prints one line saying the bundle will not carry `account-custody` and
+   cuts the release anyway. That is deliberate — a fix release for the prototype
+   Passports, which do not use this build at all, must be cuttable from an
+   ordinary clone. Half a build is still fatal: keys without IR, or IR without
+   keys, is an interrupted copy and the script says so rather than shipping a
+   bundle that looks complete and fails at the first proof.
+
+   **For the release that ships the Dynamic-only Passport, pass
+   `--require-account-custody`** (or set
+   `PASSPORT_RELEASE_REQUIRE_ACCOUNT_CUSTODY=1`). That release cannot work
+   without those artefacts, so their absence has to be an error rather than a
+   smaller bundle:
+
+   ```sh
+   PASSPORT_RELEASE_NOTES='…' node scripts/tag-release.mjs --kind feature --require-account-custody
+   ```
+
+   If it refuses, run `node scripts/fetch-zk-artefacts.mjs` for a bundle that
+   carries them, or cut the release from the host that compiled the build.
+
+   **Measure before you add the prover keys.** `managed/account-custody/keys`
+   as it comes off the compiler is **3.2 GB** — thirty circuits against the
+   account build's twelve, with the k256 arm's circuits far larger — where the
+   whole bundle is 110 MB today. That is past what a Vercel deployment will
+   accept, so serving them at all would be a decision about where the
+   artefacts come from (`PASSPORT_ZK_ORIGIN`, `.vercelignore`) and not a line
+   in a `tar` command. Nothing in the browser needs them.
+
+   **Where that build comes from, and the one rule around it.** The contract
+   is not ours and no copy of it is in this repository. `managed/account-custody`
+   is compiler output for `contract/contracts/account.compact` on
+   `midnightntwrk/passport`, consumed unchanged at the commit pinned in
+   `scripts/account-custody-contract.lock.json`. To reproduce it:
+
+   ```sh
+   node scripts/sync-account-custody-contract.mjs
+   ```
+
+   That downloads the pinned source into a gitignored directory, checks its
+   SHA-256 against the lock, and compiles it with
+   `compact compile +0.34.0 --feature-zkir-v3` (about three minutes). It
+   refuses on a hash mismatch rather than compiling something that is not what
+   the lock describes. Its last step moves the 3.2 GB of prover keys out of
+   `keys/` into `prover-keys/` beside it, so `keys/` means on this build what
+   it means on every other — the 74 KB a browser is served — and a
+   freshly-compiled tree passes `verify-zk-artefacts.mjs` rather than failing
+   it. `prover-keys/` is gitignored and is what an operator copies to the
+   proving server. Moving to a newer upstream commit means changing the
+   lock and re-running it — never editing the downloaded file. Anything that
+   needs the contract itself to change goes to Nicolas; see
+   [the account custody contract](./account-custody-contract.md).
+
 3. Cut the release from `main` and attach that file. The tag is
    `v<major>.<minor>` — see [How it is numbered](#how-it-is-numbered-hector-20260915)
    — and the next one is `v1.0`:

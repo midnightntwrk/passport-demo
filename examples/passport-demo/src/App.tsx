@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ENROLMENT_PRF_MISSING_MESSAGE,
   EncryptedPassportPrivateStateStore,
@@ -164,6 +164,24 @@ import BackupScreen from './screens/Backup.js';
 import EcosystemScreen from './screens/Ecosystem.js';
 import AliasReclaimModal from './screens/AliasReclaimModal.js';
 import RecoverByNameScreen from './screens/RecoverByName.js';
+/**
+ * THE SECOND WAY TO BE INSIDE PASSPORT — a social sign-in rather than a passkey.
+ *
+ * LAZY, AND NOT MERELY FOR TIDINESS. `DynamicPassport` reaches
+ * `identity/custodyContractClient.ts`, which STATICALLY imports `lib/localWallet.ts`
+ * — the wallet facade, its WASM ledger, and its chain sync. This file reaches
+ * that module only through `import()` (line ~2102), deliberately, so none of it
+ * is in the entry chunk. A static import here would drag all of it in for every
+ * visitor of every build, flag or no flag. `lazy` keeps the screen in a chunk of
+ * its own, fetched only when somebody is actually signed in with a provider.
+ *
+ * See `identity/custodyContractSession.ts` for the rule that chooses between the two
+ * identities, and the screen's own header for why the whole path is one screen
+ * rather than a second set of branches through this file.
+ */
+const DynamicPassport = lazy(() => import('./screens/DynamicPassport.js'));
+import { choosePassportIdentity } from './lib/dynamicSession.js';
+import { useDynamicSession } from './lib/dynamic.js';
 /* The one-off account upgrade's SCREEN, statically — it is a stepper and a
    theme toggle and reaches nothing. The MACHINE behind it is imported inside
    the handler that runs it (`runUpgrade`), because `identity/accountUpgrade.js`
@@ -2670,7 +2688,7 @@ export default function PassportDemo() {
    *
    * Every sign-in journey funnels its ceremony failure through here, and it is
    * one function rather than a `catch` apiece so the targeted unlock behind
-   * "Continue with Passport" and the discoverable assertion behind "Use a
+   * "Continue with Passkey" and the discoverable assertion behind "Use a
    * different passkey" cannot drift into offering different things for the
    * same fact. `passkeySignInRecovery` holds the rule and the reasoning; this
    * is only the wiring between it, the two panel states, and the error the
@@ -2765,7 +2783,7 @@ export default function PassportDemo() {
          user would loop. Both controls the screen already carries do lead
          somewhere from here, and the sentence names them. */
       throw new Error(
-        'You already have a Passport on this device. Choose "Use a different passkey" to pick it, or "Continue with Passport" to try again.',
+        'You already have a Passport on this device. Choose "Use a different passkey" to pick it, or "Continue with Passkey" to try again.',
       );
     }
     try {
@@ -2991,7 +3009,7 @@ export default function PassportDemo() {
          action. So the chain from here reaches a working Passport in every
          case, rather than terminating in advice. */
       throw new Error(
-        'This browser already holds a Passport passkey. Choose "Continue with Passport" to reopen it.',
+        'This browser already holds a Passport passkey. Choose "Continue with Passkey" to reopen it.',
       );
     }
     const knownCredentialIds = await knownLocalCredentialIds();
@@ -3050,7 +3068,7 @@ export default function PassportDemo() {
          offer more than the button that just failed.
 
          The first version of this branch threw a plain sentence naming
-         "Continue with Passport", which recreated the Android orphan loop
+         "Continue with Passkey", which recreated the Android orphan loop
          exactly: this browser holds records, so `discoverFirst` is true, so
          Continue runs the same discovery, and a passkey deleted from Google
          Password Manager still produces an empty sheet the user dismisses
@@ -3138,7 +3156,7 @@ export default function PassportDemo() {
          control for the same reason: "Create passkey" has not been on this
          screen since 2026/08/05. */
       throw new Error(
-        'No Passport passkey is enrolled in this browser yet. Choose "Continue with Passport" to make one.',
+        'No Passport passkey is enrolled in this browser yet. Choose "Continue with Passkey" to make one.',
       );
     }
     setOnboardingBusyLabel('Unlocking your Passport with this device');
@@ -5982,6 +6000,25 @@ export default function PassportDemo() {
    */
   const localSessionActive = localWalletStatus === 'ready' && localSurfaces !== null;
   const sessionActive = localSessionActive;
+
+  /**
+   * WHICH PASSPORT THIS RENDER BELONGS TO.
+   *
+   * `choosePassportIdentity` answers `'passkey'` the moment a profile exists,
+   * whatever the sign-in says, so nothing below this line can be reached by
+   * somebody who already has a Passport on this device — including a passkey
+   * holder who signed in with Google to look at the identity row. And with no
+   * environment id the session is `disabled` for ever, which is every build
+   * shipped today: the answer is `'none'`, the branch in the ladder is false,
+   * and this file renders exactly what it rendered before the branch existed.
+   */
+  const dynamicSession = useDynamicSession();
+  const dynamicOnly =
+    choosePassportIdentity({
+      hasPasskeyProfile: profile !== null,
+      dynamicStatus: dynamicSession.status,
+      evmAddress: dynamicSession.evmAddress,
+    }) === 'dynamic';
   /* The two way-out panels hold the screen open in their own right. They have
      to: a failure that suppresses the error banner in favour of its panel
      would otherwise have nothing left keeping onboarding on screen. */
@@ -7499,6 +7536,15 @@ export default function PassportDemo() {
               lastError: undefined,
             });
             if (plan.change === null) dropPendingSend(record.id);
+            /* WHETHER THE AMOUNT WAS SEEN TO ARRIVE (2026/09/17). Most accounts
+               mirror what they hold, so a paying leg that was accepted IS the
+               arrival and this is absent — the sentence below is unchanged for
+               every recipient the app has paid until now. The newer account
+               keeps no such mirror, and the paying leg can only say "submitted"
+               until the delivery it sealed shows up in that account's own
+               public list. Where it has not yet, the row says so rather than
+               claiming the money is there. */
+            const arrivalUnseen = 'delivery' in paid && paid.delivery === 'unconfirmed';
             /* THE TRANSFER IS DONE, WHICHEVER PLAN THIS WAS (2026/09/07). The
                recipient has the money at this line, and the trail says so
                without a qualifier — a run with change left owes the SENDER
@@ -7509,7 +7555,9 @@ export default function PassportDemo() {
             updateActivity(activityId, {
               status: 'complete',
               label: `Sent to ${record.recipient.label}`,
-              detail: `${amountText} is now in ${record.recipient.label}’s account.`,
+              detail: arrivalUnseen
+                ? `${amountText} was sent to ${record.recipient.label} and has not been seen to arrive yet.`
+                : `${amountText} is now in ${record.recipient.label}’s account.`,
               source: 'chain',
               txHash: paid.txId,
             });
@@ -8379,12 +8427,29 @@ export default function PassportDemo() {
          made, which costs nothing — the answer is cached per address for the
          session — and cannot be a stale render. A `false` either way is the
          two-leg path, which works against every account there is. */
-      const { senderSupportsOneTransactionSend } = await import(
+      const { accountModuleIfKnown, senderSupportsOneTransactionSend } = await import(
         './identity/accountCustody.js'
       );
       const oneTransaction = await senderSupportsOneTransactionSend(
         account.handle.network,
         account.address,
+      );
+      /* AND WHICH BUILD THE RECIPIENT IS ON, asked once, here, rather than
+         assumed anywhere below (2026/09/17). The single-transaction transfer
+         runs the RECIPIENT's own deposit inside the sender's call tree, and on
+         the newer account that deposit takes a second argument the sender's
+         circuit knows nothing about — so the one transaction cannot pay one of
+         those accounts at all, and trying would spend a passkey ceremony to
+         earn a refusal. The two-leg send pays them perfectly well, because its
+         paying leg is a call against the recipient's own build.
+
+         A recipient this cannot establish changes NOTHING: `null` leaves the
+         route exactly as it was before this question was asked, and the two-leg
+         path's own deposit refuses an unreadable account with the reason
+         attached. Nothing here decides a payment — see `accountModuleIfKnown`. */
+      const recipientModule = await accountModuleIfKnown(
+        account.handle.network,
+        params.accountAddress,
       );
       await runNameSend(
         newPendingSend({
@@ -8397,7 +8462,10 @@ export default function PassportDemo() {
              sender's build is allowed to matter here. */
           kind: nameSendKind({
             asset: 'shielded',
-            senderSupportsOneTransaction: oneTransaction,
+            /* The sender's build decides, EXCEPT against a recipient the one
+               transaction cannot reach — see the read above. */
+            senderSupportsOneTransaction:
+              oneTransaction && recipientModule !== 'account-custody',
           }),
           recipient: { label: params.domain, accountAddress: params.accountAddress },
           amount: params.amount,
@@ -9509,7 +9577,15 @@ export default function PassportDemo() {
 
   return (
     <div className="passport-experience is-mobile">
-      {showOnboarding ? (
+      {/* The social sign-in's own Passport, FIRST in the ladder and gated on a
+          condition that is false in every build shipped today. It is placed
+          above `showOnboarding` because it replaces onboarding rather than
+          following it: this person is not going to be asked for a passkey. */}
+      {dynamicOnly ? (
+        <Suspense fallback={<div className="passport-experience-loading" role="status" />}>
+          <DynamicPassport network={localWalletNetworkId ?? configuredWalletNetwork ?? selectedNetwork} />
+        </Suspense>
+      ) : showOnboarding ? (
         <>
         {/* THE ONE QUESTION ONBOARDING IS ALLOWED TO ASK MID-FLIGHT
             (2026/09/05). A platform that evaluates no PRF at creation leaves a

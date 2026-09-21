@@ -1,0 +1,423 @@
+/**
+ * The Dynamic-only session's rules, drilled to the branch.
+ *
+ * WHAT THESE TESTS ARE PROTECTING
+ * ------------------------------
+ * Two of them matter more than the rest and are worth naming here rather than
+ * leaving to be inferred from an `it` string:
+ *
+ *   - "a passkey profile always wins". If that ever stops being true, a passkey
+ *     holder who signs in with Google to look at the identity row is shown a
+ *     Dynamic Passport instead of their own — and the one they cannot see is
+ *     the one holding the money.
+ *   - "a read that did not complete is unreachable, never not-yours". The whole
+ *     of `nameRecovery.ts`'s header is about that distinction, and this module
+ *     adds two more reads that can fail. A `false` where a `null` belongs tells
+ *     somebody their Passport is not theirs because an indexer was slow.
+ */
+
+import { describe, expect, it, vi } from 'vitest';
+
+import {
+  DYNAMIC_SETUP_STEPS,
+  CUSTODY_MARKER_CIRCUIT,
+  CUSTODY_NAME_KEY,
+  choosePassportIdentity,
+  dynamicSetupAction,
+  dynamicSetupCopy,
+  dynamicSetupInterrupted,
+  dynamicSetupInterruptedAnywhere,
+  dynamicSetupPhase,
+  dynamicSetupStep,
+  dynamicStage,
+  dynamicUserKey,
+  custodyNameKey,
+  k1PrivateStateId,
+  custodyRecoveryOutcome,
+  loadCustodyName,
+  loadCustodyNames,
+  readDynamicPassport,
+  recoveredCustodyRecord,
+  saveCustodyName,
+} from './custodyContractSession.js';
+import { CUSTODY_STORAGE_KEY, custodyRecordKey, type CustodyAccountRecord, type CustodyStorage } from './custodyContractPlan.js';
+import type { ResolvedName } from '../lib/nameRecovery.js';
+
+/** A storage a test owns outright. Three methods, exactly as the module takes. */
+function memoryStorage(seed: Record<string, string> = {}): CustodyStorage & { map: Map<string, string> } {
+  const map = new Map(Object.entries(seed));
+  return {
+    map,
+    getItem: (key) => map.get(key) ?? null,
+    setItem: (key, value) => {
+      map.set(key, value);
+    },
+    removeItem: (key) => {
+      map.delete(key);
+    },
+  };
+}
+
+/** A storage that refuses everything, the way a browser blocking site data does. */
+function refusingStorage(): CustodyStorage {
+  return {
+    getItem: () => {
+      throw new Error('denied');
+    },
+    setItem: () => {
+      throw new Error('denied');
+    },
+    removeItem: () => {
+      throw new Error('denied');
+    },
+  };
+}
+
+const RECORD: CustodyAccountRecord = {
+  user: '0xabcdef0123456789abcdef0123456789abcdef01',
+  network: 'stagenet',
+  address: 'aa'.repeat(32),
+  privateStateId: 'passport-account-custody-abcdef01',
+  saltHex: 'bb'.repeat(32),
+  pkXHex: '1',
+  pkYHex: '2',
+  wavesDone: 3,
+  totalWaves: 3,
+  activated: true,
+  txHashes: [],
+};
+
+const RESOLVED: ResolvedName = {
+  resolverAddress: 'cc'.repeat(32),
+  target: { kind: 'contract', hex: 'aa'.repeat(32) },
+};
+
+describe('choosePassportIdentity', () => {
+  it('answers passkey whenever a profile exists, whatever the sign-in says', () => {
+    expect(
+      choosePassportIdentity({
+        hasPasskeyProfile: true,
+        dynamicStatus: 'signed-in',
+        evmAddress: '0xAbC',
+      }),
+    ).toBe('passkey');
+  });
+
+  it('answers none when nothing is signed in', () => {
+    expect(
+      choosePassportIdentity({
+        hasPasskeyProfile: false,
+        dynamicStatus: 'disabled',
+        evmAddress: null,
+      }),
+    ).toBe('none');
+    expect(
+      choosePassportIdentity({
+        hasPasskeyProfile: false,
+        dynamicStatus: 'signed-out',
+        evmAddress: null,
+      }),
+    ).toBe('none');
+  });
+
+  it('answers none for the beat between signing in and having an address', () => {
+    expect(
+      choosePassportIdentity({
+        hasPasskeyProfile: false,
+        dynamicStatus: 'signed-in',
+        evmAddress: '   ',
+      }),
+    ).toBe('none');
+  });
+
+  it('answers dynamic for a signed-in session with an address and no passkey', () => {
+    expect(
+      choosePassportIdentity({
+        hasPasskeyProfile: false,
+        dynamicStatus: 'signed-in',
+        evmAddress: '0xAbC',
+      }),
+    ).toBe('dynamic');
+  });
+});
+
+describe('dynamicUserKey', () => {
+  it('lower-cases, so a checksummed address is one user and not two', () => {
+    expect(dynamicUserKey('0xAbCdEf')).toBe('0xabcdef');
+  });
+
+  it('reads a blank, a whitespace string, and a non-string as no user', () => {
+    expect(dynamicUserKey('')).toBeNull();
+    expect(dynamicUserKey('  ')).toBeNull();
+    expect(dynamicUserKey(null)).toBeNull();
+    expect(dynamicUserKey(undefined)).toBeNull();
+    expect(dynamicUserKey(7 as unknown as string)).toBeNull();
+  });
+});
+
+describe('dynamicStage', () => {
+  it('is sign-in for any identity that is not the Dynamic one', () => {
+    expect(dynamicStage({ identity: 'passkey', record: RECORD, name: 'alice' })).toBe('sign-in');
+    expect(dynamicStage({ identity: 'none', record: null, name: null })).toBe('sign-in');
+  });
+
+  it('offers to create when nothing is stored', () => {
+    expect(dynamicStage({ identity: 'dynamic', record: null, name: null })).toBe('create');
+  });
+
+  it('offers to create when a record exists with no address yet', () => {
+    expect(
+      dynamicStage({ identity: 'dynamic', record: { ...RECORD, address: null }, name: null }),
+    ).toBe('create');
+  });
+
+  it('resumes a setup that has an address and is unfinished', () => {
+    expect(
+      dynamicStage({ identity: 'dynamic', record: { ...RECORD, wavesDone: 1 }, name: null }),
+    ).toBe('resume');
+    expect(
+      dynamicStage({ identity: 'dynamic', record: { ...RECORD, activated: false }, name: null }),
+    ).toBe('resume');
+  });
+
+  it('asks for a name once the Passport is usable, then goes home', () => {
+    expect(dynamicStage({ identity: 'dynamic', record: RECORD, name: null })).toBe('name');
+    expect(dynamicStage({ identity: 'dynamic', record: RECORD, name: 'alice' })).toBe('home');
+  });
+});
+
+describe('the setup copy', () => {
+  it('counts three steps, whatever the wave plan does', () => {
+    expect(DYNAMIC_SETUP_STEPS).toBe(3);
+    expect(dynamicSetupCopy('create')).toBe('Setting up your Passport, step 1 of 3');
+    expect(dynamicSetupCopy('finish')).toBe('Setting up your Passport, step 2 of 3');
+    expect(dynamicSetupCopy('activate')).toBe('Setting up your Passport, step 3 of 3');
+    expect(dynamicSetupCopy('done')).toBe('Your Passport is ready.');
+  });
+
+  it('reads the phase off the record', () => {
+    expect(dynamicSetupPhase(null)).toBe('create');
+    expect(dynamicSetupPhase({ ...RECORD, address: null })).toBe('create');
+    expect(dynamicSetupPhase({ ...RECORD, wavesDone: 1 })).toBe('finish');
+    expect(dynamicSetupPhase({ ...RECORD, activated: false })).toBe('activate');
+    expect(dynamicSetupPhase(RECORD)).toBe('done');
+    /* A setup that cannot be finished is back at the beginning, not `done`,
+       which is what it would otherwise fall through to — and "Your Passport is
+       ready" over a Passport that can never work is the worst sentence on the
+       screen. */
+    expect(dynamicSetupPhase({ ...RECORD, interrupted: true })).toBe('create');
+  });
+
+  it('numbers the phases, and puts done past the last one', () => {
+    expect(dynamicSetupStep('create')).toBe(1);
+    expect(dynamicSetupStep('finish')).toBe(2);
+    expect(dynamicSetupStep('activate')).toBe(3);
+    expect(dynamicSetupStep('done')).toBe(3);
+  });
+
+  it('never offers to CREATE over a setup that has already started', () => {
+    expect(dynamicSetupAction(null)).toBe('Create my Passport');
+    expect(dynamicSetupAction({ ...RECORD, address: null })).toBe('Create my Passport');
+    expect(dynamicSetupAction({ ...RECORD, wavesDone: 1 })).toBe(
+      'Finish setting up my Passport',
+    );
+    /* And never offers to FINISH one that cannot be finished: the key that
+       signs the remaining steps is gone, so that button fails every press. */
+    expect(dynamicSetupAction({ ...RECORD, wavesDone: 1, interrupted: true })).toBe(
+      'Start again',
+    );
+  });
+
+  /* THE ANSWER A SCREEN MUST NOT HAVE TO FAIL TO LEARN. Both setup screens kept
+     "this setup cannot be finished" in React state that began false on every
+     load, so a reload offered to create a Passport over an interrupted record
+     and the press under it threw `CUSTODY_SETUP_INTERRUPTED`. The record knew. */
+  it('reads an interrupted setup off the record, so a reload does not have to fail first', () => {
+    expect(dynamicSetupInterrupted(null)).toBe(false);
+    expect(dynamicSetupInterrupted(RECORD)).toBe(false);
+    expect(dynamicSetupInterrupted({ ...RECORD, wavesDone: 1 })).toBe(false);
+    expect(dynamicSetupInterrupted({ ...RECORD, wavesDone: 1, interrupted: true })).toBe(true);
+  });
+
+  it('answers for a sign-in whose network is not to hand, and for nobody else', () => {
+    const halted: CustodyAccountRecord = { ...RECORD, wavesDone: 1, interrupted: true };
+    const other = '0x00000000000000000000000000000000000000ff';
+    const storage = memoryStorage({
+      [CUSTODY_STORAGE_KEY]: JSON.stringify({
+        [custodyRecordKey(RECORD.user, 'stagenet')]: RECORD,
+        [custodyRecordKey(RECORD.user, 'undeployed')]: halted,
+        [custodyRecordKey(other, 'stagenet')]: halted,
+      }),
+    });
+    /* One of this sign-in's records is halted, on a network the milestone
+       screen cannot name, and that is the whole reason every network is asked. */
+    expect(dynamicSetupInterruptedAnywhere(storage, RECORD.user)).toBe(true);
+    /* The case on the address is the record key's, not the caller's. */
+    expect(dynamicSetupInterruptedAnywhere(storage, RECORD.user.toUpperCase())).toBe(true);
+    /* SOMEBODY ELSE'S HALTED SETUP IS NOT OURS. A prefix that matched loosely
+       would put "Start again" in front of a person whose own Passport is fine. */
+    const onlyOurs = memoryStorage({
+      [CUSTODY_STORAGE_KEY]: JSON.stringify({ [custodyRecordKey(other, 'stagenet')]: halted }),
+    });
+    expect(dynamicSetupInterruptedAnywhere(onlyOurs, RECORD.user)).toBe(false);
+    /* Nothing stored, and no sign-in yet: both are "no", and neither throws. */
+    expect(dynamicSetupInterruptedAnywhere(memoryStorage(), RECORD.user)).toBe(false);
+    expect(dynamicSetupInterruptedAnywhere(storage, null)).toBe(false);
+    expect(dynamicSetupInterruptedAnywhere(storage, '')).toBe(false);
+    /* A browser refusing site data answers "no" rather than throwing at a
+       screen that is only deciding what a button says. */
+    expect(dynamicSetupInterruptedAnywhere(refusingStorage(), RECORD.user)).toBe(false);
+  });
+});
+
+describe('the name store', () => {
+  it('keys the same way the record store does', () => {
+    expect(custodyNameKey('0xABC', 'stagenet')).toBe('0xabc|stagenet');
+    expect(custodyNameKey('0xabc', 'stagenet')).toBe(custodyRecordKey('0xABC', 'stagenet'));
+  });
+
+  it('round-trips a name', () => {
+    const storage = memoryStorage();
+    saveCustodyName(storage, '0xABC', 'stagenet', 'alice');
+    expect(loadCustodyName(storage, '0xabc', 'stagenet')).toBe('alice');
+    expect(storage.map.has(CUSTODY_NAME_KEY)).toBe(true);
+  });
+
+  it('merges rather than replacing', () => {
+    const storage = memoryStorage();
+    saveCustodyName(storage, '0xa', 'stagenet', 'alice');
+    saveCustodyName(storage, '0xb', 'stagenet', 'bob');
+    expect(loadCustodyNames(storage)).toEqual({ '0xa|stagenet': 'alice', '0xb|stagenet': 'bob' });
+  });
+
+  it('reads nothing stored, a storage that throws, and rubbish as empty', () => {
+    expect(loadCustodyNames(memoryStorage())).toEqual({});
+    expect(loadCustodyNames(refusingStorage())).toEqual({});
+    expect(loadCustodyNames(memoryStorage({ [CUSTODY_NAME_KEY]: 'not json' }))).toEqual({});
+    expect(loadCustodyNames(memoryStorage({ [CUSTODY_NAME_KEY]: 'null' }))).toEqual({});
+    expect(loadCustodyNames(memoryStorage({ [CUSTODY_NAME_KEY]: '[]' }))).toEqual({});
+  });
+
+  it('drops entries that are not names, so a bad write cannot become a label', () => {
+    const stored = JSON.stringify({ 'a|stagenet': 3, 'b|stagenet': '', 'c|stagenet': 'carol' });
+    expect(loadCustodyNames(memoryStorage({ [CUSTODY_NAME_KEY]: stored }))).toEqual({
+      'c|stagenet': 'carol',
+    });
+  });
+
+  it('answers null for a user with no name', () => {
+    expect(loadCustodyName(memoryStorage(), '0xa', 'stagenet')).toBeNull();
+  });
+
+  it('says so in the console rather than on screen when a write is refused', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    saveCustodyName(refusingStorage(), '0xa', 'stagenet', 'alice');
+    expect(warn).toHaveBeenCalledOnce();
+    warn.mockRestore();
+  });
+});
+
+describe('readDynamicPassport', () => {
+  it('assembles the record, the name, and the stage in one read', () => {
+    const storage = memoryStorage({
+      [CUSTODY_STORAGE_KEY]: JSON.stringify({ [custodyRecordKey(RECORD.user, 'stagenet')]: RECORD }),
+      [CUSTODY_NAME_KEY]: JSON.stringify({ [custodyNameKey(RECORD.user, 'stagenet')]: 'alice' }),
+    });
+    expect(readDynamicPassport({ storage, user: RECORD.user.toUpperCase(), network: 'stagenet' })).toEqual({
+      user: RECORD.user,
+      network: 'stagenet',
+      record: RECORD,
+      name: 'alice',
+      address: RECORD.address,
+      stage: 'home',
+    });
+  });
+
+  it('answers a user who has nothing with the create stage and no address', () => {
+    const view = readDynamicPassport({ storage: memoryStorage(), user: '0xa', network: 'stagenet' });
+    expect(view.record).toBeNull();
+    expect(view.address).toBeNull();
+    expect(view.stage).toBe('create');
+  });
+});
+
+describe('custodyRecoveryOutcome', () => {
+  it('is unreachable when the circuit list could not be read', () => {
+    expect(custodyRecoveryOutcome(RESOLVED, { operations: null, holdsDevice: true })).toEqual({
+      kind: 'unreachable',
+      detail: 'Midnight could not be reached to check that name. Try again in a moment.',
+    });
+  });
+
+  it('is not-yours when the name belongs to a passkey Passport', () => {
+    expect(
+      custodyRecoveryOutcome(RESOLVED, { operations: ['withdraw_night'], holdsDevice: true }),
+    ).toEqual({ kind: 'not-yours' });
+  });
+
+  it('is unreachable when the device set could not be read', () => {
+    expect(
+      custodyRecoveryOutcome(RESOLVED, { operations: [CUSTODY_MARKER_CIRCUIT], holdsDevice: null }),
+    ).toEqual({
+      kind: 'unreachable',
+      detail: 'Midnight could not be reached to check that name. Try again in a moment.',
+    });
+  });
+
+  it('is not-yours when this sign-in is not one of the account devices', () => {
+    expect(
+      custodyRecoveryOutcome(RESOLVED, { operations: [CUSTODY_MARKER_CIRCUIT], holdsDevice: false }),
+    ).toEqual({ kind: 'not-yours' });
+  });
+
+  it('is found, carrying the address and the leaf, when both reads say yes', () => {
+    expect(
+      custodyRecoveryOutcome(RESOLVED, { operations: [CUSTODY_MARKER_CIRCUIT], holdsDevice: true }),
+    ).toEqual({
+      kind: 'found',
+      address: RESOLVED.target.hex,
+      resolverAddress: RESOLVED.resolverAddress,
+    });
+  });
+});
+
+describe('recoveredCustodyRecord', () => {
+  it('writes a FINISHED record, because the chain has just said it is one', () => {
+    const record = recoveredCustodyRecord({
+      user: '0xABCDEF0123456789',
+      network: 'stagenet',
+      address: RECORD.address as string,
+      privateStateId: 'passport-account-custody-abcdef01',
+      pkXHex: '1',
+      pkYHex: '2',
+    });
+    expect(record.user).toBe('0xabcdef0123456789');
+    expect(record.wavesDone).toBe(3);
+    expect(record.totalWaves).toBe(3);
+    expect(record.activated).toBe(true);
+    /* The salt opens the boot commitment, and activation has already happened.
+       Inventing one would put a value in storage that is not true here. */
+    expect(record.saltHex).toBe('');
+    expect(record.txHashes).toEqual([]);
+  });
+
+  it('takes a wave count when the caller knows a different one', () => {
+    const record = recoveredCustodyRecord({
+      user: '0xa',
+      network: 'stagenet',
+      address: RECORD.address as string,
+      privateStateId: 'x',
+      pkXHex: '1',
+      pkYHex: '2',
+      totalWaves: 4,
+    });
+    expect(record.wavesDone).toBe(4);
+    expect(record.totalWaves).toBe(4);
+  });
+});
+
+describe('k1PrivateStateId', () => {
+  it('composes the id the deploy composes, so both devices read one store', () => {
+    expect(k1PrivateStateId('0xABCDEF0123456789')).toBe('passport-account-custody-abcdef01');
+  });
+});

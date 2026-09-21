@@ -47,6 +47,21 @@ export interface BalancerNetworkEndpoints {
    * proves in-process with the SDK's own WASM prover — see `wallet.ts`.
    */
   provingServerUrl?: string;
+  /**
+   * A proof server that can prove ZKIR v3, when one exists — the `account-custody`
+   * build and nothing else. `BALANCER_PROVER_URL_V3`.
+   *
+   * A SEPARATE NAME from {@link provingServerUrl} on purpose: that one answers
+   * "which server", which on the droplet is the 1AM gateway route, and the
+   * gateway is `ledger9-zkir2-dispatch`. This one answers "an image that can
+   * prove v3", which is a capability, and a v3 circuit routed by the first
+   * question would be sent to a server that cannot answer it at all.
+   *
+   * There is deliberately no default: unset, the account custody path refuses in one line
+   * that names this variable, and the other two builds are untouched. See
+   * `./accountModule.ts`.
+   */
+  provingServerUrlV3?: string;
 }
 
 export interface BalancerConfig extends BalancerNetworkEndpoints {
@@ -97,6 +112,15 @@ export interface BalancerConfig extends BalancerNetworkEndpoints {
   midnamesAssetsPath?: string;
   /** Overrides the search for the compiled account-custody build's ZK artefacts. */
   accountAssetsPath?: string;
+  /**
+   * Overrides the search for the compiled account custody build's ZK
+   * artefacts. `BALANCER_ACCOUNT_CUSTODY_ASSETS`.
+   *
+   * Likelier to be set than the others: that build's `keys/` is 3.2 GB, it is
+   * in no release bundle, and a host that has it will usually have it somewhere
+   * other than inside the checkout.
+   */
+  accountCustodyAssetsPath?: string;
   /** Sponsored `.night` registrations allowed per rolling hour. */
   aliasMaxPerHour: number;
   /** The activation grant `/fund-account` deposits, in atomic NIGHT. */
@@ -121,6 +145,17 @@ export interface BalancerConfig extends BalancerNetworkEndpoints {
   aliasRate: RateLimit;
   /** The per-client ceiling on `/fund-account`. */
   accountRate: RateLimit;
+  /**
+   * The per-client ceiling on `/prove-account-custody`.
+   *
+   * Its own bucket rather than a share of `accountRate`, because it meters a
+   * different cost: that route spends nothing at all and burns tens of seconds
+   * of CPU, so a caller that has used up its grants should still be able to
+   * finish proving the Passport those grants opened. Same default ceiling as
+   * the spend routes, which is the point — three a minute per client is already
+   * more than a browser walking one Passport through its four steps needs.
+   */
+  proveAccountCustodyRate: RateLimit;
   /**
    * How many spend requests may be in flight at once, across every client.
    * Zero means unbounded.
@@ -678,6 +713,8 @@ export function networkEndpoints(
   const indexerWsUrls = derivedWs.map((derived, index) => givenWs[index] ?? derived);
   const relayUrls = nodeUrls.map(relayFrom);
   const provingServerUrl = trimmed(env.BALANCER_PROVER_URL) ?? defaults?.prover;
+  /* No network default, by design — see the field's note. */
+  const provingServerUrlV3 = trimmed(env.BALANCER_PROVER_URL_V3);
   return {
     indexerHttpUrl: indexerHttpUrls[0] as string,
     indexerHttpUrls,
@@ -688,6 +725,7 @@ export function networkEndpoints(
     relayUrl: relayUrls[0] as string,
     relayUrls,
     ...(provingServerUrl ? { provingServerUrl } : {}),
+    ...(provingServerUrlV3 ? { provingServerUrlV3 } : {}),
   };
 }
 
@@ -868,6 +906,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BalancerConfig
     DEFAULT_SPEND_MAX_PER_MIN,
     DEFAULT_SPEND_BURST,
   );
+  const proveAccountCustodyRate = rateLimit(
+    'PROVE_ACCOUNT_CUSTODY',
+    trimmed(env.BALANCER_PROVE_ACCOUNT_CUSTODY_MAX_PER_MIN),
+    trimmed(env.BALANCER_PROVE_ACCOUNT_CUSTODY_BURST),
+    DEFAULT_SPEND_MAX_PER_MIN,
+    DEFAULT_SPEND_BURST,
+  );
   const spendQueueMax = wholeNumber(
     'BALANCER_SPEND_QUEUE_MAX',
     trimmed(env.BALANCER_SPEND_QUEUE_MAX),
@@ -1019,6 +1064,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BalancerConfig
     ...(trimmed(env.BALANCER_ACCOUNT_ASSETS)
       ? { accountAssetsPath: trimmed(env.BALANCER_ACCOUNT_ASSETS) as string }
       : {}),
+    ...(trimmed(env.BALANCER_ACCOUNT_CUSTODY_ASSETS)
+      ? { accountCustodyAssetsPath: trimmed(env.BALANCER_ACCOUNT_CUSTODY_ASSETS) as string }
+      : {}),
     ...(trimmed(env.BALANCER_ASSET_ASSETS)
       ? { assetAssetsPath: trimmed(env.BALANCER_ASSET_ASSETS) as string }
       : {}),
@@ -1030,6 +1078,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BalancerConfig
     balanceRate,
     aliasRate,
     accountRate,
+    proveAccountCustodyRate,
     spendQueueMax,
     spendLanes,
     dustWaitMs,

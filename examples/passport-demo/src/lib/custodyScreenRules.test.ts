@@ -1,0 +1,430 @@
+/**
+ * WHAT THIS PROTECTS: the three decisions the Dynamic Passport screen makes
+ * about somebody's money, each of which is invisible while it is being made.
+ *
+ * Every branch of every function in `./custodyScreenRules.ts` is walked here,
+ * and each drill is named after what it costs to get wrong rather than after
+ * the code path it takes:
+ *
+ *   - a note that is still held goes BACK, and a note that is gone is never
+ *     sent anywhere (a second spend the node refuses, under a line telling
+ *     somebody their money is coming home);
+ *   - a wallet that could not be asked takes the recoverable branch, because
+ *     the two mistakes are not the same size;
+ *   - a failed return leg reports where the value is and stops;
+ *   - a second payment while one runs is refused with one sentence, and the
+ *     background read of what the Passport holds is skipped for as long as the
+ *     payment runs and runs again afterwards;
+ *   - a delivery the chain could not place counts as arriving rather than as
+ *     balance or as nothing, and a walk that could not be made at all falls
+ *     back to the store's own rows rather than claiming it found none.
+ *
+ * Nothing here mocks the function under test. The seams are the values the
+ * screen hands in, which is all these functions take.
+ */
+
+import { describe, expect, it } from 'vitest';
+
+import {
+  CUSTODY_FINISH_NOT_SETTLED_YET,
+  awaitCustodyStoppedNote,
+  custodyArrivingCount,
+  custodyDeliveryFailure,
+  custodyInFlightRefusal,
+  custodyMayReadHoldings,
+  custodyUnplacedDeliveries,
+  runCustodyWork,
+  type CustodyWalkOutcome,
+} from './custodyScreenRules.js';
+
+/** The words no sentence on this path may contain. See the module header. */
+const FORBIDDEN = [
+  'wallet address',
+  'DUST',
+  'contract',
+  'registry',
+  'indexer',
+  'resolver',
+  'sponsor',
+  'SDK',
+  'Dynamic',
+];
+
+/* -------------------------------------------------------------------------- */
+/* Putting a note back, or not                                                */
+/* -------------------------------------------------------------------------- */
+
+describe('a last leg that did not land', () => {
+  it('puts the note back when the wallet still holds it', () => {
+    expect(custodyDeliveryFailure({ stillHeld: true })).toEqual({
+      stage: 'returning',
+      deposit: true,
+    });
+  });
+
+  /* THE DEFECT THIS CATCHES would have paid nobody twice and told somebody
+     their money was on its way home. A leg can throw after its transaction was
+     broadcast — a dropped socket, a confirmation wait running out — and the
+     recipient has the note. Re-sending it is a double spend the node refuses,
+     and the screen would have said "putting it back in your Passport" first. */
+  it('sends nothing anywhere when the note has gone from the wallet', () => {
+    const decided = custodyDeliveryFailure({ stillHeld: false });
+    expect(decided).toEqual({ stage: 'unconfirmed', deposit: false });
+  });
+
+  /* A WALLET THAT COULD NOT BE ASKED IS NOT AN ANSWER, and the two mistakes are
+     different sizes: a deposit-back of a note that is gone is refused by the
+     node and costs a fee, while not returning a note that IS held leaves the
+     value where no screen can reach it — Home sweeps NIGHT and cannot see a
+     shielded note. */
+  it('takes the recoverable branch when the wallet could not be asked', () => {
+    expect(custodyDeliveryFailure({ stillHeld: null })).toEqual({
+      stage: 'returning',
+      deposit: true,
+    });
+  });
+
+  it('reports where the value is, and stops, when the return leg fails too', () => {
+    for (const stillHeld of [true, false, null]) {
+      expect(custodyDeliveryFailure({ stillHeld, returnFailed: true })).toEqual({
+        stage: 'stranded',
+        deposit: false,
+      });
+    }
+  });
+
+  it('treats a return leg that has not been tried as one that has not failed', () => {
+    expect(custodyDeliveryFailure({ stillHeld: true, returnFailed: false }).stage).toBe(
+      'returning',
+    );
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* One thing at a time                                                        */
+/* -------------------------------------------------------------------------- */
+
+describe('a second piece of work while one is running', () => {
+  it('is refused in one sentence', () => {
+    const refusal = custodyInFlightRefusal(true);
+    expect(refusal).not.toBeNull();
+    expect(refusal).toMatch(/still finishing/);
+    /* One sentence, not a paragraph, and not a stack. */
+    expect(refusal!.split('. ').length).toBeLessThanOrEqual(2);
+  });
+
+  it('is allowed when nothing is running', () => {
+    expect(custodyInFlightRefusal(false)).toBeNull();
+  });
+
+  it('says nothing a person did not choose', () => {
+    const refusal = custodyInFlightRefusal(true)!;
+    for (const word of FORBIDDEN) {
+      expect(refusal.toLowerCase()).not.toContain(word.toLowerCase());
+    }
+  });
+
+  /* THE WALK INSIDE THE READ WRITES COINS, which is why the read is skipped
+     rather than queued: a walk landing mid-payment files a delivery over the
+     coin the payment has just spent. */
+  it('skips the read of what the Passport holds, and runs it afterwards', () => {
+    expect(custodyMayReadHoldings(true)).toBe(false);
+    /* The ref goes back to false in the payment's `finally`, and the next read
+       is the one that shows the new figures. */
+    expect(custodyMayReadHoldings(false)).toBe(true);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* What the walk found                                                        */
+/* -------------------------------------------------------------------------- */
+
+function outcome(reconciliation: CustodyWalkOutcome['reconciliation']): CustodyWalkOutcome {
+  return { reconciliation };
+}
+
+describe('the deliveries a walk could not place', () => {
+  /* THE DEFECT THIS CATCHES made money that had demonstrably arrived vanish off
+     the screen: the count came from the store's own rows alone, and a delivery
+     the chain had not placed was in neither the balance nor the count. */
+  it('counts an unanswered position as arriving', () => {
+    expect(
+      custodyUnplacedDeliveries([outcome({ outcome: 'unavailable', stored: false })]),
+    ).toBe(1);
+  });
+
+  it('counts an ambiguous position the store could not take as arriving', () => {
+    expect(custodyUnplacedDeliveries([outcome({ outcome: 'ambiguous', stored: false })])).toBe(1);
+    /* Absent is the same as false: a walk that reported rather than stored. */
+    expect(custodyUnplacedDeliveries([outcome({ outcome: 'ambiguous' })])).toBe(1);
+  });
+
+  it('counts an ambiguous position the store DID take as balance, not as arriving', () => {
+    expect(custodyUnplacedDeliveries([outcome({ outcome: 'ambiguous', stored: true })])).toBe(0);
+  });
+
+  it('counts nothing for the outcomes that are in the store or are no news', () => {
+    expect(
+      custodyUnplacedDeliveries([
+        outcome({ outcome: 'learned' }),
+        outcome({ outcome: 'spent' }),
+        outcome({ outcome: 'known' }),
+        outcome({ outcome: 'refused' }),
+      ]),
+    ).toBe(0);
+  });
+
+  it('counts each of a mixed walk once', () => {
+    expect(
+      custodyUnplacedDeliveries([
+        outcome({ outcome: 'learned' }),
+        outcome({ outcome: 'unavailable' }),
+        outcome({ outcome: 'ambiguous', stored: false }),
+        outcome({ outcome: 'ambiguous', stored: true }),
+      ]),
+    ).toBe(2);
+  });
+
+  it('counts nothing for a walk that found nothing', () => {
+    expect(custodyUnplacedDeliveries([])).toBe(0);
+  });
+});
+
+describe('the figure for payments still arriving', () => {
+  it('adds the store rows and the walk could not place', () => {
+    expect(custodyArrivingCount({ awaitingRows: 2, unplaced: 1 })).toBe(3);
+  });
+
+  /* A WALK THAT COULD NOT BE MADE IS NOT A WALK THAT FOUND NOTHING. The
+     control comes back either way and the figures already on screen stay on
+     it; what must not happen is the screen claiming the walk answered. */
+  it('falls back to the store rows when the walk could not be made', () => {
+    expect(custodyArrivingCount({ awaitingRows: 2, unplaced: null })).toBe(2);
+    expect(custodyArrivingCount({ awaitingRows: 0, unplaced: null })).toBe(0);
+  });
+
+  it('never shows a negative or a nonsense count', () => {
+    expect(custodyArrivingCount({ awaitingRows: -3, unplaced: 1 })).toBe(1);
+    expect(custodyArrivingCount({ awaitingRows: 1, unplaced: -3 })).toBe(1);
+    expect(custodyArrivingCount({ awaitingRows: Number.NaN, unplaced: 2 })).toBe(2);
+    expect(custodyArrivingCount({ awaitingRows: 2, unplaced: Number.NaN })).toBe(2);
+    expect(
+      custodyArrivingCount({ awaitingRows: Number.POSITIVE_INFINITY, unplaced: null }),
+    ).toBe(0);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The order a payment and its follow-up read happen in                       */
+/* -------------------------------------------------------------------------- */
+
+describe('the order a payment and the read of its result happen in', () => {
+  /* THE DEFECT THIS IS THE DRILL FOR (live, 2026/09/18): "Sent." appeared over
+     the figure the Passport held BEFORE the payment, because the follow-up read
+     ran inside the payment — where `custodyMayReadHoldings` refuses it — and
+     only Refresh or a reload moved the figure afterwards. */
+  it('reads what the Passport holds only once the payment has let the store go', async () => {
+    const flag = { current: false };
+    const seen: string[] = [];
+    const outcome = await runCustodyWork(
+      flag,
+      () => {
+        seen.push(`work:${flag.current}`);
+        return Promise.resolve();
+      },
+      () => {
+        /* What `readHoldings` asks, in the one form that matters here. */
+        seen.push(`read:${custodyMayReadHoldings(flag.current)}`);
+        return Promise.resolve();
+      },
+    );
+
+    expect(seen).toEqual(['work:true', 'read:true']);
+    expect(outcome.failure).toBeNull();
+    expect(flag.current).toBe(false);
+  });
+
+  it('reads again even when the payment failed, because that is when the figures lie', async () => {
+    const flag = { current: false };
+    const cause = new Error('the last leg threw after the value had moved');
+    let read = 0;
+
+    const outcome = await runCustodyWork(
+      flag,
+      () => Promise.reject(cause),
+      () => {
+        read += 1;
+        expect(flag.current).toBe(false);
+        return Promise.resolve();
+      },
+    );
+
+    expect(read).toBe(1);
+    expect(outcome.failure).toBe(cause);
+  });
+
+  it('tells somebody about the payment’s own failure, not the read’s', async () => {
+    const flag = { current: false };
+    const cause = new Error('the payment failed');
+
+    const outcome = await runCustodyWork(
+      flag,
+      () => Promise.reject(cause),
+      () => Promise.reject(new Error('and the read after it failed too')),
+    );
+
+    expect(outcome.failure).toBe(cause);
+    expect(flag.current).toBe(false);
+  });
+
+  it('reports a failed read when the payment itself finished', async () => {
+    const flag = { current: false };
+    const cause = new Error('the read failed');
+
+    const outcome = await runCustodyWork(flag, () => Promise.resolve(), () =>
+      Promise.reject(cause),
+    );
+
+    expect(outcome.failure).toBe(cause);
+  });
+
+  it('runs work with nothing to read afterwards, and clears the flag either way', async () => {
+    const flag = { current: false };
+    expect((await runCustodyWork(flag, () => Promise.resolve())).failure).toBeNull();
+    expect(flag.current).toBe(false);
+    const cause = new Error('nothing to read after this either');
+    expect((await runCustodyWork(flag, () => Promise.reject(cause), null)).failure).toBe(cause);
+    expect(flag.current).toBe(false);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* Whether the note a stopped payment left is here yet                        */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * WHAT THIS PROTECTS: the Finish button on a payment that stopped between its
+ * legs.
+ *
+ * It read the wallet's notes ONCE. Pressed 45 seconds after a Passport was
+ * re-opened it failed in under a second — the wallet's sync had not applied the
+ * arrival — and pressed three minutes later the same button completed the same
+ * payment (live re-run, 2026/09/18). A person cannot tell those two presses
+ * apart, so a payment that sometimes works is what they saw.
+ *
+ * The clock is hand-wound here: a drill that really waited two minutes would be
+ * a suite nobody runs.
+ */
+describe('the note a stopped payment left, on a later open', () => {
+  /** A wound clock and the sleeps taken against it. */
+  function clock(): { now: () => number; sleep: (ms: number) => Promise<void>; slept: number[] } {
+    let at = 1_000;
+    const slept: number[] = [];
+    return {
+      now: () => at,
+      sleep: (ms: number) => {
+        slept.push(ms);
+        at += ms;
+        return Promise.resolve();
+      },
+      slept,
+    };
+  }
+
+  const WAIT = { windowMs: 5_000, intervalMs: 1_000 };
+  const NONCE = 'a1'.repeat(32);
+
+  it('delivers the note that is already here, asking once', async () => {
+    const wound = clock();
+    let looks = 0;
+    const outcome = await awaitCustodyStoppedNote(
+      NONCE,
+      {
+        notes: () => {
+          looks += 1;
+          return Promise.resolve([{ nonce: `0x${NONCE.toUpperCase()}` }]);
+        },
+        withoutNonce: () => null,
+      },
+      { ...WAIT, now: wound.now, sleep: wound.sleep },
+    );
+
+    /* A `0x` and a capital are not part of a nonce's name. */
+    expect(outcome).toEqual({ kind: 'here', note: { nonce: `0x${NONCE.toUpperCase()}` } });
+    expect(looks).toBe(1);
+    expect(wound.slept).toEqual([]);
+  });
+
+  it('delivers a note that arrives while the wait is still running', async () => {
+    const wound = clock();
+    let looks = 0;
+    const outcome = await awaitCustodyStoppedNote(
+      NONCE,
+      {
+        notes: () => {
+          looks += 1;
+          /* The wallet applies the arrival on the third look. */
+          if (looks < 3) return Promise.resolve([]);
+          return Promise.resolve([{ nonce: NONCE }]);
+        },
+        withoutNonce: () => null,
+      },
+      { ...WAIT, now: wound.now, sleep: wound.sleep },
+    );
+
+    expect(outcome).toEqual({ kind: 'here', note: { nonce: NONCE } });
+    expect(looks).toBe(3);
+    expect(wound.slept).toEqual([1_000, 1_000]);
+  });
+
+  it('says so in one sentence when the note never turns up, and sends nothing', async () => {
+    const wound = clock();
+    let looks = 0;
+    const outcome = await awaitCustodyStoppedNote(
+      NONCE,
+      {
+        notes: () => {
+          looks += 1;
+          /* A read that throws is the same silence as an empty wallet. */
+          return looks === 2 ? Promise.reject(new Error('not answering')) : Promise.resolve([]);
+        },
+        withoutNonce: () => null,
+      },
+      { ...WAIT, now: wound.now, sleep: wound.sleep },
+    );
+
+    expect(outcome).toEqual({ kind: 'not-yet', sentence: CUSTODY_FINISH_NOT_SETTLED_YET });
+    /* The whole window was used up — six looks a second apart across five
+       seconds — and the caller has nothing to write down. */
+    expect(looks).toBe(6);
+  });
+
+  /* THE SENTENCE NAMES THE BUTTON, because pressing it again is the whole of
+     what a person can do — and it says nothing about a sync, a note, or a leg. */
+  it('names the button to press again, in the vocabulary of somebody who chose a sign-in', () => {
+    expect(CUSTODY_FINISH_NOT_SETTLED_YET).toContain('Finish this payment');
+    expect(CUSTODY_FINISH_NOT_SETTLED_YET.split('. ').length).toBeLessThanOrEqual(2);
+    for (const word of FORBIDDEN) {
+      expect(CUSTODY_FINISH_NOT_SETTLED_YET.toLowerCase()).not.toContain(word.toLowerCase());
+    }
+  });
+
+  it('falls back to the colour and the amount for a record with no nonce', async () => {
+    const wound = clock();
+    const notes = [{ nonce: 'b2'.repeat(32) }];
+    const outcome = await awaitCustodyStoppedNote(
+      null,
+      { notes: () => Promise.resolve(notes), withoutNonce: (held) => held[0] ?? null },
+      { ...WAIT, now: wound.now, sleep: wound.sleep },
+    );
+    expect(outcome).toEqual({ kind: 'here', note: notes[0] });
+
+    /* And a record whose nonce is not a nonce takes the same fall-back. */
+    const blank = await awaitCustodyStoppedNote(
+      '   ',
+      { notes: () => Promise.resolve(notes), withoutNonce: (held) => held[0] ?? null },
+      { ...WAIT, now: wound.now, sleep: wound.sleep },
+    );
+    expect(blank).toEqual({ kind: 'here', note: notes[0] });
+  });
+});

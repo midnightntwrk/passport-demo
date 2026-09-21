@@ -139,6 +139,18 @@ http://:6301 {
 	handle_path /prover-local/* {
 		reverse_proxy 127.0.0.1:6300
 	}
+	# ZKIR v3. Same process as /prover-local today, and a SEPARATE NAME on
+	# purpose: /prover-local means "this box rather than the gateway", which
+	# is an operational question, while this means "an image that can prove
+	# ZKIR v3", which is a capability. A client asking for v3 must not be
+	# routed by the first meaning — /prover puts the 1AM gateway first and
+	# the gateway is ledger9-zkir2-dispatch, which cannot prove v3 at all.
+	#
+	# The demo reads this as VITE_MIDNIGHT_PROVING_URL_V3, for the
+	# account-custody module only. Nothing asks for it yet.
+	handle_path /prover-v3/* {
+		reverse_proxy 127.0.0.1:6300
+	}
 
 	# The same proof server at the root paths the wallet SDK's prover client
 	# builds for itself, whatever base URL it was given. See the note above.

@@ -1,0 +1,1769 @@
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
+import { ArrowRight, BadgeCheck, Copy, Loader2, RefreshCw, Search, ShieldCheck } from 'lucide-react'
+
+import { useDynamicSession } from '../lib/dynamic.js'
+
+import { recoverSecp256k1Point } from '../lib/custodyRecover.js'
+import { normaliseNameForRecovery, type NameRecoveryOutcome } from '../lib/nameRecovery.js'
+import { parseEndpointList } from '../lib/endpoints.js'
+import { K256_ENVELOPE_NONE, k256Challenges, type K256DeviceIdentity } from '../identity/custodyContractSigning.js'
+import {
+  activateK1Device,
+  defaultCustodyDeps,
+  deployCustodyAccount,
+  k1Call,
+  recoverK1DevicePoint,
+  startCustodyAccountAgain,
+  withdrawShieldedK1,
+  type CustodyDynamicSession,
+  type CustodyPhase,
+} from '../identity/custodyContractClient.js'
+import {
+  hexToBytes,
+  custodyFailureSentence,
+  nextCustodyStep,
+  resolveCustodyUseCounter,
+  saveCustodyRecord,
+  CUSTODY_SETUP_INTERRUPTED,
+  type CustodyAccountRecord,
+} from '../identity/custodyContractPlan.js'
+import {
+  choosePassportIdentity,
+  dynamicSetupAction,
+  dynamicSetupCopy,
+  dynamicSetupInterrupted,
+  dynamicSetupPhase,
+  dynamicUserKey,
+  k1PrivateStateId,
+  custodyRecoveryOutcome,
+  readDynamicPassport,
+  recoveredCustodyRecord,
+  saveCustodyName,
+  type DynamicPassportView,
+} from '../identity/custodyContractSession.js'
+import {
+  clearCustodyShieldedSend,
+  custodyApprovalPrompt,
+  custodySendRefusal,
+  custodyShieldedSendOutcome,
+  custodyShieldedSendRefusal,
+  custodyUnshieldedBalance,
+  loadCustodyShieldedSend,
+  newCustodyShieldedSend,
+  nextCustodyShieldedSendStep,
+  planCustodySend,
+  planCustodyShieldedSend,
+  saveCustodyShieldedSend,
+  type CustodyShieldedSendRecord,
+  type CustodyUnshieldedLedger,
+} from '../identity/custodyContractSend.js'
+import {
+  custodyActionHistoryQuery,
+  custodyActionRowsFrom,
+  custodyTxIdForInboxIndex,
+} from '../identity/custodyInboxIndex.js'
+import { NIGHT_COLOUR_HEX } from '../lib/colour.js'
+import {
+  custodyAmountFigure,
+  custodyArrivingSentence,
+  custodyAssetRows,
+  custodyResumeOffer,
+  custodyReturnedSentence,
+  custodyStablecoinColour,
+  parseCustodyAmount,
+  type CustodyAssetRow,
+} from '../lib/custodyAssets.js'
+import {
+  awaitCustodyStoppedNote,
+  custodyArrivingCount,
+  custodyDeliveryFailure,
+  custodyInFlightRefusal,
+  custodyMayReadHoldings,
+  custodyUnplacedDeliveries,
+  runCustodyWork,
+  type CustodyStoppedNoteOutcome,
+} from '../lib/custodyScreenRules.js'
+import type { PassportContractName } from '../identity/contractRuntime.js'
+import type { LocalMidnightWallet } from '../lib/localWallet.js'
+import type { WalletShieldedNote } from '../lib/shieldedNote.js'
+import ThemeToggle from './ThemeToggle'
+import './onboarding.css'
+import './dynamic-passport.css'
+
+/**
+ * A PASSPORT HELD BY A SOCIAL SIGN-IN, end to end.
+ *
+ * WHAT IT IS
+ * ----------
+ * The whole of the Dynamic-only path from `docs/demo/dynamic-build-out-plan.md`
+ * §6: sign in with Google, Discord, Microsoft, or X; get a Passport set up for
+ * that sign-in with the signed-in key as the key that approves for it; claim a
+ * `.night` name; and pay somebody. No passkey is made and none is asked for.
+ *
+ * WHY IT IS ONE SCREEN AND NOT A BRANCH THROUGH `App.tsx`
+ * -------------------------------------------------------
+ * `App.tsx` is nine and a half thousand lines of a flow whose every state is
+ * downstream of one thing: a passkey profile. `profile` gates the wallet, the
+ * wallet gates `localSessionActive`, that gates the account address, and that
+ * gates Home, Send, and the name step. Threading a second identity through all
+ * of it would mean touching each of those gates, and every one of them is a
+ * place an existing Passport could be broken by a mistake nobody would see
+ * until a reviewer met it.
+ *
+ * So this is a screen with its own state, reached by ONE branch at the top of
+ * that ladder. With no Dynamic session the branch is false and `App.tsx`
+ * renders exactly what it renders today — which is the property the 89 mocked
+ * specs hold us to, and the reason the flag-off build is untouched.
+ *
+ * THE COPY RULE
+ * -------------
+ * The words wallet address, DUST, contract, registry, indexer, resolver,
+ * sponsor, and SDK do not appear on this screen, and neither does the name of
+ * the fee token. Nor does "Dynamic": the reader chose Google, not a vendor, so
+ * the approval prompt names the provider they recognise
+ * ({@link custodyApprovalPrompt}).
+ *
+ * WHAT THE SCREEN DOES WITH MONEY
+ * -------------------------------
+ * Home shows what the Passport holds: its NIGHT, off the account's own mirror,
+ * and every token it has been paid, out of the coin store. A token's
+ * description reaches that store through the account's own list of deliveries,
+ * which is walked on opening and on every refresh — and a coin whose position
+ * in the commitment tree cannot be established is shown as ARRIVING rather than
+ * as balance, because a position nobody has confirmed is a payment that cannot
+ * be spent (`../identity/custodyInboxIndex.ts`, `../identity/k1CoinStore.ts`).
+ *
+ * Send takes either. NIGHT leaves in two legs — the gated withdrawal the holder
+ * approves, then the recipient's own permissionless deposit, whichever of the
+ * three builds they hold. A token leaves in three, because a shielded amount
+ * cannot be paid straight into a stranger's account: it is withdrawn to this
+ * Passport's own receiving address, identified there by its nonce, and then
+ * deposited into the recipient — with a description sealed to their key where
+ * the recipient holds one of these accounts, since a coin that arrives
+ * undescribed can never be moved again. A send that stops between legs is
+ * written down and offered again on the next open; where it cannot be finished,
+ * the screen says where the money is rather than which leg failed.
+ *
+ * WHAT IS NOT DEPLOYED, AND SAYS SO
+ * ---------------------------------
+ * The service that proves each of these calls — `POST /prove-account-custody`
+ * on the balancer — is not deployed yet, so a live run stops at the first one
+ * with one plain sentence and the control comes back. That is deliberate: a
+ * surface that hides what it cannot do teaches its reader that the things it
+ * does show are also approximate.
+ */
+
+/** The `.night` registry networks this build can claim on. */
+const FUNDER_URLS = parseEndpointList(
+  (import.meta.env as Record<string, string | undefined>).VITE_FUNDER_URL,
+)
+
+/**
+ * The colour this build shows as its stablecoin.
+ *
+ * Configuration first and `../lib/colour.ts`'s own entry behind it — see
+ * {@link custodyStablecoinColour}. It is read once, at module scope, because
+ * Vite substitutes the variable with a literal at build time and a build cannot
+ * change its mind about which token it means.
+ */
+const STABLECOIN_COLOUR = custodyStablecoinColour(
+  (import.meta.env as Record<string, string | undefined>).VITE_MUSD_COLOUR_HEX,
+)
+
+/**
+ * How often the wallet is asked whether leg one's note has arrived.
+ *
+ * A second, inside `SETTLE_WATCH_MS`. The read is local — it asks the wallet
+ * for the notes its own sync has already applied, with no network in it — so
+ * the interval is about how soon somebody is told rather than about load.
+ */
+const NOTE_POLL_MS = 1_000
+
+/** What the screen is doing right now, for the one busy line it shows. */
+const PHASE_LABELS: Record<CustodyPhase['step'], string> = {
+  wallet: 'Opening your Passport',
+  deploy: 'Setting up your Passport',
+  waves: 'Finishing your Passport',
+  activate: 'Turning on your sign-in',
+  sign: 'Waiting for your approval',
+  submit: 'Sending',
+  confirm: 'Confirming',
+}
+
+export interface DynamicPassportProps {
+  /** The network this build transacts on. */
+  network: string
+}
+
+type Screen = 'create' | 'name' | 'home' | 'recover'
+
+export default function DynamicPassport({ network }: DynamicPassportProps) {
+  const session = useDynamicSession()
+  const user = dynamicUserKey(session.evmAddress)
+
+  const [view, setView] = useState<DynamicPassportView | null>(null)
+  const [screen, setScreen] = useState<Screen | null>(null)
+  const [busy, setBusy] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [balance, setBalance] = useState<bigint | null>(null)
+  const [balanceFailed, setBalanceFailed] = useState(false)
+  const [receivingAddress, setReceivingAddress] = useState<string | null>(null)
+  /* Every token the coin store holds of a colour — held and queued together,
+     which is what the account HOLDS as opposed to what one payment can draw
+     on (`../identity/k1CoinStore.ts`). */
+  const [tokens, setTokens] = useState<{ colourHex: string; amount: bigint }[]>([])
+  /* Coins that are demonstrably here and have no position yet. Counted, never
+     added to a figure: see the header. */
+  const [arriving, setArriving] = useState(0)
+  /* The good news, kept apart from `error` so a finished payment does not read
+     as a failure and a failure does not read as a receipt. */
+  const [notice, setNotice] = useState<string | null>(null)
+  /* A shielded payment that stopped between its legs, read on open. */
+  const [stopped, setStopped] = useState<CustodyShieldedSendRecord | null>(null)
+  /* A setup whose remaining steps can never be signed. The offer below turns
+     into the one thing that can be done about it.
+
+     READ FROM THE RECORD, not learnt from a failure. It starts false only
+     because there is nothing read yet; `refresh` below settles it on the first
+     pass, so a reload onto an interrupted setup offers "Start again" straight
+     away rather than offering to create a Passport and throwing
+     `CUSTODY_SETUP_INTERRUPTED` at whoever pressed it. */
+  const [interrupted, setInterrupted] = useState(false)
+  const device = useRef<K256DeviceIdentity | null>(null)
+  /* Whether a payment or a setup is running. See {@link run}. */
+  const inFlight = useRef(false)
+
+  /** Re-reads what is stored and moves the screen to match it. */
+  const refresh = useCallback((): DynamicPassportView | null => {
+    if (user === null) return null
+    const next = readDynamicPassport({ storage: window.localStorage, user, network })
+    setView(next)
+    setInterrupted(dynamicSetupInterrupted(next.record))
+    setScreen(next.stage === 'home' ? 'home' : next.stage === 'name' ? 'name' : 'create')
+    return next
+  }, [network, user])
+
+  useEffect(() => {
+    if (user === null) {
+      setView(null)
+      setScreen(null)
+      return
+    }
+    refresh()
+  }, [refresh, user])
+
+  /**
+   * The key that approves, recovered once.
+   *
+   * ONE SIGNATURE, AND IT IS NOT THE ONE THAT MATTERS: the sign-in hands out an
+   * address and nothing else, so the point behind it is recovered from a
+   * signature over a digest Passport chose. Doing it per call would mean an
+   * approval before every approval, which is the thing a person would notice.
+   */
+  const ensureDevice = useCallback(async (): Promise<K256DeviceIdentity> => {
+    if (device.current) return device.current
+    const pk = await recoverK1DevicePoint({
+      session: custodySession(session),
+      recover: recoverSecp256k1Point,
+    })
+    const identity: K256DeviceIdentity = { arm: 'k256', pk, envelope: K256_ENVELOPE_NONE }
+    device.current = identity
+    return identity
+  }, [session])
+
+  /**
+   * Runs one piece of work with the single busy line and the single sentence.
+   *
+   * THE SENTENCE IS NOT THE CAUSE. Every refusal this path throws on purpose is
+   * one plain sentence written for the person reading it, and painting
+   * `cause.message` verbatim works right up to the first cause that comes from
+   * a vendor, a WASM deserialiser, or a node — at which point this screen shows
+   * a stack-shaped string carrying exactly the words the demo keeps off it.
+   * {@link custodyFailureSentence} paints a message only while it still reads like
+   * something we wrote; the cause itself goes to the console, where it is of
+   * use to somebody.
+   */
+  const run = useCallback(
+    async (
+      label: string,
+      work: () => Promise<void>,
+      /**
+       * The read that shows what the work changed, run once the work has let
+       * the coin store go.
+       *
+       * NOT A LINE AT THE END OF `work`. The flag below makes `readHoldings`
+       * refuse while a payment is running, so a payment that read its own
+       * result from inside itself read nothing at all — "Sent." over the
+       * figure from before the payment, until Refresh (live, 2026/09/18). The
+       * order is `../lib/custodyScreenRules.ts`'s `runCustodyWork`.
+       */
+      after: (() => Promise<void>) | null = null,
+    ): Promise<void> => {
+      /* NOTHING ELSE READS THE STORE WHILE THIS RUNS. `readHoldings` fires from
+         an effect, and the inbox walk inside it writes coins — so a walk that
+         landed in the middle of a payment could file a delivery over the coin
+         the payment had just spent, or re-place one it had just moved. A ref
+         rather than `busy`, because the guard has to be true from the first
+         line of the payment and a state update is not. */
+      /* ONE AT A TIME, AND THE SECOND PRESS IS TOLD SO. Two of these at once
+         read and write one coin store: the second would file a delivery over
+         the coin the first has just spent, or sign against a coin the first is
+         spending — and what a person would then see is a proof refused for a
+         reason no sentence on this screen could explain. The refusal is
+         `../lib/custodyScreenRules.ts`'s one sentence, and nothing has gone
+         wrong: the press was early. */
+      const refusal = custodyInFlightRefusal(inFlight.current)
+      if (refusal !== null) {
+        setError(refusal)
+        return
+      }
+      setBusy(label)
+      setError(null)
+      /* THE LABEL STAYS UP ACROSS THE FOLLOW-UP READ, on purpose: the flag is
+         already clear by then, so the only thing left holding a second press
+         off the store is the busy state the buttons read. */
+      const { failure } = await runCustodyWork(inFlight, work, after)
+      setBusy(null)
+      if (failure === null) return
+      console.warn('[account-custody] that step did not finish', failure)
+      if (failure instanceof Error && failure.message === CUSTODY_SETUP_INTERRUPTED) {
+        setInterrupted(true)
+      }
+      setError(custodyFailureSentence(failure))
+    },
+    [],
+  )
+
+  /* ---------------------------------------------------------------------- */
+  /* Making one                                                             */
+  /* ---------------------------------------------------------------------- */
+
+  const createPassport = useCallback(() => {
+    /* The BUTTON says what is happening; the line under it says how far along
+       that is. Putting the counted sentence on both would be the same words
+       twice, which reads as a stutter rather than as progress. */
+    void run(PHASE_LABELS.deploy, async () => {
+      /* An interrupted setup is thrown away first, so this press deploys a
+         fresh Passport rather than pressing the same broken step again. The
+         account already on chain is left where it is: it is dormant, it holds
+         nothing, and there is no transaction that would tidy it away. */
+      if (interrupted) {
+        await startCustodyAccountAgain(custodySession(session))
+        setInterrupted(false)
+      }
+      const identity = await ensureDevice()
+      const onPhase = (phase: CustodyPhase) => {
+        setBusy(phase.detail ? `${PHASE_LABELS[phase.step]}` : PHASE_LABELS[phase.step])
+      }
+      /* Both halves are resumable and both check the chain before they act, so
+         running them one after the other is safe on a second press: whatever
+         already landed is skipped rather than replayed. */
+      let record = (await deployCustodyAccount(custodySession(session), identity, onPhase)).record
+      if (!record.activated) {
+        record = (await activateK1Device(custodySession(session), identity, onPhase)).record
+      }
+      refresh()
+    })
+  }, [ensureDevice, interrupted, refresh, run, session])
+
+  /* ---------------------------------------------------------------------- */
+  /* The name                                                               */
+  /* ---------------------------------------------------------------------- */
+
+  const claimName = useCallback(
+    (alias: string) => {
+      void run('Choosing your name', async () => {
+        const address = view?.record?.address ?? null
+        if (user === null || address === null) {
+          throw new Error('Your Passport is still being set up. Try again once it is ready.')
+        }
+        const [{ deriveMidnamesOwnerKey }, { sponsorAliasRegistrationAcross }, deps] =
+          await Promise.all([
+            import('../identity/midnames.js'),
+            import('../identity/sponsoredAlias.js'),
+            Promise.resolve(defaultCustodyDeps()),
+          ])
+        /* The name's owner secret comes from this device's own transaction key
+           rather than from anything the sign-in holds, because the sign-in holds
+           nothing a key can be derived from — its signatures carry fresh
+           randomness every time (DKLs23), so there is nothing deterministic to
+           hash. The consequence is written down in `dynamic-integration.md`:
+           the name can be claimed here and cannot be re-pointed from a second
+           device in this version. Coming back to the Passport does not need it.
+           */
+        const { custodyWalletSeed } = await import('../identity/custodyContractClient.js')
+        const ownerKey = await deriveMidnamesOwnerKey(custodyWalletSeed(deps, user))
+        await sponsorAliasRegistrationAcross(FUNDER_URLS, {
+          alias,
+          ownerKey,
+          contractAddress: address,
+          network: network as 'stagenet',
+        })
+        saveCustodyName(window.localStorage, user, network, alias)
+        refresh()
+      })
+    },
+    [network, refresh, run, user, view],
+  )
+
+  /* ---------------------------------------------------------------------- */
+  /* What the Passport holds                                                */
+  /* ---------------------------------------------------------------------- */
+
+  /**
+   * The wallet, the record, and the account key, or one sentence.
+   *
+   * Every money path below starts here, so the "not ready yet" answer is
+   * written once. The account key carries the NETWORK as well as the address
+   * for the reason `../identity/k1CoinStore.ts` gives: a position learned on
+   * one chain is a proof that cannot be satisfied on another.
+   */
+  const custodyContext = useCallback(async () => {
+    const record = view?.record ?? null
+    if (user === null || record === null || record.address === null) {
+      throw new Error('Your Passport is still being set up. Try again once it is ready.')
+    }
+    const deps = defaultCustodyDeps()
+    const wallet = await deps.wallet(user)
+    return {
+      deps,
+      wallet,
+      record,
+      account: { network: record.network, address: record.address },
+    }
+  }, [user, view])
+
+  /**
+   * Reads this Passport's own list of deliveries and files what it finds.
+   *
+   * THIS IS HOW A TOKEN BECOMES SPENDABLE. The chain carries the coin; the
+   * description of it — nonce, colour, value — travels in the account's own
+   * list, sealed to a key only this Passport holds, and the position in the
+   * commitment tree is in neither. So each opened entry is matched against the
+   * transaction that wrote it ({@link custodyTxIdForInboxIndex}) and that
+   * transaction is asked where its outputs landed. A coin any of those steps
+   * cannot answer for is left OUT of the store and counted as arriving: the
+   * alternative is a stored position nobody confirmed, which fails at proving
+   * time every time and looks like a broken Passport.
+   *
+   * Nothing here can add to a balance without the chain's agreement, which is
+   * why the whole of it is allowed to fail quietly — what is already stored is
+   * still shown.
+   */
+  const walkDeliveries = useCallback(
+    async (
+      wallet: { network: { indexerHttpUrl: string } },
+      account: { network: string; address: string },
+    ): Promise<number> => {
+      const [{ loadK1CoinStore }, { readInboxCustody }, accountModule, runtime] = await Promise.all([
+        import('../identity/k1CoinStore.js'),
+        import('../identity/custodyInbox.js'),
+        import('../identity/accountCustody.js'),
+        import('../identity/contractRuntime.js'),
+      ])
+      const encSecretKeyHex = loadK1CoinStore(account).encSecretKeyHex
+      /* No viewing secret, nothing to open the list with. That is a Passport
+         restored from a name on a second device, and the sentence for it is not
+         here — the row simply shows what the store holds. */
+      if (encSecretKeyHex === null) return 0
+      const indexerHttpUrl = wallet.network.indexerHttpUrl
+      const reader = await accountModule.readCustodyAccountView({ indexerHttpUrl }, account.address)
+      const actions = await readCustodyActions(indexerHttpUrl, account.address)
+      const txIdFor =
+        actions === null ? () => null : custodyTxIdForInboxIndex(actions)
+      const walked = await readInboxCustody(account, encSecretKeyHex, reader, {
+        txIdFor,
+        windows: (txId: string) =>
+          runtime.resolveTxCommitmentWindowByHashOnce(indexerHttpUrl, txId),
+        /* A DELIVERY'S TRANSACTION HAS TWO SHIELDED OUTPUTS when the payer sent
+           part of what it held, which is the ordinary case — so the window
+           gives two positions and reporting them would leave every such payment
+           permanently unshowable. They are kept as candidates, in order, in the
+           same way a spend's change is; `stored` says whether that happened,
+           because candidates go in a colour's held slot or nowhere. */
+        candidates: 'store',
+      })
+      /* WHAT THE CHAIN COULD NOT PLACE IS STILL HERE. A coin whose position the
+         indexer has not answered for, or answered ambiguously into a colour
+         already holding something, is demonstrably delivered and not yet
+         spendable — which is what "arriving" means. Counting only the store's
+         own awaiting rows made those coins vanish off the screen entirely. */
+      const unplaced = custodyUnplacedDeliveries(walked.outcomes)
+      console.info(
+        `[account-custody] read ${walked.coins.length} of this Passport's own deliveries`,
+      )
+      return unplaced
+    },
+    [],
+  )
+
+  /** What the Passport holds, in NIGHT and in every token it has been paid. */
+  const readHoldings = useCallback(async (): Promise<void> => {
+    const record = view?.record ?? null
+    if (user === null || record?.address == null) return
+    /* A payment is running and it owns the store until it is finished. What is
+       already on the screen stays on it; this read happens again when the
+       payment does finish, which is the moment the figures change anyway. */
+    if (!custodyMayReadHoldings(inFlight.current)) return
+    const account = { network: record.network, address: record.address }
+    const deps = defaultCustodyDeps()
+    let opened: Awaited<ReturnType<typeof deps.wallet>> | null = null
+    setBalanceFailed(false)
+    try {
+      const [wallet, contractModule] = await Promise.all([
+        deps.wallet(user),
+        deps.contractModule(),
+      ])
+      opened = wallet
+      setReceivingAddress(wallet.unshieldedAddress)
+      const providers = await deps.providers(wallet, record.privateStateId)
+      const reader = providers.publicDataProvider as {
+        queryContractState(address: string): Promise<{ data: unknown } | null>
+      }
+      const state = await reader.queryContractState(record.address)
+      if (!state) throw new Error('unreadable')
+      const { nightColourBytes } = await import('../identity/accountCustody.js')
+      /* `.data`, not the whole state. A compiled build's `ledger()` takes the
+         StateValue; handing it the ContractState decodes nothing. Same call
+         `readAccountState` makes for the prototype build, and the same one the
+         sponsor makes for this one. */
+      const ledger = contractModule.ledger(state.data) as unknown as CustodyUnshieldedLedger
+      setBalance(custodyUnshieldedBalance(ledger, nightColourBytes()))
+    } catch (cause) {
+      console.warn('[account-custody] could not read this Passport', cause)
+      setBalanceFailed(true)
+    }
+
+    /* NULL, NOT ZERO, UNTIL THE WALK HAS ANSWERED. A walk that could not be
+       made says nothing about whether a delivery is waiting, and the count then
+       falls back to the store's own rows rather than claiming none. */
+    let unplaced: number | null = null
+    if (opened !== null) {
+      /* EVERY AWAITING COIN IS ASKED ABOUT AGAIN, on every read. A spend files
+         its change with a description and no position, and the one question
+         that settles it was asked once — immediately after the withdrawal, when
+         the indexer had not seen the transaction yet, and never again. The coin
+         then read as "arriving" for the rest of the account's life. Asking here
+         costs one indexer call per waiting coin and is what makes a reload, or
+         simply coming back tomorrow, the remedy it ought to be. */
+      try {
+        const { awaitingK1Coins, settleK1AwaitingCoinByChainHash } = await import(
+          '../identity/k1CoinStore.js'
+        )
+        const runtime = await import('../identity/contractRuntime.js')
+        for (const waiting of awaitingK1Coins(account)) {
+          /* EACH ROW BY ITS OWN TRANSACTION. A colour can hold more than one
+             coin waiting for a position — a spend's change, then a delivery,
+             then a second spend's change — and each is filed under the
+             transaction that produced it.
+
+             AND BY THE CHAIN'S NAME FOR IT, which a row written while the
+             indexer lagged does not have: the spend's own resolution gives up
+             after ten seconds and hands back midnight-js's identifier, which
+             the indexer answers nothing for. The same helper the spend's settle
+             uses resolves it again here, so a row filed under an identifier is
+             renamed and placed by a later read rather than reading "arriving"
+             for ever. */
+          await settleK1AwaitingCoinByChainHash(
+            account,
+            waiting.colour,
+            waiting.txId,
+            (txId) => runtime.resolveTxHashOnce(opened.network.indexerHttpUrl, txId),
+            (txId) =>
+              runtime.resolveTxCommitmentWindowByHashOnce(opened.network.indexerHttpUrl, txId),
+          )
+        }
+      } catch (cause) {
+        console.info('[account-custody] a waiting coin could not be placed this time', cause)
+      }
+
+      try {
+        unplaced = await walkDeliveries(opened, account)
+      } catch (cause) {
+        /* QUIET ON PURPOSE, and not the same silence as above: this costs the
+           descriptions that have not been filed YET, and the ones already
+           filed are read below and shown. A sentence here would tell somebody
+           their money was missing when it is on the screen underneath. */
+        console.info('[account-custody] the deliveries could not be read this time', cause)
+      }
+    }
+
+    try {
+      const { awaitingK1Coins, k1ColourHoldings } = await import('../identity/k1CoinStore.js')
+      /* HELD PLUS QUEUED, over the colours that have EITHER — which is not the
+         same list as the colours with a held coin. A spend takes the held coin
+         and files its change as awaiting, so a colour whose earlier delivery is
+         sitting in the queue has an empty held slot and real money behind it;
+         drawing the rows from the held slots alone showed no row for it at all
+         (review, 2026/09/18). What one payment can draw on is smaller again,
+         and the refusal for that difference is a sentence rather than a
+         smaller figure — `custodyShieldedSendRefusal`'s. */
+      setTokens(
+        k1ColourHoldings(account).map((holding) => ({
+          colourHex: holding.colour,
+          amount: holding.value,
+        })),
+      )
+      /* The store's own waiting rows PLUS the deliveries this walk could not
+         place. Both are coins that are here and cannot be spent yet. */
+      setArriving(
+        custodyArrivingCount({ awaitingRows: awaitingK1Coins(account).length, unplaced }),
+      )
+    } catch (cause) {
+      console.warn('[account-custody] could not read what this Passport was paid', cause)
+    }
+
+    setStopped(
+      loadCustodyShieldedSend(window.localStorage, {
+        network: record.network,
+        accountAddress: record.address,
+      }),
+    )
+  }, [user, view, walkDeliveries])
+
+  useEffect(() => {
+    if (screen !== 'home') return
+    void readHoldings()
+  }, [readHoldings, screen])
+
+  /* ---------------------------------------------------------------------- */
+  /* Paying somebody                                                        */
+  /* ---------------------------------------------------------------------- */
+
+  /**
+   * The note leg one paid in, once this Passport's own wallet holds it, or null
+   * when the wait ran out.
+   *
+   * IDENTIFIED AGAINST WHAT WAS HELD BEFORE, never by colour and amount alone:
+   * `../lib/shieldedNote.ts` gives the reason at length, and it is that a note
+   * which was already there is not this payment's — depositing one that was
+   * would pay the recipient out of money nobody offered.
+   */
+  const waitForNote = useCallback(
+    async (
+      wallet: LocalMidnightWallet,
+      query: { colourHex: string; amount: bigint; heldBefore: ReadonlySet<string> },
+    ): Promise<WalletShieldedNote | null> => {
+      const [{ pollUntilTrue, SETTLE_WATCH_MS }, { findArrivedNote }, { walletShieldedNotes }] =
+        await Promise.all([
+          import('../lib/chainWait.js'),
+          import('../lib/shieldedNote.js'),
+          import('../identity/accountCustody.js'),
+        ])
+      const found: { note: WalletShieldedNote | null } = { note: null }
+      await pollUntilTrue(
+        async () => {
+          found.note = findArrivedNote(await walletShieldedNotes(wallet), {
+            tokenType: query.colourHex,
+            amount: query.amount,
+            heldBefore: query.heldBefore,
+          })
+          return found.note !== null
+        },
+        { windowMs: SETTLE_WATCH_MS, intervalMs: NOTE_POLL_MS },
+      )
+      return found.note
+    },
+    [],
+  )
+
+  /**
+   * The last leg: the note becomes the recipient's, or it comes back.
+   *
+   * ONE CALL FOR EVERY RECIPIENT. `payCustodyAccount` reads what the
+   * recipient's account is built from and seals a description to their own key
+   * where they hold one of these accounts — a coin deposited into one of them
+   * without a description is a coin that has demonstrably arrived and that
+   * nobody can ever move again. The screen does not choose the circuit, does
+   * not hold the key, and cannot get either wrong.
+   *
+   * THE DEPOSIT-BACK IS THE SAME CALL with this Passport's own account as the
+   * recipient. It is permissionless, so it needs no second approval, and it is
+   * the only thing that can be done for somebody whose payment failed after the
+   * value had left: Home has no card that sweeps up a shielded note, because a
+   * shielded note is invisible to the one that sweeps NIGHT.
+   */
+  const deliverNote = useCallback(
+    async (
+      wallet: LocalMidnightWallet,
+      record: CustodyShieldedSendRecord,
+      note: WalletShieldedNote,
+      label: string,
+    ): Promise<void> => {
+      const { payCustodyAccount, shieldedCoinFromNote } = await import(
+        '../identity/accountCustody.js'
+      )
+      const account = { network: record.network, accountAddress: record.accountAddress }
+      setBusy(`Paying ${label}`)
+      try {
+        await payCustodyAccount(wallet, {
+          targetAddress: record.recipientAccountAddress,
+          kind: 'shielded',
+          coin: shieldedCoinFromNote(note),
+        })
+      } catch (cause) {
+        console.warn('[account-custody] the last leg did not land', cause)
+
+        /* IS THE NOTE STILL HERE? A throw from the leg above is not evidence
+           that nothing happened: a transaction can be broadcast and then the
+           promise rejected — a socket dropping, a confirmation wait running
+           out — and the recipient has the money. Putting it "back" in that case
+           is a second spend of a note that is gone, which the node refuses,
+           after a screen has told somebody it is held for them. So the wallet
+           is asked what it holds before anything is sent anywhere. */
+        const { walletShieldedNotes } = await import('../identity/accountCustody.js')
+        const { shieldedNoteId } = await import('../lib/shieldedNote.js')
+        const wanted = shieldedNoteId(note)
+        const stillHeld = await walletShieldedNotes(wallet)
+          .then((notes) => notes.some((held) => shieldedNoteId(held) === wanted))
+          .catch(() => null)
+        /* THE DECISION IS `../lib/custodyScreenRules.ts`'s, not this
+           component's: three values of `stillHeld` mean three different things
+           about where somebody's money is, and each of them is drilled there. */
+        const decided = custodyDeliveryFailure({ stillHeld })
+        if (!decided.deposit) {
+          /* Gone from this wallet, and this screen cannot see whether the
+             recipient has it. It says that, rather than either receipt. */
+          const unseen: CustodyShieldedSendRecord = { ...record, stage: decided.stage }
+          saveCustodyShieldedSend(window.localStorage, unseen)
+          setStopped(unseen)
+          throw new Error(custodyShieldedSendOutcome(unseen))
+        }
+
+        const returning: CustodyShieldedSendRecord = { ...record, stage: decided.stage }
+        saveCustodyShieldedSend(window.localStorage, returning)
+        setStopped(returning)
+        setBusy('Putting it back in your Passport')
+        try {
+          await payCustodyAccount(wallet, {
+            targetAddress: record.accountAddress,
+            kind: 'shielded',
+            coin: shieldedCoinFromNote(note),
+          })
+        } catch (second) {
+          console.warn('[account-custody] and it could not be put back either', second)
+          const stranded: CustodyShieldedSendRecord = {
+            ...record,
+            stage: custodyDeliveryFailure({ stillHeld, returnFailed: true }).stage,
+          }
+          saveCustodyShieldedSend(window.localStorage, stranded)
+          setStopped(stranded)
+          throw new Error(custodyShieldedSendOutcome(stranded))
+        }
+        clearCustodyShieldedSend(window.localStorage, account)
+        setStopped(null)
+        throw new Error(custodyReturnedSentence(record.recipientLabel))
+      }
+      clearCustodyShieldedSend(window.localStorage, account)
+      setStopped(null)
+      setNotice(custodyShieldedSendOutcome({ ...record, stage: 'done' }))
+    },
+    [],
+  )
+
+  /** NIGHT out of the account, in the two legs every build takes. */
+  const sendNight = useCallback(
+    async (params: {
+      wallet: LocalMidnightWallet
+      record: CustodyAccountRecord
+      label: string
+      amount: bigint
+      recipientAccountAddress: string
+      recipientModule: PassportContractName
+    }): Promise<void> => {
+      const { wallet, record, label, amount } = params
+      const { nightColourBytes, nightColourHex, payCustodyAccount } = await import(
+        '../identity/accountCustody.js'
+      )
+      const input = {
+        record,
+        colourHex: nightColourHex(),
+        amount,
+        ownReceivingAddress: wallet.unshieldedAddress,
+        recipientAccountAddress: params.recipientAccountAddress,
+        recipientModule: params.recipientModule,
+        heldBalance: balance,
+      }
+      const refusal = custodySendRefusal(input)
+      if (refusal !== null) throw new Error(refusal)
+      const plan = planCustodySend(input)
+
+      /* LEG ONE — gated, and the only thing the holder approves. */
+      setBusy(custodyApprovalPrompt(session.provider))
+      const identity = await ensureDevice()
+      const colour = nightColourBytes()
+      const recipientBytes = await unshieldedRecipientBytes(
+        plan.withdraw.recipientAddress,
+        wallet.network.networkId,
+      )
+      await k1Call(
+        custodySession(session),
+        identity,
+        {
+          operation: 'withdraw_unshielded',
+          args: [colour, plan.withdraw.amount, { bytes: recipientBytes }],
+          challenge: (pure, context, pk) =>
+            k256Challenges.withdrawUnshielded(
+              pure,
+              context,
+              pk,
+              colour,
+              plan.withdraw.amount,
+              recipientBytes,
+            ),
+        },
+        (phase) => setBusy(PHASE_LABELS[phase.step]),
+      )
+
+      /* LEG TWO — permissionless, and the same call whichever of the three
+         builds the recipient holds. `plan.deposit.circuit` says which circuit
+         that is and is deliberately not read here: the account is re-read at
+         the moment of the call, and a screen that named the circuit itself
+         would be a second place for that answer to be wrong. */
+      setBusy(`Paying ${label}`)
+      await payCustodyAccount(wallet, {
+        targetAddress: plan.deposit.contractAddress,
+        kind: 'night',
+        colourHex: plan.deposit.colourHex,
+        amount: plan.deposit.amount,
+      })
+      setNotice(`Sent. ${label} has it.`)
+    },
+    [balance, ensureDevice, session],
+  )
+
+  /** A token out of the account, in the three legs a shielded amount takes. */
+  const sendShielded = useCallback(
+    async (params: {
+      wallet: LocalMidnightWallet
+      record: CustodyAccountRecord
+      account: { network: string; address: string }
+      label: string
+      asset: CustodyAssetRow
+      amount: bigint
+      recipientAccountAddress: string
+      recipientModule: PassportContractName
+    }): Promise<void> => {
+      const { account, amount, asset, label, record, wallet } = params
+      const [store, accountModule, { shieldedNoteIds }] = await Promise.all([
+        import('../identity/k1CoinStore.js'),
+        import('../identity/accountCustody.js'),
+        import('../lib/shieldedNote.js'),
+      ])
+      const indexerHttpUrl = wallet.network.indexerHttpUrl
+      const held = store.heldK1Coin(account, asset.colourHex)
+      /* BOTH KEYS ARE READ NOW, FROM THE CHAIN, and neither is remembered: an
+         account rotates its encryption key, and a description sealed to one it
+         has rotated away from is a coin its holder can never open. The
+         recipient's is only asked for where the recipient holds one of these
+         accounts; the prototype builds take the note alone. */
+      const ownView = await accountModule.readCustodyAccountView(
+        { indexerHttpUrl },
+        record.address as string,
+      )
+      const recipientEncKeyHex =
+        params.recipientModule === 'account-custody'
+          ? (
+              await accountModule.readCustodyAccountView(
+                { indexerHttpUrl },
+                params.recipientAccountAddress,
+              )
+            ).encKeyHex
+          : null
+      const input = {
+        record,
+        colourHex: asset.colourHex,
+        amount,
+        ownShieldedAddress: wallet.shieldedAddress,
+        recipientAccountAddress: params.recipientAccountAddress,
+        recipientModule: params.recipientModule,
+        heldCoin:
+          held === null ? null : { nonce: held.nonce, value: held.value, mtIndex: held.mtIndex },
+        queuedValues: store.queuedK1Coins(account, asset.colourHex).map((coin) => coin.value),
+        recipientEncKeyHex,
+        ownEncKeyHex: ownView.encKeyHex,
+      }
+      const refusal = custodyShieldedSendRefusal(input)
+      if (refusal !== null) throw new Error(refusal)
+      const plan = planCustodyShieldedSend(input)
+
+      /* WRITTEN DOWN BEFORE ANYTHING GOES OUT. Leg one takes the value into
+         this Passport's own hands and only the last leg makes it the
+         recipient's; a tab closed in between would otherwise leave a note with
+         nothing on any screen saying what it was for. */
+      let stoppedRecord = newCustodyShieldedSend({
+        network: record.network,
+        accountAddress: account.address,
+        colourHex: asset.colourHex,
+        amount,
+        recipientLabel: label,
+        recipientAccountAddress: params.recipientAccountAddress,
+        now: Date.now(),
+      })
+      saveCustodyShieldedSend(window.localStorage, stoppedRecord)
+      setStopped(stoppedRecord)
+
+      const heldBefore = shieldedNoteIds(await accountModule.walletShieldedNotes(wallet))
+
+      /* LEG ONE — gated, for EXACTLY the amount, with the change coin coming
+         back as the circuit's own value and going straight into the store. */
+      setBusy(custodyApprovalPrompt(session.provider))
+      const identity = await ensureDevice()
+      const keys = await accountModule.decodeShieldedRecipient(
+        plan.withdraw.ownShieldedAddress,
+        wallet.network.networkId,
+      )
+      const withdrawal = await withdrawShieldedK1(
+        custodySession(session),
+        identity,
+        {
+          recipientCoinPublicKey: keys.coinPublicKey,
+          colourHex: plan.withdraw.colourHex,
+          amount: plan.withdraw.amount,
+        },
+        (phase) => setBusy(PHASE_LABELS[phase.step]),
+      )
+      stoppedRecord = {
+        ...stoppedRecord,
+        stage: 'awaiting-note',
+        withdrawTxId: withdrawal.txHash,
+      }
+      saveCustodyShieldedSend(window.localStorage, stoppedRecord)
+      setStopped(stoppedRecord)
+
+      /* LEG TWO — no network of its own: the wallet's live sync applies the
+         arrival and this waits for it. */
+      setBusy('Waiting for it to settle')
+      const note = await waitForNote(wallet, {
+        colourHex: plan.await.colourHex,
+        amount: plan.await.amount,
+        heldBefore,
+      })
+      /* The money is OUT and the wait ran out, which is not a failure of the
+         payment: the record stays where it is and the next open finishes it. */
+      if (note === null) throw new Error(custodyShieldedSendOutcome(stoppedRecord))
+
+      stoppedRecord = { ...stoppedRecord, stage: 'depositing', noteNonce: note.nonce }
+      saveCustodyShieldedSend(window.localStorage, stoppedRecord)
+      setStopped(stoppedRecord)
+      await deliverNote(wallet, stoppedRecord, note, label)
+    },
+    [deliverNote, ensureDevice, session, waitForNote],
+  )
+
+  /**
+   * Pays a name, in whichever asset the form is on.
+   *
+   * The name is resolved and the recipient's build read ONCE, here, so both
+   * halves below work from the same answer — and neither of them decides
+   * anything about a payment on a render's word.
+   */
+  const sendToName = useCallback(
+    (typed: string, amountText: string, asset: CustodyAssetRow) => {
+      void run('Checking that name', async () => {
+        setNotice(null)
+        const { account, record, wallet } = await custodyContext()
+        const label = normaliseNameForRecovery(typed)
+        if (label.length === 0) throw new Error('Type the name you want to pay.')
+        const amount = parseCustodyAmount(amountText, asset.decimals)
+
+        const [{ resolveAliasTarget }, { accountModuleFor }] = await Promise.all([
+          import('../identity/midnames.js'),
+          import('../identity/accountCustody.js'),
+        ])
+        const resolved = await resolveAliasTarget(network as 'stagenet', label)
+        if (!resolved || resolved.target.kind !== 'contract') {
+          throw new Error('No Passport is registered under that name.')
+        }
+        setReceivingAddress(wallet.unshieldedAddress)
+        const recipientModule = await accountModuleFor(
+          { indexerHttpUrl: wallet.network.indexerHttpUrl },
+          resolved.target.hex,
+        )
+        const shared = {
+          wallet,
+          record,
+          label,
+          amount,
+          recipientAccountAddress: resolved.target.hex,
+          recipientModule,
+        }
+        if (asset.mode === 'shielded') {
+          await sendShielded({ ...shared, account, asset })
+        } else {
+          await sendNight(shared)
+        }
+        /* The figures are read by `run` AFTER this returns — see its `after`
+           argument. A read from here reads nothing: the payment still holds
+           the store. */
+      }, readHoldings)
+    },
+    [custodyContext, network, readHoldings, run, sendNight, sendShielded],
+  )
+
+  /**
+   * Finishes a payment that stopped between its legs.
+   *
+   * The remaining legs need no approval from anybody, so this is a button and
+   * not a ceremony: the note is in this Passport's own hands and the deposit
+   * that makes it the recipient's is permissionless.
+   */
+  const finishStoppedSend = useCallback(() => {
+    void run('Finishing your payment', async () => {
+      setNotice(null)
+      const { record, wallet } = await custodyContext()
+      const account = { network: record.network, accountAddress: record.address as string }
+      const pending = loadCustodyShieldedSend(window.localStorage, account)
+      if (pending === null) {
+        setStopped(null)
+        return
+      }
+      const step = nextCustodyShieldedSendStep(pending)
+      if (step !== 'find-note' && step !== 'deposit') {
+        /* Nothing left to run. The line on screen already says where the money
+           is; pressing again must not start a second payment. */
+        setStopped(pending)
+        return
+      }
+      /* THE SAME LINE THE SEND ITSELF SHOWS while it waits for this, because it
+         is the same wait: the value has left the account and the wallet's sync
+         has to apply the arrival before anything can be sent on. */
+      setBusy('Waiting for it to settle')
+      const found = await findStoppedNote(wallet, pending)
+      /* NOTHING WRITTEN AND NOTHING SENT when the window closes. The record is
+         left exactly as it was, so the next press is the same press. */
+      if (found.kind === 'not-yet') throw new Error(found.sentence)
+      const note = found.note
+      const withNote: CustodyShieldedSendRecord = {
+        ...pending,
+        stage: 'depositing',
+        noteNonce: note.nonce,
+      }
+      saveCustodyShieldedSend(window.localStorage, withNote)
+      await deliverNote(wallet, withNote, note, pending.recipientLabel)
+      /* Read once the store is free again, not from in here. */
+    }, readHoldings)
+  }, [custodyContext, deliverNote, readHoldings, run])
+
+  /** Forgets a payment the person has been told about. */
+  const dismissStoppedSend = useCallback(() => {
+    const record = view?.record ?? null
+    if (record?.address == null) return
+    clearCustodyShieldedSend(window.localStorage, {
+      network: record.network,
+      accountAddress: record.address,
+    })
+    setStopped(null)
+  }, [view])
+
+  /* ---------------------------------------------------------------------- */
+  /* Coming back on a new device                                            */
+  /* ---------------------------------------------------------------------- */
+
+  const findByName = useCallback(
+    async (typed: string): Promise<NameRecoveryOutcome> => {
+      if (user === null) {
+        return { kind: 'unreachable', detail: 'Your sign-in is still starting up.' }
+      }
+      const label = normaliseNameForRecovery(typed)
+      const [{ resolveAliasTarget }, { readAccountOperations }] = await Promise.all([
+        import('../identity/midnames.js'),
+        import('../identity/passportContract.js'),
+      ])
+      let resolved: Awaited<ReturnType<typeof resolveAliasTarget>>
+      try {
+        resolved = await resolveAliasTarget(network as 'stagenet', label)
+      } catch (cause) {
+        return {
+          kind: 'unreachable',
+          detail: cause instanceof Error ? cause.message : String(cause),
+        }
+      }
+      if (!resolved) return { kind: 'unknown' }
+      if (resolved.target.kind !== 'contract') return { kind: 'not-yours' }
+
+      const address = resolved.target.hex
+      let operations: readonly string[] | null = null
+      let holdsDevice: boolean | null = null
+      let pk: K256DeviceIdentity['pk'] | null = null
+      try {
+        const deps = defaultCustodyDeps()
+        const wallet = await deps.wallet(user)
+        operations = await readAccountOperations(wallet.network.indexerHttpUrl, address)
+        if (operations !== null) {
+          const identity = await ensureDevice()
+          pk = identity.pk
+          const [contractModule, providers] = await Promise.all([
+            deps.contractModule(),
+            deps.providers(wallet, k1PrivateStateId(user)),
+          ])
+          const reader = providers.publicDataProvider as {
+            queryContractState(a: string): Promise<{ data: unknown } | null>
+          }
+          const state = await reader.queryContractState(address)
+          if (state) {
+            const ledger = contractModule.ledger(state.data)
+            const { deviceEntry } = await import('../identity/custodyContractSigning.js')
+            /* THE SAME SCAN A CALL DOES, and for the same reason. The ledger
+               stores no counter — it stores opaque entries — and a device's
+               entry ROLLS FORWARD every time it approves something: the entry
+               is consumed and the next one inserted. Asking only about counter
+               0 therefore recognises a Passport that has never been used and
+               fails to recognise one that has, which is every Passport a
+               person would actually be coming back to. `resolveCustodyUseCounter`
+               probes the series the way `k1Call` does and refuses at the same
+               rescan limit; the refusal is caught below and reads as "this
+               name is not yours", which is what it means here. */
+            try {
+              resolveCustodyUseCounter({
+                entryAt: (counter) =>
+                  deviceEntry(
+                    contractModule.pureCircuits,
+                    identity,
+                    hexToBytes(address),
+                    ledger.device_epoch,
+                    counter,
+                  ),
+                isMember: (entry) => ledger.devices.member(entry),
+              })
+              holdsDevice = true
+            } catch {
+              holdsDevice = false
+            }
+          }
+        }
+      } catch (cause) {
+        console.warn('[account-custody] could not check that name', cause)
+      }
+
+      const outcome = custodyRecoveryOutcome(resolved, { operations, holdsDevice })
+      if (outcome.kind !== 'found' || pk === null) return outcome
+      const restored: CustodyAccountRecord = recoveredCustodyRecord({
+        user,
+        network,
+        address,
+        privateStateId: k1PrivateStateId(user),
+        pkXHex: pk.x.toString(16),
+        pkYHex: pk.y.toString(16),
+      })
+      saveCustodyRecord(window.localStorage, restored)
+      saveCustodyName(window.localStorage, user, network, label)
+      refresh()
+      return outcome
+    },
+    [ensureDevice, network, refresh, user],
+  )
+
+  /* ---------------------------------------------------------------------- */
+  /* What is on screen                                                      */
+  /* ---------------------------------------------------------------------- */
+
+  if (
+    choosePassportIdentity({
+      hasPasskeyProfile: false,
+      dynamicStatus: session.status,
+      evmAddress: session.evmAddress,
+    }) !== 'dynamic'
+  ) {
+    return (
+      <Shell label="Passport">
+        <p className="mnob-lede">Getting your Passport ready…</p>
+      </Shell>
+    )
+  }
+
+  const who = session.handle ?? 'your account'
+  const via = session.provider ?? 'your sign-in'
+
+  if (screen === 'recover') {
+    return (
+      <RecoverStep
+        provider={via}
+        onFind={findByName}
+        onBack={() => setScreen(view?.stage === 'home' ? 'home' : 'create')}
+      />
+    )
+  }
+
+  if (screen === 'name') {
+    return (
+      <NameStep
+        busy={busy}
+        error={error}
+        onClaim={claimName}
+        onSkip={() => setScreen('home')}
+      />
+    )
+  }
+
+  if (screen === 'home') {
+    return (
+      <HomeStep
+        provider={via}
+        handle={who}
+        name={view?.name ?? null}
+        address={view?.address ?? null}
+        receivingAddress={receivingAddress}
+        rows={custodyAssetRows({
+          night: balance,
+          shielded: tokens,
+          stablecoinColourHex: STABLECOIN_COLOUR,
+        })}
+        balanceFailed={balanceFailed}
+        arriving={arriving}
+        offer={custodyResumeOffer(stopped)}
+        busy={busy}
+        error={error}
+        notice={notice}
+        onRefresh={() => void readHoldings()}
+        onSend={sendToName}
+        onFinish={finishStoppedSend}
+        onDismissStopped={dismissStoppedSend}
+        onDismissError={() => setError(null)}
+      />
+    )
+  }
+
+  const phase = dynamicSetupPhase(view?.record ?? null)
+  return (
+    <Shell label="Passport">
+      <p className="mnob-kicker">Signed in with {via}</p>
+      <h1 className="mnob-title">
+        <span>Set up</span>
+        <span>your Passport</span>
+      </h1>
+      <p className="mnob-lede">
+        {who} is all Passport needs. Nothing else to remember, and nothing to install — the same
+        sign-in brings your Passport back on any device.
+      </p>
+
+      <div className="mndyn-actions">
+        <button
+          type="button"
+          className="mnob-primary"
+          onClick={createPassport}
+          disabled={busy !== null}
+        >
+          <span className="mnob-primary-copy">
+            {busy !== null ? (
+              <Loader2 className="mnob-working-spinner" size={17} strokeWidth={2} aria-hidden="true" />
+            ) : (
+              <ShieldCheck size={17} strokeWidth={2} aria-hidden="true" />
+            )}
+            {busy ?? dynamicSetupAction(view?.record ?? null)}
+          </span>
+          <ArrowRight size={17} strokeWidth={2.2} aria-hidden="true" />
+        </button>
+
+        <p className="mnob-hint" role="status">
+          {busy !== null || (view?.record && nextCustodyStep(view.record) !== 'ready')
+            ? dynamicSetupCopy(phase)
+            : 'Setting your Passport up is paid for on your behalf.'}
+        </p>
+
+        {error ? (
+          <div className="mnob-unusable" role="alert">
+            <p className="mnob-unusable-copy">{error}</p>
+          </div>
+        ) : null}
+
+        <button
+          type="button"
+          className="mnob-alt"
+          onClick={() => setScreen('recover')}
+          disabled={busy !== null}
+        >
+          I already have a Passport
+        </button>
+      </div>
+    </Shell>
+  )
+}
+
+/* -------------------------------------------------------------------------- */
+/* The steps                                                                  */
+/* -------------------------------------------------------------------------- */
+
+function Shell(props: { label: string; children: React.ReactNode }) {
+  return (
+    <section className="mnob-screen mndyn">
+      <header className="mnob-bar">
+        <img className="mnob-wordmark" src="/midnight-wordmark.svg" alt="Midnight" />
+        <span className="mnob-bar-label">{props.label}</span>
+        <ThemeToggle size="sm" className="mnob-theme" />
+      </header>
+      <div className="mnob-body">{props.children}</div>
+      <footer className="mnob-foot">
+        <span>Test network demo — not production</span>
+      </footer>
+    </section>
+  )
+}
+
+function NameStep(props: {
+  busy: string | null
+  error: string | null
+  onClaim: (alias: string) => void
+  onSkip: () => void
+}) {
+  const [name, setName] = useState('')
+  const trimmed = normaliseNameForRecovery(name)
+  return (
+    <Shell label="Passport">
+      <p className="mnob-kicker">Your Passport is ready</p>
+      <h1 className="mnob-title">
+        <span>Choose</span>
+        <span>your name</span>
+      </h1>
+      <p className="mnob-lede">
+        Pick a name people can send to, instead of a long string they have to copy carefully.
+      </p>
+      <form
+        className="mnob-stage"
+        onSubmit={(event: FormEvent) => {
+          event.preventDefault()
+          if (props.busy === null && trimmed) props.onClaim(trimmed)
+        }}
+      >
+        <label className="mnob-hint" htmlFor="dynamic-name">
+          Your name
+        </label>
+        <input
+          id="dynamic-name"
+          className="mnob-input"
+          type="text"
+          autoCapitalize="none"
+          autoCorrect="off"
+          spellCheck={false}
+          placeholder="alice"
+          value={name}
+          onChange={(event) => setName(event.target.value)}
+          disabled={props.busy !== null}
+        />
+        {props.error ? (
+          <div className="mnob-unusable" role="alert">
+            <p className="mnob-unusable-copy">{props.error}</p>
+          </div>
+        ) : null}
+        <button type="submit" className="mnob-primary" disabled={props.busy !== null || !trimmed}>
+          <span className="mnob-primary-copy">
+            {props.busy !== null ? (
+              <Loader2 className="mnob-working-spinner" size={17} strokeWidth={2} aria-hidden="true" />
+            ) : (
+              <BadgeCheck size={17} strokeWidth={2} aria-hidden="true" />
+            )}
+            {props.busy ?? 'Claim my name'}
+          </span>
+          <ArrowRight size={17} strokeWidth={2.2} aria-hidden="true" />
+        </button>
+        <p className="mnob-hint">Claiming a name is paid for on your behalf.</p>
+        <button
+          type="button"
+          className="mnob-alt"
+          onClick={props.onSkip}
+          disabled={props.busy !== null}
+        >
+          Choose one later
+        </button>
+      </form>
+    </Shell>
+  )
+}
+
+function RecoverStep(props: {
+  provider: string
+  onFind: (name: string) => Promise<NameRecoveryOutcome>
+  onBack: () => void
+}) {
+  const [name, setName] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [message, setMessage] = useState<string | null>(null)
+  const trimmed = normaliseNameForRecovery(name)
+  return (
+    <Shell label="Passport">
+      <p className="mnob-kicker">Already have a Passport</p>
+      <h1 className="mnob-title">
+        <span>Find it</span>
+        <span>by its name</span>
+      </h1>
+      <p className="mnob-lede">
+        Type the <code>.night</code> name you already hold. Passport will check with Midnight that
+        your {props.provider} sign-in is part of it before bringing anything back.
+      </p>
+      <form
+        className="mnob-stage"
+        onSubmit={(event: FormEvent) => {
+          event.preventDefault()
+          if (busy || !trimmed) return
+          setBusy(true)
+          setMessage(null)
+          void props
+            .onFind(trimmed)
+            .then((outcome) => setMessage(recoveryMessage(outcome, props.provider)))
+            .catch((cause: unknown) =>
+              setMessage(
+                cause instanceof Error
+                  ? cause.message
+                  : 'That name could not be checked just now. Try again in a moment.',
+              ),
+            )
+            .finally(() => setBusy(false))
+        }}
+      >
+        <label className="mnob-hint" htmlFor="dynamic-recover">
+          Your name
+        </label>
+        <input
+          id="dynamic-recover"
+          className="mnob-input"
+          type="text"
+          autoCapitalize="none"
+          autoCorrect="off"
+          spellCheck={false}
+          placeholder="alice"
+          value={name}
+          onChange={(event) => setName(event.target.value)}
+          disabled={busy}
+        />
+        {message ? (
+          <div className="mnob-unusable" role="alert">
+            <p className="mnob-unusable-copy">{message}</p>
+          </div>
+        ) : null}
+        <button type="submit" className="mnob-primary" disabled={busy || !trimmed}>
+          <span className="mnob-primary-copy">
+            {busy ? (
+              <Loader2 className="mnob-working-spinner" size={17} strokeWidth={2} aria-hidden="true" />
+            ) : (
+              <Search size={17} strokeWidth={2} aria-hidden="true" />
+            )}
+            {busy ? 'Checking with Midnight' : 'Find my Passport'}
+          </span>
+          <ArrowRight size={17} strokeWidth={2.2} aria-hidden="true" />
+        </button>
+        <p className="mnob-hint">
+          <ShieldCheck size={14} strokeWidth={2} aria-hidden="true" /> Knowing the name is not enough
+          on its own.
+        </p>
+        <button type="button" className="mnob-alt" onClick={props.onBack} disabled={busy}>
+          Go back
+        </button>
+      </form>
+    </Shell>
+  )
+}
+
+function HomeStep(props: {
+  provider: string
+  handle: string
+  name: string | null
+  address: string | null
+  receivingAddress: string | null
+  /** Everything the Passport holds, NIGHT first. See `../lib/custodyAssets.ts`. */
+  rows: CustodyAssetRow[]
+  balanceFailed: boolean
+  /** How many payments are here with no position yet. Never part of a figure. */
+  arriving: number
+  /** A payment that stopped between legs, and what can be done about it. */
+  offer: ReturnType<typeof custodyResumeOffer>
+  busy: string | null
+  error: string | null
+  notice: string | null
+  onRefresh: () => void
+  onSend: (name: string, amount: string, asset: CustodyAssetRow) => void
+  onFinish: () => void
+  onDismissStopped: () => void
+  onDismissError: () => void
+}) {
+  const [recipient, setRecipient] = useState('')
+  const [amount, setAmount] = useState('')
+  /* The colour being sent, by id. Held as the COLOUR rather than as an index so
+     a list that gains a row between renders — which it does, the moment a
+     payment's description lands — cannot move the selection to another token
+     under somebody who has already typed an amount. */
+  const [assetId, setAssetId] = useState<string>(NIGHT_COLOUR_HEX)
+  const payable = props.name ?? props.address ?? null
+  const asset = props.rows.find((row) => row.id === assetId) ?? props.rows[0]
+  const arriving = custodyArrivingSentence(props.arriving)
+
+  return (
+    <Shell label="Passport">
+      <p className="mnob-kicker">
+        <BadgeCheck size={13} aria-hidden="true" /> {props.provider} · {props.handle}
+      </p>
+      <h1 className="mnob-title">
+        <span>{props.name ? `${props.name}.night` : 'Your Passport'}</span>
+      </h1>
+
+      <div className="mndyn-balance" aria-label="What your Passport holds">
+        <span className="mndyn-balance-figure">
+          {custodyAmountFigure(props.rows[0].amount, props.rows[0].decimals, props.balanceFailed)}
+        </span>
+        <span className="mndyn-balance-unit">{props.rows[0].symbol}</span>
+        <button type="button" className="mndyn-icon" onClick={props.onRefresh} aria-label="Refresh">
+          <RefreshCw size={14} aria-hidden="true" />
+        </button>
+      </div>
+
+      {props.rows.length > 1 ? (
+        <ul className="mndyn-holdings">
+          {props.rows.slice(1).map((row) => (
+            <li className="mndyn-holding" key={row.id}>
+              <span className="mndyn-holding-figure">
+                {custodyAmountFigure(row.amount, row.decimals)}
+              </span>
+              <span className="mndyn-holding-unit">{row.symbol}</span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+
+      {arriving ? <p className="mnob-hint">{arriving}</p> : null}
+
+      {props.offer.kind === 'none' ? null : (
+        <div className="mnob-unusable" role="status">
+          <p className="mnob-unusable-copy">{props.offer.sentence}</p>
+          {props.offer.kind === 'finish' ? (
+            <button
+              type="button"
+              className="mnob-alt"
+              onClick={props.onFinish}
+              disabled={props.busy !== null}
+            >
+              {props.offer.action}
+            </button>
+          ) : (
+            <button type="button" className="mnob-alt" onClick={props.onDismissStopped}>
+              Dismiss
+            </button>
+          )}
+        </div>
+      )}
+
+      {payable ? (
+        <div className="mndyn-receive">
+          <span className="mnob-hint">People can pay you at</span>
+          <code className="mndyn-code">{props.name ? `${props.name}.night` : shortHex(payable)}</code>
+          <button
+            type="button"
+            className="mndyn-icon"
+            onClick={() => void navigator.clipboard?.writeText(payable)}
+            aria-label="Copy"
+          >
+            <Copy size={14} aria-hidden="true" />
+          </button>
+        </div>
+      ) : null}
+
+      <form
+        className="mnob-stage"
+        onSubmit={(event: FormEvent) => {
+          event.preventDefault()
+          if (props.busy === null) props.onSend(recipient, amount, asset)
+        }}
+      >
+        <label className="mnob-hint" htmlFor="dynamic-send-to">
+          Send to
+        </label>
+        <input
+          id="dynamic-send-to"
+          className="mnob-input"
+          type="text"
+          autoCapitalize="none"
+          autoCorrect="off"
+          spellCheck={false}
+          placeholder="alice"
+          value={recipient}
+          onChange={(event) => setRecipient(event.target.value)}
+          disabled={props.busy !== null}
+        />
+        <label className="mnob-hint" htmlFor="dynamic-send-asset">
+          What to send
+        </label>
+        <select
+          id="dynamic-send-asset"
+          className="mnob-input"
+          value={asset.id}
+          onChange={(event) => setAssetId(event.target.value)}
+          disabled={props.busy !== null}
+        >
+          {props.rows.map((row) => (
+            <option key={row.id} value={row.id}>
+              {row.symbol}
+            </option>
+          ))}
+        </select>
+        <label className="mnob-hint" htmlFor="dynamic-send-amount">
+          Amount
+        </label>
+        <input
+          id="dynamic-send-amount"
+          className="mnob-input"
+          type="text"
+          inputMode="decimal"
+          placeholder="1"
+          value={amount}
+          onChange={(event) => setAmount(event.target.value)}
+          disabled={props.busy !== null}
+        />
+        {props.notice ? (
+          <p className="mnob-hint" role="status">
+            {props.notice}
+          </p>
+        ) : null}
+        {props.error ? (
+          <div className="mnob-unusable" role="alert">
+            <p className="mnob-unusable-copy">{props.error}</p>
+            <button type="button" className="mnob-alt" onClick={props.onDismissError}>
+              Dismiss
+            </button>
+          </div>
+        ) : null}
+        <button
+          type="submit"
+          className="mnob-primary"
+          disabled={props.busy !== null || recipient.trim().length === 0}
+        >
+          <span className="mnob-primary-copy">
+            {props.busy !== null ? (
+              <Loader2 className="mnob-working-spinner" size={17} strokeWidth={2} aria-hidden="true" />
+            ) : (
+              <ArrowRight size={17} strokeWidth={2} aria-hidden="true" />
+            )}
+            {props.busy ?? `Send ${asset.symbol}`}
+          </span>
+          <ArrowRight size={17} strokeWidth={2.2} aria-hidden="true" />
+        </button>
+      </form>
+    </Shell>
+  )
+}
+
+/* -------------------------------------------------------------------------- */
+/* Small helpers                                                              */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The two-field session the custody layer takes.
+ *
+ * The address it is handed back by a caller is ignored on purpose: the bridge
+ * already closes over the key it signs with, and letting a caller name another
+ * would be a way to ask the wrong one for an approval.
+ */
+function custodySession(session: {
+  evmAddress: string | null
+  signRaw: (digestHex: string) => Promise<string>
+}): CustodyDynamicSession {
+  return {
+    address: session.evmAddress ?? '',
+    signRaw: async (input: { accountAddress: string; message: string }) =>
+      session.signRaw(input.message),
+  }
+}
+
+/** The one place the recovery answers become sentences on this path. */
+function recoveryMessage(outcome: NameRecoveryOutcome, provider: string): string | null {
+  if (outcome.kind === 'found') return null
+  if (outcome.kind === 'unknown') {
+    return 'No Passport is registered under that name. Check the spelling, or go back and set a new one up.'
+  }
+  if (outcome.kind === 'not-yours') {
+    return `That name belongs to a Passport your ${provider} sign-in is not part of. If you have more than one sign-in, go back and use the other one.`
+  }
+  return outcome.detail
+}
+
+/* NIGHT's own formatter and amount reader lived here until 2026/09/17. They
+   are `formatCustodyAmount` and `parseCustodyAmount` in `../lib/custodyAssets.ts`
+   now, because the screen sends more than one asset and only one of them
+   carries six decimal places — and because both are decisions about somebody's
+   money, which belong where a test can hold them to it. */
+
+/** Enough of a 32-byte address to compare by eye, never all of it. */
+function shortHex(value: string): string {
+  return value.length <= 16 ? value : `${value.slice(0, 8)}…${value.slice(-6)}`
+}
+
+/**
+ * The account's own action history, oldest first, or null when it could not be
+ * read.
+ *
+ * ONE POST, and the only network call this screen makes itself. The document
+ * and the reading of the answer are both in `../identity/custodyInboxIndex.ts`,
+ * which is drilled; what is here is the fetch, the ten-second ceiling every
+ * other indexer read in this app carries (`../identity/contractRuntime.ts`),
+ * and the rule that every way of not getting an answer is the SAME answer:
+ * null, which the walk reads as "nothing here knows which transaction wrote
+ * that entry" and files no coin on.
+ */
+async function readCustodyActions(indexerHttpUrl: string, address: string) {
+  try {
+    const response = await fetch(indexerHttpUrl, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ query: custodyActionHistoryQuery(address) }),
+      signal: AbortSignal.timeout(10_000),
+    })
+    return custodyActionRowsFrom(await response.json())
+  } catch (cause) {
+    console.info('[account-custody] the history of this Passport could not be read', cause)
+    return null
+  }
+}
+
+/**
+ * The note a stopped payment left behind, WAITED FOR on a later open.
+ *
+ * BY ITS NONCE where the record kept one, which is exact: that nonce came out
+ * of leg one's own result and names one note in the world. Where it did not —
+ * a payment interrupted between leg one landing and the note being identified
+ * — the fall-back is a note of exactly this colour and value, with nothing
+ * excluded, because the snapshot of what was held before is gone with the tab
+ * that took it. That is weaker and is safe here for a reason worth writing
+ * down: these Passports hold their value in the ACCOUNT, their wallet is
+ * unfunded by design, and a note of exactly that colour and size sitting in it
+ * is this payment's note or is indistinguishable from it — and either way, the
+ * amount reaches the person the holder chose.
+ *
+ * WAITED FOR, AND NOT READ ONCE (live re-run, 2026/09/18): the same button on
+ * the same payment failed in under a second 45 seconds after a re-open, before
+ * the wallet's sync had applied the arrival, and completed three minutes
+ * later. The window and the interval are the send path's own, and the decision
+ * — including the sentence for a window that closes — is
+ * `../lib/custodyScreenRules.ts`'s.
+ */
+async function findStoppedNote(
+  wallet: LocalMidnightWallet,
+  record: CustodyShieldedSendRecord,
+): Promise<CustodyStoppedNoteOutcome<WalletShieldedNote>> {
+  const [{ walletShieldedNotes }, { findArrivedNote }, { SETTLE_WATCH_MS }] = await Promise.all([
+    import('../identity/accountCustody.js'),
+    import('../lib/shieldedNote.js'),
+    import('../lib/chainWait.js'),
+  ])
+  return awaitCustodyStoppedNote(
+    record.noteNonce,
+    {
+      notes: () => walletShieldedNotes(wallet),
+      withoutNonce: (notes) =>
+        findArrivedNote(notes, {
+          tokenType: record.colourHex,
+          amount: BigInt(record.amount),
+          heldBefore: new Set<string>(),
+        }),
+    },
+    { windowMs: SETTLE_WATCH_MS, intervalMs: NOTE_POLL_MS },
+  )
+}
+
+/**
+ * The 32 bytes `withdraw_unshielded` takes as its recipient.
+ *
+ * `unshieldedAddressBytes` checks the address really belongs to the network the
+ * wallet is on, which is the check that stops a stagenet payment being sent to
+ * a mainnet-shaped address and vanishing.
+ */
+async function unshieldedRecipientBytes(address: string, networkId: string): Promise<Uint8Array> {
+  const { unshieldedAddressBytes } = await import('../identity/accountCustody.js')
+  return unshieldedAddressBytes(address, networkId)
+}

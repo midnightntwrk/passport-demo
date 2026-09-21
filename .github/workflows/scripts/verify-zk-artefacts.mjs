@@ -31,6 +31,14 @@ const MANAGED_ROOT =
 
 /** The two untracked directories. `contract/` and `compiler/` come from git. */
 const DIRECTORIES = ['keys', 'zkir'];
+/**
+ * Builds that ship VERIFIER keys only. Their prover keys are made and held on
+ * the proving server (the account custody build's are 3.2 GB), so a `.prover`
+ * entry in the manifest is expected to be absent here — and its presence is a
+ * failure,
+ * because a bundle that carried it would be gigabytes nobody can serve.
+ */
+const SERVER_ONLY_PROVER = new Set(['account-custody']);
 
 /**
  * The contracts to check, read off the tree rather than written down.
@@ -122,6 +130,14 @@ for (const contract of CONTRACTS) {
       if (name === 'type' || meta?.type !== 'file') continue;
 
       const file = resolve(base, directory, name);
+      if (directory === 'keys' && name.endsWith('.prover') && SERVER_ONLY_PROVER.has(contract)) {
+        if (existsSync(file)) {
+          failures.push(
+            `shipped  ${contract}/keys/${name}: prover keys for this build stay on the proving server and must not be in the bundle.`,
+          );
+        }
+        continue;
+      }
       let bytes;
       try {
         bytes = readFileSync(file);

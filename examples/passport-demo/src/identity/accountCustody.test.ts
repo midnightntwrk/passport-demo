@@ -98,6 +98,11 @@ import {
   transferShieldedToAccount,
   unshieldedAddressBytes,
 } from './accountCustody.js';
+import {
+  K256_ARM_OPERATION,
+  ONE_TX_TRANSFER_OPERATION,
+  accountBuildFromOperations,
+} from './passportContract.js';
 
 /**
  * THE ONE MOCK IN THIS FILE, AND WHAT IT REPLACES.
@@ -115,10 +120,17 @@ import {
  * the derivations below are the real derivations.
  */
 const accountHasOneTxTransfer = vi.fn<(url: string, address: string) => Promise<boolean | null>>();
+/* The same read, asked for all three builds rather than for one circuit.
+   `accountModuleFor` moved onto this on 2026/09/16 when `account-custody` became a
+   third possible answer; `senderSupportsOneTransactionSend` still asks the
+   boolean question, because a boolean is what it wants. */
+const readAccountBuild =
+  vi.fn<(url: string, address: string) => Promise<'account' | 'account-v1' | 'account-custody' | null>>();
 vi.mock('./passportContract.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./passportContract.js')>()),
   accountHasOneTxTransfer: (url: string, address: string) =>
     accountHasOneTxTransfer(url, address),
+  readAccountBuild: (url: string, address: string) => readAccountBuild(url, address),
 }));
 
 /** Enough of a network for a read. Nothing in these tests reaches it. */
@@ -482,6 +494,58 @@ describe('deriveAccountDeviceSecret', () => {
   });
 });
 
+describe('derivePassportContractSecrets, on a fixed root', () => {
+  /**
+   * ALL FOUR, PINNED, AND NOT ONLY THE ONE WITH A CIRCUIT BEHIND IT.
+   *
+   * The device secret is checked above against the contract's own derivation,
+   * so a change to it fails loudly. The other three have no such partner and
+   * every one of them is a key somebody has to be able to derive again years
+   * from now: the recovery secret is split into public ledger state, the enc
+   * secret is what every depositor seals an inbox entry to, and the
+   * maintenance secret is an upgrade authority. A change to a label, to the
+   * padding, or to the order of the payload would move them in silence, and
+   * the reader who notices is the one whose inbox will not open.
+   *
+   * Computed by the implementation on 2026/09/18 and written down here. They
+   * are frozen from the first live Passport onwards, not from today.
+   */
+  const ROOT = Uint8Array.from({ length: 32 }, (_unused, index) => index * 3);
+  const hex = (bytes: Uint8Array): string =>
+    Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+
+  it('derives the four vectors it has always derived', async () => {
+    const secrets = await derivePassportContractSecrets(ROOT);
+    expect(hex(secrets.deviceSecret)).toBe(
+      '052114f778bfbfb23cc7aa59ee051f93a839ff5309f3748282891b324871276f',
+    );
+    expect(hex(secrets.recoverySecret)).toBe(
+      '95fce9819f3b11c458c356ad7a6a325d80ecc10e430615bbc969c68cf368b2b5',
+    );
+    expect(hex(secrets.encSecret)).toBe(
+      'f6b7dac39f23d77726b13673ce49890aa733ab58b926604c536a578a84c36cb8',
+    );
+    expect(hex(secrets.maintenanceSecret)).toBe(
+      '0c5de89510e487ccd8088e6adf1d2f401a08a7dd46f70ba31ff225406e741e35',
+    );
+  });
+
+  it('gives the four of them four different values', async () => {
+    const secrets = await derivePassportContractSecrets(ROOT);
+    const all = [
+      secrets.deviceSecret,
+      secrets.recoverySecret,
+      secrets.encSecret,
+      secrets.maintenanceSecret,
+    ];
+    /* Domain separation is the whole of what the labels are for: two secrets
+       that collided would mean a viewing key that can also spend, or a
+       recovery share that is the upgrade authority. */
+    expect(new Set(all.map(hex)).size).toBe(4);
+    expect(all.every((secret) => secret.length === 32)).toBe(true);
+  });
+});
+
 describe('unshieldedAddressBytes, on the address kinds a recipient field sees', () => {
   it('refuses a well-formed SHIELDED address with its own sentence', () => {
     /* A `mn_shield-addr…` parses as a Midnight address and then fails the
@@ -719,10 +783,11 @@ describe('accountModuleFor', () => {
   beforeEach(() => {
     resetOneTransactionSendSupport();
     accountHasOneTxTransfer.mockReset();
+    readAccountBuild.mockReset();
   });
 
   it('opens an upgraded account with the current twelve-circuit module', async () => {
-    accountHasOneTxTransfer.mockResolvedValue(true);
+    readAccountBuild.mockResolvedValue('account');
     await expect(accountModuleFor(NETWORK, SENDER)).resolves.toBe('account');
   });
 
@@ -730,8 +795,17 @@ describe('accountModuleFor', () => {
     /* The defect itself: this recipient is a Passport deployed before the
        account contract gained the circuit, and the current module is refused
        against it by name. */
-    accountHasOneTxTransfer.mockResolvedValue(false);
+    readAccountBuild.mockResolvedValue('account-v1');
     await expect(accountModuleFor(NETWORK, PEER)).resolves.toBe('account-v1');
+  });
+
+  it('opens an account custody account with the account custody module', async () => {
+    /* The third build, since 2026/09/16. Nothing deploys one yet, so this is
+       the only place in the app where the answer can be reached at all — and
+       it is here so that when something does, the module it is handed is the
+       one whose circuits that account actually carries. */
+    readAccountBuild.mockResolvedValue('account-custody');
+    await expect(accountModuleFor(NETWORK, PEER)).resolves.toBe('account-custody');
   });
 
   it('refuses when the read itself failed, rather than guessing a module', async () => {
@@ -739,7 +813,7 @@ describe('accountModuleFor', () => {
        module is refused against a pre-upgrade account, and the v1 module lacks
        the circuit an upgraded sender is about to call. Both guesses cost the
        user a wait and then a refusal, so this one says so first. */
-    accountHasOneTxTransfer.mockResolvedValue(null);
+    readAccountBuild.mockResolvedValue(null);
     const error = await accountModuleFor(NETWORK, PEER).catch((cause) => cause);
     expect(error).toBeInstanceOf(AccountCustodyError);
     expect((error as AccountCustodyError).code).toBe('network-unreachable');
@@ -750,36 +824,97 @@ describe('accountModuleFor', () => {
     /* A device-authorised call is against the Passport this device holds; its
        module has always been the current one, and refusing to open it over an
        indexer blink would stop somebody sending at all. */
-    accountHasOneTxTransfer.mockResolvedValue(null);
+    readAccountBuild.mockResolvedValue(null);
     await expect(
       accountModuleFor(NETWORK, SENDER, { whenUnreadable: 'current' }),
     ).resolves.toBe('account');
   });
 
   it('asks the chain ONCE per address, and never caches a failed read', async () => {
-    accountHasOneTxTransfer.mockResolvedValue(false);
+    readAccountBuild.mockResolvedValue('account-v1');
     await accountModuleFor(NETWORK, PEER);
     await accountModuleFor(NETWORK, PEER);
-    expect(accountHasOneTxTransfer).toHaveBeenCalledTimes(1);
+    expect(readAccountBuild).toHaveBeenCalledTimes(1);
 
-    accountHasOneTxTransfer.mockResolvedValue(null);
+    readAccountBuild.mockResolvedValue(null);
     await expect(
       accountModuleFor(NETWORK, SENDER, { whenUnreadable: 'current' }),
     ).resolves.toBe('account');
-    accountHasOneTxTransfer.mockResolvedValue(true);
+    readAccountBuild.mockResolvedValue('account');
     await expect(accountModuleFor(NETWORK, SENDER)).resolves.toBe('account');
-    expect(accountHasOneTxTransfer).toHaveBeenCalledTimes(3);
+    expect(readAccountBuild).toHaveBeenCalledTimes(3);
     /* And the pre-upgrade address's answer is still its own. */
     await expect(accountModuleFor(NETWORK, PEER)).resolves.toBe('account-v1');
-    expect(accountHasOneTxTransfer).toHaveBeenCalledTimes(3);
+    expect(readAccountBuild).toHaveBeenCalledTimes(3);
   });
 
   it('normalises the address before it caches or asks', async () => {
-    accountHasOneTxTransfer.mockResolvedValue(false);
+    readAccountBuild.mockResolvedValue('account-v1');
     await accountModuleFor(NETWORK, `0x${PEER.toUpperCase()}`);
     await accountModuleFor(NETWORK, PEER);
-    expect(accountHasOneTxTransfer).toHaveBeenCalledTimes(1);
-    expect(accountHasOneTxTransfer).toHaveBeenCalledWith(NETWORK.indexerHttpUrl, PEER);
+    expect(readAccountBuild).toHaveBeenCalledTimes(1);
+    expect(readAccountBuild).toHaveBeenCalledWith(NETWORK.indexerHttpUrl, PEER);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* Which build an account is, read off its own entry points                   */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The three-way discriminator, on a list of names rather than through a read.
+ *
+ * THE ORDER IS THE WHOLE OF IT, and the reason is that only one of the two
+ * questions IDENTIFIES anything. The prototypes are told apart by an absence —
+ * no `transfer_shielded_to_account` means the older of the two — and the account
+ * custody build, which shares no circuit name with either, is absent it as well. So
+ * the older question alone reads an account custody account as `account-v1`: a module that
+ * cannot open it. The k256 question is positive, so it goes first.
+ */
+describe('accountBuildFromOperations', () => {
+  /* The eleven entry points every pre-upgrade Passport carries, trimmed to the
+     ones this decision reads plus enough company to be a realistic list. */
+  const V1 = ['deposit_unshielded', 'withdraw_unshielded', 'withdraw_shielded', 'add_device'];
+
+  it('reads a pre-upgrade account as the eleven-circuit build', () => {
+    expect(accountBuildFromOperations(V1)).toBe('account-v1');
+  });
+
+  it('reads an upgraded account as the current build', () => {
+    expect(accountBuildFromOperations([...V1, ONE_TX_TRANSFER_OPERATION])).toBe('account');
+  });
+
+  it('reads an account custody account as the account custody build', () => {
+    expect(accountBuildFromOperations([...V1, K256_ARM_OPERATION])).toBe('account-custody');
+  });
+
+  it('never reads a real account custody entry-point list as a prototype build', () => {
+    /* the account custody build's own names, none of which the prototypes have. Under the
+       two-way rule this list carries no `transfer_shielded_to_account` and so
+       would have answered `account-v1` — a module that cannot open it. */
+    expect(
+      accountBuildFromOperations([
+        'deposit_unshielded',
+        'deposit_shielded',
+        'withdraw_unshielded_with_jubjub',
+        'withdraw_shielded_with_jubjub',
+        'withdraw_unshielded_with_k256',
+        K256_ARM_OPERATION,
+      ]),
+    ).toBe('account-custody');
+  });
+
+  it('asks the k256 question first even where both names are present', () => {
+    /* Not a list any build produces today — the two share no circuit name —
+       but the order is a rule rather than a coincidence, and a future build
+       that carried both must still be read as the one that can prove k256. */
+    expect(
+      accountBuildFromOperations([...V1, ONE_TX_TRANSFER_OPERATION, K256_ARM_OPERATION]),
+    ).toBe('account-custody');
+  });
+
+  it('reads an empty list as the oldest build, which is what an empty read means', () => {
+    expect(accountBuildFromOperations([])).toBe('account-v1');
   });
 });
 

@@ -47,6 +47,7 @@
 import { expect, test, type BrowserContext, type CDPSession, type Page } from '@playwright/test';
 
 import { installNetworkBoundary, PASSPORT_ACCOUNT_ADDRESS } from './mocks.js';
+import { SIGN_IN_BUTTON } from './walkContext.js';
 
 /*
  * CHROMIUM ONLY, and for a reason that is about the AUTHENTICATOR rather
@@ -110,7 +111,7 @@ async function credentials(
 /** First-time enrolment through the landing button, as far as the name step. */
 async function enrol(h: Harness): Promise<string> {
   await h.page.goto('/');
-  await h.page.getByRole('button', { name: /Continue with Passport/i }).click();
+  await h.page.getByRole('button', { name: SIGN_IN_BUTTON }).click();
   await expect(h.page.getByRole('heading', { name: /Welcome to Passport/i })).toBeVisible({
     timeout: 120_000,
   });
@@ -227,7 +228,7 @@ async function clearSiteData(h: Harness): Promise<void> {
 async function signInAndWriteBlob(h: Harness): Promise<void> {
   await dropSession(h);
   await h.page.reload();
-  await h.page.getByRole('button', { name: /Continue with Passport/i }).click();
+  await h.page.getByRole('button', { name: SIGN_IN_BUTTON }).click();
   await expect(h.page.getByText(/Your account is ready/)).toBeVisible({ timeout: 60_000 });
 }
 
@@ -253,7 +254,7 @@ test('a passkey that survives a cleared browser is never created over', async ({
 
     await clearSiteData(h);
     await h.page.reload();
-    await h.page.getByRole('button', { name: /Continue with Passport/i }).click();
+    await h.page.getByRole('button', { name: SIGN_IN_BUTTON }).click();
     await expect(h.page.getByRole('heading', { name: /Welcome to Passport/i })).toBeVisible({
       timeout: 120_000,
     });

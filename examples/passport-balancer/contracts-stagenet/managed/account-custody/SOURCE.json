@@ -1,0 +1,12 @@
+{
+  "_": [
+    "Where this build came from. The contract is NOT ours and no copy of it is in",
+    "this repository: it is consumed unchanged from the commit below. Regenerate",
+    "with `node scripts/sync-account-custody-contract.mjs`."
+  ],
+  "repository": "midnightntwrk/passport",
+  "commit": "40072709e3f5ac5d9b89f9d92d02a4413cbe05cc",
+  "path": "contract/contracts/account.compact",
+  "sha256": "1064b1998a71b5ade418f136428d82721e6021d6d939ff2f12797383bb3f8d50",
+  "compiler": "compact compile +0.34.0 --feature-zkir-v3 <source> <output>"
+}

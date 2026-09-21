@@ -45,6 +45,79 @@ if (!import.meta.env.DEV || window.location.origin === requiredDevelopmentOrigin
     </React.StrictMode>,
   );
 
+  /* Social sign-in, when this build has been given an environment id — which
+     no build shipped today has.
+
+     THE CONDITION IS WRITTEN OUT RATHER THAN CALLED, and that is the whole
+     point of it. `isDynamicEnabled()` is the same question and reads better,
+     but it is a function call, and a function call is opaque to the bundler.
+     Vite substitutes `import.meta.env.VITE_DYNAMIC_ENVIRONMENT_ID` with a
+     literal at build time, so with the variable unset this reads `if
+     (undefined)` and Rollup deletes the branch, the `import()`, and every
+     chunk reachable from it. MEASURED, 2026/09/14: written as a call, a
+     flag-off build emitted the SDK anyway — 118 chunks and 10,169,722 bytes of
+     JavaScript, against 44 and 3,219,674 written this way. Nothing would ever
+     have fetched those 7 MB; they would just have been deployed. A dynamic
+     import is not dead code to a bundler merely because the branch above it
+     is false at run time.
+
+     Two more properties, both deliberate: it runs AFTER `root.render`, and its
+     rejection is swallowed. The Passport is already on screen before any of
+     this is attempted, so a vendor that will not load costs a secondary
+     button and never a boot. */
+  /* THE STAND-IN SIGN-IN, for the mocked walk and for nothing else.
+
+     It sits OUTSIDE the environment-id branch below, and deliberately: the
+     whole point of it is to drive the Dynamic-only path in a build that has no
+     Dynamic in it at all, so the SDK's 7 MB stay out and the run depends on no
+     third party. The condition is written out rather than called for the reason
+     the one below is — Vite substitutes the variable with a literal, so a build
+     without it deletes this branch, the `import()`, and the module behind it.
+     `VITE_DYNAMIC_WALK` is set for `playwright.config.ts`'s preview build and
+     for no deployment. Even there nothing happens until a URL carries
+     `?dynamicwalk=…`. See `src/lib/dynamicWalk.ts`. */
+  if (import.meta.env.VITE_DYNAMIC_WALK === '1') {
+    void import('./lib/dynamicWalk.js')
+      .then((module) => module.seedDynamicWalk(window.location.search))
+      .catch(() => {});
+  }
+
+  if (import.meta.env.VITE_DYNAMIC_ENVIRONMENT_ID) {
+    void import('./lib/dynamic.js').then((module) => module.mountDynamic()).catch(() => {});
+
+    /* The Dynamic Passport milestone, when somebody has asked for it — a build
+       made for it (`VITE_ACCOUNT_CUSTODY_MILESTONE=1`) or a `?custody=1` on one that was not.
+       Never in any build shipped today, and never without a sign-in to show:
+       nested inside the condition above because the screen's first row IS the
+       Dynamic session, and a milestone that opens on "sign in first" with no
+       sign-in available is a dead panel over the app.
+
+       ITS OWN ROOT, for the reason `dynamic.tsx` uses one: inserting anything
+       above `<PassportDemo />` after boot makes React unmount and remount the
+       whole tree, and mid-ceremony that is a passkey prompt abandoned halfway.
+       A developer surface must not be able to cost that.
+
+       The rejection is swallowed and the import runs after `root.render`, the
+       same two properties the sign-in mount has, and for the same reason. */
+    if (
+      import.meta.env.VITE_ACCOUNT_CUSTODY_MILESTONE === '1' ||
+      new URLSearchParams(window.location.search).get('custody') === '1'
+    ) {
+      void Promise.all([import('./screens/CustodyMilestone.js'), import('react-dom/client')])
+        .then(([screen, reactDom]) => {
+          const host = document.createElement('div');
+          host.id = 'mn-account-custody-root';
+          document.body.appendChild(host);
+          reactDom.createRoot(host).render(
+            <React.StrictMode>
+              <screen.default />
+            </React.StrictMode>,
+          );
+        })
+        .catch(() => {});
+    }
+  }
+
   // Retire the inline splash from index.html once React has painted, keeping
   // it on screen for at least 500ms so a fast load reads as a deliberate beat
   // rather than a flash. The element is removed after its opacity transition.
