@@ -245,7 +245,7 @@ test.describe('a passkey with no Passport yet', () => {
        nothing true. It is skipped there, with the reason on record; the live
        run on stagenet (RUN-onboard.md) is where this flow is proven. */
     const probe = await page.request.get(
-      new URL('/zk/account-custody/keys/activate_initial_device_with_jubjub.verifier', WALK).href,
+      '/zk/account-custody/keys/activate_initial_device_with_jubjub.verifier',
     );
     test.skip(
       !probe.ok(),
