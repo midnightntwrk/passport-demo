@@ -592,13 +592,15 @@ export default function CustodyPassport({ network, arm, notice: browserNotice = 
            part of what it held, which is the ordinary case — so the window
            gives two positions and reporting them would leave every such payment
            permanently unshowable. They are kept as candidates, in order, in the
-           same way a spend's change is; `stored` says whether that happened,
-           because candidates go in a colour's held slot or nowhere. */
+           same way a spend's change is, and they go WHERE THE COIN GOES: into
+           the held slot when the colour was empty, into the queue behind what
+           was there when it was not. That second case is every first payment
+           into a Passport still holding its opening grant, and until
+           2026/09/21 it was where the description was dropped. */
         candidates: 'store',
       })
       /* WHAT THE CHAIN COULD NOT PLACE IS STILL HERE. A coin whose position the
-         indexer has not answered for, or answered ambiguously into a colour
-         already holding something, is demonstrably delivered and not yet
+         indexer has not answered for is demonstrably delivered and not yet
          spendable — which is what "arriving" means. Counting only the store's
          own awaiting rows made those coins vanish off the screen entirely. */
       const unplaced = custodyUnplacedDeliveries(walked.outcomes)

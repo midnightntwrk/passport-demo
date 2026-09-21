@@ -648,6 +648,12 @@ export async function readInboxCustody(
      * payer sending part of what it holds makes a two-output transaction, which
      * is the ordinary case, and reporting those would leave every such payment
      * unshowable for ever.
+     *
+     * Under `'store'` the coin is placed whatever the colour was holding — the
+     * held slot when it was empty, the queue behind the existing coin when it
+     * was not, carrying its candidate positions with it (2026/09/21). It used
+     * to be dropped in the second case, which is the case a Passport paid
+     * while still holding its opening grant is always in.
      */
     candidates?: 'report' | 'store';
     deps?: CustodyInboxDeps;

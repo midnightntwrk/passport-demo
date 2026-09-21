@@ -186,20 +186,38 @@ export interface CustodyWalkOutcome {
     readonly outcome: string;
     /** Whether an ambiguous position was written down, or only reported. */
     readonly stored?: boolean;
+    /**
+     * Where a stored coin went — `'held'` is spendable now, `'queued'` is
+     * spendable once what is in front of it has gone, and null is a coin that
+     * was not stored.
+     *
+     * Read by nothing in this arithmetic and named here because it is what
+     * `stored` MEANS, and a figure that can be got right by accident is one
+     * that will be got wrong later.
+     */
+    readonly placed?: 'held' | 'queued' | null;
   };
 }
 
 /**
  * How many of a walk's deliveries are here and not spendable yet.
  *
- * TWO OUTCOMES COUNT AND THE REST DO NOT. `'unavailable'` is the indexer not
- * having answered where the coin landed; an `'ambiguous'` the store did not
- * take is a two-output transaction whose candidates had nowhere to go, because
- * candidates live in a colour's held slot and that slot was occupied. Both are
- * coins the account demonstrably holds and cannot put in a proof — which is
- * what "arriving" means. `'learned'` and a stored `'ambiguous'` are in the
- * store and counted in the balance; `'spent'` and `'known'` are nothing
- * happening at all; `'refused'` is a row this store will not hold.
+ * ONE OUTCOME COUNTS AND THE REST DO NOT. `'unavailable'` is the indexer not
+ * having answered where the coin landed: a coin the account demonstrably holds
+ * and cannot put in a proof, which is what "arriving" means. `'learned'` and a
+ * stored `'ambiguous'` are in the store and counted in the balance, whether
+ * they went into the colour's held slot or into the queue behind a coin it
+ * already held; `'spent'` and `'known'` are nothing happening at all;
+ * `'refused'` is a row this store will not hold.
+ *
+ * AN `'ambiguous'` THE STORE DID NOT TAKE still counts, and there is one rule
+ * left that produces it: a walk asking only to be told
+ * (`readInboxCustody`'s `'report'`). It used to be the ordinary case — a
+ * two-output transaction paying a colour that already held a coin had nowhere
+ * to put its candidate positions — and that was a payment showing as arriving
+ * for ever, on stagenet, twice on 2026/09/21. The store now queues those with
+ * their candidates, so a delivery reported as `stored` is money in the figure
+ * rather than money on its way.
  *
  * Counting only the store's own awaiting rows made these coins vanish off the
  * screen entirely, which is the defect this exists to have fixed.
