@@ -236,6 +236,11 @@ test.describe('a passkey with no Passport yet', () => {
   test('counts the setup steps, and asks the sponsor to pay for the first one', async ({
     browser,
   }) => {
+    /* Building wave 1 is real work — the compiled module, the ledger WASM, and
+       a deploy transaction — and on the shared CI runner it took longer than
+       this file's default 90 s (2026/09/21), so the poll below never got to
+       see the sponsor asked. The budget covers the poll it contains. */
+    test.setTimeout(240_000);
     const context = await browser.newContext(
       walkContextOptions({ viewport: { width: 420, height: 900 } }),
     );
