@@ -1,8 +1,8 @@
 /**
  * Passport theme preference.
  *
- * Three preferences are recorded: 'light', 'dark', and 'system'. Light is the
- * default, both here and in `screens/tokens.css`.
+ * Three preferences are recorded: 'light', 'dark', and 'system'. Dark is the
+ * default, matching Passport's Midnight-native entry experience.
  *
  * How it reaches the CSS
  * ----------------------
@@ -32,12 +32,11 @@ export const THEME_STORAGE_KEY = 'passport-theme'
 /**
  * The preference used when nothing has been recorded.
  *
- * Light, deliberately: Passport's default look is the light one, and a visitor
- * whose operating system happens to be dark should still meet the light
- * interface first. 'system' remains one tap away in the theme control, and is
- * honoured fully once chosen.
+ * Dark, deliberately: Passport's first impression now follows Midnight's live
+ * brand surface and the private, nocturnal product direction. Light and system
+ * remain one tap away in the theme control and are honoured fully once chosen.
  */
-export const DEFAULT_THEME: ThemePreference = 'light'
+export const DEFAULT_THEME: ThemePreference = 'dark'
 
 const DARK_QUERY = '(prefers-color-scheme: dark)'
 
@@ -112,7 +111,7 @@ function applyToDocument(preference: ThemePreference): void {
   const resolved = resolveTheme(preference)
   root.style.colorScheme = resolved
   const meta = document.querySelector('meta[name="theme-color"]')
-  if (meta) meta.setAttribute('content', resolved === 'dark' ? '#0a0a0a' : '#e9e9e9')
+  if (meta) meta.setAttribute('content', resolved === 'dark' ? '#0a0a0a' : '#ffffff')
 }
 
 function notify(preference: ThemePreference): void {
@@ -134,9 +133,9 @@ function bindSystemChanges(): void {
   }
   if (typeof query.addEventListener === 'function') {
     query.addEventListener('change', onChange)
-  } else if (typeof (query as MediaQueryList).addListener === 'function') {
+  } else if (typeof query.addListener === 'function') {
     /* Safari below 14. */
-    ;(query as MediaQueryList).addListener(onChange)
+    query.addListener(onChange)
   }
 }
 

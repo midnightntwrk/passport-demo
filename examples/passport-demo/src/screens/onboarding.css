@@ -1,7 +1,7 @@
 @import './tokens.css';
 
 /* Onboarding screen — prefix "mnob-".
-   Base-inspired Midnight direction: white/near-black page surfaces, one
+   Midnight atmospheric direction: white/near-black page surfaces, one
    electric blue accent, generously rounded cards, and soft vertical
    shadows (see tokens.css for the full language).
 
@@ -313,6 +313,223 @@
   .mnob-primary { width: auto; min-width: 280px; }
 }
 
+/* ------------------------------------------------------------------------- */
+/* Midnight atmospheric refresh                                              */
+/* ------------------------------------------------------------------------- */
+
+.mnob-screen {
+  isolation: isolate;
+  background:
+    radial-gradient(circle at 50% 18%, rgba(0, 0, 254, .10), transparent 34%),
+    var(--mn-surface-page);
+}
+.mnob-screen::before {
+  content: '';
+  position: absolute;
+  z-index: -1;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(180deg, transparent 55%, rgba(101, 92, 255, .045));
+}
+.mnob-bar {
+  width: min(100% - 40px, 620px);
+  min-height: 68px;
+  border-bottom-color: color-mix(in srgb, var(--mn-border-hairline) 74%, transparent);
+  animation: mnob-bar-in .55s cubic-bezier(.22, 1, .36, 1) both;
+}
+.mnob-wordmark { width: 116px; }
+.mnob-bar-label {
+  letter-spacing: .16em;
+  opacity: .76;
+}
+.mnob-body {
+  width: min(100% - 40px, 580px);
+  align-items: center;
+  padding-top: clamp(14px, 3svh, 28px);
+  padding-bottom: 22px;
+  text-align: center;
+}
+.mnob-orbit {
+  position: relative;
+  width: clamp(178px, 54vw, 282px);
+  aspect-ratio: 1;
+  margin: clamp(2px, 1.5svh, 14px) auto clamp(18px, 3svh, 30px);
+  animation: mnob-orbit-in .9s cubic-bezier(.22, 1, .36, 1) both;
+}
+.mnob-orbit-art {
+  width: 100%;
+  height: 100%;
+  display: block;
+  border-radius: 50%;
+  background: var(--mn-orbit-image) center / cover no-repeat;
+  animation: mnob-orbit-breathe 6s ease-in-out infinite;
+}
+.mnob-orbit-pulse {
+  position: absolute;
+  width: 5px;
+  height: 5px;
+  top: 30%;
+  right: 7%;
+  border-radius: 50%;
+  background: #dce2ff;
+  box-shadow: 0 0 8px #8ea0ff, 0 0 20px rgba(0, 0, 254, .92);
+  animation: mnob-satellite 4.4s ease-in-out infinite;
+}
+.mnob-title {
+  display: block;
+  max-width: 570px;
+  font-size: clamp(36px, 9.7vw, 58px);
+  font-weight: 700;
+  letter-spacing: -.045em;
+  line-height: .98;
+  text-wrap: balance;
+  animation: mnob-copy-in .65s .12s cubic-bezier(.22, 1, .36, 1) both;
+}
+.mnob-title span { display: inline; }
+.mnob-title span + span::before { content: ' '; }
+.mnob-lede {
+  max-width: 430px;
+  margin-top: 18px;
+  color: var(--mn-text-secondary);
+  font-size: 15px;
+  line-height: 1.55;
+  text-wrap: balance;
+  animation: mnob-copy-in .65s .2s cubic-bezier(.22, 1, .36, 1) both;
+}
+.mnob-stage {
+  width: 100%;
+  max-width: 520px;
+  margin-top: clamp(28px, 5svh, 46px);
+  padding-top: 0;
+  text-align: left;
+  animation: mnob-stage-in .55s .28s cubic-bezier(.22, 1, .36, 1) both;
+}
+.mnob-primary,
+.mnob-social {
+  min-height: 58px;
+  border-radius: 18px;
+  padding-inline: 21px;
+  font-family: var(--mn-font-body);
+  font-size: 15px;
+  letter-spacing: -.01em;
+}
+.mnob-primary {
+  background: var(--mn-accent-gradient);
+  box-shadow: var(--mn-shadow-accent);
+}
+.mnob-primary:hover:not(:disabled) {
+  background: linear-gradient(115deg, #8878ff 0%, #4564ff 65%, #6282ff 100%);
+  transform: translateY(-1px);
+}
+.mnob-primary-copy svg { filter: drop-shadow(0 0 9px rgba(255, 255, 255, .26)); }
+.mnob-social {
+  margin-top: 0;
+  justify-content: flex-start;
+  border-color: color-mix(in srgb, var(--mn-accent-violet) 48%, var(--mn-border-medium));
+  background: color-mix(in srgb, var(--mn-surface-raised) 74%, transparent);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .03);
+  backdrop-filter: blur(12px);
+}
+.mnob-social:hover {
+  border-color: var(--mn-accent-violet);
+  color: var(--mn-text-primary);
+  background: color-mix(in srgb, var(--mn-accent-soft) 64%, var(--mn-surface-raised));
+  transform: translateY(-1px);
+}
+.mnob-social-copy { flex: 1; }
+.mnob-social-arrow {
+  color: var(--mn-accent-ink);
+  font-size: 20px;
+  line-height: 1;
+}
+.mnob-social-providers { display: none; }
+.mnob-or {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 13px;
+  margin: 14px 10px;
+  color: var(--mn-text-muted);
+}
+.mnob-or span { height: 1px; background: var(--mn-border-hairline); }
+.mnob-or small { font-size: 11px; text-transform: lowercase; }
+.mnob-privacy-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin: 20px 4px 0;
+  color: var(--mn-text-secondary);
+}
+.mnob-privacy-note > svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+  color: var(--mn-accent-ink);
+}
+.mnob-privacy-note span { display: grid; gap: 2px; }
+.mnob-privacy-note strong { color: var(--mn-text-primary); font-size: 12px; font-weight: 650; }
+.mnob-privacy-note small { color: var(--mn-text-muted); font-size: 11.5px; line-height: 1.45; }
+.mnob-route-hint {
+  margin-top: 12px;
+  padding-left: 33px;
+  font-size: 11px;
+}
+.mnob-alt {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 12px;
+  padding-left: 33px;
+  text-decoration: none;
+}
+.mnob-foot {
+  width: min(100% - 40px, 620px);
+  justify-content: center;
+  border-top-color: color-mix(in srgb, var(--mn-border-hairline) 68%, transparent);
+  letter-spacing: .03em;
+}
+
+@keyframes mnob-bar-in {
+  from { opacity: 0; transform: translateY(-10px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes mnob-copy-in {
+  from { opacity: 0; transform: translateY(15px); filter: blur(4px); }
+  to { opacity: 1; transform: none; filter: blur(0); }
+}
+@keyframes mnob-orbit-in {
+  from { opacity: 0; transform: translateY(12px) scale(.92); filter: blur(7px); }
+  to { opacity: 1; transform: none; filter: blur(0); }
+}
+@keyframes mnob-orbit-breathe {
+  0%, 100% { transform: scale(1); filter: saturate(.95) brightness(.96); }
+  50% { transform: scale(1.018); filter: saturate(1.08) brightness(1.04); }
+}
+@keyframes mnob-satellite {
+  0%, 100% { opacity: .45; transform: translate(0, 0) scale(.8); }
+  50% { opacity: 1; transform: translate(2px, -2px) scale(1.1); }
+}
+
+@media (max-height: 760px) {
+  .mnob-orbit { width: clamp(142px, 40vw, 190px); margin-bottom: 14px; }
+  .mnob-title { font-size: clamp(32px, 8.8vw, 45px); }
+  .mnob-lede { margin-top: 12px; }
+  .mnob-stage { margin-top: 22px; }
+  .mnob-primary, .mnob-social { min-height: 52px; }
+  .mnob-privacy-note { margin-top: 15px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mnob-bar,
+  .mnob-title,
+  .mnob-lede,
+  .mnob-orbit,
+  .mnob-orbit-art,
+  .mnob-orbit-pulse,
+  .mnob-stage { animation: none; }
+  .mnob-primary:hover:not(:disabled),
+  .mnob-social:hover { transform: none; }
+}
+
 /* The social entry, and the note it turns into once somebody is signed in.
    Present in the stylesheet unconditionally; rendered only by a build with a
    Dynamic environment id. Quieter than
@@ -371,3 +588,24 @@
 
 .mnob-social-note svg { flex: none; margin-top: 2px; }
 .mnob-social-spin { animation: mnob-spin 1s linear infinite; }
+
+/* Keep the social control on the same approved component family after the
+   legacy Dynamic rules above have supplied their loading/note states. */
+.mnob-social {
+  min-height: 58px;
+  margin-top: 0;
+  padding: 10px 21px;
+  border-color: color-mix(in srgb, var(--mn-accent-violet) 48%, var(--mn-border-medium));
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--mn-surface-raised) 74%, transparent);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .03);
+  font-size: 15px;
+  letter-spacing: -.01em;
+  backdrop-filter: blur(12px);
+}
+.mnob-social:hover {
+  border-color: var(--mn-accent-violet);
+  color: var(--mn-text-primary);
+  background: color-mix(in srgb, var(--mn-accent-soft) 64%, var(--mn-surface-raised));
+  transform: translateY(-1px);
+}
