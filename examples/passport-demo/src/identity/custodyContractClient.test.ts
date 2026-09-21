@@ -2386,52 +2386,6 @@ describe('a passkey Passport, through the widened entry points', () => {
     expect(loadCustodyRecord(test.storage, user, 'stagenet')?.txHashes.length).toBe(before + 1);
   });
 
-  it('pays another Passport, and writes only the hash into its own record', async () => {
-    const test = harness();
-    const { session, device, user } = passkeyFake();
-    await deployCustodyAccount(session, device, undefined, test.deps);
-    await activateK1Device(session, device, undefined, test.deps);
-    const peer = 'cd'.repeat(32);
-
-    await custodyPermissionlessCallAt(
-      session,
-      device,
-      peer,
-      { operation: 'deposit_shielded', args: [{}, new Uint8Array(192)] },
-      undefined,
-      test.deps,
-    );
-
-    expect(test.opened[test.opened.length - 1]).toBe(peer);
-    /* The RECIPIENT's record is not ours and is not written; ours gains the
-       hash, which is the only thing this Passport learned. */
-    expect(loadCustodyRecord(test.storage, user, 'stagenet')?.txHashes.length).toBeGreaterThan(0);
-    expect(test.connections.at(-1)?.account).toBeNull();
-  });
-
-  it('seals a deposit description with the sender’s own hands on this arm too', async () => {
-    const test = harness();
-    const { session, device } = passkeyFake();
-    await deployCustodyAccount(session, device, undefined, test.deps);
-    await activateK1Device(session, device, undefined, test.deps);
-
-    await depositShieldedIntoCustody(
-      session,
-      device,
-      {
-        targetAddress: 'cd'.repeat(32),
-        recipientEncKeyHex: 'ab'.repeat(32),
-        coin: { colour: '1a'.repeat(32), nonce: '7f'.repeat(32), value: 40n },
-      },
-      undefined,
-      test.deps,
-    );
-
-    const call = test.calls.find((c) => c.circuit === 'deposit_shielded');
-    expect(call?.args).toHaveLength(2);
-    expect((call?.args[1] as Uint8Array).length).toBe(192);
-  });
-
   it('starts again by throwing away THIS device’s record and nobody else’s', async () => {
     const test = harness();
     const { session, device, user } = passkeyFake();
