@@ -125,6 +125,11 @@ import {
    can pay in one transaction, for as long as the chain cannot say. A Passport
    minted seconds ago is the case it exists for. See `lib/oneTxProbe.ts`. */
 import { probeOneTransactionSupport } from './lib/oneTxProbe.js';
+/* Which shielded sends to a raw address today's account build can survive. The
+   Send sheet asks it while somebody types; this file asks it again before it
+   builds anything, so no path around the sheet can spend. See
+   `lib/addressSendPolicy.ts`. */
+import { addressSendRefusal, type SenderAccountBuild } from './lib/addressSendPolicy.js';
 /* How long to wait for a step to settle, where the node never said it had the
    transaction. See `lib/chainWait.ts`. */
 import { settleDeadlineFor } from './lib/chainWait.js';
@@ -8279,6 +8284,22 @@ export default function PassportDemo() {
    * activity row, refusals rethrown untouched, and a covered fee claimed only
    * on the strength of what the sponsor really did.
    */
+  /**
+   * WHICH BUILD THIS PASSPORT'S ACCOUNT IS, for the one rule that has to know.
+   *
+   * `account` is the build that carries `transfer_shielded_to_account`, which
+   * is exactly what the one-transaction answer reads — the same fact
+   * `accountModuleFor` decides the module by. Anything else is `unknown`
+   * rather than a guess between the eleven-circuit build and an answer the
+   * chain has not given yet: both are the prototype, and the rule below treats
+   * an unread build as the prototype it certainly is.
+   *
+   * THIS IS THE ONE EXPRESSION TO CHANGE when an account exists that does not
+   * split a shielded coin — naming that build here is what lets a partial
+   * payment to an address through again, on the Passports that can take it.
+   */
+  const senderAccountBuild: SenderAccountBuild = oneTransactionSend ? 'account' : 'unknown';
+
   const executeOwnShieldedSend = useCallback(
     async (params: {
       recipientAddress: string;
@@ -8291,6 +8312,28 @@ export default function PassportDemo() {
       const blocked = sendBlockedByChangeReturn(pendingSendsRef.current);
       if (blocked !== null) throw new Error(blocked);
       const account = requireAccount();
+      /* THE BACKSTOP, AND IT IS BEFORE THE CEREMONY (2026/09/18). A partial
+         withdrawal splits the account's coin and re-registers a remainder the
+         network refuses every later withdrawal against, so the one thing this
+         must not do is find out afterwards: the holding is read, the rule is
+         asked, and a paused send stops here — nothing signed, nothing built,
+         nothing spent. The Send sheet asks the same rule while the amount is
+         being typed, and this is what a caller that never opened the sheet
+         meets. An unheld colour reads as `null` and is left alone: the
+         withdrawal's own refusal says that better than this could. */
+      const heldOfColour = await (async () => {
+        const { readAccountState } = await import('./identity/accountCustody.js');
+        const state = await readAccountState(account.handle.network, account.address);
+        return state.shieldedCoins.get(params.tokenType) ?? null;
+      })();
+      const pausedAddressSend = addressSendRefusal({
+        asset: 'shielded',
+        recipient: 'address',
+        senderBuild: senderAccountBuild,
+        amount: params.amount,
+        held: heldOfColour,
+      });
+      if (pausedAddressSend !== null) throw new Error(pausedAddressSend);
       try {
         const { withdrawShielded } = await import('./identity/accountCustody.js');
         await withAccountDeviceSecret(async (deviceSecret) => {
@@ -8424,6 +8467,7 @@ export default function PassportDemo() {
       addActivity,
       refreshLocalBalances,
       requireAccount,
+      senderAccountBuild,
       updateActivity,
       withAccountDeviceSecret,
     ],
@@ -8701,6 +8745,11 @@ export default function PassportDemo() {
           onSend: executeOwnSend,
           readShieldedHoldings: readAccountShieldedHoldings,
           onSendShielded: executeOwnShieldedSend,
+          /* Which build holds this Passport's money, for the one rule on that
+             sheet that has to know: a partial shielded amount to a raw address
+             is paused on today's build, and this is what says whether this
+             Passport is on it. See `lib/addressSendPolicy.ts`. */
+          senderAccountBuild,
           /* The two halves of sending to a name. Supplied together or not at
              all: a sheet that could resolve a name but not pay it would offer
              a promise nothing behind it could keep. */
