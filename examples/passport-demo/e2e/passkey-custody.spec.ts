@@ -236,6 +236,11 @@ test.describe('a passkey with no Passport yet', () => {
        a deploy transaction — and on the shared CI runner it took longer than
        this file's default 90 s (2026/09/21), so the poll below never got to
        see the sponsor asked. The budget covers the poll it contains. */
+    const context = await browser.newContext(
+      walkContextOptions({ viewport: { width: 420, height: 900 } }),
+    );
+    const page = await context.newPage();
+    const network = await installNetworkBoundary(page);
     test.setTimeout(240_000);
     /* The first wave is a DEPLOY of the account custody build, which needs
        that build's verifier keys staged under /zk/account-custody. They are
@@ -251,11 +256,6 @@ test.describe('a passkey with no Passport yet', () => {
       !probe.ok(),
       'this build carries no account-custody verifier keys, so wave 1 cannot be built here',
     );
-    const context = await browser.newContext(
-      walkContextOptions({ viewport: { width: 420, height: 900 } }),
-    );
-    const page = await context.newPage();
-    const network = await installNetworkBoundary(page);
     await installVirtualAuthenticator(context, page);
     await page.goto(WALK);
     await page.getByRole('button', { name: SIGN_IN_BUTTON }).click();
