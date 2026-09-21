@@ -41,6 +41,17 @@ import {
   openCustodyInboxEntry,
 } from './custodyInbox.js';
 
+/**
+ * The delivery-watch drills run the whole bounded loop — twenty looks, each
+ * one sealing a real entry and decoding a real ledger — under fake timers.
+ * The work is bounded by attempts, not by time, and on a shared CI runner it
+ * can take longer than vitest's default five seconds (2026/09/18: the
+ * "reports unconfirmed" and "gives up" drills timed out there while passing
+ * locally in under a second). The budget is generous on purpose: a loop that
+ * really spun would still be caught, by the attempt cap the drills assert.
+ */
+const DELIVERY_WATCH_TEST_TIMEOUT_MS = 60_000;
+
 /* -------------------------------------------------------------------------- */
 /* The seams                                                                  */
 /* -------------------------------------------------------------------------- */
@@ -428,7 +439,7 @@ describe('depositShielded, into the newer build', () => {
     );
     await expect(watched).resolves.toMatchObject({ delivery: 'unconfirmed' });
     expect(calls).toHaveLength(1);
-  });
+  }, DELIVERY_WATCH_TEST_TIMEOUT_MS);
 
   it('is not talked into confirming by somebody else’s payment landing', async () => {
     /* The list grows for every payment anybody makes into that account. Ours
@@ -447,7 +458,7 @@ describe('depositShielded, into the newer build', () => {
       depositShielded(walletHolding(0n), { contractAddress: PEER, coin: COIN }),
     );
     await expect(watched).resolves.toMatchObject({ delivery: 'unconfirmed' });
-  });
+  }, DELIVERY_WATCH_TEST_TIMEOUT_MS);
 });
 
 /* -------------------------------------------------------------------------- */
@@ -631,7 +642,7 @@ describe('the delivery watch', () => {
 
     await expect(watched).resolves.toMatchObject({ delivery: 'delivered' });
     expect(stateReads).toBe(3);
-  });
+  }, DELIVERY_WATCH_TEST_TIMEOUT_MS);
 
   it('gives up after a bounded number of attempts rather than spinning', async () => {
     payableRecipient();
@@ -647,7 +658,7 @@ describe('the delivery watch', () => {
        may well be there. */
     expect(stateReads).toBeGreaterThan(5);
     expect(stateReads).toBeLessThanOrEqual(25);
-  });
+  }, DELIVERY_WATCH_TEST_TIMEOUT_MS);
 
   it('is not confirmed by an entry that shares all but one byte with ours', async () => {
     /* NEAR-MISS, ON PURPOSE. A walk that compared prefixes, or lengths, or
@@ -669,5 +680,5 @@ describe('the delivery watch', () => {
     );
 
     await expect(watched).resolves.toMatchObject({ delivery: 'unconfirmed' });
-  });
+  }, DELIVERY_WATCH_TEST_TIMEOUT_MS);
 });
