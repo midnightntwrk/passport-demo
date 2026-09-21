@@ -88,10 +88,23 @@
   background: color-mix(in srgb, var(--mn-surface-raised) 74%, transparent);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, .03);
 }
-.mnob-social:hover {
+.mnob-social:hover:not(:disabled) {
   border-color: var(--mn-accent-violet);
   color: var(--mn-text-primary);
   background: color-mix(in srgb, var(--mn-accent-soft) 64%, var(--mn-surface-raised));
+}
+.mnob-social:disabled {
+  opacity: 1;
+  color: var(--mn-text-secondary);
+  border-color: var(--mn-border-medium);
+  background: var(--mn-surface-card);
+  transform: none;
+}
+.mnob-social-note {
+  margin-top: 8px;
+  padding-inline: 4px;
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 /* Fade only the artwork's perimeter; its orbital detail stays crisp. */
