@@ -249,7 +249,7 @@
   --mn-shadow-ink: 0 4px 10px rgba(0, 0, 0, 0.5), 0 14px 36px rgba(0, 0, 0, 0.62);
   --mn-shadow-accent: 0 8px 30px rgba(0, 0, 254, 0.38), 0 3px 14px rgba(101, 92, 255, .24);
 
-  --mn-focus-ring: var(--mn-accent-hover);
+  --mn-focus-ring: var(--mn-accent-ink);
 
   --mn-wordmark-filter: invert(1);
   --mn-app-icon-filter: none;
@@ -299,7 +299,7 @@
     --mn-shadow-ink: 0 4px 10px rgba(0, 0, 0, 0.5), 0 14px 36px rgba(0, 0, 0, 0.62);
     --mn-shadow-accent: 0 8px 30px rgba(0, 0, 254, 0.38), 0 3px 14px rgba(101, 92, 255, .24);
 
-    --mn-focus-ring: var(--mn-accent-hover);
+    --mn-focus-ring: var(--mn-accent-ink);
 
     --mn-wordmark-filter: invert(1);
     --mn-app-icon-filter: none;

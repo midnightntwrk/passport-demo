@@ -74,6 +74,11 @@
         text-transform: uppercase;
       }
       :root[data-theme='light'] #mn-splash .mn-splash-kicker { color: #5b616e; }
+      @media (prefers-color-scheme: light) {
+        :root:not([data-theme]) #mn-splash { background: #ffffff; }
+        :root:not([data-theme]) #mn-splash img { filter: none; }
+        :root:not([data-theme]) #mn-splash .mn-splash-kicker { color: #5b616e; }
+      }
       #mn-splash .mn-splash-pulse { animation: mn-splash-pulse 1.6s ease-in-out infinite; }
       @keyframes mn-splash-pulse {
         0%, 100% { opacity: 1; }
