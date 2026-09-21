@@ -180,36 +180,24 @@ describe('the holdings a Passport shows', () => {
 /* The offer, for every stage a payment can stop at                           */
 /* -------------------------------------------------------------------------- */
 
-describe('what a Passport says about a payment it did not see land', () => {
+describe('what a Passport offers about a payment that stopped', () => {
   const expectations: {
-    name: string;
     stage: CustodyShieldedSendStage;
-    patch?: { sendTxId?: string | null };
-    kind: 'none' | 'report';
+    kind: 'none' | 'finish' | 'report';
     says?: RegExp;
   }[] = [
-    {
-      name: 'sending with a transaction away',
-      stage: 'sending',
-      patch: { sendTxId: 'cc'.repeat(32) },
-      kind: 'report',
-      says: /either it reached alice\.night or nothing left/,
-    },
-    /* NOTHING WAS EVER SUBMITTED, so the offer is still a report — there is
-       something to say — but what it says is the stronger sentence. */
-    {
-      name: 'sending with nothing ever submitted',
-      stage: 'sending',
-      patch: { sendTxId: null },
-      kind: 'report',
-      says: /Nothing was sent, and it is all still in your Passport\./,
-    },
-    { name: 'done', stage: 'done', kind: 'none' },
+    { stage: 'withdrawing', kind: 'report', says: /still in your Passport/ },
+    { stage: 'awaiting-note', kind: 'finish', says: /can still be delivered/ },
+    { stage: 'depositing', kind: 'finish', says: /can still be delivered/ },
+    { stage: 'returning', kind: 'report', says: /being put back/ },
+    { stage: 'unconfirmed', kind: 'report', says: /nothing here can see whether/ },
+    { stage: 'stranded', kind: 'report', says: /could not be put back/ },
+    { stage: 'done', kind: 'none' },
   ];
 
   for (const expectation of expectations) {
-    it(`offers ${expectation.kind} at ${expectation.name}`, () => {
-      const offer = custodyResumeOffer(record({ stage: expectation.stage, ...expectation.patch }));
+    it(`offers ${expectation.kind} at ${expectation.stage}`, () => {
+      const offer = custodyResumeOffer(record({ stage: expectation.stage }));
       expect(offer.kind).toBe(expectation.kind);
       if (expectation.says !== undefined && 'sentence' in offer) {
         expect(offer.sentence).toMatch(expectation.says);
@@ -221,19 +209,21 @@ describe('what a Passport says about a payment it did not see land', () => {
     expect(custodyResumeOffer(null)).toEqual({ kind: 'none' });
   });
 
-  it('never offers a button, because there is no leg for one to run', () => {
-    /* A send is one transaction. "Finish this payment" would be an offer to
-       send the money a second time. */
-    const offer = custodyResumeOffer(record({ stage: 'sending' }));
-    expect(Object.keys(offer).sort()).toEqual(['kind', 'sentence']);
+  it('names the amount and the colour out of the record, not off the screen', () => {
+    /* The money has left the account, so the colour may have no row left at
+       all — "your payment of 40" with nothing after it is worse than a
+       shortened colour. */
+    const offer = custodyResumeOffer(record({ stage: 'awaiting-note' }));
+    expect(offer).toMatchObject({ kind: 'finish', action: 'Finish this payment' });
+    if (offer.kind !== 'finish') throw new Error('unreachable');
+    expect(offer.sentence).toContain('40 mUSD');
+    expect(offer.sentence).toContain('alice.night');
   });
 
   it('still reads as a sentence when there is no name to use', () => {
-    const offer = custodyResumeOffer(
-      record({ stage: 'sending', recipientLabel: '  ', sendTxId: 'cc'.repeat(32) }),
-    );
-    if (offer.kind !== 'report') throw new Error('unreachable');
-    expect(offer.sentence).toContain('them');
+    const offer = custodyResumeOffer(record({ stage: 'awaiting-note', recipientLabel: '  ' }));
+    if (offer.kind !== 'finish') throw new Error('unreachable');
+    expect(offer.sentence).toContain('to somebody');
   });
 });
 
@@ -293,10 +283,19 @@ describe('every sentence this screen can show', () => {
       'Enter an amount like 1 or 1.5.',
     ];
 
-    for (const stage of ['sending', 'done'] as CustodyShieldedSendStage[]) {
+    for (const stage of [
+      'withdrawing',
+      'awaiting-note',
+      'depositing',
+      'returning',
+      'unconfirmed',
+      'stranded',
+      'done',
+    ] as CustodyShieldedSendStage[]) {
       sentences.push(custodyShieldedSendOutcome(record({ stage })));
       const offer = custodyResumeOffer(record({ stage }));
-      if (offer.kind === 'report') sentences.push(offer.sentence);
+      if ('sentence' in offer) sentences.push(offer.sentence);
+      if ('action' in offer) sentences.push(offer.action);
     }
 
     for (const failure of failures) {
@@ -305,7 +304,7 @@ describe('every sentence this screen can show', () => {
 
     /* A count, so a refactor that quietly stops enumerating is a failure here
        rather than a green run over nothing. */
-    expect(sentences.length).toBeGreaterThan(20);
+    expect(sentences.length).toBeGreaterThan(25);
     for (const sentence of sentences) {
       expect(sentence, sentence).not.toMatch(FORBIDDEN);
       expect(sentence.length, sentence).toBeGreaterThan(0);

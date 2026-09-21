@@ -4,7 +4,7 @@
  *
  * WHY THESE THREE AND NOT THE WHOLE SCREEN
  * ----------------------------------------
- * `../screens/DynamicPassport.tsx` is a React component: it holds refs, awaits
+ * `../screens/CustodyPassport.tsx` is a React component: it holds refs, awaits
  * a wallet, writes `localStorage`, and paints. None of that can be asserted on
  * cheaply, and most of it does not need to be — a heading in the wrong place is
  * a thing a reader sees and reports. These three are different, because each
@@ -49,9 +49,70 @@
  * it.
  */
 
+import { pollUntilTrue } from './chainWait.js';
+import type { CustodyShieldedSendStage } from '../identity/custodyContractSend.js';
 
 /* -------------------------------------------------------------------------- */
-/* 1. One payment at a time                                                   */
+/* 1. Putting a note back, or not                                             */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * What a failed last leg means, and what is to be done about it.
+ *
+ * `stage` is the record's next stage — the one place that answers "where is my
+ * money" for a payment that stopped (`../identity/custodyContractSend.ts`'s
+ * `custodyShieldedSendOutcome` reads it) — and `deposit` says whether there is
+ * a return leg left to run.
+ */
+export interface CustodyDeliveryDecision {
+  readonly stage: CustodyShieldedSendStage;
+  /** Whether the note is to be deposited back into the sender's own account. */
+  readonly deposit: boolean;
+}
+
+/** What the wallet said when it was asked whether it still holds the note. */
+export interface CustodyDeliveryFailureInput {
+  /**
+   * Whether the note paid by leg one is STILL HELD by this wallet, by nonce.
+   *
+   * Three values and they mean three different things. `true` is the note here
+   * and undelivered. `false` is the note gone — either the recipient has it or
+   * something else does, and this screen cannot tell which. `null` is a wallet
+   * that could not be asked, which is not the same as an answer.
+   */
+  readonly stillHeld: boolean | null;
+  /** Whether the return leg has ALSO failed. Only then is the value stranded. */
+  readonly returnFailed?: boolean;
+}
+
+/**
+ * Whether to put the note back, and what the record says either way.
+ *
+ * A NOTE THAT IS GONE IS NEVER SENT ANYWHERE. `stillHeld: false` is the case
+ * this function exists for: the leg threw, and the transaction it threw out of
+ * had already been broadcast. Re-sending that note is a double spend the node
+ * refuses, and doing it under the line "putting it back in your Passport"
+ * tells somebody their money is coming home when it may well be with the
+ * person they paid. So the record goes to `'unconfirmed'`, whose sentence says
+ * exactly that much and no more.
+ *
+ * A WALLET THAT COULD NOT BE ASKED IS TREATED AS STILL HOLDING IT. The two
+ * mistakes are not the same size: a deposit-back of a note that is gone is
+ * refused by the node and costs a fee, while not returning a note that IS held
+ * leaves the value in a wallet with no screen that can reach it — Home sweeps
+ * NIGHT and cannot see a shielded note. So an unanswerable wallet takes the
+ * recoverable branch.
+ */
+export function custodyDeliveryFailure(
+  input: CustodyDeliveryFailureInput,
+): CustodyDeliveryDecision {
+  if (input.returnFailed === true) return { stage: 'stranded', deposit: false };
+  if (input.stillHeld === false) return { stage: 'unconfirmed', deposit: false };
+  return { stage: 'returning', deposit: true };
+}
+
+/* -------------------------------------------------------------------------- */
+/* 2. One thing at a time                                                     */
 /* -------------------------------------------------------------------------- */
 
 /**
@@ -141,6 +202,94 @@ export async function runCustodyWork(
 
 /* -------------------------------------------------------------------------- */
 /* 2b. Whether the note a stopped payment left is here YET                    */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * What Finish says when the note leg one paid is not in this Passport's hands
+ * yet.
+ *
+ * NOT A FAILURE, AND IT NAMES THE BUTTON. The value has left the account and
+ * the wallet's own sync has not applied the arrival; the one thing a person can
+ * do is press the same button again in a moment, so the sentence says that and
+ * nothing about a sync, a note, or a leg.
+ */
+export const CUSTODY_FINISH_NOT_SETTLED_YET =
+  'This payment has not settled yet, so it cannot be sent on. Give it a moment and press Finish this payment again.';
+
+/** Where this payment's note is: here, or not here yet. */
+export type CustodyStoppedNoteOutcome<TNote> =
+  | { readonly kind: 'here'; readonly note: TNote }
+  | { readonly kind: 'not-yet'; readonly sentence: string };
+
+/** How this payment's note is looked for, read afresh on every look. */
+export interface CustodyStoppedNoteLook<TNote extends { readonly nonce: string }> {
+  /** Every shielded note this Passport's own wallet holds, now. */
+  readonly notes: () => Promise<readonly TNote[]>;
+  /**
+   * Which of them is this payment's, for a record that kept NO nonce.
+   *
+   * A payment interrupted between leg one landing and the note being identified
+   * has no nonce to go on, and the snapshot of what was held before went with
+   * the tab. `../lib/shieldedNote.ts`'s rule is the fall-back and it is the
+   * caller's, not this one's.
+   */
+  readonly withoutNonce: (notes: readonly TNote[]) => TNote | null;
+}
+
+/**
+ * Waits for the note a stopped payment left behind, the way the send itself
+ * waits for it.
+ *
+ * THE DEFECT THIS IS THE REPAIR FOR (live re-run, 2026/09/18). Finish read the
+ * wallet's notes ONCE. Pressed 45 seconds after a Passport was re-opened it
+ * failed in under a second — the wallet had not applied the arrival yet — and
+ * pressed three minutes later the same button completed the same payment. A
+ * person cannot tell those two presses apart, so the difference read as a
+ * payment that sometimes works: the wait belongs on both paths, with the same
+ * window and the same line on screen.
+ *
+ * BY THE NONCE WHERE THERE IS ONE, which is exact: that nonce came out of leg
+ * one's own result and names one note in the world. A `0x` prefix and case are
+ * not part of the name.
+ *
+ * `'not-yet'` IS NOT `'gone'`. The window closing says nothing about whether
+ * the note exists — `pollUntilTrue` counts a read that threw as a no — so
+ * nothing is written, nothing is sent, and the record is left exactly as it
+ * was for the next press.
+ */
+export async function awaitCustodyStoppedNote<TNote extends { readonly nonce: string }>(
+  noteNonce: string | null,
+  look: CustodyStoppedNoteLook<TNote>,
+  wait: {
+    readonly windowMs: number;
+    readonly intervalMs: number;
+    readonly now?: () => number;
+    readonly sleep?: (milliseconds: number) => Promise<void>;
+  },
+): Promise<CustodyStoppedNoteOutcome<TNote>> {
+  const wanted = bareNonce(noteNonce);
+  /* A BOX, because what the poll finds has to survive the closure it is found
+     in — the same shape the screen's own note wait uses. */
+  const found: { note: TNote | null } = { note: null };
+  await pollUntilTrue(async () => {
+    const notes = await look.notes();
+    found.note =
+      wanted.length > 0
+        ? notes.find((note) => bareNonce(note.nonce) === wanted) ?? null
+        : look.withoutNonce(notes);
+    return found.note !== null;
+  }, wait);
+  if (found.note === null) {
+    return { kind: 'not-yet', sentence: CUSTODY_FINISH_NOT_SETTLED_YET };
+  }
+  return { kind: 'here', note: found.note };
+}
+
+/** A nonce with nothing on it that is not the nonce. */
+function bareNonce(nonce: string | null): string {
+  return typeof nonce === 'string' ? nonce.trim().toLowerCase().replace(/^0x/, '') : '';
+}
+
 /* -------------------------------------------------------------------------- */
 /* 3. What the walk found, as a figure                                        */
 /* -------------------------------------------------------------------------- */

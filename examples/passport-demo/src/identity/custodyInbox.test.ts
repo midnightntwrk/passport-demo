@@ -368,6 +368,41 @@ describe('the viewing key this Passport keeps', () => {
     );
   });
 
+  /* THE PASSKEY ARM'S VIEWING SECRET. Derived from the same authenticator as
+     the device key, so a Passport reinstalled on a new phone re-derives the
+     key its own inbox was sealed to. See PASSPORT_ENC_LABEL. */
+  it('files a derived secret into an empty slot, and advertises its public half', () => {
+    const { storage: store } = fakeStorage();
+    const derived = '5c'.repeat(32);
+    const pair = custodyEncKeyPair(store, 'passkey-a', ACCOUNT, undefined, derived);
+    expect(pair.secretKeyHex).toBe(derived);
+    expect(pair.publicKeyHex).toBe(custodyEncPublicKey(derived));
+    /* And it is remembered, so the next visit does not have to re-derive. */
+    expect(custodyEncKeyPair(store, 'passkey-a', ACCOUNT)).toEqual(pair);
+  });
+
+  it('re-derives the same key for the same passkey, with nothing in storage', () => {
+    const derived = '5c'.repeat(32);
+    const first = custodyEncKeyPair(fakeStorage().storage, 'passkey-a', ACCOUNT, undefined, derived);
+    const reinstalled = custodyEncKeyPair(fakeStorage().storage, 'passkey-a', ACCOUNT, undefined, derived);
+    expect(reinstalled).toEqual(first);
+  });
+
+  /* A stored key is a key somebody has already sealed to. Replacing it would
+     make exactly the entries the derivation exists to recover unreadable. */
+  it('never replaces a secret already in the slot', () => {
+    const { storage: store } = fakeStorage();
+    const stored = custodyEncKeyPair(store, 'passkey-a', ACCOUNT);
+    expect(custodyEncKeyPair(store, 'passkey-a', ACCOUNT, undefined, '5c'.repeat(32))).toEqual(stored);
+  });
+
+  it('falls back to a random secret when the derived one is not 32 bytes', () => {
+    const { storage: store } = fakeStorage();
+    const pair = custodyEncKeyPair(store, 'passkey-a', ACCOUNT, undefined, 'too short');
+    expect(pair.secretKeyHex).not.toBe('too short');
+    expect(pair.secretKeyHex.length).toBe(64);
+  });
+
   it('does not make a second key out of a different spelling', () => {
     const { storage: store } = fakeStorage();
     const made = custodyEncKeyPair(store, 'USER-A', ACCOUNT);

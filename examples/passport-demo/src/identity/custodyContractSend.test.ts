@@ -22,13 +22,10 @@ import {
   newCustodyShieldedSend,
   nextCustodyShieldedSendStep,
   saveCustodyShieldedSend,
-  spendFailureText,
   spendPositionMayBeWrong,
   CUSTODY_APPROVAL_WAITING,
   CUSTODY_SHIELDED_SEND_KEY,
-  custodyShieldedAddressSendRefusal,
   custodyShieldedSendRefusal,
-  planCustodyShieldedAddressSend,
   planCustodyShieldedSend,
   shieldedDepositRouteFor,
   depositCircuitFor,
@@ -37,7 +34,6 @@ import {
   custodyUnshieldedBalance,
   planCustodySend,
   type CustodySendPlanInput,
-  type CustodyShieldedAddressSendPlanInput,
   type CustodyShieldedSendPlanInput,
   type CustodyShieldedSendRecord,
   type CustodyUnshieldedLedger,
@@ -204,14 +200,9 @@ describe('custodyUnshieldedBalance', () => {
  * The second is that a custody recipient with no published encryption key is
  * REFUSED rather than paid: a deposit into one of these accounts without a
  * sealed description is a coin that has arrived and that nobody can ever move.
- *
- * The third is the PROTOTYPE recipient, refused because a payment to one
- * cannot be a single transaction at all — the two builds compile to different
- * intermediate representations and are proved by different services — and the
- * only other way to reach one is through a wallet the ruling of 2026/09/18
- * forbids in a value flow.
  */
 const ENC_KEY = 'ab'.repeat(32);
+const OWN_ENC_KEY = 'cd'.repeat(32);
 const NONCE = '7f'.repeat(32);
 
 function shieldedInput(
@@ -221,25 +212,12 @@ function shieldedInput(
     record: RECORD,
     colourHex: '1a'.repeat(32),
     amount: 40n,
+    ownShieldedAddress: 'mn_shield-addr_test1sender',
     recipientAccountAddress: 'dd'.repeat(32),
-    recipientModule: 'account-custody',
+    recipientModule: 'account',
     heldCoin: { nonce: NONCE, value: 100n, mtIndex: 7n },
     queuedValues: [],
-    recipientEncKeyHex: ENC_KEY,
-    ...patch,
-  };
-}
-
-function addressInput(
-  patch: Partial<CustodyShieldedAddressSendPlanInput> = {},
-): CustodyShieldedAddressSendPlanInput {
-  return {
-    record: RECORD,
-    colourHex: '1a'.repeat(32),
-    amount: 40n,
-    recipientShieldedAddress: 'mn_shield-addr_test1qqqqqqqqq',
-    heldCoin: { nonce: NONCE, value: 100n, mtIndex: 7n },
-    queuedValues: [],
+    ownEncKeyHex: OWN_ENC_KEY,
     ...patch,
   };
 }
@@ -258,7 +236,7 @@ describe('custodyShieldedSendRefusal', () => {
     expect(custodyShieldedSendRefusal(shieldedInput())).toBeNull();
     expect(
       custodyShieldedSendRefusal(
-        shieldedInput({ recipientEncKeyHex: `0x${ENC_KEY.toUpperCase()}` }),
+        shieldedInput({ recipientModule: 'account-custody', recipientEncKeyHex: ENC_KEY }),
       ),
     ).toBeNull();
   });
@@ -266,160 +244,133 @@ describe('custodyShieldedSendRefusal', () => {
   it('refuses before the Passport is finished being set up', () => {
     expect(custodyShieldedSendRefusal(shieldedInput({ record: null }))).toMatch(/still being set up/);
     expect(
-      custodyShieldedSendRefusal(shieldedInput({ record: { ...RECORD, activated: false } })),
-    ).toMatch(/still being set up/);
-    expect(
       custodyShieldedSendRefusal(shieldedInput({ record: { ...RECORD, address: null } })),
     ).toMatch(/still being set up/);
+    expect(
+      custodyShieldedSendRefusal(shieldedInput({ record: { ...RECORD, activated: false } })),
+    ).toMatch(/still being set up/);
   });
 
-  it('refuses an amount of nothing', () => {
+  it('refuses an amount of nothing, and an address it has not got yet', () => {
     expect(custodyShieldedSendRefusal(shieldedInput({ amount: 0n }))).toMatch(/greater than zero/);
+    expect(custodyShieldedSendRefusal(shieldedInput({ amount: -1n }))).toMatch(/greater than zero/);
+    expect(custodyShieldedSendRefusal(shieldedInput({ ownShieldedAddress: '   ' }))).toMatch(
+      /still opening/,
+    );
   });
 
-  it('refuses a name that is not a Passport at all', () => {
+  it('refuses a name that is not a Passport', () => {
     expect(custodyShieldedSendRefusal(shieldedInput({ recipientModule: 'midnames' }))).toMatch(
       /does not belong to a Passport/,
     );
   });
 
-  it('refuses an older Passport, because the payment could not be one transaction', () => {
-    /* THE REFUSAL WORTH ARGUING WITH. A passkey Passport's account is a
-       different build, compiled to a different intermediate representation and
-       proved by a different service, so one transaction cannot hold a call of
-       each — and the only other route is through a wallet the ruling forbids. */
-    for (const module of ['account', 'account-v1'] as const) {
-      expect(custodyShieldedSendRefusal(shieldedInput({ recipientModule: module }))).toMatch(
-        /older kind/,
-      );
-    }
-  });
-
   it('tells an empty colour apart from an amount split across payments', () => {
-    expect(custodyShieldedSendRefusal(shieldedInput({ heldCoin: null }))).toMatch(/holds none/);
+    expect(custodyShieldedSendRefusal(shieldedInput({ heldCoin: null }))).toMatch(/holds none of that/);
+    /* Not enough anywhere: the plain refusal. */
     expect(
       custodyShieldedSendRefusal(
-        shieldedInput({ heldCoin: { nonce: NONCE, value: 10n, mtIndex: 1n }, amount: 100n }),
+        shieldedInput({ amount: 500n, heldCoin: { nonce: NONCE, value: 100n, mtIndex: 7n }, queuedValues: [100n] }),
       ),
     ).toMatch(/do not hold enough/);
-    expect(
-      custodyShieldedSendRefusal(
-        shieldedInput({
-          heldCoin: { nonce: NONCE, value: 10n, mtIndex: 1n },
-          queuedValues: [50n, 60n],
-          amount: 100n,
-        }),
-      ),
-    ).toMatch(/arrived as separate payments/);
+    /* Enough in total, and not in one payment — which is a different sentence,
+       because the money IS there. */
+    const split = custodyShieldedSendRefusal(
+      shieldedInput({ amount: 150n, queuedValues: [100n] }),
+    );
+    expect(split).toMatch(/separate payments/);
+    expect(split).not.toMatch(/do not hold enough/);
   });
 
-  it('refuses a recipient whose encryption key is missing or malformed', () => {
-    for (const key of [null, undefined, '', 'nonsense', ENC_KEY.slice(0, 60)]) {
-      expect(custodyShieldedSendRefusal(shieldedInput({ recipientEncKeyHex: key }))).toMatch(
-        /cannot be paid this kind of amount yet/,
-      );
+  it('refuses a custody recipient that publishes no usable key to seal to', () => {
+    const custody = { recipientModule: 'account-custody' as const };
+    expect(custodyShieldedSendRefusal(shieldedInput(custody))).toMatch(/cannot be paid/);
+    expect(
+      custodyShieldedSendRefusal(shieldedInput({ ...custody, recipientEncKeyHex: null })),
+    ).toMatch(/cannot be paid/);
+    expect(
+      custodyShieldedSendRefusal(shieldedInput({ ...custody, recipientEncKeyHex: 'short' })),
+    ).toMatch(/cannot be paid/);
+    expect(
+      custodyShieldedSendRefusal(shieldedInput({ ...custody, recipientEncKeyHex: 12 as never })),
+    ).toMatch(/cannot be paid/);
+  });
+
+  it('says none of the words a person has never chosen to meet', () => {
+    const forbidden = /wallet address|DUST|contract|registry|indexer|resolver|sponsor|SDK|Dynamic/i;
+    const sentences = [
+      custodyShieldedSendRefusal(shieldedInput({ record: null })),
+      custodyShieldedSendRefusal(shieldedInput({ amount: 0n })),
+      custodyShieldedSendRefusal(shieldedInput({ ownShieldedAddress: '' })),
+      custodyShieldedSendRefusal(shieldedInput({ recipientModule: 'midnames' })),
+      custodyShieldedSendRefusal(shieldedInput({ heldCoin: null })),
+      custodyShieldedSendRefusal(shieldedInput({ amount: 5_000n })),
+      custodyShieldedSendRefusal(shieldedInput({ amount: 150n, queuedValues: [100n] })),
+      custodyShieldedSendRefusal(shieldedInput({ recipientModule: 'account-custody' })),
+    ];
+    for (const sentence of sentences) {
+      expect(sentence).not.toBeNull();
+      expect(sentence).not.toMatch(forbidden);
     }
   });
 });
 
 describe('planCustodyShieldedSend', () => {
-  it('is ONE leg: the gated spend to the recipient’s account, binding the coin', () => {
-    expect(planCustodyShieldedSend(shieldedInput()).transfer).toEqual({
-      operation: 'withdraw_shielded_to_contract',
+  it('spends EXACTLY the amount, out to this Passport\'s own address, binding the coin', () => {
+    const plan = planCustodyShieldedSend(shieldedInput());
+    expect(plan.withdraw).toEqual({
+      operation: 'withdraw_shielded',
+      colourHex: '1a'.repeat(32),
+      amount: 40n,
+      ownShieldedAddress: 'mn_shield-addr_test1sender',
+      coin: { nonce: NONCE, value: 100n, mtIndex: 7n },
+    });
+    /* Leg two looks for a note of exactly the amount, not the whole coin. */
+    expect(plan.await).toEqual({ colourHex: '1a'.repeat(32), amount: 40n });
+  });
+
+  it('deposits the note alone into a prototype account', () => {
+    expect(planCustodyShieldedSend(shieldedInput()).deposit).toEqual({
+      route: 'prototype',
+      circuit: 'deposit_shielded',
+      contractAddress: 'dd'.repeat(32),
+      colourHex: '1a'.repeat(32),
+      amount: 40n,
+    });
+  });
+
+  it('deposits the note AND a sealed description into another of these accounts', () => {
+    const plan = planCustodyShieldedSend(
+      shieldedInput({
+        recipientModule: 'account-custody',
+        recipientEncKeyHex: `0x${ENC_KEY.toUpperCase()}`,
+      }),
+    );
+    expect(plan.deposit).toEqual({
+      route: 'custody',
+      circuit: 'deposit_shielded',
       contractAddress: 'dd'.repeat(32),
       colourHex: '1a'.repeat(32),
       amount: 40n,
       recipientEncKeyHex: ENC_KEY,
-      coin: { nonce: NONCE, value: 100n, mtIndex: 7n },
     });
   });
 
-  it('normalises the recipient’s encryption key however it was published', () => {
+  it('knows where to put the note back, and says so plainly when it does not', () => {
+    expect(planCustodyShieldedSend(shieldedInput()).returnToSender).toEqual({
+      circuit: 'deposit_shielded',
+      contractAddress: RECORD.address,
+      colourHex: '1a'.repeat(32),
+      ownEncKeyHex: OWN_ENC_KEY,
+    });
+    expect(planCustodyShieldedSend(shieldedInput({ ownEncKeyHex: null })).returnToSender).toBeNull();
     expect(
-      planCustodyShieldedSend(shieldedInput({ recipientEncKeyHex: `0x${ENC_KEY.toUpperCase()}` }))
-        .transfer.recipientEncKeyHex,
-    ).toBe(ENC_KEY);
-  });
-
-  it('spends EXACTLY the amount, not the whole coin', () => {
-    /* The change comes back in the same transaction as the circuit's own
-       value, so asking for the whole coin would mean sending a stranger more
-       than the amount. */
-    expect(planCustodyShieldedSend(shieldedInput({ amount: 1n })).transfer.amount).toBe(1n);
+      planCustodyShieldedSend(shieldedInput({ ownEncKeyHex: undefined })).returnToSender,
+    ).toBeNull();
   });
 
   it('throws the refusal rather than planning a payment that cannot be made', () => {
     expect(() => planCustodyShieldedSend(shieldedInput({ amount: 0n }))).toThrow(
-      /greater than zero/,
-    );
-  });
-});
-
-describe('a payment to an address somebody pasted', () => {
-  it('lets one through, and plans the single gated spend', () => {
-    expect(custodyShieldedAddressSendRefusal(addressInput())).toBeNull();
-    expect(planCustodyShieldedAddressSend(addressInput())).toEqual({
-      operation: 'withdraw_shielded',
-      colourHex: '1a'.repeat(32),
-      amount: 40n,
-      recipientShieldedAddress: 'mn_shield-addr_test1qqqqqqqqq',
-      coin: { nonce: NONCE, value: 100n, mtIndex: 7n },
-    });
-  });
-
-  it('trims what was pasted, because a copied address brings whitespace with it', () => {
-    expect(
-      planCustodyShieldedAddressSend(
-        addressInput({ recipientShieldedAddress: '  mn_shield-addr_test1qqqqqqqqq \n' }),
-      ).recipientShieldedAddress,
-    ).toBe('mn_shield-addr_test1qqqqqqqqq');
-  });
-
-  it('refuses before the Passport is finished, and an amount of nothing', () => {
-    expect(custodyShieldedAddressSendRefusal(addressInput({ record: null }))).toMatch(
-      /still being set up/,
-    );
-    expect(
-      custodyShieldedAddressSendRefusal(addressInput({ record: { ...RECORD, activated: false } })),
-    ).toMatch(/still being set up/);
-    expect(
-      custodyShieldedAddressSendRefusal(addressInput({ record: { ...RECORD, address: null } })),
-    ).toMatch(/still being set up/);
-    expect(custodyShieldedAddressSendRefusal(addressInput({ amount: 0n }))).toMatch(
-      /greater than zero/,
-    );
-  });
-
-  it('refuses anything that is not a shielded address', () => {
-    for (const typed of ['', '   ', 'alice.night', 'mn_addr_test1qqq', 'mn_shield-addr']) {
-      expect(
-        custodyShieldedAddressSendRefusal(addressInput({ recipientShieldedAddress: typed })),
-      ).toMatch(/not an address this Passport can pay/);
-    }
-  });
-
-  it('tells an empty colour apart from an amount split across payments', () => {
-    expect(custodyShieldedAddressSendRefusal(addressInput({ heldCoin: null }))).toMatch(
-      /holds none/,
-    );
-    expect(
-      custodyShieldedAddressSendRefusal(
-        addressInput({ heldCoin: { nonce: NONCE, value: 10n, mtIndex: 1n }, amount: 100n }),
-      ),
-    ).toMatch(/do not hold enough/);
-    expect(
-      custodyShieldedAddressSendRefusal(
-        addressInput({
-          heldCoin: { nonce: NONCE, value: 10n, mtIndex: 1n },
-          queuedValues: [50n, 60n],
-          amount: 100n,
-        }),
-      ),
-    ).toMatch(/arrived as separate payments/);
-  });
-
-  it('throws the refusal rather than planning a payment that cannot be made', () => {
-    expect(() => planCustodyShieldedAddressSend(addressInput({ amount: 0n }))).toThrow(
       /greater than zero/,
     );
   });
@@ -480,38 +431,6 @@ describe('changeCoinFromResult', () => {
   });
 });
 
-describe('spendFailureText', () => {
-  /* THE DEFECT THIS CATCHES, live on 2026/09/18 and on the second attempt at
-     fixing it: a WebAssembly trap is `name: 'RuntimeError'`, `message:
-     'unreachable'`, so the message on its own is one word with nothing in it to
-     recognise — and the predicate below, however right, cannot judge evidence it
-     is not given. It is also what a person was shown: the alert read
-     `unreachable`. */
-  it('carries the error’s name, because a WASM trap keeps its evidence there', () => {
-    const trap = new Error('unreachable');
-    trap.name = 'RuntimeError';
-    expect(spendFailureText(trap)).toBe('RuntimeError: unreachable');
-    expect(spendPositionMayBeWrong(spendFailureText(trap))).toBe(true);
-  });
-
-  it('does not repeat a name the message already carries', () => {
-    const named = new Error('RuntimeError: unreachable');
-    named.name = 'RuntimeError';
-    expect(spendFailureText(named)).toBe('RuntimeError: unreachable');
-  });
-
-  it('adds nothing when the name says nothing', () => {
-    const nameless = new Error('could not build the merkle path');
-    nameless.name = '';
-    expect(spendFailureText(nameless)).toBe('could not build the merkle path');
-  });
-
-  it('reads anything that is not an error as itself', () => {
-    expect(spendFailureText('a plain string')).toBe('a plain string');
-    expect(spendFailureText(null)).toBe('null');
-  });
-});
-
 describe('spendPositionMayBeWrong', () => {
   it('retries only the failure a different position could fix', () => {
     expect(spendPositionMayBeWrong('could not build the merkle path')).toBe(true);
@@ -521,14 +440,10 @@ describe('spendPositionMayBeWrong', () => {
     expect(spendPositionMayBeWrong('unsatisfiable')).toBe(true);
   });
 
-  /* THE SHAPE THE LIVE FAILURE ACTUALLY HAS (2026/09/18, defect 19). A position
-     past the last leaf the contract's own Zswap state retains does not produce a
-     wrong Merkle path — the runtime traps, and all that reaches the caller is
-     the bare trap. This assertion was `false` until the phase guard went in, and
-     that is precisely why a Passport whose stored position was stale could not
-     send at all. */
-  it('retries the bare runtime trap a stale position really produces', () => {
-    expect(spendPositionMayBeWrong('RuntimeError: unreachable')).toBe(true);
+  /* THE SCENARIO: a position past the last leaf the contract's own Zswap state
+     retains. The runtime does not build a wrong path for it, it traps, and the
+     trap names nothing about positions (live, 2026/09/18). */
+  it('retries a runtime trap from inside the call, which names nothing', () => {
     expect(
       spendPositionMayBeWrong(
         `Unexpected error executing scoped transaction '<unnamed>': RuntimeError: unreachable`,
@@ -543,21 +458,17 @@ describe('spendPositionMayBeWrong', () => {
     expect(spendPositionMayBeWrong('1010: Invalid Transaction: Custom error: 239')).toBe(false);
   });
 
-  /* WHERE THE OLD DISCRIMINATOR WENT. This predicate no longer tries to tell a
-     trap raised while executing the call from a trap raised while submitting
-     it: it cannot, because the wording is the same, and pretending otherwise is
-     what produced defect 19. `spendShieldedK1` answers that question from the
-     proof boundary instead and never asks this one after a proof has come
-     back — so a trap from the submission half is unreachable here rather than
-     mis-sorted here. */
-  it('leaves WHETHER a retry is safe to the caller, and answers only whether it is worth it', () => {
-    expect(spendPositionMayBeWrong('RuntimeError: memory access out of bounds')).toBe(true);
+  /* A TRAP FROM SOMEWHERE ELSE IN THE STACK IS NOT A POSITION'S TRAP.
+     `RuntimeError` is the marker for every WebAssembly trap there is, and the
+     one this retry is armed for happened inside the execution of the call
+     being retried. Reading the rest of them as position failures asks for an
+     approval a different position cannot earn back. */
+  it('does not retry a runtime trap from outside the call being retried', () => {
+    expect(spendPositionMayBeWrong('RuntimeError: memory access out of bounds')).toBe(false);
+    expect(spendPositionMayBeWrong('RuntimeError: unreachable')).toBe(false);
     expect(
       spendPositionMayBeWrong('proving failed: RuntimeError: table index is out of bounds'),
-    ).toBe(true);
-    /* And a submission refusal is still not a position's problem, whatever
-       phase it arrives in. */
-    expect(spendPositionMayBeWrong('1010: Invalid Transaction: Custom error: 217')).toBe(false);
+    ).toBe(false);
   });
 });
 
@@ -609,16 +520,22 @@ describe('the record a stopped send leaves behind', () => {
   it('is written down before leg one goes out, and read back whole', () => {
     const { storage } = storageFake();
     const record = send();
-    expect(record.stage).toBe('sending');
+    expect(record.stage).toBe('withdrawing');
     /* A decimal string, because a bigint does not survive JSON. */
     expect(record.amount).toBe('40');
     saveCustodyShieldedSend(storage, record);
     expect(loadCustodyShieldedSend(storage, ACCOUNT)).toEqual(record);
 
-    /* And once there is a transaction to name it by, that comes back too. */
-    const inFlight = send({ sendTxId: 'tx-send' });
-    saveCustodyShieldedSend(storage, inFlight);
-    expect(loadCustodyShieldedSend(storage, ACCOUNT)).toEqual(inFlight);
+    /* And once the run has learned the note and the transactions it produced,
+       those come back too — they are what a resumed run finishes with. */
+    const midFlight = send({
+      stage: 'depositing',
+      noteNonce: '7f'.repeat(32),
+      withdrawTxId: 'tx-withdraw',
+      depositTxId: 'tx-deposit',
+    });
+    saveCustodyShieldedSend(storage, midFlight);
+    expect(loadCustodyShieldedSend(storage, ACCOUNT)).toEqual(midFlight);
     clearCustodyShieldedSend(storage, ACCOUNT);
     expect(loadCustodyShieldedSend(storage, ACCOUNT)).toBeNull();
   });
@@ -680,7 +597,7 @@ describe('the record a stopped send leaves behind', () => {
         [key]: {
           network: ACCOUNT.network,
           accountAddress: ACCOUNT.accountAddress,
-          stage: 'sending',
+          stage: 'depositing',
           colourHex: '1a'.repeat(32),
           amount: '40',
         },
@@ -689,60 +606,81 @@ describe('the record a stopped send leaves behind', () => {
     expect(loadCustodyShieldedSend(storage, ACCOUNT)).toEqual({
       network: ACCOUNT.network,
       accountAddress: ACCOUNT.accountAddress,
-      stage: 'sending',
+      stage: 'depositing',
       colourHex: '1a'.repeat(32),
       amount: '40',
       recipientLabel: '',
       recipientAccountAddress: '',
-      sendTxId: null,
+      noteNonce: null,
+      withdrawTxId: null,
+      depositTxId: null,
       startedAt: 0,
     });
   });
 
-  it('knows what a run that found a record should do with it', () => {
-    /* TWO STAGES AND NO 'finish'. A send is one transaction, so a record that
-       is not 'done' is one nobody saw land — and what is owed is a sentence,
-       not a button that would offer to send the money twice. */
-    expect(nextCustodyShieldedSendStep(send())).toBe('report');
+  it('knows what a resumed run should do next at every stage', () => {
+    expect(nextCustodyShieldedSendStep(send())).toBe('withdraw');
+    expect(nextCustodyShieldedSendStep(send({ stage: 'awaiting-note' }))).toBe('find-note');
+    /* Depositing with no note identified is the same position one step back —
+       the note is in the wallet and has to be picked out by nonce again. */
+    expect(nextCustodyShieldedSendStep(send({ stage: 'depositing' }))).toBe('find-note');
+    expect(
+      nextCustodyShieldedSendStep(send({ stage: 'depositing', noteNonce: '7f'.repeat(32) })),
+    ).toBe('deposit');
+    expect(nextCustodyShieldedSendStep(send({ stage: 'returning' }))).toBe('report');
+    expect(nextCustodyShieldedSendStep(send({ stage: 'stranded' }))).toBe('report');
     expect(nextCustodyShieldedSendStep(send({ stage: 'done' }))).toBe('nothing');
   });
 
-  it('says where the value is, and never claims more than it can see', () => {
+  it('says where the value is, and never claims it came back when it did not', () => {
     expect(custodyShieldedSendOutcome(send({ stage: 'done' }))).toMatch(/alice\.night has it/);
-    const inFlight = custodyShieldedSendOutcome(send({ sendTxId: 'cc'.repeat(32) }));
-    expect(inFlight).toMatch(/one payment/);
-    expect(inFlight).toMatch(/either it reached alice\.night or nothing left your Passport/);
-    /* AND IT PROMISES NOTHING NOBODY WROTE: no resume, no button, no wait. */
-    expect(inFlight).not.toMatch(/by itself|on its own|Finish/);
+    expect(custodyShieldedSendOutcome(send())).toMatch(/still in your Passport/);
+    expect(custodyShieldedSendOutcome(send({ stage: 'awaiting-note' }))).toMatch(/has not reached/);
+    expect(custodyShieldedSendOutcome(send({ stage: 'depositing' }))).toMatch(/has not reached/);
+    /* AND IT DOES NOT PROMISE A RESUME NOBODY WROTE. There is no auto-resume:
+       the last leg runs when the Finish button is pressed, so a sentence
+       telling somebody to come back and wait left them waiting for good. */
+    for (const stage of ['awaiting-note', 'depositing'] as const) {
+      const sentence = custodyShieldedSendOutcome(send({ stage }));
+      expect(sentence).not.toMatch(/by itself|on its own\./);
+      expect(sentence).toMatch(/press Finish this payment/);
+    }
+    expect(custodyShieldedSendOutcome(send({ stage: 'returning' }))).toMatch(/being put back/);
+    const stranded = custodyShieldedSendOutcome(send({ stage: 'stranded' }));
+    expect(stranded).toMatch(/could not be put back/);
+    expect(stranded).toMatch(/your own receiving address/);
     /* With no name to use, the sentence still has to work. */
     expect(custodyShieldedSendOutcome(send({ stage: 'done', recipientLabel: '  ' }))).toMatch(
       /them has it/,
     );
-    expect(
-      custodyShieldedSendOutcome(send({ recipientLabel: '', sendTxId: 'cc'.repeat(32) })),
-    ).toMatch(/reached them/);
-  });
-
-  /* THE STRONGER SENTENCE, AND WHEN IT IS EARNED (defect 18, fixed
-     2026/09/18). Most of what can go wrong with a payment goes wrong before a
-     transaction exists: the approval is dismissed, the proving service does not
-     answer, the position cannot be proved. A record still holding no id was
-     abandoned in one of those, the coin is untouched, and hedging about it
-     ("either it reached them or nothing left") is a worse answer than the truth.
-     The live run of 2026/09/18 showed the hedge on screen beside a balance that
-     had not moved. */
-  it('says nothing was sent when no transaction was ever submitted', () => {
-    const untouched = custodyShieldedSendOutcome(send({ sendTxId: null }));
-    expect(untouched).toBe('Nothing was sent, and it is all still in your Passport.');
-    /* It must NOT hedge, and it must not offer a resume. */
-    expect(untouched).not.toMatch(/either it reached|one payment|Finish|by itself/);
-  });
-
-  it('hedges only once there is a transaction that could have landed', () => {
-    /* The SAME stage, the only difference being that a transaction exists. */
-    const away = custodyShieldedSendOutcome(send({ sendTxId: 'cc'.repeat(32) }));
-    expect(away).toMatch(/either it reached alice\.night or nothing left your Passport/);
-    expect(away).not.toMatch(/Nothing was sent/);
   });
 });
 
+describe('a payment whose last leg threw after the note had gone', () => {
+  /* THE DEFECT THIS NAMES is a screen that says "held for you" while the
+     recipient has the money. Leg three can be broadcast and still reject — a
+     socket dropping, a confirmation wait running out — so the screen re-reads
+     the wallet before it tries to put anything back, and where the note has
+     left it says exactly that it cannot see which side has it. */
+  it('says nothing here can see whether it arrived, and does not claim it came back', () => {
+    const sentence = custodyShieldedSendOutcome({
+      stage: 'unconfirmed',
+      network: 'stagenet',
+      accountAddress: 'ab'.repeat(32),
+      recipientAccountAddress: 'cd'.repeat(32),
+      recipientLabel: 'alice.night',
+      colourHex: 'ef'.repeat(32),
+      amount: '40',
+      noteNonce: '01'.repeat(32),
+      withdrawTxId: 'ab'.repeat(32),
+      depositTxId: null,
+      startedAt: 1789689600000,
+    });
+    expect(sentence).toBe(
+      'It has left your Passport and nothing here can see whether alice.night has it yet. Check with alice.night before sending it again.',
+    );
+    /* Not the stranded sentence, which promises a sweep of value this Passport
+       may not have. */
+    expect(sentence).not.toMatch(/held for you/);
+  });
+});

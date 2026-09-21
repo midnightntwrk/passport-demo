@@ -201,25 +201,9 @@ describe('the proving endpoint', () => {
 });
 
 describe('the proving request and reply', () => {
-  it('carries every circuit, the transaction as hex, and the network', () => {
-    expect(
-      proveAccountCustodyRequest(['append_inbox_with_k256'], new Uint8Array([0xde, 0xad]), 'stagenet'),
-    ).toEqual({ circuits: ['append_inbox_with_k256'], unprovenTx: 'dead', network: 'stagenet' });
-  });
-
-  it('carries BOTH circuits of a composed transaction', () => {
-    expect(
-      proveAccountCustodyRequest(
-        ['withdraw_shielded_to_contract_with_k256', 'deposit_shielded'],
-        new Uint8Array([0x01]),
-        'stagenet',
-      ).circuits,
-    ).toEqual(['withdraw_shielded_to_contract_with_k256', 'deposit_shielded']);
-  });
-
-  it('refuses a request that names no circuit at all', () => {
-    expect(() => proveAccountCustodyRequest([], new Uint8Array([0x01]), 'stagenet')).toThrow(
-      /name the circuits/,
+  it('carries the circuit, the transaction as hex, and the network', () => {
+    expect(proveAccountCustodyRequest('append_inbox_with_k256', new Uint8Array([0xde, 0xad]), 'stagenet')).toEqual(
+      { circuit: 'append_inbox_with_k256', unprovenTx: 'dead', network: 'stagenet' },
     );
   });
 

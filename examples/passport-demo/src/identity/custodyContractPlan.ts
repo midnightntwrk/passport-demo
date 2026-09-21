@@ -361,18 +361,8 @@ export function custodyProvingEndpoint(sponsorBaseUrl: string | null | undefined
 
 /** The request body `POST /prove-account-custody` takes. */
 export interface ProveCustodyRequest {
-  /**
-   * Every circuit the transaction calls, e.g. `['append_inbox_with_k256']`.
-   *
-   * A LIST BECAUSE A TRANSACTION MAY HAVE TWO CALLS IN IT. The direct transfer
-   * of MIP-0012 §6.6 is the sender's gated spend to a contract recipient with
-   * the payee's own permissionless claim grafted onto the same transaction, and
-   * both have to be staged where the proof is made. The proving service walks
-   * the transaction's own calls either way; naming them buys the refusal — an
-   * unstaged second circuit is refused by name rather than several seconds
-   * later in a prover's own words.
-   */
-  readonly circuits: readonly string[];
+  /** The circuit being proved, e.g. `append_inbox_with_k256`. */
+  readonly circuit: string;
   /** Lower-case hex, no `0x`, of the serialised UNPROVEN transaction. */
   readonly unprovenTx: string;
   /** The network the transaction is for, e.g. `stagenet`. */
@@ -393,14 +383,11 @@ export interface ProveCustodyError {
 
 /** Build the request body. Hex, because JSON has no bytes. */
 export function proveAccountCustodyRequest(
-  circuits: readonly string[],
+  circuit: string,
   unprovenTx: Uint8Array,
   network: string,
 ): ProveCustodyRequest {
-  if (circuits.length === 0) {
-    throw new Error('a proof request must name the circuits its transaction calls');
-  }
-  return { circuits: [...circuits], unprovenTx: bytesToHex(unprovenTx), network };
+  return { circuit, unprovenTx: bytesToHex(unprovenTx), network };
 }
 
 /**

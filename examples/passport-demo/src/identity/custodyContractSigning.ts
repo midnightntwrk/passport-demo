@@ -214,6 +214,27 @@ export interface JubjubAuthorisation {
   readonly grind_nonce: bigint;
 }
 
+/**
+ * A jubjub challenge with everything but the signature nonce and the grind
+ * counter already closed over.
+ *
+ * The signer cannot be handed a finished challenge the way the k256 signer is:
+ * the preimage contains `sig_r`, which the signer only decides once it has
+ * sampled a nonce, and `grind_nonce`, which it increments until the hash reads
+ * below the subgroup order. So the arm's builders hand back a FUNCTION of those
+ * two and keep the call's own arguments inside.
+ */
+export type JubjubChallengeBuilder = (sigR: CurvePoint, grindNonce: bigint) => Uint8Array;
+
+/**
+ * What a gated call's challenge step produces on either arm: the 32 bytes a
+ * k256 device signs, or the builder a jubjub device grinds.
+ *
+ * `k1Call` dispatches on which it got, so one request shape describes a call on
+ * both arms and a caller that is already arm-agnostic stays that way.
+ */
+export type K1Challenge = Uint8Array | JubjubChallengeBuilder;
+
 /** What a `_with_k256` gated circuit consumes after its own arguments. */
 export interface K256Authorisation {
   readonly arm: 'k256';
@@ -288,16 +309,16 @@ export interface CustodyPureCircuits {
   ): Uint8Array;
   envelope_digest(envelope: bigint, challenge: Uint8Array): Uint8Array;
   compute_public_point_with_k256(scalar: bigint): CurvePoint;
+  /**
+   * `sk·G` on JubJub. The generated ABI's JubJub points carry only `x` and `y`
+   * — the neutral element is a representable point on a twisted Edwards curve,
+   * not a flag — so the return is widened to {@link CurvePoint} here and
+   * `custodyJubjubSigner.ts` supplies the `identity: false` the shared shape
+   * wants. Method syntax makes the parameter positions bivariant, so the real
+   * `PureCircuits` still satisfies this interface with no adapter.
+   */
+  compute_public_point_with_jubjub(scalar: bigint): { readonly x: bigint; readonly y: bigint };
   challenge_withdraw_shielded_with_k256(
-    self_addr: ContractAddressArg,
-    pk: CurvePoint,
-    recipient: ContractAddressArg,
-    color: Uint8Array,
-    amount: bigint,
-    coin: QualifiedCoin,
-    nonce_value: bigint,
-  ): Uint8Array;
-  challenge_withdraw_shielded_to_contract_with_k256(
     self_addr: ContractAddressArg,
     pk: CurvePoint,
     recipient: ContractAddressArg,
@@ -325,6 +346,90 @@ export interface CustodyPureCircuits {
     pk: CurvePoint,
     new_entry: Uint8Array,
     nonce_value: bigint,
+  ): Uint8Array;
+
+  /*
+   * The jubjub challenges. Two differences from the k256 ones above, both
+   * read off the generated `index.d.ts` rather than assumed:
+   *
+   *   - `sig_r` comes SECOND, before `pk`. A Schnorr challenge commits to its
+   *     own signature nonce; an ECDSA message must not.
+   *   - `grind_nonce` comes LAST, after `nonce_value`. It is the only argument
+   *     the signer varies, which is what makes the grind a loop over one
+   *     integer rather than a rebuild of the preimage.
+   *
+   * The argument ORDER between those two is the circuit's own declaration
+   * order and it is NOT the same across circuits: `withdraw_unshielded` takes
+   * `(color, amount, recipient)` while the two shielded spends take
+   * `(recipient, color, amount)`. Getting it wrong yields a challenge that
+   * grinds happily and verifies nowhere.
+   */
+  challenge_withdraw_unshielded_with_jubjub(
+    self_addr: ContractAddressArg,
+    sig_r: CurvePoint,
+    pk: CurvePoint,
+    color: Uint8Array,
+    amount: bigint,
+    recipient: ContractAddressArg,
+    nonce_value: bigint,
+    grind_nonce: bigint,
+  ): Uint8Array;
+  challenge_withdraw_shielded_with_jubjub(
+    self_addr: ContractAddressArg,
+    sig_r: CurvePoint,
+    pk: CurvePoint,
+    recipient: ContractAddressArg,
+    color: Uint8Array,
+    amount: bigint,
+    coin: QualifiedCoin,
+    nonce_value: bigint,
+    grind_nonce: bigint,
+  ): Uint8Array;
+  challenge_withdraw_shielded_to_contract_with_jubjub(
+    self_addr: ContractAddressArg,
+    sig_r: CurvePoint,
+    pk: CurvePoint,
+    recipient: ContractAddressArg,
+    color: Uint8Array,
+    amount: bigint,
+    coin: QualifiedCoin,
+    nonce_value: bigint,
+    grind_nonce: bigint,
+  ): Uint8Array;
+  challenge_append_inbox_with_jubjub(
+    self_addr: ContractAddressArg,
+    sig_r: CurvePoint,
+    pk: CurvePoint,
+    entry: Uint8Array,
+    nonce_value: bigint,
+    grind_nonce: bigint,
+  ): Uint8Array;
+  challenge_rotate_enc_key_with_jubjub(
+    self_addr: ContractAddressArg,
+    sig_r: CurvePoint,
+    pk: CurvePoint,
+    new_key: Uint8Array,
+    nonce_value: bigint,
+    grind_nonce: bigint,
+  ): Uint8Array;
+  challenge_add_device_with_jubjub(
+    self_addr: ContractAddressArg,
+    sig_r: CurvePoint,
+    pk: CurvePoint,
+    new_entry: Uint8Array,
+    nonce_value: bigint,
+    grind_nonce: bigint,
+  ): Uint8Array;
+  /* `remove_device`'s argument is named `entry` in the generated ABI, not
+     `commitment` as the reference signer calls it: it is the entry currently
+     in the set, which is the thing the contract removes. */
+  challenge_remove_device_with_jubjub(
+    self_addr: ContractAddressArg,
+    sig_r: CurvePoint,
+    pk: CurvePoint,
+    entry: Uint8Array,
+    nonce_value: bigint,
+    grind_nonce: bigint,
   ): Uint8Array;
 }
 
@@ -462,37 +567,6 @@ export const k256Challenges = {
     );
   },
 
-  /**
-   * The DIRECT-TRANSFER spend (MIP-0012 §6.6), whose recipient is a contract.
-   *
-   * The same argument list as {@link k256Challenges.withdrawShielded} with one
-   * difference that is the whole of the difference: `recipient` is another
-   * account's ADDRESS rather than somebody's coin public key, and the contract
-   * gives it its own domain-separation tag
-   * (`midnight:account:auth:k1:v1:withdraw_shielded_to_contract`) so a
-   * signature over one can never be replayed as the other. The bytes are the
-   * same 32 either way, which is exactly why the tags have to differ.
-   */
-  withdrawShieldedToContract(
-    pure: CustodyPureCircuits,
-    context: K1CallContext,
-    pk: CurvePoint,
-    recipientContract: Uint8Array,
-    color: Uint8Array,
-    amount: bigint,
-    coin: QualifiedCoin,
-  ): Uint8Array {
-    return pure.challenge_withdraw_shielded_to_contract_with_k256(
-      addressArg(context),
-      pk,
-      { bytes: recipientContract },
-      color,
-      amount,
-      coin,
-      context.authNonce,
-    );
-  },
-
   withdrawUnshielded(
     pure: CustodyPureCircuits,
     context: K1CallContext,
@@ -537,6 +611,177 @@ export const k256Challenges = {
       newEntry,
       context.authNonce,
     );
+  },
+} as const;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Challenges (jubjub arm)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The per-circuit challenge builders for the jubjub arm — the seven gated
+ * operations a Passport uses.
+ *
+ * Each mirrors one gated circuit and hands back a {@link JubjubChallengeBuilder}
+ * rather than bytes, because the preimage contains the signature nonce and the
+ * grind counter (see that type). The binding discipline is the k256 arm's: the
+ * circuit's domain-separation tag, the account, `sig_r`, the signing key, every
+ * argument in DECLARATION order, the values returned by every witness
+ * invocation, `auth_nonce`, and `grind_nonce` last.
+ *
+ * THE ARGUMENT ORDER IS PER CIRCUIT AND IT IS NOT UNIFORM. Taken from the
+ * compiled `index.d.ts`, not from the reference client:
+ *
+ * | operation                       | arguments, between `pk` and `nonce_value` |
+ * |---------------------------------|-------------------------------------------|
+ * | `withdraw_unshielded`           | `color, amount, recipient`                |
+ * | `withdraw_shielded`             | `recipient, color, amount, coin`          |
+ * | `withdraw_shielded_to_contract` | `recipient, color, amount, coin`          |
+ * | `append_inbox`                  | `entry`                                   |
+ * | `rotate_enc_key`                | `new_key`                                 |
+ * | `add_device`                    | `new_entry`                               |
+ * | `remove_device`                 | `entry`                                   |
+ *
+ * The two shielded builders take the qualified coin for the same reason their
+ * k256 twins do (AUTH-10): the approver signs over the exact note the spend
+ * will consume, not over a colour and an amount.
+ */
+export const jubjubChallenges = {
+  withdrawUnshielded(
+    pure: CustodyPureCircuits,
+    context: K1CallContext,
+    pk: CurvePoint,
+    color: Uint8Array,
+    amount: bigint,
+    recipient: Uint8Array,
+  ): JubjubChallengeBuilder {
+    return (sigR, grindNonce) =>
+      pure.challenge_withdraw_unshielded_with_jubjub(
+        addressArg(context),
+        sigR,
+        pk,
+        color,
+        amount,
+        { bytes: recipient },
+        context.authNonce,
+        grindNonce,
+      );
+  },
+
+  withdrawShielded(
+    pure: CustodyPureCircuits,
+    context: K1CallContext,
+    pk: CurvePoint,
+    recipient: Uint8Array,
+    color: Uint8Array,
+    amount: bigint,
+    coin: QualifiedCoin,
+  ): JubjubChallengeBuilder {
+    return (sigR, grindNonce) =>
+      pure.challenge_withdraw_shielded_with_jubjub(
+        addressArg(context),
+        sigR,
+        pk,
+        { bytes: recipient },
+        color,
+        amount,
+        coin,
+        context.authNonce,
+        grindNonce,
+      );
+  },
+
+  withdrawShieldedToContract(
+    pure: CustodyPureCircuits,
+    context: K1CallContext,
+    pk: CurvePoint,
+    recipient: Uint8Array,
+    color: Uint8Array,
+    amount: bigint,
+    coin: QualifiedCoin,
+  ): JubjubChallengeBuilder {
+    return (sigR, grindNonce) =>
+      pure.challenge_withdraw_shielded_to_contract_with_jubjub(
+        addressArg(context),
+        sigR,
+        pk,
+        { bytes: recipient },
+        color,
+        amount,
+        coin,
+        context.authNonce,
+        grindNonce,
+      );
+  },
+
+  appendInbox(
+    pure: CustodyPureCircuits,
+    context: K1CallContext,
+    pk: CurvePoint,
+    entry: Uint8Array,
+  ): JubjubChallengeBuilder {
+    return (sigR, grindNonce) =>
+      pure.challenge_append_inbox_with_jubjub(
+        addressArg(context),
+        sigR,
+        pk,
+        entry,
+        context.authNonce,
+        grindNonce,
+      );
+  },
+
+  rotateEncKey(
+    pure: CustodyPureCircuits,
+    context: K1CallContext,
+    pk: CurvePoint,
+    newKey: Uint8Array,
+  ): JubjubChallengeBuilder {
+    return (sigR, grindNonce) =>
+      pure.challenge_rotate_enc_key_with_jubjub(
+        addressArg(context),
+        sigR,
+        pk,
+        newKey,
+        context.authNonce,
+        grindNonce,
+      );
+  },
+
+  /* The new device travels as its already-derived ENTRY, so a jubjub device
+     enrolling a k256 one needs no per-arm-pair builder — see `enrolmentEntry`. */
+  addDevice(
+    pure: CustodyPureCircuits,
+    context: K1CallContext,
+    pk: CurvePoint,
+    newEntry: Uint8Array,
+  ): JubjubChallengeBuilder {
+    return (sigR, grindNonce) =>
+      pure.challenge_add_device_with_jubjub(
+        addressArg(context),
+        sigR,
+        pk,
+        newEntry,
+        context.authNonce,
+        grindNonce,
+      );
+  },
+
+  removeDevice(
+    pure: CustodyPureCircuits,
+    context: K1CallContext,
+    pk: CurvePoint,
+    entry: Uint8Array,
+  ): JubjubChallengeBuilder {
+    return (sigR, grindNonce) =>
+      pure.challenge_remove_device_with_jubjub(
+        addressArg(context),
+        sigR,
+        pk,
+        entry,
+        context.authNonce,
+        grindNonce,
+      );
   },
 } as const;
 

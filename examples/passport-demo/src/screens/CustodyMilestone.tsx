@@ -200,7 +200,7 @@ export default function CustodyMilestone() {
         onRun={() =>
           void run('create', async (identity) => {
             if (interrupted) {
-              await startCustodyAccountAgain(custodySession())
+              await startCustodyAccountAgain(custodySession(), identity)
               setInterrupted(false)
             }
             return deployCustodyAccount(custodySession(), identity, onPhase('create'))

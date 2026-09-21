@@ -39,6 +39,7 @@
 import {
   MUSD_COLOUR_HEX,
   NIGHT_COLOUR_HEX,
+  describeColour,
   describeColours,
   normalisedColourHex,
   sortTokenHoldings,
@@ -245,34 +246,50 @@ export function custodyArrivingSentence(count: number): string | null {
 /* A payment that stopped half-way                                            */
 /* -------------------------------------------------------------------------- */
 
-/** What to say to somebody whose last payment did not come back with an answer. */
+/** What to offer somebody whose last payment did not finish. */
 export type CustodyResumeOffer =
   /** Nothing outstanding, or nothing outstanding that a person need be told. */
   | { readonly kind: 'none' }
-  /** The sentence that says where the money is. There is nothing to press. */
+  /** The value is out and the recipient can still be paid, with no approval. */
+  | { readonly kind: 'finish'; readonly sentence: string; readonly action: string }
+  /** Nothing left to run. The sentence says where the money is. */
   | { readonly kind: 'report'; readonly sentence: string };
 
 /**
- * What a stopped payment is owed, which is a sentence and not a button.
+ * Whether a stopped payment can be finished, and what to say about it.
  *
- * `'finish'` IS GONE, and so is the leg it finished (2026/09/18). A send used
- * to take the value out of the account into this Passport's own hands and only
- * a third transaction made it the recipient's, so a payment could stop with
- * money in a place neither party owned and a person could be offered a button
- * that moved it on. A send is now one transaction: it either landed or it did
- * not, there is nothing in between for a button to do, and offering one would
- * be offering to send the money twice.
+ * `'finish'` is the case this exists for: leg one took the value out of the
+ * account into this Passport's own hands and only the last leg makes it the
+ * recipient's, and that leg needs no approval from anybody — so a Passport
+ * opened again can simply finish it. The offer says so in the two facts that
+ * matter to the person: it has left, and it can still be delivered.
  *
- * The sentence is {@link custodyShieldedSendOutcome}'s — the one place that
- * answers "where is my money" — because two wordings of the same fact is how
- * one of them goes stale.
+ * `'report'` is a record with no leg left to run, and the sentence is A's
+ * {@link custodyShieldedSendOutcome} — the one place that answers "where is my
+ * money" for every stage a payment can stop at. Nothing is re-worded here,
+ * because two wordings of the same fact is how one of them goes stale.
  */
 export function custodyResumeOffer(
   record: CustodyShieldedSendRecord | null,
 ): CustodyResumeOffer {
   if (record === null) return { kind: 'none' };
-  if (nextCustodyShieldedSendStep(record) === 'nothing') return { kind: 'none' };
-  return { kind: 'report', sentence: custodyShieldedSendOutcome(record) };
+  const step = nextCustodyShieldedSendStep(record);
+  if (step === 'nothing') return { kind: 'none' };
+  if (step === 'report' || step === 'withdraw') {
+    return { kind: 'report', sentence: custodyShieldedSendOutcome(record) };
+  }
+  /* NAMED HERE, from the colour, rather than taken from the rows on screen.
+     The money has left the account, so the colour it was in may have no row
+     left at all — and "your payment of 40" with nothing after it is worse than
+     a shortened colour. */
+  const identity = describeColour(record.colourHex);
+  const who = record.recipientLabel.trim().length > 0 ? record.recipientLabel.trim() : 'somebody';
+  const figure = formatCustodyAmount(BigInt(record.amount), identity.decimals);
+  return {
+    kind: 'finish',
+    sentence: `Your payment of ${figure} ${identity.symbol} to ${who} did not finish. It has left your Passport and can still be delivered.`,
+    action: 'Finish this payment',
+  };
 }
 
 /**

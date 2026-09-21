@@ -25,7 +25,6 @@ import {
   k1AwaitingTxNeedsChainHash,
   k1ColourHoldings,
   restartK1CoinCandidates,
-  widenK1CoinCandidates,
   k1CoinCandidates,
   k1ColourBalance,
   k1PrivateStateId,
@@ -849,57 +848,6 @@ describe('a coin whose position the chain gave two answers for', () => {
     /* And with no coin to advance at all, which is a resumed run against a
        store somebody has reset in another tab. */
     expect(advanceK1CoinCandidate(ALICE, MUSD)).toBeNull();
-  });
-
-  it('sweeps around the reported window, once, and never around its own sweep', () => {
-    /* Nicolas, 2026/09/18: the reported window is the rule and the sweep is
-       insurance for a coin claimed by a grafted intent. So the window keeps the
-       head of the list, the neighbours are appended after it, and a second call
-       adds nothing — a sweep computed from the whole list would widen around
-       its own last addition for ever. */
-    putK1CoinCandidates(ALICE, { colour: NIGHT, nonce: NONCE, value: 60n }, [10n, 11n]);
-    expect(widenK1CoinCandidates(ALICE, NIGHT)?.mtIndex).toBe(6n);
-    expect(k1CoinCandidates(ALICE, NIGHT)).toEqual([
-      10n, 11n, 6n, 7n, 8n, 9n, 12n, 13n, 14n, 15n,
-    ]);
-    expect(widenK1CoinCandidates(ALICE, NIGHT)).toBeNull();
-    expect(k1CoinCandidates(ALICE, NIGHT)).toHaveLength(10);
-  });
-
-  it('clamps the sweep at zero, and widens a one-position window too', () => {
-    putK1CoinCandidates(ALICE, { colour: NIGHT, nonce: NONCE, value: 60n }, [2n]);
-    expect(widenK1CoinCandidates(ALICE, NIGHT)?.mtIndex).toBe(0n);
-    expect(k1CoinCandidates(ALICE, NIGHT)).toEqual([2n, 0n, 1n, 3n, 4n, 5n, 6n]);
-  });
-
-  /* THE CASE D1 WAS STUCK IN, live on 2026/09/18. A coin that settled keeps its
-     winning position and drops its candidates — and if the chain later has it
-     somewhere else, that one position is the wrong one and there is nothing to
-     advance to. Its own position is the only thing known about it, so the sweep
-     goes around that. */
-  it('sweeps around a settled coin’s own position when it has no candidates', () => {
-    putK1CoinCandidates(ALICE, { colour: NIGHT, nonce: NONCE, value: 60n }, [3813n]);
-    /* SETTLED: the winning position kept, the candidates dropped. */
-    settleK1Coin(ALICE, NIGHT);
-    expect(k1CoinCandidates(ALICE, NIGHT)).toEqual([]);
-    expect(heldK1Coin(ALICE, NIGHT)?.mtIndex).toBe(3813n);
-
-    expect(widenK1CoinCandidates(ALICE, NIGHT)?.mtIndex).toBe(3809n);
-    /* The coin's own position stays at the head, so a later run still starts
-       where the chain last agreed it was; the neighbours follow it. */
-    expect(k1CoinCandidates(ALICE, NIGHT)).toEqual([
-      3813n, 3809n, 3810n, 3811n, 3812n, 3814n, 3815n, 3816n, 3817n,
-    ]);
-
-    /* AND ONCE ONLY. A spend's loop is `advance ?? widen`, so a widening that
-       kept finding more would be a loop that never ended. */
-    expect(widenK1CoinCandidates(ALICE, NIGHT)).toBeNull();
-    expect(k1CoinCandidates(ALICE, NIGHT)).toHaveLength(9);
-  });
-
-  it('has nothing to widen without a list or without a coin', () => {
-    expect(widenK1CoinCandidates(ALICE, NIGHT)).toBeNull();
-    expect(widenK1CoinCandidates(ALICE, MUSD)).toBeNull();
   });
 
   it('tries the head when the position held is not one of the candidates', () => {

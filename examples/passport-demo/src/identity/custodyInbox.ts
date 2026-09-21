@@ -401,6 +401,24 @@ export function custodyEncKeyPair(
   user: string,
   scope: CustodyEncAccountScope,
   deps: CustodyInboxDeps = defaultCustodyInboxDeps(),
+  /**
+   * A viewing secret DERIVED from the account's own authenticator, used in
+   * place of a fresh random one when this slot is still empty.
+   *
+   * The passkey arm passes it (`PASSPORT_ENC_LABEL` in `passportContract.ts`);
+   * the Dynamic arm does not, and keeps the random secret it has always had.
+   * The derivation's whole point is that it survives a reinstall, so a passkey
+   * Passport that comes back on a new phone re-derives the key its inbox was
+   * sealed to instead of advertising one nobody held.
+   *
+   * IT NEVER REPLACES A SECRET ALREADY IN THE SLOT. A key that is already
+   * stored is a key some depositor has already sealed to, and overwriting it
+   * would make exactly the entries this parameter exists to recover
+   * unreadable. A derived key that disagrees with a stored one is a deploy
+   * that has already happened under the stored one, so the stored one wins and
+   * the derivation is what repairs an EMPTY slot, not a disagreeing one.
+   */
+  derivedSecretKeyHex?: string,
 ): CustodyEncKeyPair {
   let secrets: Record<string, string> = {};
   try {
@@ -421,7 +439,11 @@ export function custodyEncKeyPair(
     return { secretKeyHex: existing, publicKeyHex: custodyEncPublicKey(existing) };
   }
 
-  const fresh = generateCustodyEncKeyPair(deps);
+  const derived = normalised32(derivedSecretKeyHex);
+  const fresh =
+    derived === null
+      ? generateCustodyEncKeyPair(deps)
+      : { secretKeyHex: derived, publicKeyHex: custodyEncPublicKey(derived) };
   secrets[slot] = fresh.secretKeyHex;
   try {
     storage.setItem(CUSTODY_ENC_KEY_KEY, JSON.stringify(secrets));
