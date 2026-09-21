@@ -76,7 +76,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const WALK = '/?dynamicwalk=1';
 
 test.describe('a Passport held by a social sign-in', () => {
-  test('welcomes a signed-in person with a Passport of their own, not a passkey', async ({
+  test('offers a signed-in person the way back to a Passport, and none of their own', async ({
     browser,
   }) => {
     const context = await browser.newContext(
@@ -89,21 +89,29 @@ test.describe('a Passport held by a social sign-in', () => {
     /* The sign-in is what the screen is about, and it names the PROVIDER —
        never the vendor, whom the reader has never chosen. */
     await expect(page.getByText('Signed in with Google')).toBeVisible();
-    await expect(page.getByRole('heading', { name: /Set up\s*your Passport/ })).toBeVisible();
+
+    /* THE DECISION OF 2026/09/21, ON THE SCREEN. Between 09/16 and 09/21 this
+       heading read "Set up your Passport" and the button below it made one: a
+       Passport whose only key was the sign-in, with nothing on any device. The
+       decision retires that shape — a sign-in is a SPARE key on a Passport a
+       device made — so what a signed-in person with no Passport is offered is
+       the way back to one they already hold, and nothing else. */
+    await expect(page.getByRole('heading', { name: /Bring your\s*Passport here/ })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Create my Passport' })).toHaveCount(0);
+    await expect(
+      page.getByText('Setting your Passport up is paid for on your behalf.'),
+    ).toHaveCount(0);
 
     /* The sentence this whole path exists to delete. Until 2026/09/16 a social
        sign-in ended here, on the welcome screen, being told to go and make a
        passkey. */
     await expect(page.getByText('Finish with your passkey above')).toHaveCount(0);
 
-    /* One offer, and the two things that are true about it. */
-    await expect(page.getByRole('button', { name: 'Create my Passport' })).toBeEnabled();
-    await expect(
-      page.getByText('Setting your Passport up is paid for on your behalf.'),
-    ).toBeVisible();
+    /* One offer, and it says where a NEW Passport is made instead. */
     await expect(
       page.getByRole('button', { name: 'I already have a Passport' }),
-    ).toBeVisible();
+    ).toBeEnabled();
+    await expect(page.getByText(/brings back a Passport you already hold/)).toBeVisible();
 
     /* NONE OF THE WORDS A READER HAS NO USE FOR. The rule this demo keeps
        everywhere, asserted rather than trusted, because a developer-shaped
@@ -152,14 +160,21 @@ test.describe('a Passport held by a social sign-in', () => {
     await expect(page.getByRole('button', { name: 'Find my Passport' })).toBeEnabled();
 
     await page.getByRole('button', { name: 'Go back' }).click();
-    await expect(page.getByRole('button', { name: 'Create my Passport' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: /Bring your\s*Passport here/ })).toBeVisible();
 
     await context.close();
   });
 
-  test('refuses in one sentence when the service that finishes setup is not there', async ({
-    browser,
-  }) => {
+  test('has no way at all to make a Passport of its own', async ({ browser }) => {
+    /* The retirement, asserted from both directions: the screen offers no
+       control that would create one, and the vocabulary of setting one up is
+       gone with it.
+
+       This replaces the walk that used to drive the create path here and
+       assert its one-sentence refusal. That refusal still matters and is still
+       drilled — on the arm that can create, in `passkey-custody.spec.ts` — and
+       driving it from a sign-in would now be driving a path the product does
+       not have. */
     const context = await browser.newContext(
       walkContextOptions({ viewport: { width: 420, height: 900 } }),
     );
@@ -167,23 +182,31 @@ test.describe('a Passport held by a social sign-in', () => {
     await installNetworkBoundary(page);
     await page.goto(WALK);
 
-    await page.getByRole('button', { name: 'Create my Passport' }).click();
+    await expect(page.getByRole('heading', { name: /Bring your\s*Passport here/ })).toBeVisible();
 
-    /* The count line, while it is working. Three steps, and the copy says so
-       rather than leaving somebody watching an unlabelled spinner. */
-    await expect(page.locator('p.mnob-hint[role="status"]')).toHaveText(
-      'Setting up your Passport, step 1 of 3',
-    );
+    const controls = await page.getByRole('button').allInnerTexts();
+    for (const label of controls) {
+      expect(label.toLowerCase()).not.toContain('create');
+      expect(label.toLowerCase()).not.toContain('set up');
+    }
 
-    /* Then one sentence, and the control back. NOT a spinner that runs until a
-       proof timeout ten minutes later, which is what an unreachable proving
-       service gives by default — the reason `custodyProofProvider` refuses
-       immediately, and the reason this assertion is here. */
-    const alert = page.getByRole('alert');
-    await expect(alert).toBeVisible({ timeout: 60_000 });
-    const sentence = (await alert.innerText()).trim();
-    expect(sentence.split('\n').filter((line) => line.trim().length > 0)).toHaveLength(1);
-    await expect(page.getByRole('button', { name: /my Passport/ })).toBeEnabled();
+    const body = (await page.locator('body').innerText()).toLowerCase();
+    expect(body).not.toContain('step 1 of 3');
+    /* And still none of the words a reader has no use for, on the screen that
+       replaced the one that was audited for them. */
+    for (const forbidden of [
+      'contract',
+      'registry',
+      'indexer',
+      'resolver',
+      'sponsor',
+      'dust',
+      'wallet address',
+      'sdk',
+      'dynamic',
+    ]) {
+      expect(body, `"${forbidden}" is on screen`).not.toContain(forbidden);
+    }
 
     await context.close();
   });
