@@ -124,8 +124,6 @@ test.describe('@live the account model on stagenet', () => {
   /** Ten units out, ninety left — a remainder the card can be read against. */
   const SEND_MUSD = '10';
   const REMAINING_MUSD = '90';
-  /** Ten out again, eighty left — what the SECOND send leaves behind. */
-  const REMAINING_MUSD_AFTER_TWO = '80';
 
   let page: Page;
   const alias = uniqueAlias('walk');
@@ -401,148 +399,6 @@ test.describe('@live the account model on stagenet', () => {
   });
 
   /**
-   * ONE SHIELDED SEND OF {@link SEND_MUSD} TO {@link SHIELDED_RECIPIENT}.
-   *
-   * Lifted out of the test below on 2026/09/17 so that the test after it can
-   * make the SAME send a second time — which is the whole of the defect this
-   * spec now guards, and the one thing a single send can never see.
-   *
-   * Unchanged in every other respect, including the two attempts: the fee
-   * sponsor can be holding its own change when the first one is built, and a
-   * Tier 2 spec that gave up on that would be reporting the sponsor's schedule
-   * as a broken send.
-   */
-  async function sendStablecoinToAddress(
-    colour: string | null,
-    /** What the account holds of this colour going in, in the sheet's own words. */
-    available: string,
-  ): Promise<void> {
-    const attempts = 2;
-    for (let attempt = 1; attempt <= attempts; attempt += 1) {
-      await page.getByRole('button', { name: /^Send$/ }).first().click();
-
-      /* WHAT IS BEING SENT IS THE FIRST FIELD, and since 2026/08/31 it is a
-         CHOICE. The sheet opens on NIGHT every time — including on the second
-         attempt, which reopens it — so mUSD is picked here rather than arrived
-         at by pasting an address, which is what this test used to do.
-
-         The picker only exists once the account is known to hold something
-         besides NIGHT: with one asset the sheet states it instead of offering a
-         control with a single option in it. So waiting for it IS waiting for
-         the contract read that the "units of this token available" line used to
-         stand in for. */
-      const picker = page.locator('.mnhome-send-asset');
-      await expect(picker).toBeVisible({ timeout: 3 * 60_000 });
-      await chooseStablecoin(picker, colour);
-
-      /* The heading names the CHOSEN asset. It is asserted after the choice and
-         before the recipient, deliberately: nothing typed below may change it,
-         and a heading that still said NIGHT here would mean the send about to
-         be confirmed is not the send this test is about. */
-      await expect(page.locator('#mnhome-send-title')).toHaveText(`Send ${MUSD_SYMBOL}`);
-      /* The unit beside the amount says which ledger is being spent from — the
-         asset's own ticker, where this once read the fixed word "units" and
-         named nothing on a sheet that can send several things. */
-      await expect(page.locator('.mnhome-send-unit')).toHaveText(MUSD_SYMBOL);
-      /* What the account holds, quoted in the asset's own name — the sheet
-         saying back the figure the caller has just watched settle, before ten
-         of them are spent. A PARAMETER since 2026/09/17, because this walk now
-         makes the same send twice and the second one starts from ninety. */
-      await expect(
-        page.locator('.mnhome-send-form').getByText(`${available} ${MUSD_SYMBOL} available`),
-      ).toBeVisible();
-
-      /* THEN the recipient, which is the order the sheet now asks in. The field
-         is the sheet's one mono textarea; its placeholder follows the chosen
-         asset, so matching on that would be matching on the thing just chosen.
-         What is asserted about the address is that the pair is ACCEPTED — the
-         codec placed it on the shielded ledger, which is where mUSD goes — and
-         a refusal under the field would be the sheet saying it is not. */
-      await page.locator('.mnhome-send-input-mono').fill(SHIELDED_RECIPIENT);
-      await expect(page.locator('#mnhome-send-recipient-error')).toHaveCount(0);
-
-      await page.locator('.mnhome-send-amount input').fill(SEND_MUSD);
-      // The fee sentence still names who pays, never which token it costs.
-      expect(await page.locator('body').innerText()).not.toMatch(/dust/i);
-
-      await page.getByRole('button', { name: /^Review$/ }).click();
-      const sheet = page.locator('[aria-labelledby="mnhome-send-title"]');
-      await expect(sheet).toBeVisible();
-      /* The review step names the transfer rather than the asset — the asset is
-         a row inside it now, and it leads, because it is what was chosen
-         first. Both are asserted: an amount with no asset beside it is the
-         ambiguity the whole inversion removed.
-
-         The Asset row is found through the LIST rather than through a class on
-         the value. This is a Tier 2 spec, so it runs against whatever is
-         deployed, and the class that value carries has changed inside the
-         window between a deploy and a merge at least once — a term and its
-         definition have not, because they are what a `dl` is. */
-      await expect(page.locator('#mnhome-send-title')).toHaveText('Review this transfer');
-      await expect(sheet.locator('dt:text-is("Asset") + dd strong')).toHaveText(MUSD_SYMBOL);
-      await expect(sheet.locator('dt:text-is("Amount") + dd strong')).toHaveText(
-        `${SEND_MUSD} ${MUSD_SYMBOL}`,
-      );
-
-      /* Armed BEFORE the submit. The success toast lives twelve seconds and is
-         pushed on the same tick the sheet closes, so a wait started afterwards
-         would be racing its own dismissal. */
-      const announced = page
-        .locator('.mntoast-success .mntoast-title')
-        .filter({ hasText: /paid/i })
-        .waitFor({ state: 'visible', timeout: 9 * 60_000 })
-        .then(() => true)
-        .catch(() => false);
-
-      /* ONE passkey ceremony, and it covers the whole run. Leg one — the WHOLE
-         coin out of the account — is the only leg that spends from the account;
-         leg two pays the address out of this wallet and leg three puts the
-         change back, and neither needs an assertion from anybody. */
-      await page.locator('.mnhome-send-actions button.mnhome-send-primary').click();
-
-      const closed = sheet
-        .waitFor({ state: 'hidden', timeout: 9 * 60_000 })
-        .then(() => 'submitted' as const)
-        .catch(() => 'timeout' as const);
-      const refused = sheet
-        .locator('.mnhome-notice[role="alert"]')
-        .waitFor({ state: 'visible', timeout: 9 * 60_000 })
-        .then(() => 'refused' as const)
-        .catch(() => 'timeout' as const);
-      const outcome = await Promise.race([closed, refused]);
-
-      if (outcome === 'submitted') {
-        /* The sheet gets out of the way only on a real transaction id, and the
-           toast is the host saying the same thing in words. Both, so a sheet
-           that closed for any other reason cannot pass for a send. */
-        expect(
-          await announced,
-          'the sheet closed but nothing reported a shielded transfer',
-        ).toBe(true);
-        return;
-      }
-
-      const said =
-        outcome === 'refused'
-          ? (await sheet.locator('.mnhome-notice[role="alert"]').innerText()).trim()
-          : (await sheet.innerText()).trim();
-      /* Nothing moved, and the sheet says so in the shielded path's own words. */
-      expect(said, 'a shielded send that did not happen must say so').toMatch(
-        /Nothing was sent/i,
-      );
-      console.log(`[live] shielded send attempt ${attempt} did not submit:\n${said}`);
-      expect(attempt, `the shielded send did not submit twice:\n${said}`).toBeLessThan(attempts);
-      await page
-        .getByRole('button', { name: /^Close$/ })
-        .click({ timeout: 10_000 })
-        .catch(() => undefined);
-      await page.keyboard.press('Escape');
-      await waitForSponsor();
-    }
-    throw new Error('the shielded send did not submit on either attempt');
-  }
-
-  /**
    * The shielded leg, and the one assertion the NIGHT send cannot make.
    *
    * `withdraw_night` and `withdraw_shielded` are different circuits over
@@ -611,7 +467,124 @@ test.describe('@live the account model on stagenet', () => {
        first rather than instead. */
     const colour = await sponsorStablecoinColour();
 
-    await sendStablecoinToAddress(colour, GRANT_MUSD);
+    const attempts = 2;
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      await page.getByRole('button', { name: /^Send$/ }).first().click();
+
+      /* WHAT IS BEING SENT IS THE FIRST FIELD, and since 2026/08/31 it is a
+         CHOICE. The sheet opens on NIGHT every time — including on the second
+         attempt, which reopens it — so mUSD is picked here rather than arrived
+         at by pasting an address, which is what this test used to do.
+
+         The picker only exists once the account is known to hold something
+         besides NIGHT: with one asset the sheet states it instead of offering a
+         control with a single option in it. So waiting for it IS waiting for
+         the contract read that the "units of this token available" line used to
+         stand in for. */
+      const picker = page.locator('.mnhome-send-asset');
+      await expect(picker).toBeVisible({ timeout: 3 * 60_000 });
+      await chooseStablecoin(picker, colour);
+
+      /* The heading names the CHOSEN asset. It is asserted after the choice and
+         before the recipient, deliberately: nothing typed below may change it,
+         and a heading that still said NIGHT here would mean the send about to
+         be confirmed is not the send this test is about. */
+      await expect(page.locator('#mnhome-send-title')).toHaveText(`Send ${MUSD_SYMBOL}`);
+      /* The unit beside the amount says which ledger is being spent from — the
+         asset's own ticker, where this once read the fixed word "units" and
+         named nothing on a sheet that can send several things. */
+      await expect(page.locator('.mnhome-send-unit')).toHaveText(MUSD_SYMBOL);
+      /* The whole grant, quoted in the asset's own name: the account really
+         holds the hundred the poll above watched arrive, and this is the sheet
+         saying the same figure back before ten of them are spent. */
+      await expect(
+        page.locator('.mnhome-send-form').getByText(`${GRANT_MUSD} ${MUSD_SYMBOL} available`),
+      ).toBeVisible();
+
+      /* THEN the recipient, which is the order the sheet now asks in. The field
+         is the sheet's one mono textarea; its placeholder follows the chosen
+         asset, so matching on that would be matching on the thing just chosen.
+         What is asserted about the address is that the pair is ACCEPTED — the
+         codec placed it on the shielded ledger, which is where mUSD goes — and
+         a refusal under the field would be the sheet saying it is not. */
+      await page.locator('.mnhome-send-input-mono').fill(SHIELDED_RECIPIENT);
+      await expect(page.locator('#mnhome-send-recipient-error')).toHaveCount(0);
+
+      await page.locator('.mnhome-send-amount input').fill(SEND_MUSD);
+      // The fee sentence still names who pays, never which token it costs.
+      expect(await page.locator('body').innerText()).not.toMatch(/dust/i);
+
+      await page.getByRole('button', { name: /^Review$/ }).click();
+      const sheet = page.locator('[aria-labelledby="mnhome-send-title"]');
+      await expect(sheet).toBeVisible();
+      /* The review step names the transfer rather than the asset — the asset is
+         a row inside it now, and it leads, because it is what was chosen
+         first. Both are asserted: an amount with no asset beside it is the
+         ambiguity the whole inversion removed.
+
+         The Asset row is found through the LIST rather than through a class on
+         the value. This is a Tier 2 spec, so it runs against whatever is
+         deployed, and the class that value carries has changed inside the
+         window between a deploy and a merge at least once — a term and its
+         definition have not, because they are what a `dl` is. */
+      await expect(page.locator('#mnhome-send-title')).toHaveText('Review this transfer');
+      await expect(sheet.locator('dt:text-is("Asset") + dd strong')).toHaveText(MUSD_SYMBOL);
+      await expect(sheet.locator('dt:text-is("Amount") + dd strong')).toHaveText(
+        `${SEND_MUSD} ${MUSD_SYMBOL}`,
+      );
+
+      /* Armed BEFORE the submit. The success toast lives twelve seconds and is
+         pushed on the same tick the sheet closes, so a wait started afterwards
+         would be racing its own dismissal. */
+      const announced = page
+        .locator('.mntoast-success .mntoast-title')
+        .filter({ hasText: /Shielded transfer accepted/i })
+        .waitFor({ state: 'visible', timeout: 9 * 60_000 })
+        .then(() => true)
+        .catch(() => false);
+
+      /* One passkey ceremony, then `withdraw_shielded` proved and submitted. */
+      await page.locator('.mnhome-send-actions button.mnhome-send-primary').click();
+
+      const closed = sheet
+        .waitFor({ state: 'hidden', timeout: 9 * 60_000 })
+        .then(() => 'submitted' as const)
+        .catch(() => 'timeout' as const);
+      const refused = sheet
+        .locator('.mnhome-notice[role="alert"]')
+        .waitFor({ state: 'visible', timeout: 9 * 60_000 })
+        .then(() => 'refused' as const)
+        .catch(() => 'timeout' as const);
+      const outcome = await Promise.race([closed, refused]);
+
+      if (outcome === 'submitted') {
+        /* The sheet gets out of the way only on a real transaction id, and the
+           toast is the host saying the same thing in words. Both, so a sheet
+           that closed for any other reason cannot pass for a send. */
+        expect(
+          await announced,
+          'the sheet closed but nothing reported a shielded transfer',
+        ).toBe(true);
+        break;
+      }
+
+      const said =
+        outcome === 'refused'
+          ? (await sheet.locator('.mnhome-notice[role="alert"]').innerText()).trim()
+          : (await sheet.innerText()).trim();
+      /* Nothing moved, and the sheet says so in the shielded path's own words. */
+      expect(said, 'a shielded send that did not happen must say so').toMatch(
+        /Nothing was sent/i,
+      );
+      console.log(`[live] shielded send attempt ${attempt} did not submit:\n${said}`);
+      expect(attempt, `the shielded send did not submit twice:\n${said}`).toBeLessThan(attempts);
+      await page
+        .getByRole('button', { name: /^Close$/ })
+        .click({ timeout: 10_000 })
+        .catch(() => undefined);
+      await page.keyboard.press('Escape');
+      await waitForSponsor();
+    }
 
     /* WITNESS ONE: the account holds ten fewer, on the surface the user reads. */
     await expect
@@ -640,81 +613,6 @@ test.describe('@live the account model on stagenet', () => {
         withdrawal!.transaction.block.height
       }`,
     );
-  });
-
-  /**
-   * THE SECOND SEND — and the whole of the defect this spec could not see.
-   *
-   * WHAT HAPPENED (2026/09/17). A shielded send to a raw `mn_shield-addr…` was
-   * one transaction: a PARTIAL `withdraw_shielded` out of the sender's account.
-   * That is the branch of the deployed contract that splits its coin and
-   * re-registers the remainder — and the remainder is a coin the network
-   * refuses every later withdrawal against (`1010 Invalid Transaction: Custom
-   * error: 239`). So the FIRST send worked, and every send after it, for the
-   * life of that Passport, did not. Otrix reproduced it on several accounts:
-   * `alexey-otrix-6.night`'s first send landed in block 502554 and nothing left
-   * that Passport again.
-   *
-   * The test above sends once and passes either way, which is exactly why the
-   * defect reached production twice. This one sends a SECOND time from the same
-   * Passport — the fresh one this whole walk onboarded — and the assertion is
-   * simply that it lands. Against the old client it cannot: the first send left
-   * the account holding a coin no withdrawal can spend.
-   *
-   * Two witnesses again, and the same two: the CARD says the account holds ten
-   * fewer than it did after the first send, and the INDEXER says the contract
-   * now records TWO `withdraw_shielded` calls rather than the one the test
-   * above already saw.
-   */
-  test('a shielded send to an address works twice — the 239 that used to follow the first', async () => {
-    const account = await storedAccountContract(page);
-    const rawAccount = account.trim().toLowerCase().replace(/^0x/, '').replace(/^0200/, '');
-
-    /* THE CHANGE FROM THE FIRST SEND HAS TO BE BACK FIRST. Leg three puts the
-       sender's own remainder into the account after the payment is confirmed,
-       and it runs detached — so the ninety the card shows IS that leg having
-       landed, and waiting for it is waiting for a settled starting point rather
-       than for a screen to catch up. */
-    await expect
-      .poll(async () => refreshedStablecoinValue(page), {
-        timeout: 8 * 60_000,
-        intervals: [8_000],
-        message: 'the change from the first send never came back to the account',
-      })
-      .toBe(REMAINING_MUSD);
-
-    await waitForSponsor();
-    const colour = await sponsorStablecoinColour();
-    await sendStablecoinToAddress(colour, REMAINING_MUSD);
-
-    /* WITNESS ONE: ten fewer again, on the surface the user reads. Against the
-       old client this figure never moved — the withdrawal was refused before
-       anything left the account. */
-    await expect
-      .poll(async () => refreshedStablecoinValue(page), {
-        timeout: 8 * 60_000,
-        intervals: [8_000],
-        message:
-          'the account mUSD balance did not fall after the SECOND shielded send — this is the 239',
-      })
-      .toBe(REMAINING_MUSD_AFTER_TWO);
-    console.log(
-      `[live] mUSD fell from ${REMAINING_MUSD} to ${REMAINING_MUSD_AFTER_TWO} on the second send`,
-    );
-
-    /* WITNESS TWO: the ledger records the second withdrawal as well as the
-       first. A balance that fell is a withdrawal only if the chain says so, and
-       one `withdraw_shielded` would be the first send's, already counted. */
-    const calls = await waitForContractCalls(rawAccount, 'withdraw_shielded', 2);
-    expect(
-      calls.length,
-      `the account's mUSD fell twice but the indexer records ${calls.length} withdraw_shielded on ${rawAccount}`,
-    ).toBeGreaterThanOrEqual(2);
-    for (const call of calls) {
-      console.log(
-        `[live] withdraw_shielded tx ${call.transaction.hash} in block ${call.transaction.block.height}`,
-      );
-    }
   });
 });
 
@@ -963,49 +861,6 @@ async function waitForContractCall(
   }
   console.log(`[live] the indexer never reported ${entryPoint}: ${last}`);
   return null;
-}
-
-/**
- * Waits until the contract records at least `wanted` calls of one entry point.
- *
- * {@link waitForContractCall} answers with the FIRST match, which is the right
- * answer to "did this ever happen" and the wrong one to "did it happen again".
- * The second send's whole point is the again, so this counts.
- */
-async function waitForContractCalls(
-  address: string,
-  entryPoint: string,
-  wanted: number,
-  timeoutMs = 6 * 60_000,
-): Promise<ContractCallAction[]> {
-  const query = `{ contract(address:"${address}") { actions { __typename ... on ContractCall { entryPoint } transaction { hash block { height } } } } }`;
-  const deadline = Date.now() + timeoutMs;
-  let found: ContractCallAction[] = [];
-  let last = 'the indexer was never asked';
-  while (Date.now() < deadline) {
-    try {
-      const response = await fetch(INDEXER_URL, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ query }),
-      });
-      const body = (await response.json()) as {
-        data?: { contract?: { actions?: ContractCallAction[] } | null } | null;
-        errors?: unknown;
-      };
-      const actions = body.data?.contract?.actions ?? [];
-      found = actions.filter(
-        (action) => action.__typename === 'ContractCall' && action.entryPoint === entryPoint,
-      );
-      if (found.length >= wanted) return found;
-      last = `${found.length} ${entryPoint} call(s) on the contract, wanted ${wanted}`;
-    } catch (cause) {
-      last = cause instanceof Error ? cause.message : String(cause);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 10_000));
-  }
-  console.log(`[live] the indexer never reported ${wanted} ${entryPoint} calls: ${last}`);
-  return found;
 }
 
 async function readNightBalance(page: Page): Promise<number> {

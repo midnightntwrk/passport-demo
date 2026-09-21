@@ -87,49 +87,12 @@ export type PendingSendLeg =
   | 'done'
   | 'failed';
 
-/**
- * Who is being paid — the words on screen, and where the paying leg pays.
- *
- * TWO FORMS, BECAUSE THERE ARE TWO PAYING LEGS (2026/09/17). Paying another
- * Passport ends in that Passport's own account, so the record carries the
- * account it deposits into. Paying a raw shielded address ends in somebody's
- * wallet, so the record carries the address the amount is transferred to.
- *
- * Until this date the second form did not exist, and the send it belongs to was
- * a SINGLE partial withdrawal out of the sender's account — the one branch of
- * the deployed contract that leaves behind a coin the network then refuses
- * every later withdrawal against (see {@link planShieldedSend}). Otrix hit that
- * on several Passports: the first mUSD send to an address worked and every send
- * after it was refused, for good. So the address send takes the same three legs
- * the name send takes, and this is the shape that lets one record describe
- * either.
- *
- * `label` means the same thing on both: what the sender is shown. For an
- * address it is the shortened form the review sheet already prints.
- */
-export type PendingSendRecipient =
-  | {
-      /** What the sender typed and what every sentence about this run calls them. */
-      label: string;
-      /** The account contract the paying leg deposits into. */
-      accountAddress: string;
-    }
-  | {
-      label: string;
-      /** The `mn_shield-addr…` the paying leg transfers to. */
-      shieldedAddress: string;
-    };
-
-/**
- * Whether this run pays a raw address rather than another Passport's account.
- *
- * The one question the legs, the step lines, and the resume all branch on, so
- * it is asked here rather than by each of them testing for a field.
- */
-export function paysAnAddress(
-  recipient: PendingSendRecipient,
-): recipient is { label: string; shieldedAddress: string } {
-  return 'shieldedAddress' in recipient;
+/** Who is being paid — the words on screen, and the account that receives. */
+export interface PendingSendRecipient {
+  /** What the sender typed and what every sentence about this run calls them. */
+  label: string;
+  /** The account contract the paying leg deposits into. */
+  accountAddress: string;
 }
 
 /**
@@ -238,27 +201,6 @@ function readExpectation(value: unknown): PendingSendExpectation | undefined {
   return undefined;
 }
 
-/**
- * The recipient as it is read back, or `null` for a row nothing could pay.
- *
- * A record needs a label to say anything about itself and ONE destination to
- * pay: an account to deposit into, or an address to transfer to. A row with
- * neither is a Continue button over a payment with nowhere to go, which is the
- * whole reason this reader refuses rows rather than repairing them.
- */
-function readRecipient(value: unknown): PendingSendRecipient | null {
-  if (typeof value !== 'object' || value === null) return null;
-  const row = value as Record<string, unknown>;
-  if (typeof row.label !== 'string' || !row.label) return null;
-  if (typeof row.accountAddress === 'string' && row.accountAddress) {
-    return { label: row.label, accountAddress: row.accountAddress };
-  }
-  if (typeof row.shieldedAddress === 'string' && row.shieldedAddress) {
-    return { label: row.label, shieldedAddress: row.shieldedAddress };
-  }
-  return null;
-}
-
 function readAttempts(value: unknown): { withdraw: number; deposit: number; change: number } {
   if (typeof value !== 'object' || value === null) {
     return { withdraw: 0, deposit: 0, change: 0 };
@@ -306,14 +248,10 @@ export function readPendingSends(raw: string | null | undefined): PendingSend[] 
     if (!isAmount(row.amount)) continue;
     if (typeof row.colourHex !== 'string' || !row.colourHex) continue;
     if (typeof row.ownReceivingAddress !== 'string' || !row.ownReceivingAddress) continue;
-    const recipient = readRecipient(row.recipient);
-    if (recipient === null) continue;
-    /* A ONE-TRANSACTION TRANSFER PAYS AN ACCOUNT, and only an account:
-       `transfer_shielded_to_account` hands the amount to a contract address and
-       lets the recipient's own deposit run inside the same call tree. There is
-       no such thing as that circuit pointed at a raw address, so a record
-       claiming to be one is not a record this app ever wrote. */
-    if (row.kind === 'transfer' && paysAnAddress(recipient)) continue;
+    const recipient = row.recipient as Record<string, unknown> | undefined;
+    if (typeof recipient !== 'object' || recipient === null) continue;
+    if (typeof recipient.label !== 'string' || !recipient.label) continue;
+    if (typeof recipient.accountAddress !== 'string' || !recipient.accountAddress) continue;
     if (typeof row.createdAt !== 'string' || Number.isNaN(Date.parse(row.createdAt))) continue;
     if (typeof row.updatedAt !== 'string' || Number.isNaN(Date.parse(row.updatedAt))) continue;
     /* A shielded run with no colour cannot name the note it is waiting for, so
@@ -324,7 +262,7 @@ export function readPendingSends(raw: string | null | undefined): PendingSend[] 
     const record: PendingSend = {
       id: row.id,
       kind: row.kind,
-      recipient,
+      recipient: { label: recipient.label, accountAddress: recipient.accountAddress },
       amount: row.amount,
       colourHex: row.colourHex,
       ownReceivingAddress: row.ownReceivingAddress,
@@ -379,15 +317,10 @@ export function serialisePendingSends(records: readonly PendingSend[]): string {
     .map((record) => ({
       id: record.id,
       kind: record.kind,
-      recipient: paysAnAddress(record.recipient)
-        ? {
-            label: record.recipient.label,
-            shieldedAddress: record.recipient.shieldedAddress,
-          }
-        : {
-            label: record.recipient.label,
-            accountAddress: record.recipient.accountAddress,
-          },
+      recipient: {
+        label: record.recipient.label,
+        accountAddress: record.recipient.accountAddress,
+      },
       amount: record.amount,
       colourHex: record.colourHex,
       ownReceivingAddress: record.ownReceivingAddress,
@@ -465,17 +398,6 @@ export interface ShieldedSendPlan {
  * Leg three is what makes the account whole again, and it is skipped entirely
  * when the payment happens to be the whole coin, which is the two-leg send this
  * app has always made.
- *
- * AND SINCE 2026/09/17 IT IS EVERY SHIELDED SEND, NOT ONLY THE ONES TO A NAME.
- * A send to a raw `mn_shield-addr…` was still asking for a partial withdrawal
- * on the argument that a 239 was uncommon and that two extra legs would be
- * paying every send for a refusal most of them never see. The 239 is not
- * uncommon: it is guaranteed on every send after the first partial one, and
- * what it costs is not two legs but every shielded send the Passport will ever
- * make again. Otrix reproduced it on several accounts. Leg two of an address
- * send pays out of the sender's WALLET rather than into a recipient's account —
- * `identity/walletTransfer.ts` — and everything either side of it is this same
- * plan, unchanged.
  *
  * Refuses, rather than rounding, when the account does not hold enough: a plan
  * that quietly paid less than was asked for is the one failure mode worse than
@@ -576,18 +498,6 @@ export function nameLegStepCount(input: {
   /** What the account holds of the chosen colour, when the picker knows. */
   held?: bigint | null;
   amount?: bigint | null;
-  /**
-   * Whether the recipient is a raw shielded ADDRESS rather than a Passport.
-   *
-   * The host's `1` is an answer about `transfer_shielded_to_account`, and the
-   * clue is again in the name: it hands the amount to a CONTRACT address. There
-   * is no account behind a raw address to hand anything to, so the answer does
-   * not apply and is discarded here — the same discipline the NIGHT branch
-   * above keeps, and for the same reason. Without it, a Passport whose account
-   * happens to carry the circuit would have been shown "Transferring — one
-   * network transaction" over the three-leg address send added on 2026/09/17.
-   */
-  toAddress?: boolean;
 }): 1 | 2 | 3 {
   if (input.asset === 'night') {
     /* NIGHT is two, always. Not the host's `1`, and not a shielded plan's `3`:
@@ -595,9 +505,7 @@ export function nameLegStepCount(input: {
        coin to take out and no change to put back. */
     return 2;
   }
-  if (input.toAddress !== true && input.hostSteps !== undefined && input.hostSteps !== null) {
-    return input.hostSteps;
-  }
+  if (input.hostSteps !== undefined && input.hostSteps !== null) return input.hostSteps;
   if (input.held === undefined || input.held === null) return 2;
   if (input.amount === undefined || input.amount === null) return 2;
   return planShieldedSend({ held: input.held, amount: input.amount })?.steps ?? 2;
@@ -634,14 +542,6 @@ export interface SendStepLineInput {
   steps: 1 | 2 | 3;
   /** Who is being paid, in the sender's own words. */
   recipient: string;
-  /**
-   * Whether the paying leg pays an ADDRESS rather than another Passport.
-   *
-   * It changes one clause and it has to: "paying it into their account" is a
-   * true sentence about a Passport and a false one about an address, which is
-   * somebody's own wallet and has no account of ours behind it.
-   */
-  toAddress?: boolean;
   /** "(retry 1 of 2)", or an empty string on a first attempt. */
   attemptSuffix?: string;
 }
@@ -688,11 +588,6 @@ export function sendStepLine(input: SendStepLineInput): string {
         ? 'Step 1 done. Waiting for it to clear before it goes on.'
         : 'Step 1 of 2 done. Waiting for the amount to clear before it goes on.';
     case 'depositing':
-      /* AN ADDRESS HAS NO ACCOUNT OF OURS BEHIND IT (2026/09/17). The
-         two-step wording below names one, which is true of a Passport and
-         false of a pasted address — so the address send says who is being
-         paid and stops there. */
-      if (input.toAddress) return `Step 2 ${of} · Paying ${input.recipient}${suffix}.`;
       return input.steps === 3
         ? `Step 2 ${of} · Paying ${input.recipient}${suffix}.`
         : `Step 2 ${of} — paying it into ${input.recipient}’s account${suffix}.`;
@@ -730,10 +625,9 @@ export function pendingSendStepLine(record: PendingSend): string {
     return `${record.recipient.label} has been paid. Your change has not come back to your account yet.`;
   }
   if (record.leg === 'settle') return 'Step 1 done. Waiting for the amount to reach your Passport.';
-  if (steps === 3 || paysAnAddress(record.recipient)) {
-    return `Step 1 done. Paying ${record.recipient.label} has not finished.`;
-  }
-  return `Step 1 done. Step 2 — paying it into ${record.recipient.label}’s account — has not finished.`;
+  return steps === 3
+    ? `Step 1 done. Paying ${record.recipient.label} has not finished.`
+    : `Step 1 done. Step 2 — paying it into ${record.recipient.label}’s account — has not finished.`;
 }
 
 /** What names the colour a run is denominated in, as a screen already has it. */
@@ -953,12 +847,19 @@ export function classifyLegError(error: unknown): LegErrorVerdict {
       return { retryable: false, rebuild: false, message: INSUFFICIENT_TEXT };
     }
   }
-  if (isNodeRefusal(error)) {
-    return {
-      retryable: true,
-      rebuild: true,
-      message: 'The network turned this step down. Passport is building it again.',
-    };
+  for (const node of chain) {
+    const name = nameOf(node);
+    if (
+      name === 'SubmissionError' ||
+      name === 'CallTxFailedError' ||
+      /invalid transaction/i.test(messageOf(node))
+    ) {
+      return {
+        retryable: true,
+        rebuild: true,
+        message: 'The network turned this step down. Passport is building it again.',
+      };
+    }
   }
   const head = messageOf(chain[0]);
   return {
@@ -966,83 +867,6 @@ export function classifyLegError(error: unknown): LegErrorVerdict {
     rebuild: false,
     message: head || 'This step could not be finished.',
   };
-}
-
-/**
- * WHETHER THE NODE ITSELF TURNED THE TRANSACTION DOWN.
- *
- * Its own words: a `SubmissionError`, the contract runtime's
- * `CallTxFailedError`, or the phrase the node puts in front of every refusal
- * it makes. Not a proof that failed, not a sponsor that was busy, not a
- * connection that went away — those are all failures on the way TO the node
- * and they say different things about what to do next.
- *
- * Exported because two rules turn on it and both matter: whether a leg is
- * worth building again ({@link classifyLegError}), and whether a Passport has
- * stopped being able to move an asset at all
- * ({@link withdrawalIsPermanentlyRefused}).
- */
-export function isNodeRefusal(error: unknown): boolean {
-  for (const node of chainOf(error)) {
-    const name = nameOf(node);
-    if (
-      name === 'SubmissionError' ||
-      name === 'CallTxFailedError' ||
-      /invalid transaction/i.test(messageOf(node))
-    ) {
-      return true;
-    }
-  }
-  return false;
-}
-
-/**
- * A PASSPORT THAT CAN NO LONGER MOVE THIS ASSET AT ALL (2026/09/17).
- *
- * The defect this exists for is the one that closed on 2026/09/17: a shielded
- * send to an address asked the deployed account for PART of its coin, the
- * contract split it and re-registered the remainder, and the network refused
- * every later withdrawal against what that left behind. The client no longer
- * asks for a part — see {@link planShieldedSend} — but a Passport that took
- * that path before the fix is already in that state, and nothing a client does
- * can move the asset out of it.
- *
- * So a WHOLE-coin withdrawal refused by the node, still refused after one
- * rebuild, is not a transient refusal. A rebuild re-reads the account and
- * proves against the state as it is now, so the second refusal is the network
- * saying the same thing about the same coin — and the attempts after it buy
- * the person another forty seconds of watching a sheet before they are told
- * what the second one already said.
- *
- * `attempt` is the ZERO-BASED index of the attempt that just failed, so `0` is
- * the first refusal — which earns the rebuild rather than this verdict.
- *
- * Only ever true of a shielded run: `withdraw_night` has no split branch and
- * nothing has ever been seen to poison an account's unshielded side.
- */
-export function withdrawalIsPermanentlyRefused(input: {
-  kind: PendingSendKind;
-  attempt: number;
-  error: unknown;
-}): boolean {
-  if (input.kind !== 'shielded') return false;
-  if (input.attempt < 1) return false;
-  return isNodeRefusal(input.error);
-}
-
-/**
- * What that Passport's owner is told, and it is the whole truth of it.
- *
- * No cause, no code, no circuit — and no "try again", because trying again is
- * the one thing that cannot work. The asset is where it is; what a person can
- * still do is start a new Passport, and the sentence says so rather than
- * leaving them pressing a button.
- */
-export function stuckAssetText(assetSymbol: string): string {
-  return (
-    `Your ${assetSymbol} can no longer be moved out of this Passport, and trying again ` +
-    'will not change that. You will need a new Passport.'
-  );
 }
 
 /**
