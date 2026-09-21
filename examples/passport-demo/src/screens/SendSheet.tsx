@@ -70,6 +70,15 @@ import {
   type SendCapabilities,
 } from '../lib/sendAssets.js'
 
+/* THE ONE SHIELDED SEND TODAY'S PASSPORTS MUST NOT MAKE, and the sentence it
+   earns. Pure and drilled, and asked here so the control is disabled with the
+   reason under the field rather than after a passkey ceremony — see
+   `lib/addressSendPolicy.ts`. */
+import {
+  addressSendRefusal,
+  type SenderAccountBuild,
+} from '../lib/addressSendPolicy.js'
+
 /* The sentence a refused send earns, and how many attempts a leg gets. Both
    are decisions rather than renderings, so both are drilled directly — see
    `lib/sendLegs.ts`. */
@@ -295,6 +304,20 @@ export interface SendSheetProps {
     tokenType: string
     amount: bigint
   }) => Promise<void>
+  /**
+   * Which build of the account this Passport's money is held by.
+   *
+   * It exists for one rule and one rule only: the build every Passport is on
+   * today cannot survive being asked for PART of a shielded coin, so a partial
+   * amount to a raw address is refused here rather than paid for and then
+   * refused by the node — see `lib/addressSendPolicy.ts`.
+   *
+   * Absent means "not asked", which the rule reads as the prototype it
+   * certainly is. The day an account exists that does not have the defect, its
+   * name is what the host passes and every send on this sheet goes back to
+   * what it was.
+   */
+  senderAccountBuild?: SenderAccountBuild | null
   /**
    * Asks the `.night` registry what one name points at.
    *
@@ -656,6 +679,7 @@ export default function SendSheet(props: SendSheetProps) {
     readShieldedHoldings,
     knownHoldings,
     onSendShielded,
+    senderAccountBuild,
     resolveName,
     onSendToName,
     onSendShieldedToName,
@@ -1001,7 +1025,7 @@ export default function SendSheet(props: SendSheetProps) {
       ? parseShieldedUnits(effectiveAmountText)
       : parseNight(effectiveAmountText)
   }, [effectiveAmountText, mode])
-  const amountError = useMemo(() => {
+  const amountLimitError = useMemo(() => {
     if (!parsedAmount) return null
     if ('error' in parsedAmount) return parsedAmount.error
     if (availableAtomic !== null && parsedAmount.amount > availableAtomic) {
@@ -1013,6 +1037,30 @@ export default function SendSheet(props: SendSheetProps) {
   }, [asset.symbol, availableAtomic, availableBalance, mode, parsedAmount])
 
   const amount = parsedAmount && !('error' in parsedAmount) ? parsedAmount.amount : null
+  /* THE SEND THAT WOULD COST THIS PASSPORT EVERY LATER ONE (2026/09/18).
+     The account build every Passport is on today splits a shielded coin when it
+     is asked for part of one, and what it puts back the network then refuses for
+     ever — so a partial amount to a raw address is paused here, before anything
+     is spent or signed, and a whole one goes exactly as it always has. Asked
+     only where the pair agrees: a mismatch already has its own sentence under
+     the recipient, and a second one over the amount would be the sheet refusing
+     twice for one mistake. The rule is `lib/addressSendPolicy.ts`; the host
+     backstops it, so nothing that skips this sheet can reach the split. */
+  const pausedAddressSend =
+    sendRoute === null
+      ? null
+      : addressSendRefusal({
+          asset: mode === 'shielded' ? 'shielded' : 'night',
+          recipient:
+            resolvedName !== null ? (accountMode ? 'account' : 'name') : 'address',
+          senderBuild: senderAccountBuild ?? null,
+          amount,
+          held: availableAtomic,
+          symbol: asset.symbol,
+        })
+  /* The limit speaks first: told that 200 is more than the 100 held, "this sends
+     all of it" is an answer to a question they are no longer asking. */
+  const amountError = amountLimitError ?? pausedAddressSend
   /* A name is not "ready" merely because it is well formed: it is ready when
      the registry has said what it points at. Anything less would let somebody
      press Review against a name nobody holds. */
