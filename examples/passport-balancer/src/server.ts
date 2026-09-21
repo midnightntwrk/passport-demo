@@ -137,6 +137,7 @@ import {
 
 import {
   AccountFundingError,
+  accountReadStatus,
   createAccountFunder,
   type AccountFunder,
 } from './account.js';
@@ -214,6 +215,7 @@ import {
 import { activationLegs, GRANT_RETRY_DELAY_MS, shouldRetryGrant } from './activationLegs.js';
 import {
   GIFT_REQUEST_SHAPES,
+  ColourPayFailure,
   createColourPayer,
   createGiftDesk,
   giftLedgerOf,
@@ -407,6 +409,18 @@ async function main(): Promise<void> {
    * there and the refusal is always the same sentence.
    */
   const custodyProver = custodyProverFromConfig(config);
+  /* WHAT IS STAGED, at start-up, in the journal. `/status` publishes the same
+     counts under `accountCustodyProving.staged`, and both exist because
+     `configured: true` is not readiness: the 3.5 GB of artefacts are rsynced
+     arm by arm and by hand, so a host can name a directory and a proof server
+     and still refuse every passkey Passport when it comes to prove. Asked once
+     here so an operator who has just staged an arm reads it from the journal
+     rather than from the first person whose Passport cannot be activated.
+     Never awaited — it reads the compiled build, and nothing else waits on
+     it. */
+  void custodyProver
+    .readiness()
+    .then((line) => console.log(`[${PROVE_ACCOUNT_CUSTODY_PREFIX}] ${line}`));
 
   /**
    * Alias registrations in progress, keyed BOTH ways: `alias:<label>` and
@@ -1795,21 +1809,33 @@ async function main(): Promise<void> {
     }
     accountInFlight.add(contractAddress);
     try {
-      /* 3. It has to BE an account. One indexer read that must both find state
-            and decode it as an account-custody contract. This is the gate that
-            keeps the balancer from paying coins into a stranger's contract: a
-            contract that is not an ACC has no `deposit_night`, and the grant
-            would be spent into something the user cannot reach. BOTH balances
-            come out of that one decode, so the two legs cannot end up
-            disagreeing about what they are looking at. */
-      let held: { night: bigint; asset: bigint };
+      /* 3. It has to BE an account, and it has to be SET UP. One indexer read
+            that must find state, recognise which of the three builds it is, and
+            decode it with that build. This is the gate that keeps the balancer
+            from paying coins into a stranger's contract: a contract that is not
+            an account has no deposit circuit at all, and the grant would be
+            spent into something the user cannot reach. BOTH balances come out
+            of that one decode, so the two legs cannot end up disagreeing about
+            what they are looking at.
+
+            IT DECODES WITH THE ACCOUNT'S OWN BUILD SINCE 2026/09/18. It used to
+            decode with the prototype build whatever the account was, so every
+            account custody Passport was refused `not-an-account` — a passkey
+            Passport that had been activated and named on stagenet that morning
+            among them. `asset` is null for those accounts and that is the
+            honest answer: custody there is stateless, so there is no shielded
+            balance anybody but the owner can read. */
+      let held: { night: bigint; asset: bigint | null };
       try {
         held = await funder.balances(contractAddress);
       } catch (cause) {
         if (cause instanceof AccountFundingError) {
           return fail(
             refusal(
-              cause.code === 'indexer-unreachable' ? 503 : 400,
+              /* See `accountReadStatus`: "we could not ask" and "that is not
+                 one of our accounts" are different answers, and a host that has
+                 not finished staging a build belongs with the first. */
+              accountReadStatus(cause.code),
               cause.code,
               cause.message,
               cause.detail ? { detail: cause.detail } : undefined,
@@ -1862,7 +1888,12 @@ async function main(): Promise<void> {
       const { nightNeeded, assetNeeded } = activationLegs({
         previous,
         heldNight: held.night,
-        heldAsset: held.asset,
+        /* NULL MEANS "cannot be asked", and the leg then rests on this
+           service's own record of having paid it. Treating it as zero is what
+           that comes to arithmetically — the account custody build mirrors no
+           shielded balance — but the reason matters: on a prototype account a
+           zero is a reading, and here it is an absence of one. */
+        heldAsset: held.asset ?? 0n,
         assetSupported,
         grantAtomic: funder.grantAtomic,
         assetGrant: funder.assetGrant,
@@ -1887,7 +1918,7 @@ async function main(): Promise<void> {
           refusal(
             409,
             'already-funded',
-            `That account already holds ${formatNight(held.night)} NIGHT${assetSupported ? ` and ${held.asset} ${funder.assetSymbol}` : ''} — at least one activation grant's worth — so it does not need funding.`,
+            `That account already holds ${formatNight(held.night)} NIGHT${assetSupported && held.asset !== null ? ` and ${held.asset} ${funder.assetSymbol}` : ''} — at least one activation grant's worth — so it does not need funding.`,
           ),
         );
       }
@@ -2128,7 +2159,35 @@ async function main(): Promise<void> {
           /* Takes the spend lock itself, twice — mint, then deposit — with the
              wait for the minted coin to become spendable in between and outside
              it. See `fundAsset` for why. */
-          const grant = await funder.fundAsset(contractAddress);
+          const grant = await funder.fundAsset(contractAddress, {
+            /* THE ROW GOES DOWN WHEN THE DEPOSIT IS SUBMITTED, not when it is
+               confirmed. `fundAsset` then spends up to ninety seconds watching
+               for the credit, and a restart inside that window used to leave a
+               coin on chain with nothing on disk naming it — after which the
+               next `/fund-account` paid a second one. A prototype account is
+               saved from that by its own `coins` map, which the retry reads; a
+               custody account mirrors no shielded holding, so nothing saves it
+               but this row.
+
+               PROVISIONAL, and it says so by what it omits: no `balanceAfter`,
+               because nothing has been read yet. The confirmed write below
+               replaces it. What it is for is `assetRecorded` in
+               `./activationLegs.ts`, which is what a retry consults. */
+            onDepositSubmitted: async (submitted) => {
+              assetEntry = {
+                symbol: funder.assetSymbol,
+                colourHex: submitted.colourHex,
+                amount: submitted.amount.toString(),
+                mintTx: submitted.mintTxHash,
+                depositTx: submitted.depositTxHash,
+                at: submitted.at,
+              };
+              await recordLeg({ asset: assetEntry });
+              console.log(
+                `[asset] ${contractAddress}: deposit ${submitted.depositTxHash} submitted and recorded before it confirms, so a restart cannot pay a second grant`,
+              );
+            },
+          });
           assetsFunded += 1;
           lastSpendAt = Date.now();
           assetBlock = grant.depositBlock;
@@ -2200,7 +2259,7 @@ async function main(): Promise<void> {
              publishes no shielded holding, so the honest answer to "what does
              it hold now" is that nobody can say — and the pre-deposit reading
              is the one number guaranteed to be wrong. */
-          assetBalanceAfter: assetEntry ? assetEntry.balanceAfter ?? null : held.asset.toString(),
+          assetBalanceAfter: assetEntry ? assetEntry.balanceAfter ?? null : held.asset?.toString() ?? null,
           ...(assetError ? { assetError } : {}),
         },
       };
@@ -2848,6 +2907,19 @@ async function main(): Promise<void> {
   }
 
   /**
+   * The account funder, for the gift desk's custody recipients, or a refusal.
+   *
+   * A `ColourPayFailure` rather than a plain throw so the route answers the
+   * `501` the partner API documents, with its own sentence, instead of a 500.
+   */
+  const custodyOpener = (): AccountFunder => {
+    if (!accountFunder) {
+      throw new ColourPayFailure(501, 'account-custody-build-required', accountFunderUnavailableReason);
+    }
+    return accountFunder;
+  };
+
+  /**
    * The gift desk. `../ops/gift-nft.ts` does the same two legs with the unit
    * stopped for five to ten minutes; this runs them in the process that owns
    * the wallet, under the same spend lock, so nothing has to be stopped.
@@ -2860,6 +2932,17 @@ async function main(): Promise<void> {
        desk already owns; a plain shielded address is an ordinary Zswap spend,
        and the only thing that can build one is the wallet. */
     transferShielded: (request) => wallet.transferShielded(request),
+    /* And the fourth kind of recipient: an account custody Passport, read and
+       opened through the ACCOUNT FUNDER'S build rather than a second copy of
+       it — see `CustodyOpener` in `./gift.ts` for why it is borrowed.
+
+       `accountFunder` is a `let` and is null where it could not be built, so
+       the lookup is per call rather than captured; a host without it refuses a
+       custody recipient exactly as it did before, before anything is minted. */
+    custody: {
+      view: (address) => custodyOpener().view(address),
+      opening: (module) => custodyOpener().opening(module),
+    },
   });
   if (giftDesk.available) {
     /* EVERY colour in the catalogue, at start-up, because a colour is the one
@@ -2916,7 +2999,7 @@ async function main(): Promise<void> {
            exactly as they do on `/fund-account`. */
         if (cause instanceof AccountFundingError) {
           throw new RepointReadFailure(
-            cause.code === 'indexer-unreachable' ? 503 : 400,
+            accountReadStatus(cause.code),
             cause.code,
             cause.message,
           );
