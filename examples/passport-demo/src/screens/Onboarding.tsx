@@ -2,6 +2,7 @@ import type { ReactNode } from 'react'
 import { ArrowRight, Eraser, Fingerprint, Loader2, ShieldCheck, X } from 'lucide-react'
 import ThemeToggle from './ThemeToggle'
 import ContinueWithSocial from './ContinueWithSocial'
+import PassportIllustration from './PassportIllustration'
 import './onboarding.css'
 
 /**
@@ -257,10 +258,7 @@ export default function OnboardingScreen(props: OnboardingProps) {
       </header>
 
       <div className="mnob-body">
-        <div className="mnob-orbit" aria-hidden="true">
-          <span className="mnob-orbit-art" />
-          <span className="mnob-orbit-pulse" />
-        </div>
+        <PassportIllustration />
         <h1
           className="mnob-title"
           aria-label="Midnight Passport — your private identity for the Midnight network"
