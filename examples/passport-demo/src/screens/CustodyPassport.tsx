@@ -1078,6 +1078,9 @@ export default function CustodyPassport({
   /* The account's chain history as the last delivery walk read it, so the
      opening-balance rows can link to the sponsor's deposits. */
   const lastActionsRef = useRef<Awaited<ReturnType<typeof readCustodyActions>>>(null)
+  /* Bumped each time a history read finishes (answered or not), so the
+     opening rows are reconsidered after it rather than before it. */
+  const [historyReads, setHistoryReads] = useState(0)
 
   const walkDeliveries = useCallback(
     async (
@@ -1091,14 +1094,17 @@ export default function CustodyPassport({
         import('../identity/contractRuntime.js'),
       ])
       const encSecretKeyHex = loadK1CoinStore(account).encSecretKeyHex
+      const indexerHttpUrl = wallet.network.indexerHttpUrl
+      /* The history is read first and kept for the opening rows' View links,
+         whether or not there is a list to open below. */
+      const actions = await readCustodyActions(indexerHttpUrl, account.address)
+      lastActionsRef.current = actions
+      setHistoryReads((count) => count + 1)
       /* No viewing secret, nothing to open the list with. That is a Passport
          restored from a name on a second device, and the sentence for it is not
          here — the row simply shows what the store holds. */
       if (encSecretKeyHex === null) return 0
-      const indexerHttpUrl = wallet.network.indexerHttpUrl
       const reader = await accountModule.readCustodyAccountView({ indexerHttpUrl }, account.address)
-      const actions = await readCustodyActions(indexerHttpUrl, account.address)
-      lastActionsRef.current = actions
       const txIdFor =
         actions === null ? () => null : custodyTxIdForInboxIndex(actions)
       const walked = await readInboxCustody(account, encSecretKeyHex, reader, {
@@ -1337,9 +1343,10 @@ export default function CustodyPassport({
       const txHash = opening
         ? custodyOpeningDepositTxHash(milestone, lastActionsRef.current)
         : custodyMilestoneTxHash(milestone, record.txHashes, registerTxId)
-      /* An opening row waits for the history that names its deposit, so it is
-         written once and with its View link; the next read writes it. */
-      if (opening && txHash === null) continue
+      /* An opening row waits only until the history has been READ, so it is
+         written once and with its View link; a history that holds no such
+         deposit writes the row without one rather than never. */
+      if (opening && txHash === null && historyReads === 0) continue
       onActivity(
         custodyMilestoneEntry(milestone, {
           name: view?.name ?? null,
@@ -1359,6 +1366,7 @@ export default function CustodyPassport({
     arriving,
     balance,
     balanceFailed,
+    historyReads,
     holdingsRead,
     onActivity,
     registerTxId,
