@@ -380,6 +380,25 @@ export interface SendSheetProps {
    */
   sponsoredToken?: { colourHex: string; symbol: string } | null
   /**
+   * WHAT THIS PAYMENT WILL PUBLISH, said at the field that decides it.
+   *
+   * Optional, and supplied by ONE host: a Passport on the account custody
+   * contract, where paying a name and paying an address are two different
+   * transactions with two different things on the public record — both
+   * Passports named, or neither. That is the per-payment choice of MIP-0012
+   * §6.6, and it is a choice somebody is making at this field, so it is said
+   * here rather than in a footnote.
+   *
+   * It is a FUNCTION of what has been typed rather than a string, because the
+   * answer changes with every keystroke and a host that had to be told about
+   * each one would be a second copy of this sheet's own input state. Returning
+   * `null` says nothing at all, which is what an empty field is owed.
+   *
+   * A host that does not supply it — every prototype Passport — renders no such
+   * line, exactly as before.
+   */
+  recipientDisclosure?: ((input: { typed: string; shielded: boolean }) => string | null) | null
+  /**
    * The live phase of the account call, when the host reports one. It narrates
    * the wait rather than measuring it: the prover reports no figure, so no
    * percentage is invented.
@@ -684,6 +703,7 @@ export default function SendSheet(props: SendSheetProps) {
     onSendToName,
     onSendShieldedToName,
     sponsoredToken,
+    recipientDisclosure,
     phase,
     nameLeg,
     nameLegAttempt,
@@ -927,6 +947,13 @@ export default function SendSheet(props: SendSheetProps) {
   /* Which ledger is being spent from — now a consequence of the choice above,
      where until 2026/08/31 it was a consequence of the recipient. */
   const mode: Mode = asset.mode
+
+  /* WHAT THIS PAYMENT WILL PUBLISH, where the host has a rule about it. Asked
+     on every render rather than remembered, because the answer is a function of
+     the field's current contents and nothing else. */
+  const disclosure = recipientDisclosure
+    ? recipientDisclosure({ typed: recipient, shielded: mode === 'shielded' })
+    : null
 
   const verdict = useMemo(
     () =>
@@ -1635,6 +1662,12 @@ export default function SendSheet(props: SendSheetProps) {
                   {networkId} address. Paste it — nothing is guessed from a partial one.
                 </span>
               )}
+              {/* WHAT THIS PAYMENT WILL PUBLISH — under the hint, because it is
+                  about the consequence of what has been typed rather than about
+                  what may be. Absent for every host that supplies no rule. */}
+              {disclosure ? (
+                <span className="mnhome-send-hint mnob-disclosure">{disclosure}</span>
+              ) : null}
             </label>
 
             <label className="mnhome-send-field">

@@ -75,6 +75,35 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 /** The URL that hands the app a stand-in sign-in. See `src/lib/dynamicWalk.ts`. */
 const WALK = '/?dynamicwalk=1';
 
+/**
+ * THE REAL HOME, WHICH IS WHERE A FINISHED PASSPORT NOW LANDS.
+ *
+ * Until 2026/09/22 one of these Passports landed on a page of its own — a
+ * name, one figure, "People can pay you at", and a three-field form — while
+ * every prototype Passport got the product. These helpers name the product's
+ * own furniture, so a walk that ended up back on the bare page would fail on
+ * the first line rather than on a figure that happens to render either way.
+ */
+function greeting(page: Page) {
+  return page.getByRole('heading', { name: /^Good (morning|afternoon|evening), walker$/ });
+}
+
+/** One asset row of the balance strip, by its ticker. */
+function assetRow(page: Page, symbol: string) {
+  return page.locator('.mnhome-token-row', { hasText: symbol });
+}
+
+/** Opens the Send sheet from Home's money row. */
+async function openSend(page: Page): Promise<void> {
+  await page.getByRole('button', { name: /^Send$/ }).first().click();
+  await expect(page.locator('.mnhome-send')).toBeVisible();
+}
+
+/** The Send sheet's asset picker, its recipient field, and its amount. */
+const sendPicker = (page: Page) => page.locator('.mnhome-send-asset');
+const sendRecipient = (page: Page) => page.locator('.mnhome-send').getByRole('textbox').first();
+const sendAmount = (page: Page) => page.locator('.mnhome-send-amount input');
+
 test.describe('a Passport held by a social sign-in', () => {
   test('welcomes a signed-in person with a Passport of their own, not a passkey', async ({
     browser,
@@ -445,7 +474,7 @@ function stoppedSendRow(stage: string): Record<string, unknown> {
 }
 
 test.describe('a Passport that has been paid', () => {
-  test('shows what it holds in mUSD as well as in NIGHT', async ({ browser }) => {
+  test('lands on the real Home, with everything a Passport has', async ({ browser }) => {
     const context = await browser.newContext(
       walkContextOptions({ viewport: { width: 420, height: 900 } }),
     );
@@ -459,21 +488,75 @@ test.describe('a Passport that has been paid', () => {
     });
     await page.goto(WALK);
 
-    await expect(page.getByRole('heading', { name: 'walker.night' })).toBeVisible();
+    /* THE DEFECT THIS WALK IS ABOUT (2026/09/22). This Passport used to land on
+       a page of its own — a big name, one figure, "People can pay you at", and
+       a send form — while every other Passport got the product. It gets the
+       product now, and each line below is one of the things that page did not
+       have. */
+    await expect(greeting(page)).toBeVisible({ timeout: 60_000 });
+    await expect(page.getByText('People can pay you at')).toHaveCount(0);
 
-    /* THE ROW THIS WHOLE PR IS ABOUT. Forty of them, named, beside the NIGHT
-       figure — and read out of the store, which is where a delivery's
-       description lands. */
-    const holding = page.locator('.mndyn-holding');
-    await expect(holding).toHaveCount(1);
-    await expect(holding.locator('.mndyn-holding-figure')).toHaveText('40');
-    await expect(holding.locator('.mndyn-holding-unit')).toHaveText('mUSD');
+    /* The money row. */
+    await expect(page.getByRole('button', { name: /^Send$/ }).first()).toBeVisible();
+    await expect(page.getByRole('button', { name: /^Receive$/ })).toBeVisible();
 
-    /* And the sentence that stood where the row is now. */
-    const body = (await page.locator('body').innerText()).toLowerCase();
-    expect(body).not.toContain('not built yet');
+    /* The asset rows — the account's own NIGHT, and what the store says it has
+       been paid. */
+    /* The account's own NIGHT, off its unshielded mirror. A real zero here —
+       this recorded account holds none — and a zero is what the row must show
+       rather than "Syncing" or a blank. */
+    await expect(assetRow(page, 'NIGHT')).toContainText('native token');
+    await expect(assetRow(page, 'mUSD')).toContainText('40');
 
-    /* The copy rule, on the screen that shows money. */
+    /* The name card, and the line under it. */
+    await expect(page.getByText('Your name on Stagenet')).toBeVisible();
+    await expect(page.getByText('Registered on Stagenet')).toBeVisible();
+    await expect(page.locator('.mnid-alias')).toHaveText('walker.night');
+    await expect(page.getByText('Your account is ready')).toBeVisible();
+
+    /* Everything down the page that a Passport has — and the two things that
+       are deliberately NOT on it, because neither applies to a Passport on this
+       contract: a back-up file that would restore none of its state, and the
+       developer panel whose own sentence ("nothing in your Passport is held by
+       this key") is false here. */
+    await expect(page.getByRole('button', { name: 'Back up or restore' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Sign a test message' })).toHaveCount(0);
+    await expect(page.getByText('Ethereum address')).toHaveCount(0);
+    await expect(page.locator('.mnhome-activity')).toBeVisible();
+    await expect(page.getByRole('button', { name: /^Home$/ })).toBeVisible();
+    await expect(page.getByRole('button', { name: /^Assets$/ })).toBeVisible();
+    await expect(page.getByRole('button', { name: /^Apps$/ })).toBeVisible();
+
+    /* THE TRAIL, WRITTEN AS THE SCREEN LEARNS EACH THING IS TRUE. Before this
+       a Passport of this kind had an empty history for ever: every one of these
+       happened and nothing wrote any of it down. */
+    const trail = page.locator('.mnhome-activity');
+    for (const row of [
+      'Passport created',
+      'Your account is set up',
+      'Your name is registered',
+      'Stablecoin deposited',
+    ]) {
+      await expect(trail).toContainText(row, { timeout: 30_000 });
+    }
+    /* AND NOT A ROW FOR MONEY THAT NEVER ARRIVED. This recorded account holds
+       no NIGHT, so "Opening balance deposited" is not owed and is not written
+       — which is the rule that keeps the trail from narrating a deposit that
+       did not happen. */
+    await expect(trail).not.toContainText('Opening balance deposited');
+
+    /* The copy rule, over everything this screen says about money and identity.
+       The apps grid is left out on purpose: it renders a third-party registry's
+       own words, which are not this repository's to hold to. */
+    const said = (
+      await Promise.all(
+        ['.mnhome-identity', '.mnhome-assets', '.mnid-card', '.mnhome-activity'].map(
+          async (selector) => (await page.locator(selector).allInnerTexts()).join(' '),
+        ),
+      )
+    )
+      .join(' ')
+      .toLowerCase();
     for (const forbidden of [
       'contract',
       'registry',
@@ -485,8 +568,36 @@ test.describe('a Passport that has been paid', () => {
       'sdk',
       'dynamic',
     ]) {
-      expect(body, `"${forbidden}" is on screen`).not.toContain(forbidden);
+      expect(said, `"${forbidden}" is on screen`).not.toContain(forbidden);
     }
+    expect(said).not.toContain('not built yet');
+
+    await context.close();
+  });
+
+  test('carries the same figures onto the Assets shelf', async ({ browser }) => {
+    const context = await browser.newContext(
+      walkContextOptions({ viewport: { width: 420, height: 900 } }),
+    );
+    const page = await context.newPage();
+    await installNetworkBoundary(page);
+    await serveAccountCustodyState(page, [ACCOUNT_CUSTODY_ADDRESS, PASSPORT_ACCOUNT_ADDRESS]);
+    await seedDynamicPassport(page, {
+      name: 'walker',
+      accountAddress: ACCOUNT_CUSTODY_ADDRESS,
+      musd: '40',
+    });
+    await page.goto(WALK);
+    await expect(greeting(page)).toBeVisible({ timeout: 60_000 });
+
+    /* THE BOTTOM BAR REALLY MOVES, and the shelf is fed the same snapshot the
+       strip above reads — so the two tabs cannot disagree about what this
+       Passport holds. */
+    await page.getByRole('button', { name: /^Assets$/ }).click();
+    await expect(page.locator('.mnassets-table')).toContainText('40', { timeout: 30_000 });
+
+    await page.getByRole('button', { name: /^Home$/ }).click();
+    await expect(greeting(page)).toBeVisible();
 
     await context.close();
   });
@@ -506,37 +617,34 @@ test.describe('a Passport that has been paid', () => {
       musd: '40',
     });
     await page.goto(WALK);
+    await expect(greeting(page)).toBeVisible({ timeout: 60_000 });
 
-    await page.getByLabel('Send to').fill(RESOLVABLE_NAME);
-    await page.getByLabel('What to send').selectOption({ label: 'mUSD' });
-    await page.getByLabel('Amount').fill('10');
-    await page.getByRole('button', { name: /^Send/ }).click();
+    await openSend(page);
+    /* WHAT THIS PAYMENT WILL PUBLISH, said at the field that decides it — the
+       per-payment choice of MIP-0012 §6.6, which moved onto this sheet with the
+       rest of the send. */
+    await sendPicker(page).selectOption({ index: 1 });
+    await sendRecipient(page).fill(RESOLVABLE_NAME);
+    await expect(
+      page.getByText('Both Passports are named on chain for this payment.'),
+    ).toBeVisible();
+
+    await sendAmount(page).fill('10');
+    await expect(page.getByRole('button', { name: /^Review$/ })).toBeEnabled({ timeout: 30_000 });
+    await page.getByRole('button', { name: /^Review$/ }).click();
+    await expect(page.getByText('Review this transfer')).toBeVisible();
+    await page.locator('.mnhome-send-primary').click();
 
     /* ONE SENTENCE, AND THE CONTROL BACK. Where this run stops is worth being
        exact about: the account it is driving is a REAL one, and its device set
        holds the key the gate run enrolled rather than this walk's stand-in, so
-       the refusal is the account's own — "this key is not one of the keys that
-       can approve for this Passport". That is a refusal a person can genuinely
-       meet, and it lands after the payment has been planned in full: the coin
-       chosen out of the store, the recipient read off the chain as one of these
-       accounts, the amount checked against what one payment can draw on. What
-       is asserted here is the property that holds whatever the refusal is —
-       one plain sentence, the control back, and the money accounted for. */
-    const alert = page.getByRole('alert');
-    await expect(alert).toBeVisible({ timeout: 60_000 });
-    const sentence = (await alert.innerText()).trim();
-    expect(sentence.split('\n').filter((line) => line.trim().length > 0)).toHaveLength(2);
-    expect(sentence).not.toContain('not built yet');
-    await expect(page.getByRole('button', { name: /^Send/ })).toBeEnabled();
-
-    /* AND THE PASSPORT SAYS WHERE THE MONEY IS. The payment was written down
-       before anything went out, and a run that stopped before the withdrawal
-       reports exactly that — the sentence comes from the record, through
-       storage, which is what makes a closed tab survivable. */
-    await expect(
-      page.getByText('Nothing was sent, and it is all still in your Passport.'),
-    ).toBeVisible();
-    await expect(page.locator('.mndyn-holding-figure')).toHaveText('40');
+       the refusal is the account's own. What is asserted is the property that
+       holds whatever the refusal is — one plain sentence on the sheet, the
+       control back, and the money accounted for. */
+    const failure = page.locator('.mnhome-send').locator('.mnhome-notice[role="alert"]');
+    await expect(failure.first()).toBeVisible({ timeout: 60_000 });
+    expect((await failure.first().innerText()).trim()).not.toContain('not built yet');
+    await expect(page.locator('.mnhome-send-primary')).toBeEnabled();
 
     await context.close();
   });
@@ -547,11 +655,16 @@ test.describe('a Passport that has been paid', () => {
      so the value left the account into a wallet the app builds and a tab closed
      between the legs left somebody's money where neither party owned it. That
      is the route the shielded send had taken out of it, and it is now out of
-     this one too — refused before the name is resolved and before anything is
-     signed, in the sentence the passkey arm already showed. */
-  test('refuses a NIGHT payment on this arm too, in the same sentence', async ({
-    browser,
-  }) => {
+     this one too.
+
+     WHERE THE REFUSAL LANDS NOW, AND WHY IT IS EARLIER THAN IT WAS. The bare
+     form this Passport used to land on had no idea what the account held, so a
+     NIGHT send reached the seam and was refused there in one sentence. The real
+     Send sheet checks the balance first, and the account in this recording holds
+     no NIGHT — so the refusal it gets is the truer of the two, and it arrives
+     before anybody is asked to review anything. The seam's own sentence is held
+     to in `src/lib/custodyHome.test.ts`, which is where a sentence belongs. */
+  test('will not offer NIGHT this Passport does not hold', async ({ browser }) => {
     const context = await browser.newContext(
       walkContextOptions({ viewport: { width: 420, height: 900 } }),
     );
@@ -564,26 +677,23 @@ test.describe('a Passport that has been paid', () => {
       musd: '40',
     });
     await page.goto(WALK);
+    await expect(greeting(page)).toBeVisible({ timeout: 60_000 });
 
-    await page.getByLabel('Send to').fill(RESOLVABLE_NAME);
-    await page.getByLabel('What to send').selectOption({ label: 'NIGHT' });
-    await page.getByLabel('Amount').fill('0.5');
-    await page.getByRole('button', { name: /^Send/ }).click();
+    await openSend(page);
+    await sendPicker(page).selectOption({ index: 0 });
+    await sendRecipient(page).fill(RESOLVABLE_NAME);
+    await sendAmount(page).fill('0.001');
 
-    await expect(
-      page.getByText('Paying somebody from this Passport is coming. Everything else here works.'),
-    ).toBeVisible({ timeout: 60_000 });
-    /* AND THE OLD SENTENCE IS STILL GONE: this is a route that is not offered,
-       not a Passport of this kind being told it cannot pay anybody. The
-       shielded send above is what works, on the same screen. */
-    const sentence = (await page.getByRole('alert').innerText()).trim();
-    expect(sentence).not.toContain('not built yet');
-    /* NOTHING WENT OUT, so no payment is written down and the control comes
-       back. */
-    await expect(
-      page.getByText('Nothing was sent, and it is all still in your Passport.'),
-    ).toHaveCount(0);
-    await expect(page.getByRole('button', { name: /^Send/ })).toBeEnabled();
+    /* NOTHING IS SIGNED AND NOTHING IS REVIEWED. The control stays down, which
+       is the house rule for an action that cannot work. */
+    await expect(page.getByRole('button', { name: /^Review$/ })).toBeDisabled();
+    /* And the old sentence is still gone: this is not a Passport of this kind
+       being told it cannot pay anybody. */
+    expect(await page.locator('.mnhome-send').innerText()).not.toContain('not built yet');
+
+    /* The shielded balance beside it is what sends, and the sheet says so by
+       offering it. */
+    await expect(sendPicker(page).locator('option')).toHaveCount(2);
 
     await context.close();
   });
@@ -618,8 +728,7 @@ test.describe('a Passport opened again after a payment', () => {
     });
     await page.goto(WALK);
 
-    const holding = page.locator('.mndyn-holding');
-    await expect(holding.locator('.mndyn-holding-figure')).toHaveText('30');
+    await expect(assetRow(page, 'mUSD')).toContainText('30', { timeout: 60_000 });
 
     /* THE RELOAD IS THE ASSERTION. The change coin's description exists
        nowhere but in this browser, and the inbox walk that runs on every open
@@ -627,10 +736,9 @@ test.describe('a Passport opened again after a payment', () => {
        reload is where a build that let that walk win puts the spent hundred
        back over the thirty of change. */
     await page.reload();
-    await expect(page.getByRole('heading', { name: 'walker.night' })).toBeVisible();
-    await expect(holding.locator('.mndyn-holding-figure')).toHaveText('30');
-    const body = await page.locator('body').innerText();
-    expect(body).not.toContain('100');
+    await expect(greeting(page)).toBeVisible({ timeout: 60_000 });
+    await expect(assetRow(page, 'mUSD')).toContainText('30');
+    expect(await page.locator('.mnhome-assets').innerText()).not.toContain('100');
 
     await context.close();
   });
@@ -658,16 +766,18 @@ test.describe('a Passport opened again after a payment', () => {
        "Finish this payment" button. There is now no such leg: the transaction
        either landed or it did not, so what is owed is the sentence and a way
        to put it away. A button would be a button offering to pay twice. */
-    const offer = page.locator('.mnob-unusable');
-    await expect(offer).toBeVisible();
+    /* IT IS SAID WHERE HOME SAYS EVERYTHING ELSE THAT WANTS READING — the
+       banner at the top, with the one control that puts it away. */
+    const offer = page.locator('.mnhome-notice[role="alert"]');
+    await expect(offer).toBeVisible({ timeout: 60_000 });
     await expect(offer).toContainText('was sent as one payment');
     await expect(offer).toContainText('Your balance below says which.');
     await expect(page.getByRole('button', { name: 'Finish this payment' })).toHaveCount(0);
-    await expect(page.getByRole('button', { name: 'Dismiss' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Dismiss error' })).toBeVisible();
 
     /* And the sentence points at a balance that is really on the screen
        beside it — the sentence is only the truth if the figure is there. */
-    await expect(page.locator('.mndyn-holding-figure')).toHaveText('30');
+    await expect(assetRow(page, 'mUSD')).toContainText('30');
 
     await context.close();
   });
@@ -690,8 +800,8 @@ test.describe('a Passport opened again after a payment', () => {
     /* A payment that finished owes nobody an interruption on the next open.
        The record is still there — it is cleared by the screen, not by the
        reader — and the screen is quiet about it. */
-    await expect(page.getByRole('heading', { name: 'walker.night' })).toBeVisible();
-    await expect(page.locator('.mnob-unusable')).toHaveCount(0);
+    await expect(greeting(page)).toBeVisible({ timeout: 60_000 });
+    await expect(page.locator('.mnhome-notice[role="alert"]')).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Finish this payment' })).toHaveCount(0);
 
     await context.close();

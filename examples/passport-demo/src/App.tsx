@@ -72,6 +72,19 @@ import { openingBalanceLegsHeld } from './lib/balanceWatch.js';
    the ones the reader is about to have: the opening grant on its way in, a
    send on its way out and back. Pure — see `lib/pendingBalances.ts`. */
 import { pendingBalances } from './lib/pendingBalances.js';
+/* What a payment out of an account custody Passport will publish, said at the
+   recipient field. Pure — see `lib/custodyScreenRules.ts`. */
+import { custodyPaymentDisclosure } from './lib/custodyScreenRules.js';
+/* The translation between a Passport on the account custody contract and the
+   props Home already takes. Pure, drilled, and free of the custody stores
+   themselves — see `lib/custodyHome.ts`, which says why that matters here. */
+import {
+  custodyHomeAccount,
+  custodyHomeAliasRecord,
+  custodyHomeContractRecord,
+  custodyHomePendingBalances,
+  type CustodyHomeView,
+} from './lib/custodyHome.js';
 import type { FundAccountAnswer } from './lib/activation.js';
 import {
   activationGrantHeld,
@@ -1889,7 +1902,29 @@ export default function PassportDemo() {
   /* DOM — the parse that refuses junk and the writer that caps what is kept */
   /* are the halves that CAN be, and both are.                              */
   /* ---------------------------------------------------------------------- */
-  const activityCredentialId = profile?.passkey?.credentialId ?? null;
+  /**
+   * The account custody user key, once the arm below has settled one.
+   *
+   * STATE AND NOT A DERIVATION, because the arm is decided six thousand lines
+   * further down — it needs the wallet's network and, on the passkey arm, a
+   * pointer that is only readable once a session is open — and the trail's two
+   * effects are here, beside the trail itself. An effect down there settles it;
+   * until it does the key is null, which reads as "nothing to load and nothing
+   * to save", and the load merges rather than replaces when it arrives.
+   */
+  const [custodyActivityUser, setCustodyActivityUser] = useState<string | null>(null);
+
+  /**
+   * WHOSE TRAIL THIS IS.
+   *
+   * The passkey credential where there is one, and the account custody user key
+   * where there is not. A Passport held by a sign-in has no passkey at all, so
+   * before 2026/09/22 it had no key to file a trail under and therefore no
+   * trail: everything it did was written to memory and lost on reload. The key
+   * is the one every other store on that path is filed under, so one Passport's
+   * history is still never another's.
+   */
+  const activityCredentialId = profile?.passkey?.credentialId ?? custodyActivityUser;
   /* Nothing is written back until the stored trail has been read for THIS
      credential. Without the gate the save effect's first pass would write the
      empty initial state over a real trail. */
@@ -6161,6 +6196,13 @@ export default function PassportDemo() {
     ready: localSessionActive && localWalletNetworkId !== null,
   });
   const dynamicArm = useDynamicCustodyArm(dynamicSession);
+  /* The key this Passport's trail is filed under, reported up to the store
+     that keeps it. See `custodyActivityUser`. */
+  const settledCustodyUser =
+    (dynamicOnly ? dynamicArm.userKey : localSessionActive ? passkeyArm.userKey : null) ?? null;
+  useEffect(() => {
+    setCustodyActivityUser(settledCustodyUser);
+  }, [settledCustodyUser]);
   /**
    * Whether this render belongs to the account custody screen, and with which
    * arm behind it.
@@ -9673,6 +9715,150 @@ export default function PassportDemo() {
       }
     : null;
 
+  /* ---------------------------------------------------------------------- */
+  /* A PASSPORT ON THE ACCOUNT CUSTODY CONTRACT, ON THE REAL HOME           */
+  /* ---------------------------------------------------------------------- */
+
+  /**
+   * Paints a finished custody Passport with the SAME shell every other
+   * Passport gets — Home, the Assets shelf, the apps, and the bottom bar.
+   *
+   * WHY IT IS HERE AND NOT IN `screens/CustodyPassport.tsx`. Until 2026/09/22
+   * that screen had a Home of its own: a name, one figure, "People can pay you
+   * at", and a three-field form. It was never the product, and which contract
+   * holds somebody's money is not a reason to show them a different one. The
+   * shell is this file's — it owns the tab, the apps grid, the toasts, and the
+   * consent overlays — so the screen keeps the custody state and the wallet and
+   * hands up a plain value; `lib/custodyHome.ts` turns that value into the
+   * props Home already takes.
+   *
+   * NOTHING ABOUT HOME IS FORKED OR BRANCHED FOR IT. Every difference is a prop
+   * that is present or absent, which is how Home has always been told what it
+   * may show.
+   */
+  const renderCustodyHome = (custody: CustodyHomeView) => {
+    const account = custodyHomeAccount(custody.holdings);
+    const aliasRecord = custodyHomeAliasRecord({
+      name: custody.name,
+      network: custody.network,
+      accountAddress: custody.accountAddress,
+    });
+    const contractRecord = custodyHomeContractRecord({
+      accountAddress: custody.accountAddress,
+      network: custody.network,
+      ready: custody.ready,
+      user: custody.user,
+    });
+    /* WHAT A CUSTODY PASSPORT IS TO AN APP: its name and the account that name
+       points at. The three wallet addresses are deliberately absent — they
+       belong to machinery this Passport does not have, and a consent sheet
+       offering them would be offering something nothing behind it holds. */
+    const custodyAppsProfile = custody.accountAddress
+      ? {
+          displayName: custody.name,
+          passportContract: { address: custody.accountAddress, network: custody.network },
+        }
+      : null;
+    const home = (
+      <HomeScreen
+        displayName={null}
+        aliasLabel={custody.name}
+        /* The name card. `onClaimName` and `onFindExisting` are withheld: a
+           Passport that has reached this screen already has its name, and a
+           Passport that has not is still on the name step, which is a screen
+           rather than a card. */
+        identity={{ record: aliasRecord, incentives: [] }}
+        /* "Your account is ready", and the address Receive offers. */
+        passportContract={contractRecord ? { record: contractRecord } : null}
+        network={custody.network as PassportNetwork}
+        syncPercent={custody.syncPercent}
+        account={account}
+        /* The `Arriving` word under a figure with coins behind it that have no
+           position yet. Never added to the figure itself. */
+        pendingBalances={custodyHomePendingBalances(custody.holdings)}
+        error={custody.error}
+        onDismissError={custody.onDismissError}
+        onRefresh={custody.onRefresh}
+        send={{
+          networkId: custody.send.networkId,
+          /* This Passport's calls are proved by a service, not in this tab. */
+          provingMode: 'http',
+          /* Every call on this path is paid for on the holder's behalf, so the
+             probe answers the one thing it is asked without going anywhere. */
+          readFeeReadiness: () => Promise.resolve({ mode: 'sponsored' as const }),
+          onSend: custody.send.onSend,
+          onSendToName: custody.send.onSendToName,
+          /* WHICH BUILD HOLDS THIS PASSPORT'S MONEY, for the one rule on that
+             sheet that has to know. The prototype's `withdraw_shielded` burns
+             the change it re-registers when it is asked for PART of a coin, so
+             a partial amount to a pasted address is refused on it
+             (`lib/addressSendPolicy.ts`). This is the build that fixed that, so
+             the refusal does not apply and the sheet is told which build it is
+             rather than left to assume the broken one. */
+          senderAccountBuild: 'account-custody' as const,
+          onSendShielded: custody.send.onSendShielded,
+          onSendShieldedToName: custody.send.onSendShieldedToName,
+          resolveName: custody.send.resolveName,
+          readShieldedHoldings: custody.send.readShieldedHoldings,
+          /* What this payment will publish, said at the field that decides it
+             — both Passports named, or neither. The per-payment choice of
+             MIP-0012 §6.6, and a choice somebody is making at that field. */
+          recipientDisclosure: custodyPaymentDisclosure,
+          phase: custody.send.phase,
+          /* ONE TRANSACTION. A shielded amount leaves this account and reaches
+             the recipient in a single call — see
+             `identity/custodyContractSend.ts` — so the review step says so
+             rather than counting legs this build does not have. */
+          nameLegSteps: 1 as const,
+        }}
+        activity={homeActivity}
+        appsProfile={custodyAppsProfile}
+        supportUrl={(import.meta.env.VITE_TELEGRAM_URL as string | undefined) ?? null}
+        /* NO BACK-UP FILE FOR THIS PASSPORT YET, so no control offering one.
+           `identity/backup.ts` exports the prototype's stores — the passkey
+           profile, the alias records, the prototype account — and none of them
+           is where a custody Passport's state lives; the file it would write
+           would restore nothing. Hidden rather than offered and broken. */
+        /* THE DEVELOPER PANEL IS OFF. It says "nothing in your Passport is held
+           by this key", which is true of a prototype Passport and false of this
+           one: here that key IS the device that approves. */
+        showSignedInIdentity={false}
+        /* ENDING THE SESSION, IN WHICHEVER WAY THIS PASSPORT WAS OPENED. A
+           passkey Passport closes the local session, exactly as every other
+           Passport on this screen does; a Passport opened with a sign-in signs
+           out of it. Neither forgets the Passport — coming back in the same way
+           opens it again. */
+        onSignOut={
+          dynamicOnly ? () => void dynamicSession.signOut() : () => void signOutPassport()
+        }
+      />
+    );
+    return (
+      <>
+        {mobileTab === 'home' ? (
+          home
+        ) : mobileTab === 'assets' ? (
+          /* The same snapshot Home's strip reads, so the two tabs cannot
+             disagree about what this Passport holds. */
+          <AssetsScreen
+            account={account}
+            pendingBalances={custodyHomePendingBalances(custody.holdings)}
+            network={custody.network as PassportNetwork}
+            onRefresh={custody.onRefresh}
+            activity={homeActivity}
+          />
+        ) : (
+          /* The apps grid, with NO transfer seam. An app that asks this
+             Passport to spend is answered `wallet-unavailable` rather than
+             being shown a sheet nothing behind it could satisfy — the seam
+             below it is the prototype wallet's, and this Passport has none. */
+          <AppsScreen profile={custodyAppsProfile} network={custody.network as PassportNetwork} />
+        )}
+        <PassportNav active={mobileTab} onSelect={setMobileTab} />
+      </>
+    );
+  };
+
   const overlays = (
     <>
       <PassportProfileConsent
@@ -9745,6 +9931,14 @@ export default function PassportDemo() {
             network={localWalletNetworkId ?? configuredWalletNetwork ?? selectedNetwork}
             arm={custodyArm}
             notice={passkeyOtherKeyNotice}
+            /* A FINISHED PASSPORT LANDS ON THE REAL HOME (2026/09/22). The
+               screen keeps onboarding — the welcome page, the name step, the
+               counted setup, and coming back by name — and hands everything
+               else up here. See `renderCustodyHome`. */
+            renderHome={renderCustodyHome}
+            /* And everything that happens to it is written down. The trail is
+               this file's: keyed, stored, paged, and linked to the explorer. */
+            onActivity={addActivity}
           />
         </Suspense>
       ) : showOnboarding ? (

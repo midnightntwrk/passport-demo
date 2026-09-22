@@ -318,6 +318,26 @@ export interface HomeScreenProps {
      * quietly routed to the other one.
      */
     onSendShieldedToName?: SendSheetProps['onSendShieldedToName']
+    /**
+     * Which build of the account contract holds this Passport's money, for the
+     * one rule on that sheet that has to know: a PARTIAL shielded amount to a
+     * pasted address is refused on the prototype build, whose
+     * `withdraw_shielded` burns the change it re-registers, and allowed on the
+     * build that fixed it. See `lib/addressSendPolicy.ts`.
+     *
+     * FORWARDED SINCE 2026/09/22, and it was not before: the host has passed it
+     * since the rule was written and this screen dropped it, so every sender
+     * reached the sheet as "not asked" — which the rule reads as the prototype,
+     * the safe answer for every Passport that existed then and the WRONG one
+     * for a Passport on the account custody build, which can divide a coin.
+     */
+    senderAccountBuild?: SendSheetProps['senderAccountBuild']
+    /**
+     * What this payment will publish, said at the recipient field. Supplied by
+     * a host that has a rule about it and omitted by every other — see
+     * {@link SendSheetProps.recipientDisclosure}.
+     */
+    recipientDisclosure?: SendSheetProps['recipientDisclosure']
     /** The live phase of the account call, narrated by the sheet. */
     phase?: 'checking' | 'connecting' | 'submitting' | 'confirming' | null
     /** Which of a name transfer's two legs is running. See the Send sheet. */
@@ -382,6 +402,22 @@ export interface HomeScreenProps {
    * appears.
    */
   onOpenBackup?: () => void
+  /**
+   * Whether the signed-in identity panel belongs on this Home.
+   *
+   * IT IS A DEVELOPER PANEL and it says so: an Ethereum address, a "Sign a test
+   * message" button, and the sentence "nothing in your Passport is held by this
+   * key". All three are true of a PROTOTYPE Passport, where a sign-in is beside
+   * the passkey and holds nothing.
+   *
+   * None of them is true of a Passport on the account custody contract held by
+   * that same sign-in: the key IS the device that approves for it, so the
+   * sentence is false, and the address and the test button are machinery a
+   * person who chose Google never asked to meet. Hidden there rather than
+   * reworded — see `lib/custodyHome.ts`. Defaults to shown, so every existing
+   * caller is unchanged.
+   */
+  showSignedInIdentity?: boolean
   onSignOut: () => void
 }
 
@@ -423,6 +459,7 @@ export default function HomeScreen(props: HomeScreenProps) {
     onIncentiveRedeemed,
     supportUrl,
     onOpenBackup,
+    showSignedInIdentity,
     onSignOut,
   } = props
 
@@ -1093,6 +1130,12 @@ export default function HomeScreen(props: HomeScreenProps) {
             /* The sponsor's own name for its colour, so the picker and the
                balance list call the same colour the same thing. */
             sponsoredToken={sponsoredToken}
+            {...(send.senderAccountBuild
+              ? { senderAccountBuild: send.senderAccountBuild }
+              : {})}
+            {...(send.recipientDisclosure
+              ? { recipientDisclosure: send.recipientDisclosure }
+              : {})}
             phase={send.phase ?? null}
             nameLeg={send.nameLeg ?? null}
             nameLegAttempt={send.nameLegAttempt ?? null}
@@ -1252,7 +1295,7 @@ export default function HomeScreen(props: HomeScreenProps) {
             environment id AND somebody signed in with a provider — so in every
             build shipped today this footer is unchanged. Same reason as
             above: the condition belongs inside the component that knows it. */}
-        <DynamicIdentity />
+        {showSignedInIdentity === false ? null : <DynamicIdentity />}
 
       </div>
     </section>

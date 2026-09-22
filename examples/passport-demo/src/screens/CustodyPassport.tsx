@@ -1,11 +1,9 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import {
   ArrowRight,
   BadgeCheck,
-  Copy,
   Fingerprint,
   Loader2,
-  RefreshCw,
   Search,
   ShieldCheck,
   Sparkles,
@@ -71,20 +69,31 @@ import {
   custodyActionRowsFrom,
   custodyTxIdForInboxIndex,
 } from '../identity/custodyInboxIndex.js'
-import { NIGHT_COLOUR_HEX } from '../lib/colour.js'
 import {
-  custodyAmountFigure,
-  custodyArrivingSentence,
+  custodyAssetRow,
   custodyAssetRows,
   custodyResumeOffer,
   custodyStablecoinColour,
-  parseCustodyAmount,
   type CustodyAssetRow,
 } from '../lib/custodyAssets.js'
+/* The translation between what this screen holds and what the real Home
+   paints, plus the trail's own rules. Pure — see `../lib/custodyHome.ts`. */
+import {
+  CUSTODY_NIGHT_SEND_REFUSAL,
+  custodyActivityMarkKey,
+  custodyMilestoneEntry,
+  custodyMilestoneTxHash,
+  custodyMilestonesLanded,
+  custodyHomeSendableHoldings,
+  custodySendPhase,
+  custodySentEntry,
+  custodyStablecoinHeld,
+  type CustodyActivityEntry,
+  type CustodyHomeView,
+} from '../lib/custodyHome.js'
 import {
   custodyArrivingCount,
   custodyInFlightRefusal,
-  custodyPaymentDisclosure,
   custodyMayReadHoldings,
   runCustodyKeepRecord,
   custodyUnplacedDeliveries,
@@ -115,6 +124,10 @@ import {
 import { NETWORK_LABELS, type PassportNetwork } from './NetworkSwitcher.js'
 import type { PassportContractName } from '../identity/contractRuntime.js'
 import type { LocalMidnightWallet } from '../lib/localWallet.js'
+import { pushToast } from './ToastStack.js'
+/* The explorer link a finished payment's toast and trail row carry. Pure, and
+   free of the wallet SDK — see `../lib/networks.ts`. */
+import { txReceiptLink } from '../lib/networks.js'
 import ThemeToggle from './ThemeToggle'
 import './onboarding.css'
 import './dynamic-passport.css'
@@ -240,6 +253,37 @@ export interface CustodyPassportProps {
    * Passport on one browser is a legitimate thing to want.
    */
   notice?: string | null
+  /**
+   * PAINTS A FINISHED PASSPORT — the real Home, the bottom bar, and everything
+   * that hangs off them.
+   *
+   * THIS SCREEN NO LONGER HAS A HOME OF ITS OWN, and that is the change of
+   * 2026/09/22. It had one: a name, one figure, "People can pay you at", and a
+   * three-field form. It was never the product — the product's Home is
+   * `./Home.tsx`, with the greeting, Send and Receive, the asset rows and their
+   * `Arriving` word, the name card, "Your account is ready", the apps, and the
+   * trail — and a Passport was being shown a different product because of which
+   * contract happened to be holding its money.
+   *
+   * The shell is rendered by `App.tsx` rather than from here for one reason: it
+   * is the SAME shell, with the same tab state, the same apps grid, and the
+   * same overlays a prototype Passport gets, and a second copy of it here would
+   * be two Homes to keep in step. What this screen keeps is the state, the
+   * wallet, and the seams — see `../lib/custodyHome.ts#CustodyHomeView`.
+   *
+   * What is left here is onboarding: the welcome page, the name step, the
+   * counted setup, and coming back by name.
+   */
+  renderHome: (view: CustodyHomeView) => React.ReactNode
+  /**
+   * Records something that happened, for the trail Home renders.
+   *
+   * The host owns the trail — it is keyed, stored, paged, and linked to the
+   * explorer there — so this screen only ever says what happened. Every call is
+   * at the moment the thing LANDS, and the milestones are written at most once
+   * per account: see `custodyMilestonesLanded`.
+   */
+  onActivity?: (entry: CustodyActivityEntry) => void
 }
 
 /**
@@ -254,7 +298,13 @@ export interface CustodyPassportProps {
  */
 type Screen = 'welcome' | 'name' | 'home' | 'recover'
 
-export default function CustodyPassport({ network, arm, notice: browserNotice = null }: CustodyPassportProps) {
+export default function CustodyPassport({
+  network,
+  arm,
+  notice: browserNotice = null,
+  renderHome,
+  onActivity,
+}: CustodyPassportProps) {
   /**
    * The key every store this Passport owns is filed under.
    *
@@ -298,7 +348,6 @@ export default function CustodyPassport({ network, arm, notice: browserNotice = 
   const [error, setError] = useState<string | null>(null)
   const [balance, setBalance] = useState<bigint | null>(null)
   const [balanceFailed, setBalanceFailed] = useState(false)
-  const [receivingAddress, setReceivingAddress] = useState<string | null>(null)
   /* Every token the coin store holds of a colour — held and queued together,
      which is what the account HOLDS as opposed to what one payment can draw
      on (`../identity/k1CoinStore.ts`). */
@@ -324,6 +373,22 @@ export default function CustodyPassport({ network, arm, notice: browserNotice = 
      step can say so over a field the person is about to retype. Cleared the
      moment they type. See `../lib/custodyNameFirst.ts`. */
   const [taken, setTaken] = useState<string | null>(null)
+  /* Whether the holdings have been read AT ALL on this Passport. It is not the
+     same question as "is the balance null": the shielded rows always carry a
+     stablecoin row, at zero where nothing has arrived, so without this a first
+     render would read "you have been paid nothing" and write no trail row for
+     the deposit when it landed. See `custodyStablecoinHeld`. */
+  const [holdingsRead, setHoldingsRead] = useState(false)
+  /* The wallet's own chain position, for the hairline bar under Home's top
+     bar. Null until the wallet has published one. */
+  const [syncPercent, setSyncPercent] = useState<number | null>(null)
+  /* The transaction the name registration landed in, where THIS session
+     watched it happen. It is not stored: the trail keeps it, and the name card
+     does not need it to say the name is registered. */
+  const [registerTxId, setRegisterTxId] = useState<string | null>(null)
+  /* Which step of a PAYMENT is running, in the Send sheet's four words.
+     Separate from `busy`, which is the onboarding steps' line. */
+  const [sendStep, setSendStep] = useState<CustodyPhase['step'] | null>(null)
   /**
    * Whether the welcome page has been read in this session.
    *
@@ -338,6 +403,15 @@ export default function CustodyPassport({ network, arm, notice: browserNotice = 
   const device = useRef<CustodyIdentity | null>(null)
   /* Whether a payment or a setup is running. See {@link run}. */
   const inFlight = useRef(false)
+  /* The sync subscription's own handle — see {@link readHoldings}. */
+  const syncOff = useRef<(() => void) | null>(null)
+  useEffect(
+    () => () => {
+      syncOff.current?.()
+      syncOff.current = null
+    },
+    [],
+  )
 
   /** Re-reads what is stored and moves the screen to match it. */
   const refresh = useCallback((): DynamicPassportView | null => {
@@ -455,12 +529,61 @@ export default function CustodyPassport({ network, arm, notice: browserNotice = 
   const sendPhase = useCallback(
     (record: CustodyShieldedSendRecord) => (phase: CustodyPhase) => {
       setBusy(PHASE_LABELS[phase.step])
+      /* The same step, in the four words the Send sheet narrates with — it is
+         the surface a payment is made from now, and the onboarding line above
+         is not on screen at the time. See `custodySendPhase`. */
+      setSendStep(phase.step)
       if (phase.txId === undefined) return
+      /* WHERE THE TRAIL'S LINK COMES FROM. A ref rather than state because the
+         send that is about to report itself reads this in the same tick it was
+         written, before any render. */
+      sentTxId.current = phase.txId
       const away: CustodyShieldedSendRecord = { ...record, sendTxId: phase.txId }
       saveCustodyShieldedSend(window.localStorage, away)
       setStopped(away)
     },
     [],
+  )
+
+  /** The transaction the last payment went out in, for its trail row. */
+  const sentTxId = useRef<string | null>(null)
+
+  /**
+   * One finished payment, said in all three places it is owed: the trail, the
+   * toast, and the quiet line the screen already had.
+   *
+   * ONE FUNCTION, because the two shielded routes — to a name and to a pasted
+   * address — differ only in who the recipient is, and a payment reported two
+   * ways is a payment described differently depending on how it was addressed.
+   */
+  const reportSent = useCallback(
+    (sent: {
+      asset: CustodyAssetRow
+      amount: bigint
+      recipientLabel: string
+      network: string
+    }) => {
+      const txHash = sentTxId.current
+      onActivity?.(
+        custodySentEntry({
+          amount: sent.amount,
+          decimals: sent.asset.decimals,
+          symbol: sent.asset.symbol,
+          recipient: sent.recipientLabel,
+          txHash,
+        }),
+      )
+      pushToast({
+        tone: 'success',
+        /* Accepted, not yet included — the same claim every other send on this
+           app makes, and the only one that is true at this moment. */
+        title: 'Shielded transfer accepted by the network — confirming',
+        body: 'The network fee was covered on your behalf.',
+        ...(txHash ? { link: txReceiptLink(sent.network, txHash) ?? undefined } : {}),
+      })
+      sentTxId.current = null
+    },
+    [onActivity],
   )
 
   /**
@@ -637,12 +760,17 @@ export default function CustodyPassport({ network, arm, notice: browserNotice = 
       const { custodyWalletSeed } = await import('../identity/custodyContractClient.js')
       const ownerKey = await deriveMidnamesOwnerKey(custodyWalletSeed(deps, owner))
       try {
-        await sponsorAliasRegistrationAcross(FUNDER_URLS, {
+        const claimed = await sponsorAliasRegistrationAcross(FUNDER_URLS, {
           alias,
           ownerKey,
           contractAddress: address,
           network: network as 'stagenet',
         })
+        /* KEPT FOR THE TRAIL AND FOR NOTHING ELSE. The row that says the name
+           is registered is worth a link to the transaction that registered it;
+           the name card needs no such thing, and neither does anything else on
+           screen, so it is session state rather than another stored field. */
+        setRegisterTxId(claimed.registerTxId ?? null)
       } catch (cause) {
         if (custodyNameWasTaken(cause)) {
           loseTheRace()
@@ -833,7 +961,17 @@ export default function CustodyPassport({ network, arm, notice: browserNotice = 
         deps.contractModule(),
       ])
       opened = wallet
-      setReceivingAddress(wallet.unshieldedAddress)
+      /* THE SYNC BAR, SUBSCRIBED ONCE. Home paints a hairline strip while the
+         wallet walks the chain, and it is the one thing about the wallet a
+         person needs: nothing can be signed until it has caught up. Subscribed
+         on the first read rather than per read, because the facade republishes
+         on every applied index and a second listener would double the renders
+         it causes. The handle is dropped when this screen goes. */
+      if (syncOff.current === null) {
+        syncOff.current = wallet.subscribeSyncProgress((progress) => {
+          setSyncPercent(progress.percent)
+        })
+      }
       const providers = await deps.providers(wallet, record.privateStateId)
       const reader = providers.publicDataProvider as {
         queryContractState(address: string): Promise<{ data: unknown } | null>
@@ -927,6 +1065,10 @@ export default function CustodyPassport({ network, arm, notice: browserNotice = 
       setArriving(
         custodyArrivingCount({ awaitingRows: awaitingK1Coins(account).length, unplaced }),
       )
+      /* ONLY NOW is a zero a real zero. Until this line nothing has asked the
+         store anything, and the rows' own stablecoin row — which exists at zero
+         by design — would otherwise be read as "paid nothing". */
+      setHoldingsRead(true)
     } catch (cause) {
       console.warn('[account-custody] could not read what this Passport was paid', cause)
     }
@@ -945,32 +1087,94 @@ export default function CustodyPassport({ network, arm, notice: browserNotice = 
   }, [readHoldings, screen])
 
   /* ---------------------------------------------------------------------- */
-  /* Paying somebody                                                        */
+  /* The trail                                                              */
   /* ---------------------------------------------------------------------- */
 
   /**
-   * The account's NIGHT, out to a name — refused, on both arms.
+   * Writes down each thing that has happened, once, the moment it is TRUE.
    *
-   * THE RULING OF 2026/09/18 IS ABOUT THE ROUTE, NOT ABOUT THE SIGNATURES. The
-   * shielded send became one transaction that pays the recipient directly, and
-   * no value passes through a wallet this app built. This leg never did: it
-   * took NIGHT out of the account into the Passport's OWN wallet and paid the
-   * recipient from there, so a tab closed between the two left somebody's money
-   * in a place neither party owned — which is exactly what the ruling forbids,
-   * and exactly where every stopped payment in this build's history got stuck.
+   * WHY IT IS AN OBSERVER AND NOT FIVE CALL SITES. Three of these five facts
+   * are things this tab did — the account was made, the key was turned on, the
+   * name was registered — and two are things that happen TO the Passport: the
+   * opening NIGHT and the stablecoin are deposited on its behalf, and nothing
+   * here is waiting on either. A Passport whose deposit lands after the tab was
+   * closed would get no row at all from a call site, and a Passport opened for
+   * the first time on a second device would get none of the five. An observer
+   * over what is now true gets all of them, in the order they happened, whenever
+   * the reader happens to look.
    *
-   * It was refused on the passkey arm already, for that reason. Refusing it on
-   * both is the same decision applied consistently: a route this repository has
-   * ruled out is not one a social sign-in may take either, and the arm that
-   * could still take it is parked rather than privileged. The sentence is the
-   * one the passkey arm already showed, and it is true of both: the shielded
-   * balance below sends today.
+   * ONCE PER ACCOUNT, and the marks are stored under the account rather than
+   * held in memory, because the whole point is that a reload must not repeat
+   * them. `../lib/custodyHome.ts` owns both the rule and the key.
+   *
+   * NOTHING IS OWED ON A NULL. A balance nobody has read is not a balance of
+   * zero — see `custodyMilestonesLanded`.
    */
-  const sendNight = useCallback((): Promise<void> => {
-    return Promise.reject(
-      new Error('Paying somebody from this Passport is coming. Everything else here works.'),
-    )
-  }, [])
+  useEffect(() => {
+    const record = view?.record ?? null
+    const address = record?.address ?? null
+    if (onActivity === undefined || record === null || address === null) return
+    const key = custodyActivityMarkKey(record.network, address)
+    let written: string[] = []
+    try {
+      const raw = window.localStorage.getItem(key)
+      const parsed: unknown = raw === null ? [] : JSON.parse(raw)
+      if (Array.isArray(parsed)) written = parsed.filter((row): row is string => typeof row === 'string')
+    } catch {
+      /* Storage blocked or unreadable. A trail is a convenience; the worst this
+         costs is a row written twice, which is better than a Passport whose
+         history is blank. */
+      written = []
+    }
+    const holdings = {
+      night: balance,
+      shielded: tokens,
+      balanceFailed,
+      stablecoinColourHex: STABLECOIN_COLOUR,
+      arriving,
+    }
+    const owed = custodyMilestonesLanded({
+      written,
+      hasAccount: true,
+      activated: record.activated,
+      name: view?.name ?? null,
+      night: balance,
+      stablecoin: custodyStablecoinHeld(holdings, holdingsRead),
+    })
+    if (owed.length === 0) return
+    const stablecoinRow = custodyAssetRow(custodyAssetRows({
+      night: balance,
+      shielded: tokens,
+      stablecoinColourHex: STABLECOIN_COLOUR,
+    }), STABLECOIN_COLOUR)
+    for (const milestone of owed) {
+      onActivity(
+        custodyMilestoneEntry(milestone, {
+          name: view?.name ?? null,
+          ...(stablecoinRow ? { stablecoinSymbol: stablecoinRow.symbol } : {}),
+          txHash: custodyMilestoneTxHash(milestone, record.txHashes, registerTxId),
+        }),
+      )
+    }
+    try {
+      window.localStorage.setItem(key, JSON.stringify([...written, ...owed]))
+    } catch {
+      // As above: nothing on screen depends on the write succeeding.
+    }
+  }, [
+    arriving,
+    balance,
+    balanceFailed,
+    holdingsRead,
+    onActivity,
+    registerTxId,
+    tokens,
+    view,
+  ])
+
+  /* ---------------------------------------------------------------------- */
+  /* Paying somebody                                                        */
+  /* ---------------------------------------------------------------------- */
 
   /**
    * Write the change this account kept into its own inbox.
@@ -1222,84 +1426,198 @@ export default function CustodyPassport({ network, arm, notice: browserNotice = 
     [arm, backfillChange, ensureIdentity, sendPhase],
   )
 
+  /* ---------------------------------------------------------------------- */
+  /* The Send sheet's four seams                                            */
+  /* ---------------------------------------------------------------------- */
+
   /**
-   * Pays whatever was typed, in whichever asset the form is on.
+   * Everything this Passport holds, named once for every surface that reads it.
    *
-   * TWO THINGS CAN BE TYPED and the difference is decided here, once, on the
-   * shape of what was typed: a name belongs to a Passport and is resolved, and
-   * an `mn_shield-addr…` belongs to whoever holds it and is paid directly. A
-   * name is resolved and the recipient's build read ONCE so that every branch
-   * below works from the same answer, and none of them decides anything about
-   * a payment on a render's word.
+   * MEMOISED BECAUSE IT IS AN IDENTITY, not for speed: the seams below close
+   * over it, and a fresh array on every render would rebuild every one of them
+   * on every render, which is a new `onSend` handed to an open Send sheet in
+   * the middle of a payment.
    */
-  const sendToName = useCallback(
-    (typed: string, amountText: string, asset: CustodyAssetRow) => {
-      void run('Checking that name', async () => {
+  const assetRows = useMemo(
+    () =>
+      custodyAssetRows({
+        night: balance,
+        shielded: tokens,
+        stablecoinColourHex: STABLECOIN_COLOUR,
+      }),
+    [balance, tokens],
+  )
+
+  /**
+   * ONE PAYMENT AT A TIME, AND IT THROWS RATHER THAN PAINTING.
+   *
+   * THIS IS NOT {@link run}. `run` is onboarding's runner: it puts a label on
+   * this screen's own busy line and turns a failure into a sentence on this
+   * screen's own error card. Neither of those is on screen when a payment is
+   * made now — the Send sheet is, and it has a busy state, a review step, and a
+   * failure panel of its own, which is where a person making a payment is
+   * looking. So the seam does the one thing the sheet cannot do for itself —
+   * hold the coin store against the read that fires from an effect — and lets
+   * the failure out to the surface that asked for it.
+   *
+   * The follow-up read runs AFTER the flag is cleared, for the reason
+   * `runCustodyWork` exists: a read from inside the payment reads the figures
+   * from before it.
+   */
+  const runPayment = useCallback(
+    async (work: () => Promise<void>): Promise<void> => {
+      const refusal = custodyInFlightRefusal(inFlight.current)
+      if (refusal !== null) throw new Error(refusal)
+      setError(null)
+      const { failure } = await runCustodyWork(inFlight, work, readHoldings)
+      setBusy(null)
+      setSendStep(null)
+      if (failure === null) return
+      console.warn('[account-custody] that payment did not finish', failure)
+      /* THE SHEET GETS A SENTENCE, THE CONSOLE GETS THE CAUSE — the same rule
+         `run` follows, and for the same reason: a cause from a vendor, a WASM
+         deserialiser, or a node carries exactly the words this app keeps off
+         its screens. */
+      throw new Error(custodyFailureSentence(failure))
+    },
+    [readHoldings],
+  )
+
+  /**
+   * The registry's answer about one name, in the shape the sheet expects.
+   *
+   * REFUSED IN A SENTENCE AND NOT AS AN ERROR, in every case: a name nobody
+   * holds, a name pointing somewhere that is not a Passport account, and a
+   * lookup that could not be made are three different things a person can act
+   * on, and the field says which.
+   */
+  const resolveName = useCallback(
+    async (
+      typed: string,
+    ): Promise<{ found: true; domain: string; accountAddress: string } | { found: false; reason: string }> => {
+      let label: string
+      try {
+        label = normalizePassportAlias(typed)
+      } catch {
+        return { found: false, reason: 'That is not a Midnight name.' }
+      }
+      const { resolveAliasTarget } = await import('../identity/midnames.js')
+      const resolved = await resolveAliasTarget(network as 'stagenet', label)
+      if (!resolved || resolved.target.kind !== 'contract') {
+        return { found: false, reason: `No Passport is registered under ${aliasDomain(label)}.` }
+      }
+      /* An all-zero target is a name that was never pointed at anything.
+         Treating it as an account would send money to nobody. */
+      if (/^0*$/.test(resolved.target.hex)) {
+        return {
+          found: false,
+          reason: `${aliasDomain(label)} is registered, but no Passport has been attached to it yet.`,
+        }
+      }
+      return { found: true, domain: aliasDomain(label), accountAddress: resolved.target.hex }
+    },
+    [network],
+  )
+
+  /**
+   * A shielded amount out to a name, in ONE transaction.
+   *
+   * The sheet has already resolved the name and hands the account it points at,
+   * so nothing is resolved twice; what is still this seam's to do is read which
+   * build holds that account, because a recipient on a different build is a
+   * payment that must be refused rather than sent somewhere it cannot be opened
+   * — `custodyShieldedSendRefusal` owns that sentence.
+   */
+  const sendShieldedToName = useCallback(
+    async (params: {
+      domain: string
+      accountAddress: string
+      tokenType: string
+      amount: bigint
+    }): Promise<void> => {
+      await runPayment(async () => {
         setNotice(null)
         const { account, record, wallet } = await custodyContext()
-        const typedTrimmed = typed.trim()
-        const amount = parseCustodyAmount(amountText, asset.decimals)
-
-        /* AN ADDRESS, NOT A NAME. Only a shielded amount can go to one: the
-           account's unshielded holdings are a mirror the contract keeps, and
-           nothing at a shielded address can write one. */
-        if (/^mn_shield-addr/i.test(typedTrimmed)) {
-          if (asset.mode !== 'shielded') {
-            throw new Error('That kind of amount can only be sent to a Passport name.')
-          }
-          await sendShieldedToAddress({
-            wallet,
-            record,
-            account,
-            asset,
-            amount,
-            shieldedAddress: typedTrimmed,
-          })
-          return
-        }
-
-        const label = normaliseNameForRecovery(typed)
-        if (label.length === 0) throw new Error('Type the name you want to pay.')
-
-        /* REFUSED BEFORE ANYTHING IS ASKED OF ANYBODY. The account's NIGHT
-           leaves by a route this repository has ruled out, on both arms — see
-           {@link sendNight} — so the name is not resolved, the recipient's
-           build is not read, and nothing is signed. */
-        if (asset.mode !== 'shielded') {
-          await sendNight()
-          return
-        }
-
-        const [{ resolveAliasTarget }, { accountModuleFor }] = await Promise.all([
-          import('../identity/midnames.js'),
-          import('../identity/accountCustody.js'),
-        ])
-        const resolved = await resolveAliasTarget(network as 'stagenet', label)
-        if (!resolved || resolved.target.kind !== 'contract') {
-          throw new Error('No Passport is registered under that name.')
-        }
-        setReceivingAddress(wallet.unshieldedAddress)
+        const asset = custodyAssetRow(assetRows, params.tokenType)
+        if (asset === null) throw new Error('This Passport does not hold that token.')
+        const { accountModuleFor } = await import('../identity/accountCustody.js')
         const recipientModule = await accountModuleFor(
           { indexerHttpUrl: wallet.network.indexerHttpUrl },
-          resolved.target.hex,
+          params.accountAddress,
         )
+        const label = normaliseNameForRecovery(params.domain)
         await sendShielded({
           wallet,
           record,
           account,
           label,
           asset,
-          amount,
-          recipientAccountAddress: resolved.target.hex,
+          amount: params.amount,
+          recipientAccountAddress: params.accountAddress,
           recipientModule,
         })
-        /* The figures are read by `run` AFTER this returns — see its `after`
-           argument. A read from here reads nothing: the payment still holds
-           the store. */
-      }, readHoldings)
+        reportSent({
+          asset,
+          amount: params.amount,
+          recipientLabel: params.domain,
+          network: record.network,
+        })
+      })
     },
-    [custodyContext, network, readHoldings, run, sendNight, sendShielded, sendShieldedToAddress],
+    [assetRows, custodyContext, reportSent, runPayment, sendShielded],
   )
+
+  /** The same amount, out to a shielded address somebody pasted or scanned. */
+  const sendShieldedToPastedAddress = useCallback(
+    async (params: {
+      recipientAddress: string
+      tokenType: string
+      amount: bigint
+    }): Promise<void> => {
+      await runPayment(async () => {
+        setNotice(null)
+        const { account, record, wallet } = await custodyContext()
+        const asset = custodyAssetRow(assetRows, params.tokenType)
+        if (asset === null) throw new Error('This Passport does not hold that token.')
+        await sendShieldedToAddress({
+          wallet,
+          record,
+          account,
+          asset,
+          amount: params.amount,
+          shieldedAddress: params.recipientAddress.trim(),
+        })
+        reportSent({
+          asset,
+          amount: params.amount,
+          recipientLabel: shortHex(params.recipientAddress.trim()),
+          network: record.network,
+        })
+      })
+    },
+    [assetRows, custodyContext, reportSent, runPayment, sendShieldedToAddress],
+  )
+
+  /**
+   * What the picker may offer, read again when the sheet opens.
+   *
+   * THE ROWS ON SCREEN ARE HANDED TO THE SHEET SEPARATELY so its first frame is
+   * already populated; this is the re-read behind them, and it is the answer a
+   * send is enabled against. Both come out of `../lib/custodyHome.ts`, so the
+   * strip, the shelf, and the picker cannot disagree.
+   */
+  const readShieldedHoldings = useCallback(async (): Promise<
+    { tokenType: string; amount: bigint }[]
+  > => {
+    await readHoldings()
+    return custodyHomeSendableHoldings({
+      night: balance,
+      shielded: tokens,
+      balanceFailed,
+      stablecoinColourHex: STABLECOIN_COLOUR,
+      arriving,
+    })
+  }, [arriving, balance, balanceFailed, readHoldings, tokens])
 
   /** Forgets a payment the person has been told about. */
   const dismissStoppedSend = useCallback(() => {
@@ -1548,29 +1866,68 @@ export default function CustodyPassport({ network, arm, notice: browserNotice = 
   }
 
   if (stage === 'home') {
-    return (
-      <HomeStep
-        badge={arm.badge}
-        name={view?.name ?? null}
-        address={view?.address ?? null}
-        receivingAddress={receivingAddress}
-        rows={custodyAssetRows({
-          night: balance,
-          shielded: tokens,
-          stablecoinColourHex: STABLECOIN_COLOUR,
-        })}
-        balanceFailed={balanceFailed}
-        arriving={arriving}
-        offer={custodyResumeOffer(stopped)}
-        busy={busy}
-        error={error}
-        notice={notice}
-        onRefresh={() => void readHoldings()}
-        onSend={sendToName}
-        onDismissStopped={dismissStoppedSend}
-        onDismissError={() => setError(null)}
-      />
-    )
+    /* THE REAL HOME, AND NOT A SECOND ONE (2026/09/22). Everything below the
+       name is the shell every other Passport gets — the greeting, Send and
+       Receive, the asset rows, the name card, "Your account is ready", the
+       apps, the trail, and the bottom bar — painted by `App.tsx` from this
+       value. See `CustodyPassportProps.renderHome`. */
+    const offer = custodyResumeOffer(stopped)
+    return renderHome({
+      user,
+      network,
+      name: view?.name ?? null,
+      /* THE ACCOUNT, AND NOT THE WALLET. Receive offers this and only this: it
+         is what the name points at and what a payment is made into. The
+         wallet's own address is machinery and is never handed out. */
+      accountAddress: view?.address ?? null,
+      ready: view?.record != null && nextCustodyStep(view.record) === 'ready',
+      holdings: {
+        night: balance,
+        shielded: tokens,
+        balanceFailed,
+        stablecoinColourHex: STABLECOIN_COLOUR,
+        arriving,
+      },
+      syncPercent,
+      /* ONE BANNER, TWO SOURCES. A refusal from a control on this screen and
+         the sentence about a payment that stopped are both "something you
+         should read", and Home has one place for that. The stopped payment's
+         sentence wins only when there is no live failure, because a failure is
+         about the press that just happened. */
+      error: error ?? notice ?? (offer.kind === 'report' ? offer.sentence : null),
+      stoppedSentence: offer.kind === 'report' ? offer.sentence : null,
+      onRefresh: () => void readHoldings(),
+      /* PUTS AWAY EXACTLY WHAT IS ON SCREEN, in the order the banner shows
+         them. Clearing all three on one press would discard the record of a
+         stopped payment because an unrelated refusal happened to be showing,
+         and that record is the only thing on this device that knows where
+         somebody's money got to. */
+      onDismissError: () => {
+        if (error !== null) {
+          setError(null)
+          return
+        }
+        if (notice !== null) {
+          setNotice(null)
+          return
+        }
+        dismissStoppedSend()
+      },
+      onDismissStopped: dismissStoppedSend,
+      send: {
+        networkId: network,
+        resolveName,
+        /* THE ACCOUNT'S NIGHT, REFUSED IN ONE SENTENCE, whichever way it is
+           addressed — the route it would take is the one ruled out on
+           2026/09/18. See `CUSTODY_NIGHT_SEND_REFUSAL`. */
+        onSend: () => Promise.reject(new Error(CUSTODY_NIGHT_SEND_REFUSAL)),
+        onSendToName: () => Promise.reject(new Error(CUSTODY_NIGHT_SEND_REFUSAL)),
+        onSendShielded: sendShieldedToPastedAddress,
+        onSendShieldedToName: sendShieldedToName,
+        readShieldedHoldings,
+        phase: custodySendPhase(sendStep),
+      },
+    })
   }
 
   /* EVERY SCREEN THIS FLOW HAS IS NAMED ABOVE, and `stage` is one of four, so
@@ -2069,191 +2426,6 @@ function RecoverStep(props: {
         </p>
         <button type="button" className="mnob-alt" onClick={props.onBack} disabled={busy}>
           Go back
-        </button>
-      </form>
-    </Shell>
-  )
-}
-
-function HomeStep(props: {
-  badge: string
-  name: string | null
-  address: string | null
-  receivingAddress: string | null
-  /** Everything the Passport holds, NIGHT first. See `../lib/custodyAssets.ts`. */
-  rows: CustodyAssetRow[]
-  balanceFailed: boolean
-  /** How many payments are here with no position yet. Never part of a figure. */
-  arriving: number
-  /** A payment that stopped between legs, and what can be done about it. */
-  offer: ReturnType<typeof custodyResumeOffer>
-  busy: string | null
-  error: string | null
-  notice: string | null
-  onRefresh: () => void
-  onSend: (name: string, amount: string, asset: CustodyAssetRow) => void
-  onDismissStopped: () => void
-  onDismissError: () => void
-}) {
-  const [recipient, setRecipient] = useState('')
-  const [amount, setAmount] = useState('')
-  /* The colour being sent, by id. Held as the COLOUR rather than as an index so
-     a list that gains a row between renders — which it does, the moment a
-     payment's description lands — cannot move the selection to another token
-     under somebody who has already typed an amount. */
-  const [assetId, setAssetId] = useState<string>(NIGHT_COLOUR_HEX)
-  const payable = props.name ?? props.address ?? null
-  const asset = props.rows.find((row) => row.id === assetId) ?? props.rows[0]
-  const arriving = custodyArrivingSentence(props.arriving)
-  /* WHAT THIS PAYMENT WILL PUBLISH, said at the field that decides it. See
-     `custodyPaymentDisclosure`. */
-  const disclosure = custodyPaymentDisclosure({
-    typed: recipient,
-    shielded: asset.mode === 'shielded',
-  })
-
-  return (
-    <Shell label="Passport">
-      <p className="mnob-kicker">
-        <BadgeCheck size={13} aria-hidden="true" /> {props.badge}
-      </p>
-      <h1 className="mnob-title">
-        <span>{props.name ? `${props.name}.night` : 'Your Passport'}</span>
-      </h1>
-
-      <div className="mndyn-balance" aria-label="What your Passport holds">
-        <span className="mndyn-balance-figure">
-          {custodyAmountFigure(props.rows[0].amount, props.rows[0].decimals, props.balanceFailed)}
-        </span>
-        <span className="mndyn-balance-unit">{props.rows[0].symbol}</span>
-        <button type="button" className="mndyn-icon" onClick={props.onRefresh} aria-label="Refresh">
-          <RefreshCw size={14} aria-hidden="true" />
-        </button>
-      </div>
-
-      {props.rows.length > 1 ? (
-        <ul className="mndyn-holdings">
-          {props.rows.slice(1).map((row) => (
-            <li className="mndyn-holding" key={row.id}>
-              <span className="mndyn-holding-figure">
-                {custodyAmountFigure(row.amount, row.decimals)}
-              </span>
-              <span className="mndyn-holding-unit">{row.symbol}</span>
-            </li>
-          ))}
-        </ul>
-      ) : null}
-
-      {arriving ? <p className="mnob-hint">{arriving}</p> : null}
-
-      {props.offer.kind === 'none' ? null : (
-        /* A SENTENCE AND A DISMISS, and no third thing to press. A send is one
-           transaction: it landed or it did not, and a button offering to
-           "finish" it would be a button offering to send the money twice. */
-        <div className="mnob-unusable" role="status">
-          <p className="mnob-unusable-copy">{props.offer.sentence}</p>
-          <button type="button" className="mnob-alt" onClick={props.onDismissStopped}>
-            Dismiss
-          </button>
-        </div>
-      )}
-
-      {payable ? (
-        <div className="mndyn-receive">
-          <span className="mnob-hint">People can pay you at</span>
-          <code className="mndyn-code">{props.name ? `${props.name}.night` : shortHex(payable)}</code>
-          <button
-            type="button"
-            className="mndyn-icon"
-            onClick={() => void navigator.clipboard?.writeText(payable)}
-            aria-label="Copy"
-          >
-            <Copy size={14} aria-hidden="true" />
-          </button>
-        </div>
-      ) : null}
-
-      <form
-        className="mnob-stage"
-        onSubmit={(event: FormEvent) => {
-          event.preventDefault()
-          if (props.busy === null) props.onSend(recipient, amount, asset)
-        }}
-      >
-        <label className="mnob-hint" htmlFor="dynamic-send-to">
-          Send to
-        </label>
-        <input
-          id="dynamic-send-to"
-          className="mnob-input"
-          type="text"
-          autoCapitalize="none"
-          autoCorrect="off"
-          spellCheck={false}
-          placeholder="alice"
-          value={recipient}
-          onChange={(event) => setRecipient(event.target.value)}
-          disabled={props.busy !== null}
-        />
-        <label className="mnob-hint" htmlFor="dynamic-send-asset">
-          What to send
-        </label>
-        <select
-          id="dynamic-send-asset"
-          className="mnob-input"
-          value={asset.id}
-          onChange={(event) => setAssetId(event.target.value)}
-          disabled={props.busy !== null}
-        >
-          {props.rows.map((row) => (
-            <option key={row.id} value={row.id}>
-              {row.symbol}
-            </option>
-          ))}
-        </select>
-        <label className="mnob-hint" htmlFor="dynamic-send-amount">
-          Amount
-        </label>
-        <input
-          id="dynamic-send-amount"
-          className="mnob-input"
-          type="text"
-          inputMode="decimal"
-          placeholder="1"
-          value={amount}
-          onChange={(event) => setAmount(event.target.value)}
-          disabled={props.busy !== null}
-        />
-        {disclosure ? (
-          <p className="mnob-hint mnob-disclosure">{disclosure}</p>
-        ) : null}
-        {props.notice ? (
-          <p className="mnob-hint" role="status">
-            {props.notice}
-          </p>
-        ) : null}
-        {props.error ? (
-          <div className="mnob-unusable" role="alert">
-            <p className="mnob-unusable-copy">{props.error}</p>
-            <button type="button" className="mnob-alt" onClick={props.onDismissError}>
-              Dismiss
-            </button>
-          </div>
-        ) : null}
-        <button
-          type="submit"
-          className="mnob-primary"
-          disabled={props.busy !== null || recipient.trim().length === 0}
-        >
-          <span className="mnob-primary-copy">
-            {props.busy !== null ? (
-              <Loader2 className="mnob-working-spinner" size={17} strokeWidth={2} aria-hidden="true" />
-            ) : (
-              <ArrowRight size={17} strokeWidth={2} aria-hidden="true" />
-            )}
-            {props.busy ?? `Send ${asset.symbol}`}
-          </span>
-          <ArrowRight size={17} strokeWidth={2.2} aria-hidden="true" />
         </button>
       </form>
     </Shell>

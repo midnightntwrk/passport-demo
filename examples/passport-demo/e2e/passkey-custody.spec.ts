@@ -60,6 +60,38 @@ const WALK = '/?accwalk=1';
 
 const WALK_NETWORK = 'stagenet';
 
+/**
+ * THE REAL HOME, WHICH IS WHERE A FINISHED PASSPORT NOW LANDS.
+ *
+ * Until 2026/09/22 a Passport on this contract landed on a page of its own — a
+ * big name, one figure, "People can pay you at", and a three-field form — while
+ * every prototype Passport got the product. These helpers name the product's
+ * own furniture, so a walk that ended up back on the bare page fails on its
+ * first line rather than on a figure that renders either way.
+ */
+function greeting(page: Page) {
+  return page.getByRole('heading', { name: /^Good (morning|afternoon|evening), walker$/ });
+}
+
+/** One row of Home's balance strip, by its ticker. */
+function assetRow(page: Page, symbol: string) {
+  return page.locator('.mnhome-token-row', { hasText: symbol });
+}
+
+/** Opens the Send sheet from Home's money row. */
+async function openSend(page: Page): Promise<void> {
+  await page.getByRole('button', { name: /^Send$/ }).first().click();
+  await expect(page.locator('.mnhome-send')).toBeVisible();
+}
+
+const sendPicker = (page: Page) => page.locator('.mnhome-send-asset');
+const sendRecipient = (page: Page) => page.locator('.mnhome-send').getByRole('textbox').first();
+const sendAmount = (page: Page) => page.locator('.mnhome-send-amount input');
+
+/** The Send sheet's own failure panel. */
+const sendFailure = (page: Page) =>
+  page.locator('.mnhome-send').locator('.mnhome-notice[role="alert"]');
+
 /** The demo stablecoin's colour, as `src/lib/colour.ts` knows it. */
 const MUSD_COLOUR = '1a2917fbed8b5ce44d12ebc7d337689045f6c96a6bbd39cf3d8691ab310ef6a6';
 
@@ -427,17 +459,42 @@ test.describe('a passkey that already holds one', () => {
        every store is under is the device point, which costs an assertion, and
        a returning reader must not be asked for a fingerprint merely to be
        shown their own Passport. */
-    await expect(page.getByRole('heading', { name: 'walker.night' })).toBeVisible({
-      timeout: 60_000,
-    });
+    /* THE REAL HOME (2026/09/22), and not the bare page this path used to land
+       on. Everything below is something that page did not have. */
+    await expect(greeting(page)).toBeVisible({ timeout: 60_000 });
+    await expect(page.getByText('People can pay you at')).toHaveCount(0);
     await expect(page.getByRole('button', { name: SIGN_IN_BUTTON })).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Create my Passport' })).toHaveCount(0);
     /* Nor is a Passport that already exists welcomed to Passport. */
     await expect(page.getByRole('heading', { name: /Welcome to\s*Passport/ })).toHaveCount(0);
-    /* What it has been paid, read out of the store the shipped reader reads. */
-    await expect(page.getByText('250')).toBeVisible();
-    /* And it is named by the device, not by a sign-in. */
-    await expect(page.getByText('Held on this device')).toBeVisible();
+
+    /* The money row, and what it has been paid — read out of the store the
+       shipped reader reads. */
+    await expect(page.getByRole('button', { name: /^Send$/ }).first()).toBeVisible();
+    await expect(page.getByRole('button', { name: /^Receive$/ })).toBeVisible();
+    /* The account's own NIGHT, off its unshielded mirror. A real zero here —
+       this recorded account holds none — and a zero is what the row must show
+       rather than "Syncing" or a blank. */
+    await expect(assetRow(page, 'NIGHT')).toContainText('native token');
+    await expect(assetRow(page, 'mUSD')).toContainText('250');
+
+    /* The name card, the account line, the trail, and the bar. */
+    await expect(page.getByText('Your name on Stagenet')).toBeVisible();
+    await expect(page.getByText('Registered on Stagenet')).toBeVisible();
+    await expect(page.locator('.mnid-alias')).toHaveText('walker.night');
+    await expect(page.getByText('Your account is ready')).toBeVisible();
+    await expect(page.locator('.mnhome-activity')).toContainText('Passport created', {
+      timeout: 30_000,
+    });
+    await expect(page.locator('.mnhome-activity')).toContainText('Your name is registered');
+    await expect(page.getByRole('button', { name: /^Apps$/ })).toBeVisible();
+
+    /* RECEIVE OFFERS THE NAME AND THE ACCOUNT, and nothing else. */
+    await page.getByRole('button', { name: /^Receive$/ }).click();
+    const receive = page.getByRole('dialog', { name: 'Receive to your Passport' });
+    await expect(receive).toBeVisible();
+    await expect(receive).toContainText('walker.night');
+    await expect(receive).toContainText('Your account');
 
     await authenticator.remove();
     await context.close();
@@ -470,7 +527,11 @@ test.describe('a passkey that already holds one', () => {
     await page.goto(WALK);
 
     await page.getByRole('button', { name: SIGN_IN_BUTTON }).click();
-    await expect(page.getByRole('heading', { name: /Set up\s*your Passport/ })).toBeVisible({
+    /* The welcome page, which is where a passkey with no Passport lands since
+       the name-first flow (2026/09/22). It used to be "Set up your Passport" —
+       a page whose whole content was an offer and a button — and that page is
+       gone. */
+    await expect(page.getByRole('heading', { name: /Welcome to\s*Passport/ })).toBeVisible({
       timeout: 60_000,
     });
     const credentialId = await page.evaluate(() =>
@@ -490,7 +551,7 @@ test.describe('a passkey that already holds one', () => {
 
     /* AND IT ARRIVES AT THE NAME STEP BY ITSELF. Not "Finish setting up my
        Passport", and certainly not a failure sentence. */
-    await expect(page.getByRole('heading', { name: /Choose\s*your name/ })).toBeVisible({
+    await expect(page.getByRole('heading', { name: /Choose\s*your \.night name/ })).toBeVisible({
       timeout: 60_000,
     });
     await expect(page.getByLabel('Your name')).toBeVisible();
@@ -624,9 +685,7 @@ async function passkeyPassportOnHome(browser: import('@playwright/test').Browser
     musd: '250',
   });
   await page.goto(WALK);
-  await expect(page.getByRole('heading', { name: 'walker.night' })).toBeVisible({
-    timeout: 60_000,
-  });
+  await expect(greeting(page)).toBeVisible({ timeout: 60_000 });
   return {
     page,
     close: async () => {
@@ -640,7 +699,8 @@ test.describe('a passkey Passport paying somebody', () => {
   test('says which of the two payments this one is, before it is made', async ({ browser }) => {
     const { page, close } = await passkeyPassportOnHome(browser);
 
-    await page.getByLabel('What to send').selectOption({ label: 'mUSD' });
+    await openSend(page);
+    await sendPicker(page).selectOption({ index: 1 });
 
     /* NOTHING TO SAY YET. The field decides which transaction gets built, so
        there is nothing to disclose until somebody has typed into it. */
@@ -650,20 +710,20 @@ test.describe('a passkey Passport paying somebody', () => {
        account, so the chain records that the two of them transacted. That is
        the per-payment choice of MIP-0012 §6.6 and it is said at the field that
        makes it. */
-    await page.getByLabel('Send to').fill(RESOLVABLE_NAME);
+    await sendRecipient(page).fill(RESOLVABLE_NAME);
     await expect(
       page.getByText('Both Passports are named on chain for this payment.'),
     ).toBeVisible();
 
     /* THE SAME MONEY THE OTHER WAY NAMES NOBODY. */
-    await page.getByLabel('Send to').fill(THROWAWAY_ADDRESS);
+    await sendRecipient(page).fill(THROWAWAY_ADDRESS);
     await expect(
       page.getByText('This payment names neither Passport on chain.'),
     ).toBeVisible();
 
     /* And it is about the shielded route only: the account's NIGHT moves by a
        different pair of legs and this sentence would describe the wrong one. */
-    await page.getByLabel('What to send').selectOption({ label: 'NIGHT' });
+    await sendPicker(page).selectOption({ index: 0 });
     await expect(page.locator('.mnob-disclosure')).toHaveCount(0);
 
     await close();
@@ -672,10 +732,13 @@ test.describe('a passkey Passport paying somebody', () => {
   test('plans a payment to a name and stops where every payment stops', async ({ browser }) => {
     const { page, close } = await passkeyPassportOnHome(browser);
 
-    await page.getByLabel('Send to').fill(RESOLVABLE_NAME);
-    await page.getByLabel('What to send').selectOption({ label: 'mUSD' });
-    await page.getByLabel('Amount').fill('10');
-    await page.getByRole('button', { name: /^Send/ }).click();
+    await openSend(page);
+    await sendPicker(page).selectOption({ index: 1 });
+    await sendRecipient(page).fill(RESOLVABLE_NAME);
+    await sendAmount(page).fill('10');
+    await expect(page.getByRole('button', { name: /^Review$/ })).toBeEnabled({ timeout: 30_000 });
+    await page.getByRole('button', { name: /^Review$/ }).click();
+    await page.locator('.mnhome-send-primary').click();
 
     /* ONE SENTENCE, AND THE CONTROL BACK. There is no proving service behind
        this tier, so the payment is planned in full — the coin chosen out of
@@ -683,19 +746,20 @@ test.describe('a passkey Passport paying somebody', () => {
        the amount checked against what one payment can draw on — and then
        stops. What is held is the property that holds whatever the refusal is,
        exactly as the k256 walk next door holds it. */
-    const alert = page.getByRole('alert');
-    await expect(alert).toBeVisible({ timeout: 60_000 });
-    const sentence = (await alert.innerText()).trim();
+    await expect(sendFailure(page).first()).toBeVisible({ timeout: 60_000 });
+    const sentence = (await sendFailure(page).first().innerText()).trim();
     expect(sentence).not.toContain('not built yet');
     expect(sentence).not.toContain('Paying somebody from this Passport is coming');
-    await expect(page.getByRole('button', { name: /^Send/ })).toBeEnabled();
+    await expect(page.locator('.mnhome-send-primary')).toBeEnabled();
 
     /* AND THE PASSPORT SAYS WHERE THE MONEY IS: nothing went out, and the
        figure it started with is the figure it still holds. */
+    await page.locator('.mnhome-send').getByRole('button', { name: 'Close' }).click();
+    await expect(greeting(page)).toBeVisible({ timeout: 30_000 });
     await expect(
       page.getByText('Nothing was sent, and it is all still in your Passport.'),
     ).toBeVisible();
-    await expect(page.locator('.mndyn-holding-figure')).toHaveText('250');
+    await expect(assetRow(page, 'mUSD')).toContainText('250');
 
     await close();
   });
@@ -703,18 +767,19 @@ test.describe('a passkey Passport paying somebody', () => {
   test('plans a payment to a shielded address and stops the same way', async ({ browser }) => {
     const { page, close } = await passkeyPassportOnHome(browser);
 
-    await page.getByLabel('Send to').fill(THROWAWAY_ADDRESS);
-    await page.getByLabel('What to send').selectOption({ label: 'mUSD' });
-    await page.getByLabel('Amount').fill('5');
-    await page.getByRole('button', { name: /^Send/ }).click();
+    await openSend(page);
+    await sendPicker(page).selectOption({ index: 1 });
+    await sendRecipient(page).fill(THROWAWAY_ADDRESS);
+    await sendAmount(page).fill('5');
+    await expect(page.getByRole('button', { name: /^Review$/ })).toBeEnabled({ timeout: 30_000 });
+    await page.getByRole('button', { name: /^Review$/ }).click();
+    await page.locator('.mnhome-send-primary').click();
 
-    const alert = page.getByRole('alert');
-    await expect(alert).toBeVisible({ timeout: 60_000 });
-    const sentence = (await alert.innerText()).trim();
+    await expect(sendFailure(page).first()).toBeVisible({ timeout: 60_000 });
+    const sentence = (await sendFailure(page).first().innerText()).trim();
     expect(sentence).not.toContain('not built yet');
     expect(sentence).not.toContain('Paying somebody from this Passport is coming');
-    await expect(page.getByRole('button', { name: /^Send/ })).toBeEnabled();
-    await expect(page.locator('.mndyn-holding-figure')).toHaveText('250');
+    await expect(page.locator('.mnhome-send-primary')).toBeEnabled();
 
     await close();
   });
@@ -723,48 +788,60 @@ test.describe('a passkey Passport paying somebody', () => {
      belongs to this network, and it used to run AFTER the stopped-send record
      was written and after the approval. So an address this Passport cannot pay
      cost a touch of the authenticator and left a card on Home saying a payment
-     was in flight — for a payment that was never built. The check asks nothing
-     of anybody and can only refuse, so it goes first. */
+     was in flight — for a payment that was never built.
+
+     ON THE REAL SEND SHEET THE REFUSAL IS EARLIER STILL, and that is the point
+     of moving to it: the field itself will not accept an address the codec
+     cannot place, so the control never comes up, no ceremony is asked for, and
+     there is nothing to write down. */
   test('refuses an address it cannot pay without writing a payment down', async ({ browser }) => {
     const { page, close } = await passkeyPassportOnHome(browser);
 
-    /* Shaped like an address the field will accept and take the address door
-       for, and not one this Passport can pay. */
-    await page.getByLabel('Send to').fill('mn_shield-addr_stagenet1qqqqqqqqqqqqqqqqqqq');
-    await page.getByLabel('What to send').selectOption({ label: 'mUSD' });
-    await page.getByLabel('Amount').fill('5');
-    await page.getByRole('button', { name: /^Send/ }).click();
+    await openSend(page);
+    await sendPicker(page).selectOption({ index: 1 });
+    /* Shaped like an address the field will take the address door for, and not
+       one this Passport can pay. */
+    await sendRecipient(page).fill('mn_shield-addr_stagenet1qqqqqqqqqqqqqqqqqqq');
+    await sendAmount(page).fill('5');
 
-    await expect(page.getByRole('alert')).toBeVisible({ timeout: 60_000 });
-    /* AND NO PAYMENT WAS WRITTEN DOWN. The card below is what a stopped
-       payment puts on Home, and nothing here was ever in flight. */
+    await expect(page.locator('#mnhome-send-recipient-error')).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByRole('button', { name: /^Review$/ })).toBeDisabled();
+
+    /* AND NO PAYMENT WAS WRITTEN DOWN. The banner on Home is what a stopped
+       payment puts there, and nothing here was ever in flight. */
+    await page.locator('.mnhome-send').getByRole('button', { name: 'Close' }).click();
+    await expect(greeting(page)).toBeVisible({ timeout: 30_000 });
     await expect(
       page.getByText('Nothing was sent, and it is all still in your Passport.'),
     ).toHaveCount(0);
-    await expect(page.locator('.mndyn-holding-figure')).toHaveText('250');
-    await expect(page.getByRole('button', { name: /^Send/ })).toBeEnabled();
+    await expect(assetRow(page, 'mUSD')).toContainText('250');
 
     await close();
   });
 
-  test('refuses the account’s NIGHT in one sentence, and says the rest works', async ({
-    browser,
-  }) => {
+  /* THE ONE THING STILL COMING, and it is the ROUTE rather than the arm: the
+     account's NIGHT would leave in two legs, the second of which goes through
+     this Passport's own wallet — the route ruled out on 2026/09/18. The seam
+     refuses it in one sentence, and that sentence is held to in
+     `src/lib/custodyHome.test.ts`.
+
+     WHAT THIS WALK CAN SEE is one step earlier, and it is the truer refusal:
+     the real Send sheet checks what the account holds before it offers a
+     review, and the account in this recording holds no NIGHT. So the control
+     stays down and nothing is signed, which is what the bare form this screen
+     replaced could not do at all. */
+  test('will not offer NIGHT this Passport does not hold', async ({ browser }) => {
     const { page, close } = await passkeyPassportOnHome(browser);
 
-    await page.getByLabel('Send to').fill(RESOLVABLE_NAME);
-    await page.getByLabel('What to send').selectOption({ label: 'NIGHT' });
-    await page.getByLabel('Amount').fill('0.5');
-    await page.getByRole('button', { name: /^Send/ }).click();
+    await openSend(page);
+    await sendPicker(page).selectOption({ index: 0 });
+    await sendRecipient(page).fill(RESOLVABLE_NAME);
+    await sendAmount(page).fill('0.001');
 
-    /* THE ONE THING STILL COMING, and it is the ROUTE rather than the arm: the
-       account's NIGHT still moves in two legs, the second of which goes through
-       this Passport's own wallet. Everything else on this screen works, which
-       is why the sentence can say so. */
-    await expect(
-      page.getByText('Paying somebody from this Passport is coming. Everything else here works.'),
-    ).toBeVisible({ timeout: 60_000 });
-    await expect(page.getByRole('button', { name: /^Send/ })).toBeEnabled();
+    await expect(page.getByRole('button', { name: /^Review$/ })).toBeDisabled();
+    expect(await page.locator('.mnhome-send').innerText()).not.toContain('not built yet');
+    /* And the shielded balance beside it is offered, which is what sends. */
+    await expect(sendPicker(page).locator('option')).toHaveCount(2);
 
     await close();
   });
