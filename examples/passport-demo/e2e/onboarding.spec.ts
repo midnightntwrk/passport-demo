@@ -102,10 +102,10 @@ test('the landing screen keeps both sign-in choices visible, and says what netwo
 
   /* The offline preview has no Dynamic environment. Keep its route visible
      and explain availability, while passkey sign-in remains usable. */
-  await expect(page.getByRole('button', { name: 'Continue with Dynamic' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Continue with Dynamic' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Continue with Google, Microsoft, X, or Discord' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Continue with Google, Microsoft, X, or Discord' })).toBeDisabled();
   await expect(page.getByRole('button', { name: SIGN_IN_BUTTON })).toBeEnabled();
-  await expect(page.getByText('Dynamic sign-in is currently unavailable. You can continue with a passkey.')).toBeVisible();
+  await expect(page.getByText('Signing in with a provider is not available right now. You can continue with a passkey.')).toBeVisible();
   const primaries = await page.getByRole('button', { name: /Continue|Create|Sign in/i }).count();
   expect(primaries).toBe(2);
 
