@@ -11,6 +11,10 @@ import { describe, expect, it } from 'vitest';
 import { MUSD_COLOUR_HEX, NIGHT_COLOUR_HEX } from './colour.js';
 import { custodyOpeningDepositTxHash,
   CUSTODY_NIGHT_SEND_REFUSAL,
+  CUSTODY_OLDER_ACCOUNT_REFUSAL,
+  CUSTODY_OLDER_NAME_REFUSAL,
+  custodyRecipientAccountRefusal,
+  custodySentToastTitle,
   custodyActivityMarkKey,
   custodyHomeAccount,
   custodyHomeAliasRecord,
@@ -424,6 +428,10 @@ describe('what none of these sentences may say', () => {
 
   const sentences = [
     CUSTODY_NIGHT_SEND_REFUSAL,
+    CUSTODY_OLDER_NAME_REFUSAL,
+    CUSTODY_OLDER_ACCOUNT_REFUSAL,
+    custodySentToastTitle('unshielded'),
+    custodySentEntry({ amount: 1_500_000n, decimals: 6, symbol: 'NIGHT', recipient: 'mn_addr…1234' }).label,
     ...(
       [
         'created',
@@ -454,10 +462,32 @@ describe('what none of these sentences may say', () => {
     }
   });
 
-  it('refuses the account’s NIGHT in one sentence that says what still works', () => {
+  it('refuses NIGHT to a name in one sentence that says what still works', () => {
     expect(CUSTODY_NIGHT_SEND_REFUSAL).toBe(
-      'Paying somebody from this Passport is coming. Everything else here works.',
+      'NIGHT can be sent to an address for now. To pay a name, choose mUSD.',
     );
+    expect(CUSTODY_NIGHT_SEND_REFUSAL).not.toContain('is coming');
+  });
+
+  it('refuses a Passport on the older version, about the thing that was typed', () => {
+    for (const build of ['account', 'account-v1']) {
+      expect(custodyRecipientAccountRefusal(build, 'name')).toBe(
+        "This name belongs to a Passport on the older version, so it can't be paid from this one. Paying between the two versions isn't supported.",
+      );
+      expect(custodyRecipientAccountRefusal(build, 'account')).toBe(
+        "This is a Passport on the older version, so it can't be paid from this one. Paying between the two versions isn't supported.",
+      );
+    }
+    expect(custodyRecipientAccountRefusal('account-custody', 'name')).toBeNull();
+    expect(custodyRecipientAccountRefusal('midnames', 'account')).toBeNull();
+    expect(CUSTODY_OLDER_NAME_REFUSAL).not.toMatch(/set their Passport up again/);
+  });
+
+  it('titles the success toast by the ledger the payment left', () => {
+    expect(custodySentToastTitle('shielded')).toBe(
+      'Shielded transfer accepted by the network — confirming',
+    );
+    expect(custodySentToastTitle('unshielded')).toBe('Transfer accepted by the network — confirming');
   });
 });
 

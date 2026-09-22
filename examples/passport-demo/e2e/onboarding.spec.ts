@@ -873,9 +873,8 @@ test('the Send sheet is a withdrawal from the account, and never mentions DUST',
      internal reason are the wallet's business and do not appear here. */
   const sheet = await visibleText();
   expect(sheet).not.toMatch(/dust/i);
-  // What it DOES say about the fee: who is expected to pay it, and nothing
-  // about which token that costs them.
-  await expect(page.getByText(/Network fee expected to be covered by the fee sponsor/i)).toBeVisible();
+  // A covered fee is not narrated at all (2026/09/22): the reader pays nothing.
+  await expect(page.getByText(/Network fee expected to be covered by the fee sponsor/i)).toHaveCount(0);
 
   /* `mn_addr…` appears once, as the shape of the RECIPIENT's address — that is
      someone else's, and naming its format is how a paste is validated. What
@@ -1039,7 +1038,7 @@ test('a busy fee sponsor disables the Send control rather than removing it', asy
   await expect(page.getByText(/The fee sponsor is busy/)).toHaveCount(0);
   await expect(
     page.getByText(/Network fee expected to be covered by the fee sponsor/i),
-  ).toBeVisible();
+  ).toHaveCount(0);
 });
 
 test('a send whose passkey will not answer offers a retry and a way out, in the sheet', async () => {

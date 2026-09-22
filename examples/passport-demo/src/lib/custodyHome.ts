@@ -139,11 +139,10 @@ export function custodyHomeAccount(holdings: CustodyHoldings): CustodyHomeAccoun
 /**
  * What the Send sheet's picker may offer in its first frame.
  *
- * SHIELDED ONLY, AND ONLY WHAT IS POSITIVE. The account's NIGHT leaves by a
- * route this repository has ruled out — see {@link CUSTODY_NIGHT_SEND_REFUSAL}
- * — so offering it as a holding to pick would be offering a payment that is
- * refused a screen later. A zero row is not a holding either: it is a row that
- * exists so a reader can see the token, which is a different job.
+ * SHIELDED ONLY, AND ONLY WHAT IS POSITIVE. NIGHT is not a shielded holding:
+ * the sheet always offers it itself, off the account's own NIGHT figure. A
+ * zero row is not a holding either: it is a row that exists so a reader can
+ * see the token, which is a different job.
  */
 export function custodyHomeSendableHoldings(
   holdings: CustodyHoldings,
@@ -258,17 +257,52 @@ export function custodyHomeContractRecord(input: {
 /* -------------------------------------------------------------------------- */
 
 /**
- * The account's NIGHT, refused in one sentence — the same sentence on both
- * arms, and the same one the old bare form showed.
+ * NIGHT to a name, refused in one sentence (2026/09/22).
  *
- * The route it would take is the one ruled out on 2026/09/18: NIGHT leaves the
- * account into a wallet this app built and is paid onward from there, so a tab
- * closed between the two leaves somebody's money in a place neither party owns.
- * The sentence says what is true and what still works, and it names no
- * machinery to say it.
+ * NIGHT leaves this build's account by ONE route: `withdraw_unshielded`, whose
+ * recipient is a `UserAddress` by type. The contract has nothing that moves
+ * NIGHT into another account, so a name — which resolves to an account — can
+ * be paid in the stablecoin and not in NIGHT. The Send sheet says this at the
+ * recipient field before Review (`nightToName: false`); this constant is the
+ * backstop behind it, and says the same thing in the same words.
  */
 export const CUSTODY_NIGHT_SEND_REFUSAL =
-  'Paying somebody from this Passport is coming. Everything else here works.';
+  'NIGHT can be sent to an address for now. To pay a name, choose mUSD.';
+
+/** A name that leads to a Passport on the older build. */
+export const CUSTODY_OLDER_NAME_REFUSAL =
+  "This name belongs to a Passport on the older version, so it can't be paid from this one. Paying between the two versions isn't supported.";
+
+/** The same, about a Passport account typed out rather than named. */
+export const CUSTODY_OLDER_ACCOUNT_REFUSAL =
+  "This is a Passport on the older version, so it can't be paid from this one. Paying between the two versions isn't supported.";
+
+/**
+ * Whether a recipient's Passport can be paid from this one at all, decided from
+ * which build holds it — the answer `accountModuleFor` reads off the account's
+ * own operations (`deposit_unshielded` marks this build; the prototype has
+ * `withdraw_shielded` and `transfer_shielded_to_account` and not it).
+ *
+ * THE OLDER BUILD IS REFUSED IN EVERY ASSET, AND AT THE FIELD. The two builds
+ * are proved to different intermediate representations and one transaction
+ * cannot hold a call of each; there is no migration (2026/09/18). So the
+ * sentence goes under the recipient field when the name resolves, never after
+ * somebody has approved a payment.
+ */
+export function custodyRecipientAccountRefusal(
+  build: string,
+  recipient: 'name' | 'account',
+): string | null {
+  if (build !== 'account' && build !== 'account-v1') return null;
+  return recipient === 'name' ? CUSTODY_OLDER_NAME_REFUSAL : CUSTODY_OLDER_ACCOUNT_REFUSAL;
+}
+
+/** The success toast's title, by which ledger the payment left from. */
+export function custodySentToastTitle(mode: 'shielded' | 'unshielded'): string {
+  return mode === 'shielded'
+    ? 'Shielded transfer accepted by the network — confirming'
+    : 'Transfer accepted by the network — confirming';
+}
 
 /* -------------------------------------------------------------------------- */
 /* The seam between the screen that HOLDS a custody Passport and the shell     */
@@ -328,9 +362,9 @@ export interface CustodyHomeSend {
   readonly resolveName: (
     domain: string,
   ) => Promise<{ found: true; domain: string; accountAddress: string } | { found: false; reason: string }>;
-  /** NIGHT, to an address. Refused — see {@link CUSTODY_NIGHT_SEND_REFUSAL}. */
+  /** NIGHT, to an `mn_addr…` address. One gated `withdraw_unshielded`. */
   readonly onSend: (params: { recipientAddress: string; amount: bigint }) => Promise<void>;
-  /** NIGHT, to a name. Refused for the same reason. */
+  /** NIGHT, to a name. Refused — see {@link CUSTODY_NIGHT_SEND_REFUSAL}. */
   readonly onSendToName: (params: {
     domain: string;
     accountAddress: string;
@@ -349,6 +383,11 @@ export interface CustodyHomeSend {
     tokenType: string;
     amount: bigint;
   }) => Promise<void>;
+  /** Whether a resolved Passport can be paid from this one; the sentence if not. */
+  readonly checkRecipientAccount: (input: {
+    accountAddress: string;
+    name: boolean;
+  }) => Promise<string | null>;
   /** What the picker may offer, read again when the sheet opens. */
   readonly readShieldedHoldings: () => Promise<{ tokenType: string; amount: bigint }[]>;
   /** The live step of a payment, in the sheet's own four words. */

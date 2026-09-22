@@ -37,11 +37,13 @@ import {
   startCustodyAccountAgain,
   withdrawShieldedK1,
   withdrawShieldedToContractK1,
+  withdrawUnshieldedK1,
   type CustodyCallDevice,
   type CustodyPhase,
 } from '../identity/custodyContractClient.js'
 import {
   hexToBytes,
+  CUSTODY_SEND_NOT_SENT,
   custodyActivatedRecord,
   custodyFailureSentence,
   nextCustodyStep,
@@ -64,6 +66,8 @@ import {
 import {
   clearCustodyShieldedSend,
   custodyShieldedAddressSendRefusal,
+  custodyStoppedSendSentence,
+  custodyStoppedSendVerdict,
   custodyShieldedSendOutcome,
   custodyShieldedSendRefusal,
   custodyUnshieldedBalance,
@@ -93,6 +97,8 @@ import {
 import {
   CUSTODY_NIGHT_SEND_REFUSAL,
   custodyActivityMarkKey,
+  custodyRecipientAccountRefusal,
+  custodySentToastTitle,
   custodyMilestoneEntry,
   custodyMilestoneTxHash,
   custodyOpeningDepositTxHash,
@@ -690,7 +696,26 @@ export default function CustodyPassport({
          send that is about to report itself reads this in the same tick it was
          written, before any render. */
       sentTxId.current = phase.txId
-      const away: CustodyShieldedSendRecord = { ...record, sendTxId: phase.txId }
+      const away: CustodyShieldedSendRecord = {
+        ...record,
+        sendTxId: phase.txId,
+        sentAt: Date.now(),
+        /* What the submit wrote, so a payment the chain never records can be
+           taken back after a reload exactly as this tab would take it back. */
+        undo: phase.undo
+          ? {
+              held: {
+                colour: phase.undo.held.colour,
+                nonce: phase.undo.held.nonce,
+                value: phase.undo.held.value.toString(),
+                mtIndex: phase.undo.held.mtIndex.toString(),
+              },
+              change: phase.undo.change
+                ? { colour: phase.undo.change.colour, nonce: phase.undo.change.nonce }
+                : null,
+            }
+          : null,
+      }
       saveCustodyShieldedSend(window.localStorage, away)
       setStopped(away)
     },
@@ -699,6 +724,30 @@ export default function CustodyPassport({
 
   /** The transaction the last payment went out in, for its trail row. */
   const sentTxId = useRef<string | null>(null)
+
+  /**
+   * A payment the chain never recorded, settled in the tab that sent it
+   * (2026/09/22). The client has already taken its coin-store write back; what
+   * is left is the record that says a payment is in flight, which would
+   * otherwise stay on Home saying so. Every other failure passes through.
+   */
+  const settleNotSent = useCallback(
+    async <T,>(record: CustodyShieldedSendRecord, work: () => Promise<T>): Promise<T> => {
+      try {
+        return await work()
+      } catch (cause) {
+        if (cause instanceof Error && cause.message === CUSTODY_SEND_NOT_SENT) {
+          clearCustodyShieldedSend(window.localStorage, {
+            network: record.network,
+            accountAddress: record.accountAddress,
+          })
+          setStopped(null)
+        }
+        throw cause
+      }
+    },
+    [],
+  )
 
   /**
    * One finished payment, said in all three places it is owed: the trail, the
@@ -729,7 +778,7 @@ export default function CustodyPassport({
         tone: 'success',
         /* Accepted, not yet included — the same claim every other send on this
            app makes, and the only one that is true at this moment. */
-        title: 'Shielded transfer accepted by the network — confirming',
+        title: custodySentToastTitle(sent.asset.mode === 'unshielded' ? 'unshielded' : 'shielded'),
         body: 'The network fee was covered on your behalf.',
         ...(txHash ? { link: txReceiptLink(sent.network, txHash) ?? undefined } : {}),
       })
@@ -1276,6 +1325,69 @@ export default function CustodyPassport({
     void readHoldings()
   }, [readHoldings, screen])
 
+  /**
+   * A STOPPED PAYMENT, ANSWERED FROM THE CHAIN (2026/09/22).
+   *
+   * A record with a transaction behind it used to be reported with a hedge —
+   * "either it reached them or nothing left" — and left for the reader to work
+   * out from the balance. The chain can say which, so it is asked: the indexer
+   * has the transaction (sent), or it answered that it does not and the wait a
+   * payment is given has passed (not sent: the coin-store write is taken back
+   * and the record cleared). Only while neither is known — inside the wait, or
+   * an indexer that cannot be reached — does the line say it is checking, and
+   * it asks again.
+   */
+  useEffect(() => {
+    const record = stopped
+    if (record === null || record.stage !== 'sending' || record.sendTxId === null) return
+    if (inFlight.current) return
+    const txId = record.sendTxId
+    let live = true
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const check = async (): Promise<void> => {
+      const [{ resolveTxOnChainOnce }, { localWalletNetworkConfig }] = await Promise.all([
+        import('../identity/contractRuntime.js'),
+        import('../lib/localWallet.js'),
+      ])
+      const onChain = await resolveTxOnChainOnce(localWalletNetworkConfig().indexerHttpUrl, txId)
+      if (!live || inFlight.current) return
+      const verdict = custodyStoppedSendVerdict({ record, onChain, now: Date.now() })
+      if (verdict === 'checking') {
+        timer = setTimeout(() => void check(), 15_000)
+        return
+      }
+      if (verdict === 'not-landed' && record.undo) {
+        try {
+          const { undoK1ChangeCoin } = await import('../identity/k1CoinStore.js')
+          undoK1ChangeCoin(
+            { network: record.network, address: record.accountAddress },
+            {
+              colour: record.undo.held.colour,
+              nonce: record.undo.held.nonce,
+              value: BigInt(record.undo.held.value),
+              mtIndex: BigInt(record.undo.held.mtIndex),
+            },
+            record.undo.change,
+          )
+        } catch (cause) {
+          console.warn('[account-custody] the payment that did not land could not be taken back', cause)
+        }
+      }
+      clearCustodyShieldedSend(window.localStorage, {
+        network: record.network,
+        accountAddress: record.accountAddress,
+      })
+      setStopped(null)
+      setNotice(custodyStoppedSendSentence(record, verdict))
+      if (verdict === 'not-landed') void readHoldings()
+    }
+    void check()
+    return () => {
+      live = false
+      clearTimeout(timer)
+    }
+  }, [readHoldings, stopped])
+
   /* ---------------------------------------------------------------------- */
   /* The trail                                                              */
   /* ---------------------------------------------------------------------- */
@@ -1497,7 +1609,7 @@ export default function CustodyPassport({
          so that neither reader is shown the other's. */
       setBusy(arm.approvalPrompt)
       const { device: identity } = await ensureIdentity()
-      const sent = await withdrawShieldedToContractK1(
+      const sent = await settleNotSent(stoppedRecord, () => withdrawShieldedToContractK1(
         arm.session,
         identity,
         {
@@ -1516,7 +1628,7 @@ export default function CustodyPassport({
           amount: plan.transfer.amount,
         },
         sendPhase(stoppedRecord),
-      )
+      ))
       clearCustodyShieldedSend(window.localStorage, {
         network: record.network,
         accountAddress: account.address,
@@ -1532,7 +1644,7 @@ export default function CustodyPassport({
         backfillChange({ wallet, record, identity, change: sent.change }),
       )
     },
-    [arm, backfillChange, ensureIdentity, sendPhase],
+    [arm, backfillChange, ensureIdentity, sendPhase, settleNotSent],
   )
 
   /**
@@ -1603,7 +1715,7 @@ export default function CustodyPassport({
 
       setBusy(arm.approvalPrompt)
       const { device: identity } = await ensureIdentity()
-      const sent = await withdrawShieldedK1(
+      const sent = await settleNotSent(stoppedRecord, () => withdrawShieldedK1(
         arm.session,
         identity,
         {
@@ -1613,7 +1725,7 @@ export default function CustodyPassport({
           amount: plan.amount,
         },
         sendPhase(stoppedRecord),
-      )
+      ))
       clearCustodyShieldedSend(window.localStorage, {
         network: record.network,
         accountAddress: account.address,
@@ -1625,7 +1737,7 @@ export default function CustodyPassport({
         backfillChange({ wallet, record, identity, change: sent.change }),
       )
     },
-    [arm, backfillChange, ensureIdentity, sendPhase],
+    [arm, backfillChange, ensureIdentity, sendPhase, settleNotSent],
   )
 
   /* ---------------------------------------------------------------------- */
@@ -1767,6 +1879,77 @@ export default function CustodyPassport({
       })
     },
     [assetRows, custodyContext, reportSent, runPayment, sendShielded],
+  )
+
+  /**
+   * NIGHT out to an unshielded (`mn_addr…`) address, in ONE gated transaction.
+   *
+   * `withdraw_unshielded_with_<arm>` debits the account's NIGHT mirror by
+   * exactly the amount and pays the address; there is no coin to split and no
+   * change to put back, so a partial amount is simply a smaller debit. The
+   * address is decoded — and checked against this Passport's network — before
+   * anybody is asked to approve anything.
+   */
+  const sendNightToAddress = useCallback(
+    async (params: { recipientAddress: string; amount: bigint }): Promise<void> => {
+      await runPayment(async () => {
+        setNotice(null)
+        const { record, wallet } = await custodyContext()
+        if (!record.activated) {
+          throw new Error('Your Passport is still being set up. Try again once it is ready.')
+        }
+        if (params.amount <= 0n) throw new Error('Enter an amount greater than zero.')
+        const accountModule = await import('../identity/accountCustody.js')
+        const asset = custodyAssetRow(assetRows, accountModule.nightColourHex())
+        if (asset === null) throw new Error('This Passport does not hold that token.')
+        if (asset.amount !== null && params.amount > asset.amount) {
+          throw new Error('You do not hold enough to send that.')
+        }
+        const address = params.recipientAddress.trim()
+        const recipient = accountModule.unshieldedAddressBytes(address, wallet.network.networkId)
+        setBusy(arm.approvalPrompt)
+        const { device: identity } = await ensureIdentity()
+        const sent = await withdrawUnshieldedK1(
+          arm.session,
+          identity,
+          { recipient, colourHex: accountModule.nightColourHex(), amount: params.amount },
+          (phase) => {
+            setBusy(PHASE_LABELS[phase.step])
+            setSendStep(phase.step)
+          },
+        )
+        sentTxId.current = sent.txHash
+        reportSent({
+          asset,
+          amount: params.amount,
+          recipientLabel: shortHex(address),
+          network: record.network,
+        })
+      })
+    },
+    [arm, assetRows, custodyContext, ensureIdentity, reportSent, runPayment],
+  )
+
+  /**
+   * Whether the Passport a recipient resolved to can be paid from this one.
+   * Asked by the Send sheet when the name resolves, so an older Passport is
+   * refused under the field, before Review — never after an approval.
+   */
+  const checkRecipientAccount = useCallback(
+    async (input: { accountAddress: string; name: boolean }): Promise<string | null> => {
+      /* The indexer from configuration, not from an open wallet: this is asked
+         while somebody types, and opening a wallet for it would be seconds. */
+      const [{ accountModuleFor }, { localWalletNetworkConfig }] = await Promise.all([
+        import('../identity/accountCustody.js'),
+        import('../lib/localWallet.js'),
+      ])
+      const build = await accountModuleFor(
+        { indexerHttpUrl: localWalletNetworkConfig().indexerHttpUrl },
+        input.accountAddress,
+      )
+      return custodyRecipientAccountRefusal(build, input.name ? 'name' : 'account')
+    },
+    [],
   )
 
   /** The same amount, out to a shielded address somebody pasted or scanned. */
@@ -2399,11 +2582,12 @@ export default function CustodyPassport({
       send: {
         networkId: network,
         resolveName,
-        /* THE ACCOUNT'S NIGHT, REFUSED IN ONE SENTENCE, whichever way it is
-           addressed — the route it would take is the one ruled out on
-           2026/09/18. See `CUSTODY_NIGHT_SEND_REFUSAL`. */
-        onSend: () => Promise.reject(new Error(CUSTODY_NIGHT_SEND_REFUSAL)),
+        /* NIGHT goes to an `mn_addr…` address in one gated transaction. To a
+           name it cannot go at all — the sheet says so at the field, before
+           Review; this rejection is only the backstop behind that. */
+        onSend: sendNightToAddress,
         onSendToName: () => Promise.reject(new Error(CUSTODY_NIGHT_SEND_REFUSAL)),
+        checkRecipientAccount,
         onSendShielded: sendShieldedToPastedAddress,
         onSendShieldedToName: sendShieldedToName,
         readShieldedHoldings,

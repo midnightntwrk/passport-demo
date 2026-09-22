@@ -112,7 +112,10 @@ import {
   custodyProofNotBuiltDetail,
   isCustodyProofNotBuilt,
   CUSTODY_SEND_FAILED,
+  CUSTODY_SEND_NOT_SENT,
   CUSTODY_SEND_UNCONFIRMED,
+  CUSTODY_SUBMIT_WAIT_MS,
+  custodySubmitVerdict,
   CUSTODY_SETUP_INTERRUPTED,
   CUSTODY_SETUP_UNCONFIRMED,
   custodyActivatedRecord,
@@ -162,6 +165,7 @@ import {
   widenK1CoinCandidates,
   type K1Account,
   type K1CoinStoreState,
+  type K1HeldCoin,
 } from './k1CoinStore.js';
 import { normalisedColourHex } from '../lib/colour.js';
 import {
@@ -310,6 +314,15 @@ export interface CustodyPhase {
    * later still knows which of the two it is owed.
    */
   readonly txId?: string;
+  /**
+   * What the submit wrote to the coin store, on the same `confirm` — so the
+   * screen can store it beside the id and take it back after a reload if the
+   * chain turns out never to have recorded the payment.
+   */
+  readonly undo?: {
+    readonly held: K1HeldCoin;
+    readonly change: { readonly colour: string; readonly nonce: string } | null;
+  };
 }
 
 /** Everything this module reaches for that a drill wants to replace. */
@@ -339,6 +352,12 @@ export interface CustodyDeps {
   contracts(): Promise<CustodyContractsApi>;
   now(): number;
   sleep(milliseconds: number): Promise<void>;
+  /**
+   * How long a submitted payment is waited on before the account is asked
+   * whether it ran — see {@link CUSTODY_SUBMIT_WAIT_MS}. Injected so a drill
+   * of a payment that never lands does not wait three minutes.
+   */
+  submitWaitMs?: number;
   /**
    * Where a transaction's shielded outputs landed in the commitment tree.
    *
@@ -1670,6 +1689,14 @@ export interface CustodyCallRequest {
    * there is to name the transaction by until the hash resolves.
    */
   readonly onSubmitted?: (result: unknown, identifier: string | null) => void;
+  /**
+   * A PAYMENT, submitted and waited on separately and for a BOUNDED time
+   * (2026/09/22) — the same discipline the shielded spend follows. A
+   * transaction the chain never records is settled as not sent once the
+   * account shows it did not run, rather than holding a sheet on "Submitted"
+   * for ever. Setup steps leave this off and keep midnight-js's own wait.
+   */
+  readonly bounded?: boolean;
 }
 
 /**
@@ -1767,6 +1794,15 @@ export async function k1Call(
   }
 
   onPhase?.({ step: 'submit' });
+  if (request.bounded === true) {
+    return boundedK1Submit(deps, providers, record, circuit, [...request.args, ...authArgs(auth)], {
+      signedNonce: context.authNonce,
+      module,
+      network,
+      storage,
+      onPhase,
+    });
+  }
   const call = callTx[circuit];
   if (!call) throw new Error('This Passport cannot do that yet.');
   const result = await call(...request.args, ...authArgs(auth));
@@ -1786,6 +1822,83 @@ export async function k1Call(
     txHash,
     explorerUrl: txHash ? custodyExplorerLink(txHash, network) : null,
     result: circuitResultOf(result),
+  };
+}
+
+/**
+ * A gated payment's submit and its bounded wait — see
+ * {@link CustodyCallRequest.bounded}.
+ *
+ * Built unproven, then `submitTxAsync` (which proves, balances, and hands it
+ * to the node), then the chain's verdict waited on for at most
+ * `submitWaitMs`. Three outcomes, each said once: the chain accepted it (the
+ * step result, with its hash); the chain refused it ({@link CUSTODY_SEND_FAILED});
+ * or the wait ran out, when the account's own `auth_nonce` decides between
+ * {@link CUSTODY_SEND_NOT_SENT} and the hedged {@link CUSTODY_SEND_UNCONFIRMED}.
+ */
+async function boundedK1Submit(
+  deps: CustodyDeps,
+  providers: Record<string, unknown>,
+  record: CustodyAccountRecord,
+  circuit: string,
+  args: readonly unknown[],
+  context: {
+    readonly signedNonce: bigint;
+    readonly module: CustodyContractModule;
+    readonly network: string;
+    readonly storage: CustodyStorage;
+    readonly onPhase?: (phase: CustodyPhase) => void;
+  },
+): Promise<CustodyStepResult> {
+  const address = record.address as string;
+  const contracts = await deps.contracts();
+  const unproven = (await contracts.createUnprovenCallTx(providers, {
+    compiledContract: providers.compiledContract,
+    circuitId: circuit,
+    contractAddress: address,
+    args: [...args],
+    privateStateId: custodyPrivateStateId(record),
+  })) as CustodyUnprovenCall;
+  const identifier = await contracts.submitTxAsync(providers, {
+    unprovenTx: unproven.private.unprovenTx,
+    circuitId: [circuit],
+  });
+  context.onPhase?.({ step: 'confirm', txId: identifier ?? undefined });
+
+  let finalized: unknown;
+  try {
+    const waited = await watchWithin(providers, identifier, deps.submitWaitMs ?? CUSTODY_SUBMIT_WAIT_MS);
+    if (waited.kind === 'timeout') {
+      const verdict = custodySubmitVerdict({
+        signedNonce: context.signedNonce,
+        liveNonce: await liveAuthNonce(context.module, providers, address),
+      });
+      throw new CustodySubmitSettled(
+        verdict === 'not-sent' ? CUSTODY_SEND_NOT_SENT : CUSTODY_SEND_UNCONFIRMED,
+      );
+    }
+    finalized = waited.value;
+  } catch (cause) {
+    if (cause instanceof CustodySubmitSettled) throw new Error(cause.message);
+    console.warn('[account-custody] the payment was sent and its outcome is not known', cause);
+    throw new Error(CUSTODY_SEND_UNCONFIRMED);
+  }
+  const status = finalizedStatus(finalized);
+  if (status !== (await succeededEntirely())) {
+    console.warn(`[account-custody] the chain did not accept the payment (${status ?? 'no status'})`);
+    throw new Error(status === null ? CUSTODY_SEND_UNCONFIRMED : CUSTODY_SEND_FAILED);
+  }
+  const txHash = finalizedTxHash(finalized) ?? (await resolveHash(providers, finalized));
+  const next: CustodyAccountRecord = {
+    ...record,
+    txHashes: txHash ? [...record.txHashes, txHash] : record.txHashes,
+  };
+  saveCustodyRecord(context.storage, next);
+  return {
+    record: next,
+    txHash,
+    explorerUrl: txHash ? custodyExplorerLink(txHash, context.network) : null,
+    result: null,
   };
 }
 
@@ -2239,13 +2352,44 @@ export async function spendShieldedK1(
          this line can fail, and none of those failures may leave a record
          saying nothing was sent — `custodyShieldedSendOutcome` decides that on
          `sendTxId` alone, and this is where it gets one. */
-      onPhase?.({ step: 'confirm', txId: identifier ?? undefined });
+      onPhase?.({
+        step: 'confirm',
+        txId: identifier ?? undefined,
+        undo: { held, change: change.outcome === 'change' ? change : null },
+      });
 
-      /* THE CHAIN'S VERDICT, WAITED FOR HERE RATHER THAN INSIDE THE SUBMIT. */
+      /* THE CHAIN'S VERDICT, WAITED FOR HERE RATHER THAN INSIDE THE SUBMIT —
+         and for a BOUNDED time (2026/09/22). A transaction the node took and
+         the chain never recorded left this wait, and the sheet above it, on
+         "Submitted" for ever. When the bound runs out the account is asked:
+         an `auth_nonce` still at the value this payment was signed against is
+         an account that has not run it, so the write above is taken back
+         exactly as a failed transaction's is, and the person is told plainly.
+         If the transaction lands after all, the coin store's own
+         reconciliation settles it — the nonce it spent makes a second copy
+         of this payment impossible. */
       let finalized: unknown;
       try {
-        finalized = await watchForTxData(providers, identifier);
+        const waited = await watchWithin(
+          providers,
+          identifier,
+          deps.submitWaitMs ?? CUSTODY_SUBMIT_WAIT_MS,
+        );
+        if (waited.kind === 'timeout') {
+          const verdict = custodySubmitVerdict({
+            signedNonce: context.authNonce,
+            liveNonce: await liveAuthNonce(module, providers, record.address),
+          });
+          if (verdict === 'not-sent') {
+            undoK1ChangeCoin(account, held, change.outcome === 'change' ? change : null);
+            restartK1CoinCandidates(account, colour);
+            throw new CustodySubmitSettled(CUSTODY_SEND_NOT_SENT);
+          }
+          throw new CustodySubmitSettled(CUSTODY_SEND_UNCONFIRMED);
+        }
+        finalized = waited.value;
       } catch (cause) {
+        if (cause instanceof CustodySubmitSettled) throw new Error(cause.message);
         /* THE WRITE STAYS. A wait that failed says nothing about the
            transaction: it may be in the next block. Undoing here would drop the
            change coin's only description on the strength of a socket, which is
@@ -2509,6 +2653,47 @@ function finalizedTxHash(result: unknown): string | null {
  * already past the point where anything can be undone by giving up, so the
  * honest thing is to wait and to say so if the wait fails.
  */
+/** A bounded wait's own verdict, passed through the wait's catch untouched. */
+class CustodySubmitSettled extends Error {}
+
+/**
+ * {@link watchForTxData}, or `timeout` once `milliseconds` have passed. The
+ * wait itself is not cancelled — midnight-js offers no way to — it is simply
+ * no longer listened to.
+ */
+async function watchWithin(
+  providers: Record<string, unknown>,
+  txId: string,
+  milliseconds: number,
+): Promise<{ kind: 'data'; value: unknown } | { kind: 'timeout' }> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<{ kind: 'timeout' }>((resolve) => {
+    timer = setTimeout(() => resolve({ kind: 'timeout' }), milliseconds);
+  });
+  try {
+    return await Promise.race([
+      watchForTxData(providers, txId).then((value) => ({ kind: 'data' as const, value })),
+      timeout,
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** The account's `auth_nonce` as the chain has it now, or null when unreadable. */
+async function liveAuthNonce(
+  module: CustodyContractModule,
+  providers: Record<string, unknown>,
+  address: string,
+): Promise<bigint | null> {
+  try {
+    return module.ledger(await queryStateData(providers, address)).auth_nonce;
+  } catch (cause) {
+    console.warn('[account-custody] the account could not be read after the wait', cause);
+    return null;
+  }
+}
+
 async function watchForTxData(providers: Record<string, unknown>, txId: string): Promise<unknown> {
   const reader = providers.publicDataProvider as
     | { watchForTxData?: (id: string) => Promise<unknown> }
@@ -2677,6 +2862,68 @@ export async function appendChangeToInboxK1(
   const { sealCustodyInboxEntry } = await import('./custodyInbox.js');
   const entry = await sealCustodyInboxEntry(decided.ownEncKeyHex, decided.coin);
   return appendInboxK1(session, device, entry, onPhase, overrides);
+}
+
+/* -------------------------------------------------------------------------- */
+/* NIGHT out to an address                                                    */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Pay NIGHT out of this Passport to an unshielded (`mn_addr…`) address — ONE
+ * gated transaction, `withdraw_unshielded_with_<arm>(colour, amount,
+ * recipient, …auth)`.
+ *
+ * NO COIN, SO NO SPLIT. NIGHT lives on the account's `unshielded_balances`
+ * mirror, which the circuit debits by exactly `amount` before
+ * `sendUnshielded` pays the recipient; there is no note to consume whole, so a
+ * partial amount is simply a smaller debit, and there is no change to backfill.
+ *
+ * THE ARGUMENT ORDER IS THE CIRCUIT'S OWN: `(color, amount, recipient)`, where
+ * the two shielded spends take `(recipient, color, amount)`. The challenge
+ * builders already encode that order; this passes the same three values to the
+ * circuit and to the challenge, so the signature is over exactly what is paid.
+ *
+ * WHAT IT CANNOT DO is pay another Passport's account: the recipient is a
+ * `UserAddress` by type, and the contract has no route that moves NIGHT
+ * between two accounts. The Send sheet refuses that pair before anything is
+ * asked of anybody.
+ */
+export async function withdrawUnshieldedK1(
+  session: CustodySession,
+  device: CustodyCallDevice,
+  request: {
+    /** The 32 bytes inside an `mn_addr…` address. */
+    readonly recipient: Uint8Array;
+    readonly colourHex: string;
+    readonly amount: bigint;
+  },
+  onPhase?: (phase: CustodyPhase) => void,
+  overrides: Partial<CustodyDeps> = {},
+): Promise<CustodyStepResult> {
+  if (request.recipient.length !== 32) {
+    throw new Error('That is not an address this Passport can pay.');
+  }
+  if (request.amount <= 0n) throw new Error('Enter an amount greater than zero.');
+  const colour = normalisedColourHex(request.colourHex);
+  if (colour === null) throw new Error('That is not something this Passport can send.');
+  const colourBytes = hexToBytes(colour);
+  const recipient = request.recipient;
+  const amount = request.amount;
+  return k1Call(
+    session,
+    device,
+    {
+      operation: 'withdraw_unshielded',
+      args: [colourBytes, amount, { bytes: recipient }],
+      bounded: true,
+      challenge: (pure, context, pk) =>
+        device.arm === 'jubjub'
+          ? jubjubChallenges.withdrawUnshielded(pure, context, pk, colourBytes, amount, recipient)
+          : k256Challenges.withdrawUnshielded(pure, context, pk, colourBytes, amount, recipient),
+    },
+    onPhase,
+    overrides,
+  );
 }
 
 export async function appendInboxK1(

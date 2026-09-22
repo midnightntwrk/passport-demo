@@ -47,6 +47,7 @@ import { expect, test, type Page } from '@playwright/test';
 
 import {
   PASSPORT_ACCOUNT_ADDRESS,
+  RECIPIENT_ACCOUNT_ADDRESS,
   RESOLVABLE_NAME,
   installNetworkBoundary,
 } from './mocks.js';
@@ -119,8 +120,25 @@ const ACCOUNT_CUSTODY_DEPLOY_STATE = fs.readFileSync(
 const ACCOUNT_CUSTODY_ADDRESS =
   'cbd6b1c14a99c1751caa80a5665f01cb8067a9758183bda5da581e4ef745d215';
 
+/**
+ * The same recorded account with 5 NIGHT on its unshielded mirror — the
+ * recording above run through the build's own `deposit_unshielded` circuit,
+ * locally, once. The recording itself holds no NIGHT.
+ */
+const ACCOUNT_CUSTODY_NIGHT_STATE = fs.readFileSync(
+  path.join(here, 'fixtures', 'stagenet-account-custody-night.json'),
+  'utf8',
+);
+
+/** A real stagenet unshielded address that belongs to nobody in this walk. */
+const NIGHT_ADDRESS = 'mn_addr_stagenet127xnp9uuxwhh7a8an77mxv02ypt6u09xkk63c9zvdkjsrj4mj68qg7c5ad';
+
 /** Answers the account custody recordings for one address, ahead of the boundary. */
-async function serveAccountCustodyState(page: Page, addresses: readonly string[]): Promise<void> {
+async function serveAccountCustodyState(
+  page: Page,
+  addresses: readonly string[],
+  states: Readonly<Record<string, string>> = {},
+): Promise<void> {
   const wanted = new Set(addresses.map((address) => address.toLowerCase()));
   await page.route('**/indexer.stagenet.shielded.tools/**', async (route) => {
     const body = route.request().postData() ?? '';
@@ -133,7 +151,10 @@ async function serveAccountCustodyState(page: Page, addresses: readonly string[]
       return route.fulfill({ contentType: 'application/json', body: ACCOUNT_CUSTODY_DEPLOY_TX });
     }
     if (body.includes('CONTRACT_STATE_QUERY')) {
-      return route.fulfill({ contentType: 'application/json', body: ACCOUNT_CUSTODY_STATE });
+      return route.fulfill({
+        contentType: 'application/json',
+        body: states[asked] ?? ACCOUNT_CUSTODY_STATE,
+      });
     }
     return route.fallback();
   });
@@ -796,7 +817,15 @@ const THROWAWAY_ADDRESS =
   'tqtvfk7z5dtthx7kk6ewhluygc3xp2wrmyp3erzwdwns78fus5nm2xk';
 
 /** Opens a passkey Passport that already holds 250 mUSD, on Home. */
-async function passkeyPassportOnHome(browser: import('@playwright/test').Browser): Promise<{
+async function passkeyPassportOnHome(
+  browser: import('@playwright/test').Browser,
+  options: {
+    /** The account also holds 5 NIGHT. */
+    night?: boolean;
+    /** `iamtester` (and the typed-out recipient) lead to an OLDER Passport. */
+    recipientIsOlder?: boolean;
+  } = {},
+): Promise<{
   page: Page;
   close: () => Promise<void>;
 }> {
@@ -805,7 +834,15 @@ async function passkeyPassportOnHome(browser: import('@playwright/test').Browser
   );
   const page = await context.newPage();
   await installNetworkBoundary(page);
-  await serveAccountCustodyState(page, [ACCOUNT_CUSTODY_ADDRESS, PASSPORT_ACCOUNT_ADDRESS]);
+  /* Where `iamtester` is served no custody recording, the boundary answers it
+     with its own: the prototype account `stagenet-passport-account.json`. */
+  await serveAccountCustodyState(
+    page,
+    options.recipientIsOlder === true
+      ? [ACCOUNT_CUSTODY_ADDRESS]
+      : [ACCOUNT_CUSTODY_ADDRESS, PASSPORT_ACCOUNT_ADDRESS],
+    options.night === true ? { [ACCOUNT_CUSTODY_ADDRESS]: ACCOUNT_CUSTODY_NIGHT_STATE } : {},
+  );
   const authenticator = await installVirtualAuthenticator(context, page);
   await page.goto(WALK);
   await page.getByRole('button', { name: SIGN_IN_BUTTON }).click();
@@ -982,29 +1019,101 @@ test.describe('a passkey Passport paying somebody', () => {
     await close();
   });
 
-  /* THE ONE THING STILL COMING, and it is the ROUTE rather than the arm: the
-     account's NIGHT would leave in two legs, the second of which goes through
-     this Passport's own wallet — the route ruled out on 2026/09/18. The seam
-     refuses it in one sentence, and that sentence is held to in
-     `src/lib/custodyHome.test.ts`.
-
-     WHAT THIS WALK CAN SEE is one step earlier, and it is the truer refusal:
-     the real Send sheet checks what the account holds before it offers a
-     review, and the account in this recording holds no NIGHT. So the control
-     stays down and nothing is signed, which is what the bare form this screen
-     replaced could not do at all. */
-  test('will not offer NIGHT this Passport does not hold', async ({ browser }) => {
-    const { page, close } = await passkeyPassportOnHome(browser);
+  /* NIGHT TO A NAME IS REFUSED AT THE FIELD (2026/09/22). The contract has no
+     route that moves NIGHT between two accounts, so the sheet says so the
+     moment the pair is known — before Review, before any approval — and the
+     "coming" sentence is gone from this path entirely. */
+  test('refuses NIGHT to a name before anything is asked for', async ({ browser }) => {
+    const { page, close } = await passkeyPassportOnHome(browser, { night: true });
 
     await openSend(page);
     await sendPicker(page).selectOption({ index: 0 });
     await sendRecipient(page).fill(RESOLVABLE_NAME);
-    await sendAmount(page).fill('0.001');
+    await sendAmount(page).fill('1');
 
+    await expect(page.locator('#mnhome-send-recipient-error')).toHaveText(
+      'NIGHT can be sent to an address for now. To pay a name, choose mUSD.',
+      { timeout: 30_000 },
+    );
     await expect(page.getByRole('button', { name: /^Review$/ })).toBeDisabled();
-    expect(await page.locator('.mnhome-send').innerText()).not.toContain('not built yet');
-    /* And the shielded balance beside it is offered, which is what sends. */
-    await expect(sendPicker(page).locator('option')).toHaveCount(2);
+    const sheet = await page.locator('.mnhome-send').innerText();
+    expect(sheet).not.toContain('is coming');
+    /* No ceremony: nothing was pressed that could raise one, and no failure. */
+    await expect(sendFailure(page)).toHaveCount(0);
+
+    await close();
+  });
+
+  test('takes NIGHT to an address as far as the review, in part', async ({ browser }) => {
+    const { page, close } = await passkeyPassportOnHome(browser, { night: true });
+    await expect(assetRow(page, 'NIGHT')).toContainText('5', { timeout: 30_000 });
+
+    await openSend(page);
+    await sendPicker(page).selectOption({ index: 0 });
+    await sendRecipient(page).fill(NIGHT_ADDRESS);
+    await sendAmount(page).fill('1.5');
+
+    await expect(page.locator('#mnhome-send-recipient-error')).toHaveCount(0);
+    const review = page.getByRole('button', { name: /^Review$/ });
+    await expect(review).toBeEnabled({ timeout: 30_000 });
+    await review.click();
+
+    const sheet = page.locator('.mnhome-send');
+    await expect(sheet.getByText('1.5 NIGHT', { exact: true })).toBeVisible();
+    await expect(page.locator('.mnhome-send-primary')).toBeEnabled();
+    const text = await sheet.innerText();
+    expect(text).not.toContain('is coming');
+    expect(text).not.toContain('expected to be covered');
+
+    await close();
+  });
+
+  test('refuses NIGHT to a shielded address, in words', async ({ browser }) => {
+    const { page, close } = await passkeyPassportOnHome(browser, { night: true });
+
+    await openSend(page);
+    await sendPicker(page).selectOption({ index: 0 });
+    await sendRecipient(page).fill(THROWAWAY_ADDRESS);
+    await sendAmount(page).fill('1');
+
+    await expect(page.locator('#mnhome-send-recipient-error')).toContainText(
+      'NIGHT goes to an unshielded (mn_addr…) address',
+      { timeout: 30_000 },
+    );
+    await expect(page.getByRole('button', { name: /^Review$/ })).toBeDisabled();
+
+    await close();
+  });
+
+  /* A NAME THAT LEADS TO A PASSPORT ON THE OLDER VERSION, refused where it is
+     typed. The two builds cannot share a transaction and there is no
+     migration, so this is decided when the name resolves — never after an
+     approval. */
+  test('refuses a name that leads to an older Passport, under the field', async ({ browser }) => {
+    const { page, close } = await passkeyPassportOnHome(browser, { recipientIsOlder: true });
+
+    await openSend(page);
+    await sendPicker(page).selectOption({ index: 1 });
+    await sendRecipient(page).fill(RESOLVABLE_NAME);
+    await sendAmount(page).fill('10');
+
+    await expect(page.locator('#mnhome-send-recipient-error')).toHaveText(
+      "This name belongs to a Passport on the older version, so it can't be paid from this one. Paying between the two versions isn't supported.",
+      { timeout: 30_000 },
+    );
+    await expect(page.getByRole('button', { name: /^Review$/ })).toBeDisabled();
+    await expect(sendFailure(page)).toHaveCount(0);
+    expect(await page.locator('.mnhome-send').innerText()).not.toContain(
+      'set their Passport up again',
+    );
+
+    /* The same Passport typed out as an account is refused about what was typed. */
+    await sendRecipient(page).fill(RECIPIENT_ACCOUNT_ADDRESS);
+    await expect(page.locator('#mnhome-send-recipient-error')).toHaveText(
+      "This is a Passport on the older version, so it can't be paid from this one. Paying between the two versions isn't supported.",
+      { timeout: 30_000 },
+    );
+    await expect(page.getByRole('button', { name: /^Review$/ })).toBeDisabled();
 
     await close();
   });

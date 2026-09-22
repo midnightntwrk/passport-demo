@@ -881,10 +881,15 @@ test.describe('a Passport opened again after a payment', () => {
        to put it away. A button would be a button offering to pay twice. */
     /* IT IS SAID WHERE HOME SAYS EVERYTHING ELSE THAT WANTS READING — the
        banner at the top, with the one control that puts it away. */
+    /* THE CHAIN IS ASKED (2026/09/22), and this boundary cannot answer, so
+       the line says it is checking — never the old hedge that left the reader
+       to work it out from the balance. */
     const offer = page.locator('.mnhome-notice[role="alert"]');
     await expect(offer).toBeVisible({ timeout: 60_000 });
-    await expect(offer).toContainText('was sent as one payment');
-    await expect(offer).toContainText('Your balance below says which.');
+    await expect(offer).toContainText(
+      `Checking whether your payment to ${RESOLVABLE_NAME}.night went through…`,
+    );
+    await expect(offer).not.toContainText('Your balance below says which.');
     await expect(page.getByRole('button', { name: 'Finish this payment' })).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Dismiss error' })).toBeVisible();
 
@@ -894,6 +899,54 @@ test.describe('a Passport opened again after a payment', () => {
 
     await context.close();
   });
+
+  for (const answer of ['landed', 'never'] as const) {
+    test(`answers a stopped payment from the chain when it ${answer === 'landed' ? 'landed' : 'never landed'}`, async ({
+      browser,
+    }) => {
+      const context = await browser.newContext(
+        walkContextOptions({ viewport: { width: 420, height: 900 } }),
+      );
+      const page = await context.newPage();
+      await installNetworkBoundary(page);
+      await serveAccountCustodyState(page, [ACCOUNT_CUSTODY_ADDRESS, PASSPORT_ACCOUNT_ADDRESS]);
+      /* The indexer's answer about the payment's transaction, ahead of the
+         boundary: found, or answered and absent. The record was sent days ago,
+         so the wait a payment is given has long passed. */
+      await page.route('**/indexer.stagenet.shielded.tools/**', async (route) => {
+        const body = route.request().postData() ?? '';
+        if (!body.includes('transactions(offset')) return route.fallback();
+        return route.fulfill({
+          json: { data: { transactions: answer === 'landed' ? [{ hash: 'cd'.repeat(32) }] : [] } },
+        });
+      });
+      await seedDynamicPassport(page, {
+        name: 'walker',
+        accountAddress: ACCOUNT_CUSTODY_ADDRESS,
+        musd: '30',
+        stoppedSend: stoppedSendRow('sending'),
+      });
+      await page.goto(WALK);
+
+      const offer = page.locator('.mnhome-notice[role="alert"]');
+      await expect(offer).toBeVisible({ timeout: 60_000 });
+      await expect(offer).toContainText(
+        answer === 'landed'
+          ? `Sent. ${RESOLVABLE_NAME}.night has it.`
+          : "That payment didn't go through. Nothing left your Passport.",
+      );
+      await expect(offer).not.toContainText('Checking whether');
+      /* The record is settled: it does not come back on the next open. */
+      const kept = await page.evaluate(() =>
+        window.localStorage.getItem('passport-account-custody-shielded-send:v1'),
+      );
+      expect(kept ?? '{}').not.toContain('sending');
+      /* And Send is there to press again. */
+      await expect(page.getByRole('button', { name: /^Send$/ }).first()).toBeEnabled();
+
+      await context.close();
+    });
+  }
 
   test('says nothing at all about a payment that landed', async ({ browser }) => {
     const context = await browser.newContext(

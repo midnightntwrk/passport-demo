@@ -339,6 +339,10 @@ export interface HomeScreenProps {
      * {@link SendSheetProps.recipientDisclosure}.
      */
     recipientDisclosure?: SendSheetProps['recipientDisclosure']
+    /** Whether a name may be paid in NIGHT — see {@link SendSheetProps.nightToName}. */
+    nightToName?: SendSheetProps['nightToName']
+    /** Whether a resolved Passport can be paid at all — see {@link SendSheetProps.checkRecipientAccount}. */
+    checkRecipientAccount?: SendSheetProps['checkRecipientAccount']
     /** The live phase of the account call, narrated by the sheet. */
     phase?: 'checking' | 'connecting' | 'submitting' | 'confirming' | null
     /** Which of a name transfer's two legs is running. See the Send sheet. */
@@ -1191,6 +1195,10 @@ export default function HomeScreen(props: HomeScreenProps) {
               : {})}
             {...(send.recipientDisclosure
               ? { recipientDisclosure: send.recipientDisclosure }
+              : {})}
+            {...(send.nightToName === false ? { nightToName: false } : {})}
+            {...(send.checkRecipientAccount
+              ? { checkRecipientAccount: send.checkRecipientAccount }
               : {})}
             phase={send.phase ?? null}
             nameLeg={send.nameLeg ?? null}

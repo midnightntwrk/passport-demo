@@ -225,6 +225,10 @@ function deviceFake(): {
 }
 
 interface ChainFake {
+  /** The node took it and the chain never records it: the wait never answers. */
+  neverLands?: boolean;
+  /** The account's `auth_nonce` on the read after the wait ran out. */
+  nonceAfter?: bigint;
   /** What a call returns as the circuit's own result. */
   circuitResult?: unknown;
   /** How many spends fail the way a wrong position fails, before one lands. */
@@ -406,6 +410,7 @@ function harness(
      same as succeeding, which is exactly the world the defect lived in. */
   const watchForTxData = (txId: string) => {
     watched.push(txId);
+    if (chain.neverLands === true) return new Promise(() => undefined);
     if (chain.watchFailure !== undefined) return Promise.reject(new Error(chain.watchFailure));
     return Promise.resolve({
       txId,
@@ -460,7 +465,7 @@ function harness(
           pureCircuits: pureFake(),
           Contract: class {},
           ledger: () => ({
-            auth_nonce: 3n,
+            auth_nonce: submitted > 0 && chain.nonceAfter !== undefined ? chain.nonceAfter : 3n,
             device_epoch: 0n,
             device_count: 1n,
             booted: true,
@@ -490,6 +495,7 @@ function harness(
       },
       now: () => 1_700_000_000_000,
       sleep: () => Promise.resolve(undefined),
+      submitWaitMs: 5,
     },
   };
 }
@@ -848,6 +854,58 @@ describe('the change coin reaches storage before anything slow happens', () => {
     /* And the transaction is still named, because one exists: the record must
        not tell somebody nothing was sent when something was. */
     expect(seen).toEqual(['id-1']);
+  });
+
+  it('settles a payment the chain never recorded as not sent, and gives the coin back', async () => {
+    /* Live, 2026/09/22: proved, balanced, taken by the node, and never on
+       chain. The wait is bounded; the account's nonce has not moved, so the
+       payment did not run and the write is taken back as a refusal's is. */
+    const test = harness({ circuitResult: changeResult(60n), neverLands: true });
+    const { session, device } = deviceFake();
+    putK1CoinCandidates(ACCOUNT, { colour: COLOUR, nonce: NONCE, value: 100n }, [5n, 6n]);
+
+    await expect(
+      withdrawShieldedK1(
+        session,
+        device,
+        {
+          recipientCoinPublicKey: new Uint8Array(32),
+          recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+          colourHex: COLOUR,
+          amount: 40n,
+        },
+        undefined,
+        test.deps,
+      ),
+    ).rejects.toThrow("That payment didn't go through. Nothing left your Passport.");
+
+    expect(heldK1Coin(ACCOUNT, COLOUR)?.nonce).toBe(NONCE);
+    expect(isK1NonceSpent(ACCOUNT, NONCE)).toBe(false);
+    expect(awaitingK1Coins(ACCOUNT)).toEqual([]);
+  });
+
+  it('keeps the write and hedges when the account moved while the wait ran out', async () => {
+    const test = harness({ circuitResult: changeResult(60n), neverLands: true, nonceAfter: 4n });
+    const { session, device } = deviceFake();
+    putK1CoinCandidates(ACCOUNT, { colour: COLOUR, nonce: NONCE, value: 100n }, [5n, 6n]);
+
+    await expect(
+      withdrawShieldedK1(
+        session,
+        device,
+        {
+          recipientCoinPublicKey: new Uint8Array(32),
+          recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+          colourHex: COLOUR,
+          amount: 40n,
+        },
+        undefined,
+        test.deps,
+      ),
+    ).rejects.toThrow('could not confirm it');
+    /* It may be on chain: the spent coin stays spent, the change stays filed. */
+    expect(isK1NonceSpent(ACCOUNT, NONCE)).toBe(true);
+    expect(awaitingK1Coins(ACCOUNT)).toHaveLength(1);
   });
 
   it('hedges rather than guessing when the finalised data carried no verdict', async () => {

@@ -9934,6 +9934,11 @@ export default function PassportDemo() {
              — both Passports named, or neither. The per-payment choice of
              MIP-0012 §6.6, and a choice somebody is making at that field. */
           recipientDisclosure: custodyPaymentDisclosure,
+          /* NIGHT leaves this build's account only to an `mn_addr…` address:
+             the contract has no route that moves it between two accounts, so
+             a name is refused for NIGHT at the field, before Review. */
+          nightToName: false,
+          checkRecipientAccount: custody.send.checkRecipientAccount,
           phase: custody.send.phase,
           /* ONE TRANSACTION. A shielded amount leaves this account and reaches
              the recipient in a single call — see
