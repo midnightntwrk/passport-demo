@@ -17,13 +17,20 @@ import { describe, expect, it } from 'vitest';
 import {
   BACKUP_COPY,
   BACKUP_REMINDER_MS,
+  CUSTODY_BACKUP_INTENT_KEY,
+  CUSTODY_BACKUP_KEY,
+  backupAutomatically,
   backupOffer,
   backupRefusal,
   backupSlot,
-  CUSTODY_BACKUP_KEY,
+  backupStartsSetup,
+  clearBackupIntent,
+  loadBackupIntent,
   loadBackupRecord,
   loadBackupRecords,
+  saveBackupIntent,
   saveBackupRecord,
+  type BackupIntent,
   type BackupOfferInput,
 } from './backupDevice.js';
 import type { CustodyStorage } from '../identity/custodyContractPlan.js';
@@ -66,6 +73,7 @@ function ready(over: Partial<BackupOfferInput> = {}): BackupOfferInput {
     socialAvailable: true,
     heldBySocial: false,
     record: null,
+    autoPending: false,
     now: NOW,
     ...over,
   };
@@ -283,5 +291,159 @@ describe('the copy', () => {
   it('names the provider in the line that says it is done, where there is one', () => {
     expect(BACKUP_COPY.done('Google')).toContain('Google');
     expect(BACKUP_COPY.done('  ')).toBe(BACKUP_COPY.done(null));
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* A Passport started by somebody who was already signed in                   */
+/* -------------------------------------------------------------------------- */
+
+const SETTING_UP: BackupIntent = { network: 'stagenet', stage: 'setting-up' };
+const BACKING_UP: BackupIntent = { network: 'stagenet', stage: 'backing-up' };
+
+describe('the intent behind one press', () => {
+  it('comes back exactly as it was written, and goes when it is cleared', () => {
+    const storage = memoryStorage();
+    saveBackupIntent(storage, SETTING_UP);
+    expect(loadBackupIntent(storage)).toEqual(SETTING_UP);
+    clearBackupIntent(storage);
+    expect(loadBackupIntent(storage)).toBeNull();
+  });
+
+  it('is one at a time, and the second press replaces the first', () => {
+    const storage = memoryStorage();
+    saveBackupIntent(storage, SETTING_UP);
+    saveBackupIntent(storage, BACKING_UP);
+    expect(loadBackupIntent(storage)?.stage).toBe('backing-up');
+  });
+
+  it('reads as nothing over a stage it does not recognise', () => {
+    /* A stage nobody wrote is not a stage to guess at: one guess deploys a
+       second Passport and the other never attaches anything. */
+    const odd = JSON.stringify({ network: 'stagenet', stage: 'halfway' });
+    expect(loadBackupIntent(memoryStorage({ [CUSTODY_BACKUP_INTENT_KEY]: odd }))).toBeNull();
+  });
+
+  it('reads as nothing over rubbish, an array, and a missing network', () => {
+    expect(loadBackupIntent(memoryStorage({ [CUSTODY_BACKUP_INTENT_KEY]: 'not json' }))).toBeNull();
+    expect(loadBackupIntent(memoryStorage({ [CUSTODY_BACKUP_INTENT_KEY]: '[1]' }))).toBeNull();
+    expect(
+      loadBackupIntent(memoryStorage({ [CUSTODY_BACKUP_INTENT_KEY]: '{"stage":"setting-up"}' })),
+    ).toBeNull();
+  });
+
+  it('survives a storage that refuses, in both directions', () => {
+    expect(loadBackupIntent(refusingStorage())).toBeNull();
+    expect(() => saveBackupIntent(refusingStorage(), SETTING_UP)).not.toThrow();
+    expect(() => clearBackupIntent(refusingStorage())).not.toThrow();
+  });
+});
+
+describe('the setup starting on its own', () => {
+  const ready = {
+    intent: SETTING_UP,
+    network: 'stagenet',
+    onCreateStep: true,
+    heldByDeviceKey: true,
+    busy: false,
+  };
+
+  it('starts where a press is waiting on it', () => {
+    /* The press already happened. What this prevents is the same button being
+       offered again on a screen the reader thought they had left. */
+    expect(backupStartsSetup(ready)).toBe(true);
+  });
+
+  it('does not start without a press behind it', () => {
+    expect(backupStartsSetup({ ...ready, intent: null })).toBe(false);
+  });
+
+  it('does not start once it has already been started', () => {
+    expect(backupStartsSetup({ ...ready, intent: BACKING_UP })).toBe(false);
+  });
+
+  it('does not start on a network the press was not made on', () => {
+    expect(backupStartsSetup({ ...ready, network: 'devnet' })).toBe(false);
+  });
+
+  it('does not start until the key that would hold it is open', () => {
+    /* The setup asks the arm for a device on its first line, so starting early
+       would hand the reader a failure they never asked for. */
+    expect(backupStartsSetup({ ...ready, heldByDeviceKey: false })).toBe(false);
+  });
+
+  it('does not start anywhere but at the beginning', () => {
+    expect(backupStartsSetup({ ...ready, onCreateStep: false })).toBe(false);
+  });
+
+  it('does not start on top of something already running', () => {
+    expect(backupStartsSetup({ ...ready, busy: true })).toBe(false);
+  });
+});
+
+describe('the spare key attaching on its own', () => {
+  const ready = {
+    intent: BACKING_UP,
+    network: 'stagenet',
+    onHome: true,
+    hasName: true,
+    socialReady: true,
+    record: null,
+    busy: false,
+  };
+
+  it('attaches once there is a named Passport to attach it to', () => {
+    expect(backupAutomatically(ready)).toBe(true);
+  });
+
+  it('waits for the name, as the offer does and for the same reason', () => {
+    expect(backupAutomatically({ ...ready, hasName: false })).toBe(false);
+  });
+
+  it('waits for Home, because a setup still running has nothing to attach to', () => {
+    expect(backupAutomatically({ ...ready, onHome: false })).toBe(false);
+  });
+
+  it('does not attach while the setup half of the press is still the stage', () => {
+    expect(backupAutomatically({ ...ready, intent: SETTING_UP })).toBe(false);
+  });
+
+  it('does not attach for a Passport nobody started this way', () => {
+    expect(backupAutomatically({ ...ready, intent: null })).toBe(false);
+  });
+
+  it('does not attach a second one to a Passport that already has it', () => {
+    expect(backupAutomatically({ ...ready, record: { doneAt: NOW } })).toBe(false);
+  });
+
+  it('does not attach without a sign-in there to be attached', () => {
+    expect(backupAutomatically({ ...ready, socialReady: false })).toBe(false);
+  });
+
+  it('does not attach on a network the press was not made on', () => {
+    expect(backupAutomatically({ ...ready, network: 'devnet' })).toBe(false);
+  });
+
+  it('does not attach on top of something already running', () => {
+    expect(backupAutomatically({ ...ready, busy: true })).toBe(false);
+  });
+});
+
+describe('the offer, while a press is still running', () => {
+  it('is not made, because the thing it offers is already under way', () => {
+    /* A card whose "Not now" would be dismissing something that then happens
+       anyway is worse than no card. */
+    expect(backupOffer(ready({ autoPending: true }))).toBe('hidden');
+  });
+
+  it('is made again once the press is over and nothing was attached', () => {
+    /* The automatic attempt clears its own intent either way, so a failure
+       falls back to a card the reader can answer rather than to a silent retry
+       on every open. */
+    expect(backupOffer(ready({ autoPending: false }))).toBe('offer');
+  });
+
+  it('still says "done" over a press that is still running, if one landed', () => {
+    expect(backupOffer(ready({ autoPending: true, record: { doneAt: NOW } }))).toBe('done');
   });
 });

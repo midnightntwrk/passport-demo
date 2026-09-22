@@ -116,6 +116,8 @@ async function seedPasskeyPassport(
     name: string;
     /** `passport-account-custody-backup:v1`, or nothing recorded at all. */
     backup?: Record<string, unknown>;
+    /** `passport-account-custody-backup-intent:v1` — a press still running. */
+    intent?: Record<string, unknown>;
   },
 ): Promise<void> {
   const key = `${options.userKey}|${WALK_NETWORK}`;
@@ -150,7 +152,16 @@ async function seedPasskeyPassport(
     },
   };
   await page.addInitScript(
-    ([recordKey, seededRecord, seededName, seededStore, pointerKey, seededUser, seededBackup]) => {
+    ([
+      recordKey,
+      seededRecord,
+      seededName,
+      seededStore,
+      pointerKey,
+      seededUser,
+      seededBackup,
+      seededIntent,
+    ]) => {
       window.localStorage.setItem(
         'passport-account-custody:v1',
         JSON.stringify({ [recordKey]: seededRecord }),
@@ -170,6 +181,12 @@ async function seedPasskeyPassport(
           JSON.stringify(seededBackup),
         );
       }
+      if (seededIntent) {
+        window.localStorage.setItem(
+          'passport-account-custody-backup-intent:v1',
+          JSON.stringify(seededIntent),
+        );
+      }
     },
     [
       key,
@@ -179,6 +196,7 @@ async function seedPasskeyPassport(
       `${options.credentialId}|${WALK_NETWORK}`,
       options.userKey,
       options.backup ?? null,
+      options.intent ?? null,
     ] as const,
   );
 }
@@ -435,19 +453,110 @@ test.describe('asking for a spare key', () => {
 });
 
 /* -------------------------------------------------------------------------- */
-/* Coming back on a new device                                                */
+/* A Passport started by somebody who was already signed in                   */
 /* -------------------------------------------------------------------------- */
 
-test.describe('a device with no key on it', () => {
-  test('is offered the way back by name, and nothing to create', async ({ browser }) => {
+test.describe('a Passport made from a sign-in', () => {
+  test('attaches the spare key by itself, and does not retry it in silence', async ({
+    browser,
+  }) => {
+    /* THE END OF ONE PRESS. Somebody already signed in presses "Create my
+       Passport", gets the passkey road — the key here, the same setup, the same
+       name step, the same Home — and the sign-in they already made is attached
+       at the end without being asked for again. The setup and the name are the
+       passkey road's own walks; what is seeded here is the state they leave
+       behind, so this walk is about the half that is new.
+
+       The attaching itself needs the proving service, which is not here. So
+       what is asserted is what a box can see: the attempt is made with nobody
+       pressing anything, it says so in one plain sentence when it cannot
+       finish, it clears the press rather than retrying in silence on every
+       open, and it records nothing.
+
+       WHERE it stops is not asserted, and deliberately. Settling the key that
+       approves derives the REAL device point from the authenticator, and the
+       Passport seeded here is filed under a stand-in one — so the moment the
+       attempt reaches for the key, the screen is routed to that real key's own
+       (empty) Passport. That is a property of seeding rather than of the app,
+       and an assertion about the wall it happens to hit first would be an
+       assertion about the fixture. That the offer returns once the press is
+       over is the rule's own business, drilled in
+       `src/lib/backupDevice.test.ts`. */
     const context = await browser.newContext(
       walkContextOptions({ viewport: { width: 420, height: 900 } }),
     );
     const page = await context.newPage();
     await installNetworkBoundary(page);
+    await serveAccountCustodyState(page);
+    const authenticator = await installVirtualAuthenticator(context, page);
+    test.setTimeout(180_000);
+
+    const credentialId = await signInAndReadCredential(page);
+    await seedPasskeyPassport(page, {
+      credentialId,
+      userKey: 'jubjub:2a1f',
+      name: 'walker',
+      backup: {},
+      intent: { network: WALK_NETWORK, stage: 'backing-up' },
+    });
+    await page.goto(WALK);
+
+    await expect(page.getByRole('heading', { name: 'walker.night' })).toBeVisible({
+      timeout: 60_000,
+    });
+    /* IT IS UNDER WAY WITH NOBODY HAVING PRESSED ANYTHING, which is the whole
+       claim of this half. That the card is not offered WHILE it runs is the
+       rule's own business and is drilled in `src/lib/backupDevice.test.ts`;
+       asserting it here would be a race against how fast the refusal arrives. */
+    const alert = page.getByRole('alert');
+    await expect(alert).toBeVisible({ timeout: 120_000 });
+    const sentence = (await alert.innerText()).trim();
+    expect(sentence.split('\n').filter((line) => line.trim().length > 0)).toHaveLength(1);
+    expect(sentence.toLowerCase()).not.toContain('error:');
+    expect(sentence.toLowerCase()).not.toContain('undefined');
+
+    /* The press is over either way, so the reader is handed a card they can
+       answer rather than a silent retry on every open. */
+    await expect
+      .poll(
+        () =>
+          page.evaluate(() =>
+            window.localStorage.getItem('passport-account-custody-backup-intent:v1'),
+          ),
+        { timeout: 30_000 },
+      )
+      .toBeNull();
+
+    /* And nothing was recorded. A Passport is backed up when the chain says so,
+       never because a flow ran. */
+    const written = await page.evaluate(() =>
+      window.localStorage.getItem('passport-account-custody-backup:v1'),
+    );
+    expect(written ?? '').not.toContain('doneAt');
+
+    await authenticator.remove();
+    await context.close();
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* Coming back on a new device                                                */
+/* -------------------------------------------------------------------------- */
+
+test.describe('a device with no key on it', () => {
+  test('is offered the way back by name, beside the offer to make one', async ({ browser }) => {
+    const context = await browser.newContext(
+      walkContextOptions({ viewport: { width: 420, height: 900 } }),
+    );
+    const page = await context.newPage();
+    await installNetworkBoundary(page);
+    const authenticator = await installVirtualAuthenticator(context, page);
     await page.goto(WALK_SOCIAL_ONLY);
 
-    await expect(page.getByRole('heading', { name: /Bring your\s*Passport here/ })).toBeVisible();
+    /* BOTH, and in the order the decision puts them: making one here is the
+       primary, and coming back to one is beside it. */
+    await expect(page.getByRole('heading', { name: /Set up\s*your Passport/ })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Create my Passport' })).toBeEnabled();
     await page.getByRole('button', { name: 'I already have a Passport' }).click();
 
     await expect(page.getByRole('heading', { name: /Find it\s*by its name/ })).toBeVisible();
@@ -464,10 +573,11 @@ test.describe('a device with no key on it', () => {
     await expect(answer).toBeVisible({ timeout: 120_000 });
     const sentence = (await answer.innerText()).trim();
     expect(sentence.split('\n').filter((line) => line.trim().length > 0)).toHaveLength(1);
-    /* Whatever it says, it does not offer to make a Passport instead. */
-    const controls = await page.getByRole('button').allInnerTexts();
-    for (const label of controls) expect(label.toLowerCase()).not.toContain('create');
+    /* Whatever it says, it is a sentence and not machinery. */
+    expect(sentence.toLowerCase()).not.toContain('error:');
+    expect(sentence.toLowerCase()).not.toContain('undefined');
 
+    await authenticator.remove();
     await context.close();
   });
 
@@ -507,9 +617,10 @@ test.describe('a device with no key on it', () => {
        discovered afterwards as an empty list of tokens. */
     await expect(page.getByText(/stay listed on your other device/)).toBeVisible();
 
-    /* Giving up clears it, so the next open is not this screen again. */
+    /* Giving up clears it, and what is behind it is the ordinary offer to make
+       a Passport here — never a dead end. */
     await page.getByRole('button', { name: 'Go back' }).click();
-    await expect(page.getByRole('heading', { name: /Bring your\s*Passport here/ })).toBeVisible();
+    await expect(page.getByRole('heading', { name: /Set up\s*your Passport/ })).toBeVisible();
     const held = await page.evaluate(() =>
       window.localStorage.getItem('passport-account-custody-adopt:v1'),
     );

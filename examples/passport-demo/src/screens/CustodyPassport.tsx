@@ -60,14 +60,20 @@ import {
 } from '../identity/custodyInboxIndex.js'
 import {
   BACKUP_COPY,
+  backupAutomatically,
   backupOffer,
   backupRefusal,
+  backupStartsSetup,
+  clearBackupIntent,
+  loadBackupIntent,
   loadBackupRecord,
+  saveBackupIntent,
   saveBackupRecord,
+  type BackupIntent,
   type BackupOffer,
   type BackupRecord,
 } from '../lib/backupDevice.js'
-import { ADOPT_COPY, saveAdoption } from '../lib/custodyAdoption.js'
+import { ADOPT_COPY, saveAdoption, socialStart } from '../lib/custodyAdoption.js'
 import { NIGHT_COLOUR_HEX } from '../lib/colour.js'
 import {
   custodyAmountFigure,
@@ -230,11 +236,13 @@ export interface CustodyPassportProps {
    */
   social?: CustodySocial | null
   /**
-   * Make a key on THIS device, for a Passport a sign-in has just found.
+   * Make a key on THIS device — for a Passport a sign-in has just found, and
+   * for one a signed-in person is about to make.
    *
    * The host owns it, because making one changes which Passport the app thinks
-   * it is showing and therefore replaces this screen mid-ceremony. See
-   * `../lib/custodyAdoption.ts` for the hand-off that survives that.
+   * it is showing and therefore replaces this screen mid-ceremony. What each
+   * press meant is written down first: `../lib/custodyAdoption.ts` for a
+   * recovery, `../lib/backupDevice.ts` for a Passport being started.
    */
   onEnrolDeviceKey?: () => void
   /**
@@ -248,6 +256,13 @@ export interface CustodyPassportProps {
   adoption?: { readonly name: string; readonly stage: 'enrol' | 'adopt' | 'blocked' } | null
   /** Give up on the recovery in flight. */
   onAbandonAdoption?: () => void
+  /**
+   * Whether this device can make a key of its own, or null while unknown.
+   *
+   * `null` is not `false` — see `../lib/custodyAdoption.ts`'s `socialStart` for
+   * why a probe that has not answered must not read as a refusal.
+   */
+  canMakeDeviceKey?: boolean | null
 }
 
 /** The half of the sign-in this screen reads. Nothing of the vendor in it. */
@@ -276,6 +291,7 @@ export default function CustodyPassport({
   onEnrolDeviceKey,
   adoption = null,
   onAbandonAdoption,
+  canMakeDeviceKey = null,
 }: CustodyPassportProps) {
   /**
    * The key every store this Passport owns is filed under.
@@ -357,6 +373,16 @@ export default function CustodyPassport({
   const [adopting, setAdopting] = useState<string | null>(null)
   /* Whether a press on the backup offer is waiting for a sign-in to finish. */
   const backupAsked = useRef(false)
+  /**
+   * A Passport being made by somebody who was already signed in, and how far
+   * that press has got. See `../lib/backupDevice.ts`.
+   */
+  const [intent, setIntent] = useState<BackupIntent | null>(() =>
+    loadBackupIntent(window.localStorage),
+  )
+  /* Both halves of that press run once per screen, and never twice. */
+  const autoSetupStarted = useRef(false)
+  const autoBackupStarted = useRef(false)
   const device = useRef<CustodyIdentity | null>(null)
   /* Whether a payment or a setup is running. See {@link run}. */
   const inFlight = useRef(false)
@@ -1420,6 +1446,32 @@ export default function CustodyPassport({
     setBackup(loadBackupRecord(window.localStorage, settled, network))
   }, [network])
 
+  /**
+   * Start the whole thing, for somebody who is already signed in.
+   *
+   * ONE PRESS AND ONE ROAD. Making the key on this device replaces this screen
+   * — a device key wins the identity question the moment it exists — so the
+   * press is written down before the ceremony and the setup carries on under
+   * the passkey arm without asking again. Everything after that is the road a
+   * passkey takes: the same setup screen, the same counted steps, the same name
+   * step, the same Home.
+   */
+  const startHere = useCallback(() => {
+    const next: BackupIntent = { network, stage: 'setting-up' }
+    saveBackupIntent(window.localStorage, next)
+    setIntent(next)
+    onEnrolDeviceKey?.()
+  }, [network, onEnrolDeviceKey])
+
+  /**
+   * Whether a Passport started from a sign-in is still mid-press.
+   *
+   * The offer is not made while it is: a card offering the thing already under
+   * way is a card whose "Not now" would be dismissing something that then
+   * happens anyway.
+   */
+  const autoPending = intent !== null && intent.network === network
+
   /** What the offer does on this visit, or `hidden`. */
   const backupState: BackupOffer = backupOffer({
     onHome: screen === 'home',
@@ -1427,8 +1479,59 @@ export default function CustodyPassport({
     socialAvailable: social !== null && social.status !== 'disabled',
     heldBySocial: arm.kind === 'dynamic',
     record: backup,
+    autoPending,
     now: Date.now(),
   })
+
+  /* THE REST OF THE PRESS, half one: the setup itself. */
+  const startsSetup = backupStartsSetup({
+    intent,
+    network,
+    /* `null` IS THE CREATE STEP. A Passport nobody has made yet has no record
+       to read a stage off, so `refresh` never sets a screen for it and the
+       render falls through to the setup screen — which is exactly the state
+       this half is waiting for. Reading only `'create'` would wait for ever. */
+    onCreateStep: screen === null || screen === 'create',
+    /* AND THE KEY HAS TO BE OPEN, not merely present: `createPassport` asks the
+       arm for a device on its first line, and an arm that is still starting up
+       would answer that with a failure the reader never asked for. */
+    heldByDeviceKey: arm.kind === 'passkey' && arm.ready,
+    busy: busy !== null,
+  })
+  useEffect(() => {
+    if (!startsSetup || autoSetupStarted.current) return
+    autoSetupStarted.current = true
+    /* Advanced BEFORE the work, and written down rather than held in a ref: a
+       tab closed mid-setup has to come back to a Passport it resumes, never to
+       a second setup of the first one. */
+    const next: BackupIntent = { network, stage: 'backing-up' }
+    saveBackupIntent(window.localStorage, next)
+    setIntent(next)
+    createPassport()
+  }, [createPassport, network, startsSetup])
+
+  /* And half two: the spare key, once there is a named Passport to attach it
+     to. One approval, and it is the only one this half costs. */
+  const backsUpAutomatically = backupAutomatically({
+    intent,
+    network,
+    onHome: screen === 'home',
+    hasName: (view?.name ?? null) !== null,
+    socialReady: social !== null && social.status === 'signed-in' && social.address !== null,
+    record: backup,
+    busy: busy !== null,
+  })
+  useEffect(() => {
+    if (!backsUpAutomatically || autoBackupStarted.current) return
+    autoBackupStarted.current = true
+    void runBackup().finally(() => {
+      /* CLEARED EITHER WAY. It worked, or it did not and the ordinary offer is
+         what asks again — a card the reader can answer beats a silent retry on
+         every open. */
+      clearBackupIntent(window.localStorage)
+      setIntent(null)
+    })
+  }, [backsUpAutomatically, runBackup])
 
   /* ---------------------------------------------------------------------- */
   /* What is on screen                                                      */
@@ -1523,45 +1626,99 @@ export default function CustodyPassport({
   }
 
   /**
-   * A SIGN-IN IS OFFERED NO PASSPORT OF ITS OWN (2026/09/21).
+   * WHAT A SIGNED-IN PERSON WITH NO PASSPORT IS OFFERED.
    *
-   * It could make one until that day, and this branch is the retirement of it.
-   * A Passport made from a sign-in alone has no key on any device, which makes
-   * the sign-in the only thing standing between its holder and their money —
-   * the shape the whole design exists to avoid. What a sign-in is FOR now is
-   * the spare key on a Passport a device key made, and the one thing it can do
-   * from this screen is bring such a Passport back.
+   * THE SAME ROAD A PASSKEY TAKES, and the same words for it. Between 09/16 and
+   * 09/21 a sign-in could make a Passport of its OWN — no key on any device,
+   * the sign-in the only thing between its holder and their money — and that
+   * shape is retired. For one night the screen that replaced it offered nothing
+   * but "I already have a Passport", which turned the commonest way into this
+   * demo into a dead end: signed in on a clean phone, told to go and find a
+   * device that can make a key, on the device that could.
    *
-   * Existing ones are untouched: this is the screen for a sign-in with NO
-   * Passport, and a sign-in that already holds one never reaches it.
+   * So the primary action here is the one the passkey road has — "Create my
+   * Passport", under the same heading, with the same sentence about who pays —
+   * and pressing it makes a key on THIS device, runs the same setup, claims a
+   * name the same way, and lands on the same Home. The only difference is the
+   * end of it: the sign-in already in hand is attached as the spare key without
+   * being asked for again, which costs one approval.
+   *
+   * `recover-only` is what is left for a device that genuinely cannot make a
+   * key of its own, and only after something has actually said so — see
+   * `../lib/custodyAdoption.ts`.
    */
   if (arm.kind === 'dynamic') {
+    const start = socialStart({ canMakeDeviceKey })
     return (
       <Shell label="Passport">
         <p className="mnob-kicker">{arm.kicker}</p>
         <h1 className="mnob-title">
-          <span>Bring your</span>
-          <span>Passport here</span>
+          {start === 'create' ? (
+            <>
+              <span>Set up</span>
+              <span>your Passport</span>
+            </>
+          ) : (
+            <>
+              <span>Bring your</span>
+              <span>Passport here</span>
+            </>
+          )}
         </h1>
-        <p className="mnob-lede">{ADOPT_COPY.socialCannotCreate}</p>
+        <p className="mnob-lede">
+          {start === 'create'
+            ? ADOPT_COPY.socialCanCreate(social?.provider ?? null)
+            : ADOPT_COPY.socialCannotCreate}
+        </p>
         <div className="mndyn-actions">
-          <button
-            type="button"
-            className="mnob-primary"
-            onClick={() => setScreen('recover')}
-            disabled={busy !== null}
-          >
-            <span className="mnob-primary-copy">
-              <Search size={17} strokeWidth={2} aria-hidden="true" />
-              I already have a Passport
-            </span>
-            <ArrowRight size={17} strokeWidth={2.2} aria-hidden="true" />
-          </button>
+          {start === 'create' ? (
+            <>
+              <button
+                type="button"
+                className="mnob-primary"
+                onClick={startHere}
+                disabled={busy !== null}
+              >
+                <span className="mnob-primary-copy">
+                  {busy !== null ? (
+                    <Loader2
+                      className="mnob-working-spinner"
+                      size={17}
+                      strokeWidth={2}
+                      aria-hidden="true"
+                    />
+                  ) : (
+                    <ShieldCheck size={17} strokeWidth={2} aria-hidden="true" />
+                  )}
+                  {busy ?? ADOPT_COPY.socialCreateAction}
+                </span>
+                <ArrowRight size={17} strokeWidth={2.2} aria-hidden="true" />
+              </button>
+              <p className="mnob-hint">{ADOPT_COPY.socialCreateHint}</p>
+            </>
+          ) : null}
           {error ? (
             <div className="mnob-unusable" role="alert">
               <p className="mnob-unusable-copy">{error}</p>
             </div>
           ) : null}
+          <button
+            type="button"
+            /* PRIMARY ONLY WHERE IT IS THE ONLY THING ON OFFER. Two primaries
+               on one screen is a screen with no answer to "what now". */
+            className={start === 'create' ? 'mnob-alt' : 'mnob-primary'}
+            onClick={() => setScreen('recover')}
+            disabled={busy !== null}
+          >
+            {start === 'create' ? (
+              ADOPT_COPY.socialRecoverAction
+            ) : (
+              <span className="mnob-primary-copy">
+                <Search size={17} strokeWidth={2} aria-hidden="true" />
+                {ADOPT_COPY.socialRecoverAction}
+              </span>
+            )}
+          </button>
         </div>
       </Shell>
     )

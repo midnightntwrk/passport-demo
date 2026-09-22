@@ -180,6 +180,44 @@ export function adoptionStage(input: AdoptionStageInput): AdoptionStage {
 }
 
 /* -------------------------------------------------------------------------- */
+/* What a signed-in person with no Passport is offered                        */
+/* -------------------------------------------------------------------------- */
+
+/** What the screen a signed-in person with no Passport lands on may offer. */
+export type SocialStart =
+  /** Make a Passport here, with the sign-in becoming its spare key. */
+  | 'create'
+  /** Only the way back to one they already hold. */
+  | 'recover-only';
+
+/**
+ * What to offer somebody who has signed in on a device with no Passport.
+ *
+ * WHY THIS IS A RULE AND NOT A CONSTANT (live, 2026/09/21). The screen offered
+ * `recover-only` to everybody: a person who signed in with Google on a clean
+ * phone was told to "use a device that can make a key of its own", on the
+ * device that could. It was a dead end, and it was one for the commonest way
+ * into this demo. The retirement it came from is still right — a Passport
+ * whose only key is a sign-in has nothing on any device — but what follows from
+ * it is that the sign-in becomes the SPARE on a Passport made here, not that
+ * there is nothing to offer.
+ *
+ * `null` is NOT `false`. A question that has not been answered yet is a device
+ * we have no reason to doubt, and the sentence about a device that cannot make
+ * a key is only ever shown once something has actually said so — otherwise the
+ * commonest device in the world reads a refusal for the length of a promise.
+ * The host's own answer is narrow for the same reason: a desktop with no
+ * built-in authenticator still makes a key through a security key or the phone
+ * beside it, so the only definite no is a browser with no WebAuthn at all.
+ */
+export function socialStart(input: {
+  /** Whether this device can make a key of its own, or null while unknown. */
+  readonly canMakeDeviceKey: boolean | null;
+}): SocialStart {
+  return input.canMakeDeviceKey === false ? 'recover-only' : 'create';
+}
+
+/* -------------------------------------------------------------------------- */
 /* What it says                                                               */
 /* -------------------------------------------------------------------------- */
 
@@ -208,7 +246,32 @@ export const ADOPT_COPY = {
   limit:
     'Tokens you were sent before today stay listed on your other device. This one can be paid ' +
     'and can send from now on.',
-  /** The sentence the social arm shows instead of an offer to make a Passport. */
+  /**
+   * The sentence a signed-in person reads on a device that CAN make a key.
+   *
+   * It says the two things that are true and that they would otherwise have to
+   * infer: the Passport is made here and held here, and the sign-in they have
+   * already made is what brings it back. The provider is named because that is
+   * what they chose.
+   */
+  socialCanCreate: (provider: string | null): string =>
+    provider === null || provider.trim().length === 0
+      ? 'Passport will make a key on this device to hold it. The account you signed in with ' +
+        'becomes your way back if you ever lose this device.'
+      : `Passport will make a key on this device to hold it. Your ${provider.trim()} sign-in ` +
+        'becomes your way back if you ever lose this device.',
+  /** The primary action on that screen. The same words the other arm uses. */
+  socialCreateAction: 'Create my Passport',
+  /** Under it, and true of this path: nothing here is paid for by the reader. */
+  socialCreateHint: 'Setting your Passport up is paid for on your behalf.',
+  /** The secondary action, for somebody who already holds one. */
+  socialRecoverAction: 'I already have a Passport',
+  /**
+   * The sentence for a device that genuinely cannot make a key of its own.
+   *
+   * Kept exactly as it was, and now shown only where it is TRUE — see
+   * {@link socialStart}, and the dead end that rule exists to remove.
+   */
   socialCannotCreate:
     'Signing in brings back a Passport you already hold. To make a new one, use a device that ' +
     'can make a key of its own.',

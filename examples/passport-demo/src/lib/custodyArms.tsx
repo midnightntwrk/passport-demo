@@ -169,9 +169,15 @@ export function useDynamicCustodyArm(session: DynamicArmInput): CustodyArm {
           ? 'Approve with the account you signed in with'
           : `Approve with your ${provider.trim()} account`,
       kicker: `Signed in with ${provider ?? 'your sign-in'}`,
+      /* TRUE OF THIS ARM AS OF 2026/09/21, and it was not before. The sentence
+         used to read "…is all Passport needs", which described a Passport whose
+         only key was the sign-in — the shape that day retired. A sign-in is now
+         the SPARE key on a Passport the device holds, so the lede says what the
+         next press will actually do: make a key here, and keep the sign-in as
+         the way back. See `./custodyAdoption.ts`. */
       lede:
-        `${handle ?? 'your account'} is all Passport needs. Nothing else to remember, and ` +
-        'nothing to install — the same sign-in brings your Passport back on any device.',
+        `Signed in as ${handle ?? 'your account'}. Passport will make a key on this device to ` +
+        'hold your Passport, and your sign-in becomes the way back if you lose it.',
       badge: `${provider ?? 'your sign-in'} · ${handle ?? 'your account'}`,
       keyPhrase: `your ${provider ?? 'sign-in'} sign-in`,
       otherKeyHint: 'If you have more than one sign-in, go back and use the other one.',

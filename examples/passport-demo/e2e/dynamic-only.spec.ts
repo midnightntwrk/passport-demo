@@ -68,6 +68,7 @@ import { fileURLToPath } from 'node:url';
 import { expect, test, type Page } from '@playwright/test';
 
 import { PASSPORT_ACCOUNT_ADDRESS, RESOLVABLE_NAME, installNetworkBoundary } from './mocks.js';
+import { installVirtualAuthenticator } from './passkey.js';
 import { walkContextOptions } from './walkContext.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -76,7 +77,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const WALK = '/?dynamicwalk=1';
 
 test.describe('a Passport held by a social sign-in', () => {
-  test('offers a signed-in person the way back to a Passport, and none of their own', async ({
+  test('is offered the road a passkey takes, in the passkey road’s own words', async ({
     browser,
   }) => {
     const context = await browser.newContext(
@@ -84,34 +85,43 @@ test.describe('a Passport held by a social sign-in', () => {
     );
     const page = await context.newPage();
     await installNetworkBoundary(page);
+    /* A device that CAN make a key of its own, which is what the primary offer
+       below is conditioned on. Without one the app is right to say so — that
+       branch is the last walk in this describe. */
+    const authenticator = await installVirtualAuthenticator(context, page);
     await page.goto(WALK);
 
-    /* The sign-in is what the screen is about, and it names the PROVIDER —
-       never the vendor, whom the reader has never chosen. */
+    /* The kicker is true of the state the reader is in, and names the provider
+       they chose rather than the vendor they never did. */
     await expect(page.getByText('Signed in with Google')).toBeVisible();
 
-    /* THE DECISION OF 2026/09/21, ON THE SCREEN. Between 09/16 and 09/21 this
-       heading read "Set up your Passport" and the button below it made one: a
-       Passport whose only key was the sign-in, with nothing on any device. The
-       decision retires that shape — a sign-in is a SPARE key on a Passport a
-       device made — so what a signed-in person with no Passport is offered is
-       the way back to one they already hold, and nothing else. */
-    await expect(page.getByRole('heading', { name: /Bring your\s*Passport here/ })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Create my Passport' })).toHaveCount(0);
+    /* THE SAME HEADING, THE SAME BUTTON, AND THE SAME SENTENCE ABOUT WHO PAYS
+       as the passkey road. Between 09/16 and 09/21 this screen made a Passport
+       whose only key was the sign-in — nothing on any device — and that shape
+       is retired. For one night what replaced it offered nothing but "I already
+       have a Passport", which turned the commonest way in into a dead end. What
+       is offered now is the passkey road: the key is made here, the sign-in
+       becomes the spare. */
+    await expect(page.getByRole('heading', { name: /Set up\s*your Passport/ })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Create my Passport' })).toBeEnabled();
     await expect(
       page.getByText('Setting your Passport up is paid for on your behalf.'),
-    ).toHaveCount(0);
-
-    /* The sentence this whole path exists to delete. Until 2026/09/16 a social
-       sign-in ended here, on the welcome screen, being told to go and make a
-       passkey. */
-    await expect(page.getByText('Finish with your passkey above')).toHaveCount(0);
-
-    /* One offer, and it says where a NEW Passport is made instead. */
+    ).toBeVisible();
     await expect(
       page.getByRole('button', { name: 'I already have a Passport' }),
-    ).toBeEnabled();
-    await expect(page.getByText(/brings back a Passport you already hold/)).toBeVisible();
+    ).toBeVisible();
+
+    /* And the lede says the two things a reader would otherwise have to infer:
+       where the Passport will be held, and what the sign-in is now for. The
+       sentence it replaces — "your sign-in is all Passport needs" — was true of
+       the shape that was retired and of nothing since. */
+    await expect(page.getByText(/make a key on this device/)).toBeVisible();
+    await expect(page.getByText(/Your Google sign-in becomes your way back/)).toBeVisible();
+    await expect(page.getByText('is all Passport needs')).toHaveCount(0);
+
+    /* The sentence this whole path exists to delete. Until 2026/09/16 a social
+       sign-in ended on the welcome screen, being told to go and make a passkey. */
+    await expect(page.getByText('Finish with your passkey above')).toHaveCount(0);
 
     /* NONE OF THE WORDS A READER HAS NO USE FOR. The rule this demo keeps
        everywhere, asserted rather than trusted, because a developer-shaped
@@ -131,10 +141,49 @@ test.describe('a Passport held by a social sign-in', () => {
       'dust',
       'wallet address',
       'sdk',
+      'dynamic',
     ]) {
       expect(body, `"${forbidden}" is on screen`).not.toContain(forbidden);
     }
 
+    await authenticator.remove();
+    await context.close();
+  });
+
+  test('starts the setup itself on one press, with no second button to find', async ({
+    browser,
+  }) => {
+    /* ONE PRESS AND ONE ROAD. Making the key on this device REPLACES this
+       screen — a device key wins the identity question the moment it exists —
+       so without the press being written down first the reader would land on
+       the ordinary setup screen and be offered the same button again. What this
+       asserts is that they are not: the press carries through, and what comes
+       next is the counted setup the passkey road shows. */
+    const context = await browser.newContext(
+      walkContextOptions({ viewport: { width: 420, height: 900 } }),
+    );
+    const page = await context.newPage();
+    await installNetworkBoundary(page);
+    const authenticator = await installVirtualAuthenticator(context, page);
+    test.setTimeout(240_000);
+    await page.goto(WALK);
+
+    await page.getByRole('button', { name: 'Create my Passport' }).click();
+
+    /* The key is made on this device, and the press is remembered across the
+       screen it replaces. */
+    await expect
+      .poll(
+        () => page.evaluate(() => window.localStorage.getItem('passport-last-passkey')),
+        { timeout: 120_000 },
+      )
+      .not.toBeNull();
+    const intent = await page.evaluate(() =>
+      window.localStorage.getItem('passport-account-custody-backup-intent:v1'),
+    );
+    expect(intent, 'the press is written down before the ceremony').toContain('stagenet');
+
+    await authenticator.remove();
     await context.close();
   });
 
@@ -144,6 +193,7 @@ test.describe('a Passport held by a social sign-in', () => {
     );
     const page = await context.newPage();
     await installNetworkBoundary(page);
+    const authenticator = await installVirtualAuthenticator(context, page);
     await page.goto(WALK);
 
     await page.getByRole('button', { name: 'I already have a Passport' }).click();
@@ -160,53 +210,36 @@ test.describe('a Passport held by a social sign-in', () => {
     await expect(page.getByRole('button', { name: 'Find my Passport' })).toBeEnabled();
 
     await page.getByRole('button', { name: 'Go back' }).click();
-    await expect(page.getByRole('heading', { name: /Bring your\s*Passport here/ })).toBeVisible();
+    await expect(page.getByRole('heading', { name: /Set up\s*your Passport/ })).toBeVisible();
 
+    await authenticator.remove();
     await context.close();
   });
 
-  test('has no way at all to make a Passport of its own', async ({ browser }) => {
-    /* The retirement, asserted from both directions: the screen offers no
-       control that would create one, and the vocabulary of setting one up is
-       gone with it.
-
-       This replaces the walk that used to drive the create path here and
-       assert its one-sentence refusal. That refusal still matters and is still
-       drilled — on the arm that can create, in `passkey-custody.spec.ts` — and
-       driving it from a sign-in would now be driving a path the product does
-       not have. */
+  test('is told plainly when the browser itself cannot make a key', async ({ browser }) => {
+    /* The branch the dead end used to be shown to EVERYBODY. The only definite
+       no is a browser with no WebAuthn at all — a desktop with no built-in
+       authenticator still makes a key through a security key or the phone
+       beside it — so that is what this walk removes, and the sentence is then
+       true, which is the whole of the rule: shown where it is true and nowhere
+       else. */
     const context = await browser.newContext(
       walkContextOptions({ viewport: { width: 420, height: 900 } }),
     );
     const page = await context.newPage();
     await installNetworkBoundary(page);
+    await page.addInitScript(() => {
+      Reflect.deleteProperty(window, 'PublicKeyCredential');
+    });
     await page.goto(WALK);
 
     await expect(page.getByRole('heading', { name: /Bring your\s*Passport here/ })).toBeVisible();
-
-    const controls = await page.getByRole('button').allInnerTexts();
-    for (const label of controls) {
-      expect(label.toLowerCase()).not.toContain('create');
-      expect(label.toLowerCase()).not.toContain('set up');
-    }
-
-    const body = (await page.locator('body').innerText()).toLowerCase();
-    expect(body).not.toContain('step 1 of 3');
-    /* And still none of the words a reader has no use for, on the screen that
-       replaced the one that was audited for them. */
-    for (const forbidden of [
-      'contract',
-      'registry',
-      'indexer',
-      'resolver',
-      'sponsor',
-      'dust',
-      'wallet address',
-      'sdk',
-      'dynamic',
-    ]) {
-      expect(body, `"${forbidden}" is on screen`).not.toContain(forbidden);
-    }
+    await expect(page.getByText(/use a device that can make a key of its own/)).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Create my Passport' })).toHaveCount(0);
+    /* And the way back is still there, as the only thing on offer. */
+    await expect(
+      page.getByRole('button', { name: 'I already have a Passport' }),
+    ).toBeEnabled();
 
     await context.close();
   });

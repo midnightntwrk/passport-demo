@@ -124,6 +124,140 @@ export function saveBackupRecord(
   }
 }
 
+/* -------------------------------------------------------------------------- */
+/* A Passport started from a sign-in                                          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * `passport-account-custody-backup-intent:v1` — a Passport being made BY
+ * somebody who is already signed in with a provider, and the two things that
+ * have to happen to it without being asked for again.
+ *
+ * WHY IT EXISTS (live, 2026/09/21). Pressing "Create my Passport" while signed
+ * in has to give the passkey road and nothing else: the key is made on this
+ * device, the setup runs, the name is claimed, and the sign-in already in hand
+ * is attached as the spare — one press, and one approval for the spare at the
+ * end. But making the key REPLACES the screen that was pressed, exactly as a
+ * recovery does (`./custodyAdoption.ts`), so the intent behind the press has to
+ * outlive it or the reader lands on the ordinary setup screen and presses the
+ * same button a second time.
+ *
+ * ONE RECORD, TWO STAGES, and they are written down rather than inferred:
+ * "the setup has not been started yet" and "the setup is running or done and the
+ * spare key has not been attached yet" are different, and a flow that guessed
+ * between them would either deploy a second Passport or never attach anything.
+ */
+export const CUSTODY_BACKUP_INTENT_KEY = 'passport-account-custody-backup-intent:v1';
+
+/** How far a Passport started from a sign-in has got. */
+export type BackupIntentStage =
+  /** The key is made; the setup itself has not been started. */
+  | 'setting-up'
+  /** The setup is under way or finished; the spare key is not attached yet. */
+  | 'backing-up';
+
+export interface BackupIntent {
+  /** The network it was started on. An intent does not cross networks. */
+  readonly network: string;
+  readonly stage: BackupIntentStage;
+}
+
+/** The intent in flight, or null. */
+export function loadBackupIntent(storage: CustodyStorage): BackupIntent | null {
+  let raw: string | null = null;
+  try {
+    raw = storage.getItem(CUSTODY_BACKUP_INTENT_KEY);
+  } catch {
+    return null;
+  }
+  if (raw === null) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    const record = parsed as Record<string, unknown>;
+    const network = record.network;
+    const stage = record.stage;
+    if (typeof network !== 'string' || network.length === 0) return null;
+    if (stage !== 'setting-up' && stage !== 'backing-up') return null;
+    return { network, stage };
+  } catch {
+    return null;
+  }
+}
+
+/** Write it. Replaces whatever was there: one Passport is being made at a time. */
+export function saveBackupIntent(storage: CustodyStorage, intent: BackupIntent): void {
+  try {
+    storage.setItem(CUSTODY_BACKUP_INTENT_KEY, JSON.stringify(intent));
+  } catch (cause) {
+    console.warn('[account-custody] could not write down how this Passport was started', cause);
+  }
+}
+
+/** Forget it, once the spare key is attached or the attempt is over. */
+export function clearBackupIntent(storage: CustodyStorage): void {
+  try {
+    storage.removeItem(CUSTODY_BACKUP_INTENT_KEY);
+  } catch {
+    /* An intent that could not be cleared costs one more attempt at a step
+       that is safe to repeat. Nothing to say to anybody about it. */
+  }
+}
+
+/**
+ * Whether the setup should start on its own, without a second press.
+ *
+ * THE PRESS ALREADY HAPPENED. This is not a flow spending somebody's sponsored
+ * fees unasked: they pressed "Create my Passport", and making the key on this
+ * device is a step INSIDE that press rather than an answer to it. What this
+ * rule prevents is the opposite defect — the same button offered again, on a
+ * screen that looks like the one they thought they had left.
+ *
+ * Narrow, because a setup started by mistake is a Passport too many: the intent
+ * must be for THIS network, the Passport must be at the very beginning, and the
+ * key that would hold it must already be on this device.
+ */
+export function backupStartsSetup(input: {
+  readonly intent: BackupIntent | null;
+  readonly network: string;
+  /** The custody screen's own `create` step — nothing set up yet. */
+  readonly onCreateStep: boolean;
+  /** Whether the key that would hold it is on this device. */
+  readonly heldByDeviceKey: boolean;
+  /** Whether something is already running. */
+  readonly busy: boolean;
+}): boolean {
+  if (input.intent === null || input.intent.stage !== 'setting-up') return false;
+  if (input.intent.network !== input.network) return false;
+  return input.onCreateStep && input.heldByDeviceKey && !input.busy;
+}
+
+/**
+ * Whether the spare key should be attached on its own, without being offered.
+ *
+ * The end of the same press. A Passport made by somebody who was already signed
+ * in gets the sign-in attached the moment there is something to attach it to —
+ * which is when the name has been claimed, for the reason
+ * {@link BackupOfferInput.hasName} gives — and the reader is asked for the one
+ * approval that costs, rather than for a decision they already made.
+ */
+export function backupAutomatically(input: {
+  readonly intent: BackupIntent | null;
+  readonly network: string;
+  readonly onHome: boolean;
+  readonly hasName: boolean;
+  /** Whether the sign-in is there, with a key behind it. */
+  readonly socialReady: boolean;
+  /** What this browser has recorded. */
+  readonly record: BackupRecord | null;
+  readonly busy: boolean;
+}): boolean {
+  if (input.intent === null || input.intent.stage !== 'backing-up') return false;
+  if (input.intent.network !== input.network) return false;
+  if (input.record?.doneAt !== undefined) return false;
+  return input.onHome && input.hasName && input.socialReady && !input.busy;
+}
+
 /** What the custody screen does about the spare key on this visit. */
 export type BackupOffer =
   /** Say nothing. Not ready, not applicable, or asked recently enough. */
@@ -159,6 +293,14 @@ export interface BackupOfferInput {
   readonly heldBySocial: boolean;
   /** What this browser recorded. See {@link loadBackupRecord}. */
   readonly record: BackupRecord | null;
+  /**
+   * Whether a spare key is being attached on its own right now.
+   *
+   * A Passport started from a sign-in gets one without being asked, so offering
+   * it would be offering something already under way — and a reader who
+   * dismissed that card would be dismissing a thing that then happened anyway.
+   */
+  readonly autoPending: boolean;
   readonly now: number;
 }
 
@@ -174,6 +316,7 @@ export interface BackupOfferInput {
 export function backupOffer(input: BackupOfferInput): BackupOffer {
   if (input.record?.doneAt !== undefined) return 'done';
   if (!input.socialAvailable || input.heldBySocial) return 'hidden';
+  if (input.autoPending) return 'hidden';
   if (!input.onHome || !input.hasName) return 'hidden';
   const dismissed = input.record?.dismissedAt;
   if (dismissed === undefined) return 'offer';

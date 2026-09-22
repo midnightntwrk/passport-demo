@@ -18,6 +18,7 @@ import {
   clearAdoption,
   loadAdoption,
   saveAdoption,
+  socialStart,
   type AdoptionHandoff,
   type AdoptionStageInput,
 } from './custodyAdoption.js';
@@ -164,6 +165,25 @@ describe('the hand-off', () => {
 /* The words                                                                  */
 /* -------------------------------------------------------------------------- */
 
+describe('what a signed-in person with no Passport is offered', () => {
+  it('is the road a passkey takes, on a device that can make a key', () => {
+    /* The dead end of 2026/09/21, in one assertion: signed in on a clean phone
+       and told to go and find a device that can make a key, on the device that
+       could. */
+    expect(socialStart({ canMakeDeviceKey: true })).toBe('create');
+  });
+
+  it('is the same road while the question has not been answered yet', () => {
+    /* `null` is not `false`. A probe in flight must not read as a refusal, or
+       the commonest device in the world reads one for the length of a promise. */
+    expect(socialStart({ canMakeDeviceKey: null })).toBe('create');
+  });
+
+  it('is only the way back, on a device that genuinely cannot make one', () => {
+    expect(socialStart({ canMakeDeviceKey: false })).toBe('recover-only');
+  });
+});
+
 describe('the copy', () => {
   const everything = [
     ADOPT_COPY.title,
@@ -172,6 +192,11 @@ describe('the copy', () => {
     ADOPT_COPY.busy,
     ADOPT_COPY.blocked,
     ADOPT_COPY.limit,
+    ADOPT_COPY.socialCanCreate('Google'),
+    ADOPT_COPY.socialCanCreate(null),
+    ADOPT_COPY.socialCreateAction,
+    ADOPT_COPY.socialCreateHint,
+    ADOPT_COPY.socialRecoverAction,
     ADOPT_COPY.socialCannotCreate,
   ].join(' \n ');
 
@@ -201,8 +226,25 @@ describe('the copy', () => {
     expect(ADOPT_COPY.found('alice')).toContain('alice.night');
   });
 
-  it('refuses to offer a new Passport to a sign-in, and says where to make one', () => {
-    /* The retirement of the Dynamic-only Passport, in one sentence. */
+  it('refuses to offer a new Passport only where a device cannot make a key', () => {
+    /* Still the right sentence, and now shown only where it is true. */
     expect(ADOPT_COPY.socialCannotCreate).toMatch(/brings back a Passport you already hold/);
+  });
+
+  it('says where the Passport will be held, and what the sign-in is for', () => {
+    /* The two things a reader would otherwise have to infer, and the retirement
+       of "your sign-in is all Passport needs" — which was true of the shape
+       2026/09/21 replaced and of nothing since. */
+    expect(ADOPT_COPY.socialCanCreate('Google')).toMatch(/key on this device/);
+    expect(ADOPT_COPY.socialCanCreate('Google')).toMatch(/Your Google sign-in/);
+    expect(ADOPT_COPY.socialCanCreate(null)).toMatch(/The account you signed in with/);
+    expect(ADOPT_COPY.socialCanCreate('  ')).toBe(ADOPT_COPY.socialCanCreate(null));
+  });
+
+  it('uses the passkey road’s own words for the press and for who pays', () => {
+    /* Same screens, same wording: the two arms must not name one action two
+       ways, or the road stops looking like one road. */
+    expect(ADOPT_COPY.socialCreateAction).toBe('Create my Passport');
+    expect(ADOPT_COPY.socialCreateHint).toBe('Setting your Passport up is paid for on your behalf.');
   });
 });

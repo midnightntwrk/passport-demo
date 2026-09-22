@@ -6215,6 +6215,27 @@ export default function PassportDemo() {
   /** The network every custody decision on this render is about. */
   const custodyNetwork = localWalletNetworkId ?? configuredWalletNetwork ?? selectedNetwork;
 
+  /**
+   * Whether this device can make a key of its own.
+   *
+   * ASKED THE NARROW WAY, AND DELIBERATELY. The obvious probe —
+   * `isUserVerifyingPlatformAuthenticatorAvailable` — answers a different
+   * question: whether the device has a PLATFORM authenticator of its own. A
+   * desktop with none still makes a perfectly good Passport key through a
+   * security key or the phone-beside-it flow, which is exactly the route the
+   * Windows follow-up of 2026/09/16 was left on. Reading that probe as "this
+   * device cannot" would put the dead end this screen exists to remove back in
+   * front of every such machine.
+   *
+   * So the only definite no is a browser with no WebAuthn at all. Everything
+   * else is offered the key, and a ceremony that then fails has its own panels
+   * to say why — which is where a real failure belongs, rather than in a
+   * refusal issued before anybody has tried.
+   */
+  const canMakeDeviceKey =
+    typeof (globalThis as { PublicKeyCredential?: unknown }).PublicKeyCredential !==
+      'undefined' && typeof globalThis.navigator?.credentials?.create === 'function';
+
   const custodySocial = useMemo(
     () =>
       dynamicSession.status === 'disabled'
@@ -9874,6 +9895,7 @@ export default function PassportDemo() {
               clearAdoption(window.localStorage);
               setAdoption(null);
             }}
+            canMakeDeviceKey={canMakeDeviceKey}
           />
         </Suspense>
       ) : showOnboarding ? (
