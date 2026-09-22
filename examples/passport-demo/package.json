@@ -20,7 +20,7 @@
   },
   "//test:e2e:live": [
     "THE LIVE WALK POINTS AT STAGING BY DEFAULT (2026/09/15). It used to run",
-    "against https://midnightpassport.com \u2014 the spec's own LIVE_URL default \u2014",
+    "against https://midnightpassport.com — the spec's own LIVE_URL default —",
     "which put the one command anybody types to check a build on the link",
     "stakeholders hold, and left a real account contract and a claimed .night",
     "name on it each time. The delivery rule is that a build is walked on",
@@ -49,6 +49,7 @@
     "@midnightntwrk/ledger-v9": "1.0.0-rc.3",
     "@noble/curves": "2.4.0",
     "bip39": "^3.1.0",
+    "bot-avatars": "0.1.1",
     "buffer": "^6.0.3",
     "jsqr": "^1.4.0",
     "lucide-react": "^0.468.0",

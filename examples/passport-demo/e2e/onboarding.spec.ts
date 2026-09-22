@@ -99,7 +99,7 @@ test('the landing screen offers Log in and Sign up, and says what network this i
   await expect(page.getByRole('heading', { name: /Midnight\s*Passport/ })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Sign up', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Log in', exact: true })).toBeEnabled();
-  await expect(page.getByText(/Test network demo — not production/)).toBeVisible();
+  await expect(page.getByText(/Test network demo — not production/)).toHaveCount(0);
 
   /* TWO DOORS, AND NOTHING ELSE THAT STARTS ANYTHING (2026/09/22). The one
      "Continue with Passkey" is gone, and so is its quiet "Use a different

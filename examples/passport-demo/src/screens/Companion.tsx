@@ -1,10 +1,36 @@
 import { MessageCircle } from 'lucide-react'
 
-import { useState } from 'react'
+import { lazy, Suspense, useState } from 'react'
 import { createPortal } from 'react-dom'
 
 import { COMPANION_LABEL, companionEnabled, companionUrl } from '../lib/companionLink.js'
 import './companion.css'
+
+/* THE COMPANION HAS A FACE (2026/09/22): an animated bot from `bot-avatars`
+   (MIT, pinned at 0.1.1, no runtime dependencies, 2D canvas). Loaded lazily so
+   the entry chunk does not grow; until it arrives the old chat bubble stands
+   in. It looks around when idle, switches to its "working" animation while
+   the pointer or focus is on the control, and hops when pressed. The library
+   honours prefers-reduced-motion by holding a still pose. The avatar is
+   decoration: the control's own label says what it does, so it is hidden from
+   assistive technology. */
+const BotAvatar = lazy(() => import('bot-avatars').then((m) => ({ default: m.BotAvatar })))
+
+function CompanionFace(props: { size: number; active: boolean; fallbackSize: number }) {
+  return (
+    <span className="mncompanion-face" aria-hidden="true">
+      <Suspense fallback={<MessageCircle size={props.fallbackSize} aria-hidden="true" />}>
+        <BotAvatar
+          type="clover"
+          face="mouth"
+          size={props.size}
+          state={props.active ? 'working' : 'default'}
+          seed={0.37}
+        />
+      </Suspense>
+    </span>
+  )
+}
 
 /**
  * "Chat with your Midnight Companion" — a link out to a Telegram chat, and
@@ -38,6 +64,13 @@ export default function CompanionLink({ variant = 'row' }: CompanionLinkProps) {
   const enabled = companionEnabled(configured)
   const href = companionUrl(configured)
   const [open, setOpen] = useState(false)
+  const [active, setActive] = useState(false)
+  const hoverProps = {
+    onMouseEnter: () => setActive(true),
+    onMouseLeave: () => setActive(false),
+    onFocus: () => setActive(true),
+    onBlur: () => setActive(false),
+  }
 
   /* Until the Companions team has an address, the button stays exactly where
      it is and looks exactly as it will, and a press says "coming soon" rather
@@ -55,6 +88,9 @@ export default function CompanionLink({ variant = 'row' }: CompanionLinkProps) {
             aria-label="Midnight Companion"
             onMouseDown={(event) => event.stopPropagation()}
           >
+            <div className="mncompanion-modal-face">
+              <CompanionFace size={72} active fallbackSize={28} />
+            </div>
             <p className="mnid-kicker">Coming soon</p>
             <h2 className="mnid-modal-title">Your Midnight Companion is on its way</h2>
             <p className="mnid-lede">
@@ -81,8 +117,9 @@ export default function CompanionLink({ variant = 'row' }: CompanionLinkProps) {
           aria-label={COMPANION_LABEL}
           title={COMPANION_LABEL}
           onClick={() => setOpen(true)}
+          {...hoverProps}
         >
-          <MessageCircle size={15} aria-hidden="true" />
+          <CompanionFace size={26} active={active} fallbackSize={15} />
         </button>
         {modal}
       </>
@@ -94,8 +131,9 @@ export default function CompanionLink({ variant = 'row' }: CompanionLinkProps) {
         rel="noreferrer noopener"
         aria-label={COMPANION_LABEL}
         title={COMPANION_LABEL}
+        {...hoverProps}
       >
-        <MessageCircle size={15} aria-hidden="true" />
+        <CompanionFace size={26} active={active} fallbackSize={15} />
       </a>
     )
   }
@@ -103,7 +141,7 @@ export default function CompanionLink({ variant = 'row' }: CompanionLinkProps) {
   const inner = (
     <>
       <span className="mncompanion-mark" aria-hidden="true">
-        <MessageCircle size={16} strokeWidth={2} />
+        <CompanionFace size={34} active={active} fallbackSize={16} />
       </span>
       <span className="mncompanion-copy">
         <span className="mncompanion-label">{COMPANION_LABEL}</span>
@@ -114,13 +152,13 @@ export default function CompanionLink({ variant = 'row' }: CompanionLinkProps) {
 
   return soon ? (
     <>
-      <button type="button" className="mncompanion-row" onClick={() => setOpen(true)}>
+      <button type="button" className="mncompanion-row" onClick={() => setOpen(true)} {...hoverProps}>
         {inner}
       </button>
       {modal}
     </>
   ) : (
-    <a className="mncompanion-row" href={href} target="_blank" rel="noreferrer noopener">
+    <a className="mncompanion-row" href={href} target="_blank" rel="noreferrer noopener" {...hoverProps}>
       {inner}
     </a>
   )

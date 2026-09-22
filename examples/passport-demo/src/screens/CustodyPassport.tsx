@@ -2415,9 +2415,6 @@ function Shell(props: { label: string; children: React.ReactNode }) {
         <ThemeToggle size="sm" className="mnob-theme" />
       </header>
       <div className="mnob-body">{props.children}</div>
-      <footer className="mnob-foot">
-        <span>Test network demo — not production</span>
-      </footer>
     </section>
   )
 }

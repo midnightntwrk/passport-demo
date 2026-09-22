@@ -158,9 +158,6 @@ export default function RecoverByNameScreen(props: RecoverByNameProps) {
         </form>
       </div>
 
-      <footer className="mnob-foot">
-        <span>Test network demo — not production</span>
-      </footer>
     </section>
   )
 }

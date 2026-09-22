@@ -10084,9 +10084,6 @@ export default function PassportDemo() {
               account you just signed in with.
             </p>
           </div>
-          <footer className="mnob-foot">
-            <span>Test network demo — not production</span>
-          </footer>
         </section>
       ) : recoverWithProvider && custodyArm === null ? (
         /* THE WAY BACK, BEFORE THERE IS ANYTHING TO HOLD A SCREEN UP. Pressed
