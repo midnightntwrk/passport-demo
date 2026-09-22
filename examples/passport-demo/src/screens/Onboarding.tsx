@@ -267,7 +267,7 @@ export default function OnboardingScreen(props: OnboardingProps) {
         : 'Uses a passkey on this device — sign in, or create your Passport the first time.'
 
   return (
-    <section className="mnob-screen" aria-busy={stage === 'working'}>
+    <section className="mnob-screen mnob-landing" aria-busy={stage === 'working'}>
       <header className="mnob-bar">
         <img
           className="mnob-wordmark"

@@ -2,7 +2,7 @@
 
 /* Atmosphere belongs only to the approved sign-in experience. Product screens
    deliberately keep their plain surfaces, solid actions, and shared tokens. */
-.mnob-screen {
+.mnob-screen.mnob-landing {
   --mn-font-display: Outfit, ui-sans-serif, system-ui, sans-serif;
   --mn-font-body: Outfit, ui-sans-serif, system-ui, sans-serif;
   --mn-radius-sm: 10px;
@@ -14,26 +14,26 @@
     radial-gradient(circle at 76% 3%, rgba(0, 0, 254, .12), transparent 28%),
     radial-gradient(circle at 12% 76%, rgba(121, 104, 255, .05), transparent 30%);
 }
-.mnob-bar { border-bottom-color: var(--mn-border-hairline); }
-.mnob-wordmark { width: 112px; }
+.mnob-landing .mnob-bar { border-bottom-color: var(--mn-border-hairline); }
+.mnob-landing .mnob-wordmark { width: 112px; }
 
 /* Authentication -------------------------------------------------------- */
 
-.mnob-body {
+.mnob-landing .mnob-body {
   width: min(100% - 40px, 580px);
   align-items: center;
   padding-top: clamp(14px, 3svh, 28px);
   text-align: center;
 }
-.mnob-intro {
+.mnob-landing .mnob-intro {
   width: 100%;
   display: flex;
   flex-direction: column;
   align-items: center;
 }
-.mnob-signin { width: 100%; max-width: 520px; text-align: left; }
-.mnob-signin-heading { display: none; }
-.mnob-title {
+.mnob-landing .mnob-signin { width: 100%; max-width: 520px; text-align: left; }
+
+.mnob-landing .mnob-title {
   display: block;
   max-width: 570px;
   font-size: clamp(36px, 9.7vw, 58px);
@@ -42,24 +42,23 @@
   line-height: 1.06;
   text-wrap: balance;
 }
-.mnob-title span { display: inline; }
-.mnob-title span + span::before { content: ' '; }
-.mnob-lede {
+.mnob-landing .mnob-title span { display: inline; }
+.mnob-landing .mnob-title span + span::before { content: ' '; }
+.mnob-landing .mnob-lede {
   max-width: 430px;
   margin-top: 18px;
   font-size: 15px;
   line-height: 1.55;
   text-wrap: balance;
 }
-.mnob-stage {
+.mnob-landing .mnob-stage {
   width: 100%;
   max-width: 520px;
   margin-top: clamp(28px, 5svh, 46px);
   padding-top: 0;
   text-align: left;
 }
-.mnob-primary,
-.mnob-social {
+.mnob-landing .mnob-primary {
   width: 100%;
   min-height: 72px;
   padding: 14px 16px;
@@ -71,16 +70,16 @@
   text-align: left;
   transition: background .18s ease, border-color .18s ease, box-shadow .18s ease, transform .18s ease;
 }
-.mnob-primary {
+.mnob-landing .mnob-primary {
   background: var(--mn-accent);
   box-shadow: 0 4px 14px rgba(0, 0, 254, .18), inset 0 1px 0 rgba(255, 255, 255, .12);
 }
-.mnob-primary:hover:not(:disabled) {
+.mnob-landing .mnob-primary:hover:not(:disabled) {
   background: #1515dc;
   box-shadow: 0 6px 20px rgba(0, 0, 254, .24);
 }
-.mnob-primary-copy { gap: 13px; }
-.mnob-method-icon {
+.mnob-landing .mnob-primary-copy { gap: 13px; }
+.mnob-landing .mnob-method-icon {
   width: 38px;
   height: 38px;
   display: grid;
@@ -90,100 +89,45 @@
   border-radius: 11px;
   background: color-mix(in srgb, currentColor 7%, transparent);
 }
-.mnob-primary-copy .mnob-method-icon svg { filter: none; }
-.mnob-method-copy { display: grid; gap: 4px; min-width: 0; }
-.mnob-method-copy small {
+.mnob-landing .mnob-primary-copy .mnob-method-icon svg { filter: none; }
+.mnob-landing .mnob-method-copy { display: grid; gap: 4px; min-width: 0; }
+.mnob-landing .mnob-method-copy small {
   font-size: 12px;
   font-weight: 400;
   line-height: 1.35;
   color: var(--mn-text-secondary);
 }
-.mnob-primary .mnob-method-copy small { color: rgba(255, 255, 255, .82); }
-.mnob-primary > svg, .mnob-social > svg { flex: 0 0 auto; }
-.mnob-social {
-  margin-top: 0;
-  border-color: var(--mn-border-medium);
-  background: var(--mn-surface-raised);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .03);
-}
-.mnob-social:hover:not(:disabled) {
-  border-color: var(--mn-accent-ink);
-  color: var(--mn-text-primary);
-  background: color-mix(in srgb, var(--mn-accent-soft) 64%, var(--mn-surface-raised));
-}
-.mnob-social .mnob-method-icon { color: var(--mn-accent-ink); }
-.mnob-social:disabled {
-  opacity: 1;
-  color: var(--mn-text-secondary);
-  border-color: var(--mn-border-medium);
-  background: var(--mn-surface-card);
-  transform: none;
-}
-.mnob-social:disabled > svg { opacity: .4; }
-.mnob-social-note {
-  margin-top: 8px;
-  padding-inline: 4px;
-  font-size: 12px;
-  line-height: 1.45;
-}
+.mnob-landing .mnob-primary .mnob-method-copy small { color: rgba(255, 255, 255, .82); }
+.mnob-landing .mnob-primary > svg { flex: 0 0 auto; }
 
-.mnob-alt { min-height: 44px; }
-.mnob-auth-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-.mnob-auth-button {
-  min-width: 0;
-  min-height: 58px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  padding: 14px;
-  border: 1px solid var(--mn-border-medium);
-  border-radius: 16px;
-  font-family: inherit;
-  font-size: 16px;
-  font-weight: 500;
-  letter-spacing: -.015em;
-  line-height: 1.2;
-  cursor: pointer;
-  transition: background .18s ease, border-color .18s ease, box-shadow .18s ease;
-}
-.mnob-auth-button svg { flex-shrink: 0; }
-.mnob-auth-login { background: var(--mn-accent); border-color: var(--mn-accent); color: #fff; box-shadow: 0 4px 12px rgb(0 0 254 / 16%); }
-.mnob-auth-login:hover:not(:disabled) { background: var(--mn-accent-hover); }
-.mnob-auth-signup { background: var(--mn-surface-raised); color: var(--mn-text-primary); }
-.mnob-auth-signup:hover { background: var(--mn-accent-soft); border-color: var(--mn-accent-ink); }
-.mnob-auth-button:focus-visible { outline: 2px solid var(--mn-accent-ink); outline-offset: 4px; }
-.mnob-auth-button:disabled { opacity: .5; cursor: default; }
-@media (prefers-reduced-motion: reduce) { .mnob-auth-button { transition: none; } }
-.mnob-route-hint { font-size: 12px; }
-.mnob-privacy-note small { font-size: 12px; }
+.mnob-landing .mnob-alt { min-height: 44px; }
 
-/* The action group should stay within reach on a phone with both methods.
+.mnob-landing .mnob-route-hint { font-size: 12px; }
+
+/* The action group should stay within reach on a phone.
    These rules live after the final visual layer, so short-screen sizing wins. */
 @media (max-width: 600px) and (max-height: 900px) {
-  .mnob-body { padding-top: 12px; padding-bottom: 16px; }
-  .mnob-title { font-size: clamp(30px, 8.7vw, 40px); }
-  .mnob-lede { margin-top: 14px; }
-  .mnob-stage { margin-top: 26px; }
-  .mnob-primary, .mnob-social { min-height: 70px; padding: 12px 14px; }
-  .mnob-or { margin-block: 10px; }
-  .mnob-privacy-note { margin-top: 16px; }
+  .mnob-landing .mnob-body { padding-top: 12px; padding-bottom: 16px; }
+  .mnob-landing .mnob-title { font-size: clamp(30px, 8.7vw, 40px); }
+  .mnob-landing .mnob-lede { margin-top: 14px; }
+  .mnob-landing .mnob-stage { margin-top: 26px; }
+  .mnob-landing .mnob-primary { min-height: 70px; padding: 12px 14px; }
 }
 
 @media (max-width: 360px) {
-  .mnob-bar-label { display: none; }
-  .mnob-theme { margin-left: auto; }
-  .mnob-primary, .mnob-social { gap: 10px; font-size: 14px; padding-inline: 12px; }
-  .mnob-primary-copy { gap: 10px; }
-  .mnob-method-icon { width: 32px; height: 36px; }
+  .mnob-landing .mnob-bar-label { display: none; }
+  .mnob-landing .mnob-theme { margin-left: auto; }
+  .mnob-landing .mnob-primary { gap: 10px; font-size: 14px; padding-inline: 12px; }
+  .mnob-landing .mnob-primary-copy { gap: 10px; }
+  .mnob-landing .mnob-method-icon { width: 32px; height: 36px; }
 }
 
 /* Desktop gets a composed introduction beside a dedicated sign-in panel. */
 @media (min-width: 960px) {
-  .mnob-bar, .mnob-foot { width: min(100% - 96px, 1120px); }
-  .mnob-bar { min-height: 88px; }
-  .mnob-wordmark { width: 132px; }
-  .mnob-body {
+  .mnob-landing .mnob-bar, .mnob-landing .mnob-foot { width: min(100% - 96px, 1120px); }
+  .mnob-landing .mnob-bar { min-height: 88px; }
+  .mnob-landing .mnob-wordmark { width: 132px; }
+  .mnob-landing .mnob-body {
     width: min(100% - 96px, 1120px);
     display: grid;
     grid-template-columns: minmax(0, 1.15fr) minmax(360px, 1fr);
@@ -193,54 +137,46 @@
     padding-block: 48px;
     text-align: left;
   }
-  .mnob-intro { align-items: flex-start; }
-  .mnob-intro .mn-passport-art { width: 360px; max-width: 100%; margin: 0 0 24px -44px; }
-  .mnob-title { font-size: clamp(44px, 4.5vw, 58px); line-height: 1.06; }
-  .mnob-lede { max-width: 380px; font-size: 16px; text-wrap: pretty; }
-  .mnob-signin {
+  .mnob-landing .mnob-intro { align-items: flex-start; }
+  .mnob-landing .mnob-intro .mn-passport-art { width: 360px; max-width: 100%; margin: 0 0 24px -44px; }
+  .mnob-landing .mnob-title { font-size: clamp(44px, 4.5vw, 58px); line-height: 1.06; }
+  .mnob-landing .mnob-lede { max-width: 380px; font-size: 16px; text-wrap: pretty; }
+  .mnob-landing .mnob-signin {
     padding: clamp(24px, 3vw, 36px);
     border: 1px solid var(--mn-border-hairline);
     border-radius: 26px;
     background: color-mix(in srgb, var(--mn-surface-page) 88%, var(--mn-surface-raised));
     box-shadow: 0 16px 48px rgba(0, 0, 0, .06);
   }
-  .mnob-signin-heading { display: block; }
-  .mnob-signin-heading h2 {
-    margin: 0;
-    color: var(--mn-text-primary);
-    font-size: 26px;
-    font-weight: 500;
-    letter-spacing: -.025em;
-    line-height: 1.2;
-  }
-  .mnob-signin-heading p { margin: 10px 0 0; color: var(--mn-text-secondary); font-size: 14px; }
-  .mnob-stage { margin-top: 28px; padding: 0; }
-  .mnob-privacy-note { padding-top: 20px; margin-top: 24px; border-top: 1px solid var(--mn-border-hairline); }
-  .mnob-route-hint { padding-left: 0; margin-top: 18px; line-height: 1.55; }
-  .mnob-alt { padding-left: 0; }
-  .mnob-foot { justify-content: flex-start; min-height: 62px; }
+
+  .mnob-landing .mnob-stage { margin-top: 28px; padding: 0; }
+  .mnob-landing .mnob-signin > :first-child { margin-top: 0; }
+
+  .mnob-landing .mnob-route-hint { padding-left: 0; margin-top: 18px; line-height: 1.55; }
+  .mnob-landing .mnob-alt { padding-left: 0; }
+  .mnob-landing .mnob-foot { justify-content: flex-start; min-height: 62px; }
 }
 @media (min-width: 960px) and (max-height: 800px) {
-  .mnob-body { padding-block: 24px; }
+  .mnob-landing .mnob-body { padding-block: 24px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .mnob-primary, .mnob-social { transition: none; }
-  .mnob-primary:hover:not(:disabled), .mnob-social:hover:not(:disabled) { transform: none; }
+  .mnob-landing .mnob-primary { transition: none; }
+  .mnob-landing .mnob-primary:hover:not(:disabled) { transform: none; }
 }
 
 /* One short entrance, starting as the existing splash clears. The steady
    credential animation runs inside this wrapper and has its own timing. */
 @media (prefers-reduced-motion: no-preference) {
-  .mnob-screen, .mnob-stage { animation: none; }
-  .mnob-bar { animation: mnob-arrive .4s cubic-bezier(.22, 1, .36, 1) both; }
-  .mnob-intro .mn-passport-art { animation: mnob-arrive .6s .04s cubic-bezier(.22, 1, .36, 1) both; }
-  .mnob-title { animation: mnob-arrive .5s .10s cubic-bezier(.22, 1, .36, 1) both; }
-  .mnob-lede { animation: mnob-arrive .5s .16s cubic-bezier(.22, 1, .36, 1) both; }
-  .mnob-signin { animation: mnob-arrive .55s .22s cubic-bezier(.22, 1, .36, 1) both; }
+  .mnob-screen.mnob-landing, .mnob-landing .mnob-stage { animation: none; }
+  .mnob-landing .mnob-bar { animation: mnob-arrive .4s cubic-bezier(.22, 1, .36, 1) both; }
+  .mnob-landing .mnob-intro .mn-passport-art { animation: mnob-arrive .6s .04s cubic-bezier(.22, 1, .36, 1) both; }
+  .mnob-landing .mnob-title { animation: mnob-arrive .5s .10s cubic-bezier(.22, 1, .36, 1) both; }
+  .mnob-landing .mnob-lede { animation: mnob-arrive .5s .16s cubic-bezier(.22, 1, .36, 1) both; }
+  .mnob-landing .mnob-signin { animation: mnob-arrive .55s .22s cubic-bezier(.22, 1, .36, 1) both; }
 
-  body:has(#mn-splash:not(.mn-splash-done)) :is(.mnob-bar, .mnob-title, .mnob-lede, .mnob-signin),
-  body:has(#mn-splash:not(.mn-splash-done)) .mnob-intro .mn-passport-art {
+  body:has(#mn-splash:not(.mn-splash-done)) .mnob-landing :is(.mnob-bar, .mnob-title, .mnob-lede, .mnob-signin),
+  body:has(#mn-splash:not(.mn-splash-done)) .mnob-landing .mnob-intro .mn-passport-art {
     animation-play-state: paused;
   }
 }
