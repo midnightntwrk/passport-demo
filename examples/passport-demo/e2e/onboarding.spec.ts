@@ -522,7 +522,7 @@ test('a claim that failed keeps the name, and the reload lands on Home with a re
 
   // Home, not the naming screen — the name step is resolved, it just is not
   // on chain.
-  await expect(page.getByRole('heading', { name: new RegExp(NAME, 'i') })).toBeVisible({
+  await expect(page.locator('.mnid-alias').filter({ hasText: new RegExp(NAME, 'i') }).first()).toBeVisible({
     timeout: 60_000,
   });
   await expect(page.getByText(/Choose your .night name/i)).toHaveCount(0);
@@ -1696,7 +1696,7 @@ test('a claim whose passkey will not answer offers a retry, a way out, and a way
        its owner picked, offered for another attempt. Before that record
        existed this landed on an empty naming screen, which was the same
        Passport but could not be told apart from a new one. */
-    await expect(stalled.getByRole('heading', { name: new RegExp(claimName, 'i') })).toBeVisible({
+    await expect(stalled.locator('.mnid-alias').filter({ hasText: new RegExp(claimName, 'i') }).first()).toBeVisible({
       timeout: 180_000,
     });
     await expect(stalled.getByRole('heading', { name: /Welcome to Passport/i })).toHaveCount(0);

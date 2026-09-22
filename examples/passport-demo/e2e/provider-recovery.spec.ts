@@ -109,7 +109,9 @@ const WALK_SIGNED_OUT = '/?dynamicwalk=out';
  * the first line rather than on a figure that happens to render either way.
  */
 function greeting(page: Page) {
-  return page.getByRole('heading', { name: /^Good (morning|afternoon|evening), walker$/ });
+  /* Since the Home polish (2026/09/22) the greeting is the time of day alone;
+     the name lives once, in the identity card. */
+  return page.getByRole('heading', { name: /^Good (morning|afternoon|evening)\.$/ });
 }
 
 /** One asset row of the balance strip, by its ticker. */
