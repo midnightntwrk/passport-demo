@@ -3,6 +3,7 @@ import {
   ArrowRight,
   BadgeCheck,
   Fingerprint,
+  Gamepad2,
   Loader2,
   Search,
   ShieldCheck,
@@ -49,9 +50,7 @@ import {
   type CustodyAccountRecord,
 } from '../identity/custodyContractPlan.js'
 import {
-  dynamicSetupCopy,
   dynamicSetupInterrupted,
-  dynamicSetupPhase,
   forgetCustodyChosenName,
   k1PrivateStateId,
   custodyRecoveryOutcome,
@@ -111,6 +110,17 @@ import {
   custodyUnplacedDeliveries,
   runCustodyWork,
 } from '../lib/custodyScreenRules.js'
+import {
+  custodySetupHint,
+  custodySetupPhase,
+  custodySetupSteps,
+  custodySetupSubStages,
+  type CustodySetupSignal,
+} from '../lib/custodySetupProgress.js'
+import { LONG_WAIT_NOTE } from '../lib/claimSteps.js'
+import { OFFER_AFTER_MS } from '../lib/waitingGame.js'
+import ProgressTimeline, { useTimelineClock, type TimelineRow } from './ProgressTimeline.js'
+import WaitingGame from './WaitingGame.js'
 import {
   CUSTODY_NAME_CHECKING_SENTENCE,
   CUSTODY_NAME_UNREACHABLE_SENTENCE,
@@ -249,6 +259,19 @@ const PHASE_LABELS: Record<CustodyPhase['step'], string> = {
   sign: 'Waiting for your approval',
   submit: 'Sending',
   confirm: 'Confirming',
+}
+
+/**
+ * Which of the custody road's reported steps moves the timeline on.
+ *
+ * Three of the seven, and the other four are deliberately absent — see the
+ * note at the one call site. `../lib/custodySetupProgress.ts` turns these into
+ * the row and the state a reader is shown.
+ */
+const SETUP_SIGNAL_OF_STEP: Partial<Record<CustodyPhase['step'], CustodySetupSignal>> = {
+  deploy: 'deploy',
+  waves: 'waves',
+  activate: 'activate',
 }
 
 export interface CustodyPassportProps {
@@ -404,6 +427,21 @@ export default function CustodyPassport({
   const [view, setView] = useState<DynamicPassportView | null>(null)
   const [screen, setScreen] = useState<Screen | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
+  /**
+   * THE LAST THING THE SETUP SAID, and the reason the timeline can be trusted.
+   *
+   * The counted hint used to be read off the stored record, which is re-read
+   * when a press FINISHES — so somebody watched "step 1 of 3" while the chain
+   * showed all three landed (2026/09/22). What is live is what this press
+   * reports, so this is what it reports; the record is still the answer after a
+   * reload, and `../lib/custodySetupProgress.ts` is where the two are weighed.
+   */
+  const [setupSignal, setSetupSignal] = useState<CustodySetupSignal | null>(null)
+  /* The name THIS press is claiming, so the timeline can name it from the
+     first frame. The stored one is only readable after a refresh, and a row
+     that said "your name" for three minutes and then swapped in the real one
+     would move under a reader who is already watching it. */
+  const [setupName, setSetupName] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [balance, setBalance] = useState<bigint | null>(null)
   const [balanceFailed, setBalanceFailed] = useState(false)
@@ -751,6 +789,9 @@ export default function CustodyPassport({
          off the store is the busy state the buttons read. */
       const { failure } = await runCustodyWork(inFlight, work, after)
       setBusy(null)
+      /* The timeline goes with the busy line: a panel left standing over a
+         press that is over would be counting seconds nobody is waiting. */
+      setSetupSignal(null)
       if (failure === null) return
       console.warn('[account-custody] that step did not finish', failure)
       if (failure instanceof Error && failure.message === CUSTODY_SETUP_INTERRUPTED) {
@@ -871,6 +912,7 @@ export default function CustodyPassport({
          in this version. Coming back to the Passport does not need it. */
       const { custodyWalletSeed } = await import('../identity/custodyContractClient.js')
       const ownerKey = await deriveMidnamesOwnerKey(custodyWalletSeed(deps, owner))
+      setSetupSignal('register')
       try {
         const claimed = await sponsorAliasRegistrationAcross(FUNDER_URLS, {
           alias,
@@ -890,6 +932,10 @@ export default function CustodyPassport({
         }
         throw cause
       }
+      /* REGISTERED IS NOT YET CONFIRMED. What is shown from here on is read
+         back rather than assumed, so the last state of the long row is the
+         read and not a flourish over one that already happened. */
+      setSetupSignal('confirm')
       saveCustodyName(window.localStorage, owner, network, alias)
       forgetCustodyChosenName(window.localStorage, owner, network)
       setTaken(null)
@@ -914,11 +960,24 @@ export default function CustodyPassport({
    */
   const createPassport = useCallback(
     (alias: string) => {
-      /* The BUTTON says what is happening; the line under it says how far along
-         that is. Putting the counted sentence on both would be the same words
-         twice, which reads as a stutter rather than as progress. */
+      setSetupName(alias)
+      /* The BUTTON names the row that is running; the line under it counts the
+         three. Putting the same sentence on both would be the same words twice,
+         which reads as a stutter rather than as progress. */
       void run(PHASE_LABELS.deploy, async () => {
+        /* The ceremony is the first thing the press costs, and it is the
+           reader's own step — so the timeline names it before anything is
+           asked of them rather than after they have answered. */
+        setSetupSignal('identity')
         const settled = await ensureIdentity()
+        /* THE CEREMONY IS OVER THE MOMENT IT ANSWERS, and the timeline says so
+           here rather than waiting for the custody road's first report. That
+           report comes after the compiled module, the ledger WASM, and the
+           circuit keys have been fetched — tens of seconds on a cold cache,
+           and forever behind a prover that is not answering — and a reader
+           held on "Confirm with your passkey" through all of it has already
+           done the one thing that row is about. */
+        setSetupSignal('deploy')
         const identity = settled.device
         const owner = settled.userKey
         saveCustodyChosenName(window.localStorage, owner, network, alias)
@@ -932,6 +991,12 @@ export default function CustodyPassport({
         }
         const onPhase = (phase: CustodyPhase) => {
           setBusy(phase.detail ? `${PHASE_LABELS[phase.step]}` : PHASE_LABELS[phase.step])
+          /* ONLY THE THREE THAT MOVE THE TIMELINE. `wallet`, `sign`, `submit`,
+             and `confirm` are moments INSIDE one of these waves — advancing on
+             the `confirm` that ends the activation would move the row to the
+             name before the name had been asked for. */
+          const signal = SETUP_SIGNAL_OF_STEP[phase.step]
+          if (signal !== undefined) setSetupSignal(signal)
         }
         /* Both halves are resumable and both check the chain before they act, so
            running them one after the other is safe on a second press: whatever
@@ -2008,6 +2073,106 @@ export default function CustodyPassport({
   }, [busy, recoveryIntended, recoveryRecord, runRecoveryAdd, screen, social])
 
   /* ---------------------------------------------------------------------- */
+  /* THE JOURNEY, SHOWN THE WAY THE OLD ROAD SHOWED IT (2026/09/22)          */
+  /*                                                                         */
+  /* "I like how we showed the full TX journey here … this part same way     */
+  /* with the game is critical." What stood here was one button and a        */
+  /* counted sentence that did not count: it was read off a record that is   */
+  /* re-read only when a press finishes, so a reader watched "step 1 of 3"   */
+  /* while the chain showed all three landed.                                */
+  /*                                                                         */
+  /* What stands here now is the panel `./ProgressTimeline.tsx` paints for   */
+  /* the old name step, row for row, with the phases of THIS road in it —    */
+  /* and the same game beneath it, offered once the wait is long enough to   */
+  /* be worth a distraction. The rule is `../lib/custodySetupProgress.ts`'s; */
+  /* nothing below decides anything.                                         */
+  /* ---------------------------------------------------------------------- */
+  const setupPhase = custodySetupPhase({
+    running: busy !== null,
+    signal: setupSignal,
+    recordStep: view?.record != null ? nextCustodyStep(view.record) : null,
+    named: (view?.name ?? null) !== null,
+  })
+  const setupRows = setupPhase === null ? null : custodySetupSteps(setupPhase, arm.kind)
+  /* This press's name first, then the one written down before it — which is
+     what a reload has to go on. */
+  const timelineName = setupName ?? view?.chosenName ?? null
+  const runningRow = setupRows?.find((row) => row.state === 'active') ?? null
+  const elapsedFor = useTimelineClock(runningRow?.id ?? null)
+
+  /* ---------------------------------------------------------------------- */
+  /* SOMETHING TO DO WITH THE MINUTES                                        */
+  /*                                                                         */
+  /* OFFERED, NEVER STARTED, exactly as on the old road: a control appears   */
+  /* once the setup has been running for {@link OFFER_AFTER_MS} and nothing  */
+  /* is on screen until it is pressed. It sits BENEATH the timeline in       */
+  /* normal flow so it covers nothing, it goes away while the ceremony has   */
+  /* the reader's hands, and it can be shut for the rest of this setup.      */
+  /* ---------------------------------------------------------------------- */
+  const setupRunning = setupPhase !== null && busy !== null
+  const [waitedMs, setWaitedMs] = useState(0)
+  const [gameOpen, setGameOpen] = useState(false)
+  const [gameDismissed, setGameDismissed] = useState(false)
+  useEffect(() => {
+    if (!setupRunning) {
+      // The setup ended, one way or the other. The next one is offered afresh.
+      setWaitedMs(0)
+      setGameOpen(false)
+      setGameDismissed(false)
+      return undefined
+    }
+    const startedAt = Date.now()
+    const timer = window.setInterval(() => setWaitedMs(Date.now() - startedAt), 1_000)
+    return () => window.clearInterval(timer)
+  }, [setupRunning])
+
+  /* The ceremony is a prompt over this screen — a passkey dialogue, or the
+     provider's overlay — and the game goes away for it rather than competing
+     with it. */
+  const identityPromptUp = setupPhase === 'confirm-identity'
+  const offerGame = setupRunning && waitedMs >= OFFER_AFTER_MS && !gameDismissed
+
+  const setupProgress =
+    setupRows === null || setupPhase === null ? null : (
+      <>
+        <ProgressTimeline
+          rows={setupRows.map((row): TimelineRow => ({
+            id: row.id,
+            label: row.label,
+            state: row.state,
+            expectedSeconds: row.expectedSeconds,
+            elapsedMs: elapsedFor(row),
+            /* The arm's own sentence, for the one row that is the reader's.
+               Dropped where it repeats the label, which is what
+               `./ProgressTimeline.tsx` does with a detail equal to it. */
+            detail: row.id === 'identity' && row.state === 'active' ? arm.approvalPrompt : null,
+            subStages:
+              row.id === 'account'
+                ? custodySetupSubStages(setupPhase, timelineName !== null ? aliasDomain(timelineName) : undefined)
+                : null,
+            note: row.id === 'account' ? LONG_WAIT_NOTE : null,
+          }))}
+        />
+        {offerGame ? (
+          gameOpen ? (
+            <WaitingGame
+              paused={identityPromptUp}
+              onDismiss={() => {
+                setGameOpen(false)
+                setGameDismissed(true)
+              }}
+            />
+          ) : identityPromptUp ? null : (
+            <button type="button" className="mngame-offer" onClick={() => setGameOpen(true)}>
+              <Gamepad2 size={14} aria-hidden="true" />
+              Play while you wait
+            </button>
+          )
+        ) : null}
+      </>
+    )
+
+  /* ---------------------------------------------------------------------- */
   /* What is on screen                                                      */
   /* ---------------------------------------------------------------------- */
 
@@ -2115,12 +2280,16 @@ export default function CustodyPassport({
           setupFinished,
           interrupted,
         })}
-        hint={
-          busy !== null || (view?.record && nextCustodyStep(view.record) !== 'ready')
-            ? dynamicSetupCopy(dynamicSetupPhase(view?.record ?? null))
-            : 'Setting your Passport up and claiming your name are paid for on your behalf.'
-        }
-        busy={busy}
+        /* THE HINT IS READ OFF THE LIVE PHASE NOW, which is the whole of the
+           counter fix: it used to come from a stored record that changes only
+           when the press is over, so it said "step 1 of 3" through all three.
+           See `../lib/custodySetupProgress.ts#custodySetupHint`. */
+        hint={custodySetupHint(setupPhase)}
+        progress={setupProgress}
+        /* THE BUTTON NAMES THE ROW THAT IS RUNNING, and says it once — the
+           timeline above it is the progress indicator, and a button repeating
+           a sentence already printed there is two spinners and one fact. */
+        busy={runningRow?.label ?? busy}
         error={error}
         checkName={checkName}
         onCreate={createPassport}
@@ -2403,6 +2572,8 @@ function NameStep(props: {
   /** What the one primary control says. See {@link custodyNameFirstAction}. */
   action: string
   hint: string
+  /** The timeline and the game, or null before anything has started. */
+  progress: React.ReactNode
   busy: string | null
   error: string | null
   checkName: (alias: string) => Promise<AliasAvailability>
@@ -2534,6 +2705,11 @@ function NameStep(props: {
             <p className="mnob-unusable-copy">{props.error}</p>
           </div>
         ) : null}
+
+        {/* THE FULL JOURNEY, above the control rather than under it: what a
+            person is watching while they wait is the progress, and the button
+            beneath it is a label on that wait rather than a thing to press. */}
+        {props.progress}
 
         <button type="submit" className="mnob-primary" disabled={!enabled}>
           <span className="mnob-primary-copy">

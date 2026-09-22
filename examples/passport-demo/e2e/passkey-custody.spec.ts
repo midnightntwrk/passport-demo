@@ -380,7 +380,13 @@ test.describe('a passkey with no Passport yet', () => {
     /* The count line while it works. It is the SAME three steps as the other
        arm — set the Passport up, finish it, turn the key on — even though a
        jubjub-born account is four transactions rather than three, because the
-       middle ones are one thing to the person waiting. */
+       middle ones are one thing to the person waiting.
+
+       Since 2026/09/22 it is read off the LIVE phase rather than off the
+       stored record, which is what makes it true: the record is re-read when a
+       press finishes, so a reader watched this line say "1 of 3" while the
+       chain showed all three landed. The next test is where the whole journey
+       it now belongs to is drilled. */
     await expect(page.locator('p.mnob-hint[role="status"]')).toHaveText(
       'Setting up your Passport, step 1 of 3',
       { timeout: 60_000 },
@@ -406,6 +412,161 @@ test.describe('a passkey with no Passport yet', () => {
     const shown = await page.locator('body').innerText();
     expect(shown.toLowerCase()).not.toContain('error:');
     expect(shown.toLowerCase()).not.toContain('undefined');
+
+    await context.close();
+  });
+
+  /**
+   * THE WHOLE JOURNEY, ON A SETUP THAT IS GENUINELY STUCK.
+   *
+   * "I like how we showed the full TX journey here … this part same way with
+   * the game is critical" (2026/09/22). The old name step showed a claim you
+   * could follow — rows with marks, a clock on the one that is running, the
+   * long one broken into the states it passes through, and a game for the
+   * minutes — and the name-first setup showed a button and a counter that did
+   * not count. It shows the same panel now, painted by the same component
+   * (`src/screens/ProgressTimeline.tsx`) and driven by this road's own phases.
+   *
+   * HOW A TIER WITH NO CHAIN HOLDS A SETUP STILL, and it is
+   * `claim-progress.spec.ts`'s trick because the problem is the same one: the
+   * deploy asks for its circuit keys over HTTP before it can build anything,
+   * and a request that is never answered leaves the app in exactly the state a
+   * slow prover leaves it in — the long row running, its first state live, and
+   * nothing moving but the clock. Nothing is stubbed to arrange it.
+   */
+  test('shows the whole journey, counts while nothing moves, and offers the game', async ({
+    browser,
+  }) => {
+    test.setTimeout(240_000);
+    /* NO SERVICE WORKER IN THIS CONTEXT: `public/sw.js` serves `/zk/**`
+       cache-first, and a worker's fetches are not the page's — so `page.route`
+       would never see the request this walk means to hold open. */
+    const context = await browser.newContext(
+      walkContextOptions({ viewport: { width: 420, height: 900 }, serviceWorkers: 'block' }),
+    );
+    const page = await context.newPage();
+    await installNetworkBoundary(page);
+
+    /* Asked BEFORE the prover is held open, for the same reason the walk above
+       asks it: a build with no account-custody verifier keys cannot construct
+       wave 1 at all, so this walk would assert nothing true. */
+    const probe = await page.request.get(
+      '/zk/account-custody/keys/activate_initial_device_with_jubjub.verifier',
+    );
+    test.skip(
+      !probe.ok(),
+      'this build carries no account-custody verifier keys, so wave 1 cannot be built here',
+    );
+
+    // THE PROVER, HELD OPEN — never fulfilled, never aborted, and free.
+    await page.route('**/zk/**', () => {
+      /* Deliberately empty: the request stays in flight for the life of the
+         context, which is what a prover taking its minutes looks like. */
+    });
+
+    await installVirtualAuthenticator(context, page);
+    await page.goto(WALK);
+    await page.getByRole('button', { name: SIGN_IN_BUTTON }).click();
+    await expect(page.getByRole('button', { name: 'Choose my name' })).toBeEnabled({
+      timeout: 60_000,
+    });
+    await page.getByRole('button', { name: 'Choose my name' }).click();
+    await page.getByLabel('Your name').fill('walker');
+    await expect(page.getByRole('button', { name: 'Create my Passport' })).toBeEnabled({
+      timeout: 120_000,
+    });
+    await page.getByRole('button', { name: 'Create my Passport' }).click();
+
+    /* THREE ROWS, AND THE FIRST IS ALREADY TICKED. The press that started this
+       setup could not have been made over a name the registry had not reported
+       free, so the check it names is a thing that has happened — and a row
+       sitting `todo` over work that was done is the same untruth as a counter
+       stuck on one. */
+    const rows = page.locator('.mnid-stepper-item');
+    await expect(rows).toHaveCount(3, { timeout: 120_000 });
+    await expect(rows.nth(0)).toContainText('Checking your name');
+    await expect(rows.nth(0)).toHaveAttribute('data-state', 'done');
+    await expect(rows.nth(1)).toContainText('Confirm with your passkey');
+
+    /* THE LONG ROW, RUNNING, AND THE FIVE STATES IT IS MADE OF — on screen
+       whole from the first frame, so they fill in rather than appearing under
+       a reader who is already waiting. */
+    const account = rows.nth(2);
+    await expect(account).toHaveAttribute('data-state', 'active', { timeout: 120_000 });
+    await expect(account).toContainText('Setting up your account');
+    const stages = account.locator('.mnid-substage');
+    await expect(stages).toHaveCount(5);
+    await expect(stages.nth(0)).toContainText('Creating your account');
+    await expect(stages.nth(1)).toContainText('Finishing your account');
+    await expect(stages.nth(2)).toContainText('Turning on your sign-in');
+    await expect(stages.nth(3)).toContainText('Registering walker.night');
+    await expect(stages.nth(4)).toContainText('Confirming your name');
+    await expect(stages.nth(0)).toHaveAttribute('data-state', 'active');
+    for (const index of [1, 2, 3, 4]) {
+      await expect(stages.nth(index)).toHaveAttribute('data-state', 'todo');
+    }
+    /* And the warning about the minutes is up FRONT, on the row that costs
+       them, rather than arriving once the reader is already inside the wait. */
+    await expect(account).toContainText(
+      'Your Passport is on its way. This part takes a few minutes.',
+    );
+
+    /* THE COUNT LINE, READ OFF THE LIVE PHASE. This is the counter that was
+       stuck: it came off a stored record that is re-read only when the press
+       FINISHES, so it said "1 of 3" through all three. */
+    await expect(page.locator('p.mnob-hint[role="status"]')).toHaveText(
+      'Setting up your Passport, step 1 of 3',
+    );
+
+    /* AND THE CLOCK KEEPS COUNTING ON A PHASE THAT IS NOT MOVING. This is the
+       one thing a static assertion cannot establish: a number rendered once
+       from `Date.now()` passes every test about its format and is exactly the
+       hang it was built to disprove. Read twice, five seconds apart, with
+       nothing changing between the two reads except the number. */
+    const timing = account.locator('.mnid-stepper-timing');
+    await expect(timing).toHaveText(/Usually about 4 minutes — \d+:\d{2} so far/);
+    const clock = async (): Promise<number> => {
+      const match = /(\d+):(\d{2})/.exec(await timing.innerText());
+      if (match === null) throw new Error('no clock on the running row');
+      return Number(match[1]) * 60 + Number(match[2]);
+    };
+    const first = await clock();
+    await page.waitForTimeout(5_000);
+    await expect(stages.nth(0)).toHaveAttribute('data-state', 'active');
+    expect((await clock()) - first).toBeGreaterThanOrEqual(4);
+
+    /* THE BUTTON NAMES THE ROW THAT IS RUNNING, and says it once: the panel
+       above it is the progress indicator, and a button repeating a sentence
+       already printed there is two spinners and one fact. */
+    await expect(page.getByRole('button', { name: 'Setting up your account' })).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'I already have a Passport' })).toBeVisible();
+
+    /* SOMETHING TO DO WITH THE MINUTES. Offered rather than started, after
+       `OFFER_AFTER_MS`, and it sits BENEATH the panel in normal flow so it
+       covers nothing — which the assertion after it holds. */
+    const offer = page.getByRole('button', { name: 'Play while you wait' });
+    await expect(offer).toBeVisible({ timeout: 60_000 });
+    await offer.click();
+    await expect(page.locator('.mngame')).toBeVisible();
+    await expect(page.locator('.mngame-title')).toHaveText('While you wait');
+    await expect(account).toHaveAttribute('data-state', 'active');
+    await expect(stages.nth(0)).toHaveAttribute('data-state', 'active');
+
+    /* No percentage, anywhere. There is no quantity to take a percentage OF —
+       a proof either lands or it does not — so a bar filling to 60% would be a
+       number nobody measured, and inventing one is how a progress view starts
+       lying. */
+    await expect(page.locator('.mnid-panel').first()).not.toContainText('%');
+
+    /* AND NOTHING THE PANEL SAYS NAMES THE MACHINERY BEHIND IT. Swept while
+       the setup is mid-flight, so the rows, the five states, the timing line,
+       the hint, and the button are all in it. */
+    const text = await page.locator('body').innerText();
+    for (const forbidden of ['contract', 'registry', 'indexer', 'resolver', 'sponsor', 'sdk']) {
+      expect(text.toLowerCase(), `"${forbidden}" is on screen`).not.toContain(forbidden);
+    }
+    expect(text).not.toMatch(/\bDUST\b/);
+    expect(text.toLowerCase()).not.toContain('wallet address');
 
     await context.close();
   });

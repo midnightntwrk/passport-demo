@@ -794,6 +794,7 @@ export default mergeConfig(
           'src/lib/custodyRoute.ts',
           'src/lib/custodyScreenRules.ts',
           'src/lib/custodyNameFirst.ts',
+          'src/lib/custodySetupProgress.ts',
           'src/lib/dynamicSession.ts',
           'src/lib/endpoints.ts',
           'src/lib/feeReadinessPoll.ts',
