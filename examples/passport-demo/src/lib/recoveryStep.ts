@@ -138,8 +138,16 @@ export function recoveryHomeEntry(input: {
 export function recoveryResumes(input: {
   /** Whether the reader pressed the offer and has not been answered yet. */
   readonly intended: boolean;
-  /** Whether the recovery step is the screen on show. */
-  readonly onRecoveryStep: boolean;
+  /**
+   * Whether the screen on show is one the add can finish on — the recovery
+   * step, or Home.
+   *
+   * BOTH, because the press comes from both. Home offers "Add recovery" to a
+   * Passport that skipped the step or predates it, and that press opens the
+   * same overlay; a rule that only resumed on the step would leave somebody who
+   * pressed it from Home signed in, back on Home, and no further forward.
+   */
+  readonly readyScreen: boolean;
   /** Whether a provider sign-in is attached and has a key behind it. */
   readonly socialReady: boolean;
   /** Whether this Passport already has a way back. */
@@ -148,7 +156,7 @@ export function recoveryResumes(input: {
 }): boolean {
   if (!input.intended) return false;
   if (recoveryHeld(input.record)) return false;
-  return input.onRecoveryStep && input.socialReady && !input.busy;
+  return input.readyScreen && input.socialReady && !input.busy;
 }
 
 /* -------------------------------------------------------------------------- */

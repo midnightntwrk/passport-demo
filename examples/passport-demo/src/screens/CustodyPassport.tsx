@@ -1995,7 +1995,7 @@ export default function CustodyPassport({
     if (
       !recoveryResumes({
         intended: recoveryIntended,
-        onRecoveryStep: screen === 'recovery',
+        readyScreen: screen === 'recovery' || screen === 'home',
         socialReady: social !== null && social.status === 'signed-in' && (social.address ?? '').length > 0,
         record: recoveryRecord,
         busy: busy !== null,

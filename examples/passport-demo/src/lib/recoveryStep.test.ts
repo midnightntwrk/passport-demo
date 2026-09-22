@@ -123,7 +123,7 @@ describe('what Home says about it', () => {
 describe('picking the step back up after the sign-in', () => {
   const PRESSED = {
     intended: true,
-    onRecoveryStep: true,
+    readyScreen: true,
     socialReady: true,
     record: null,
     busy: false,
@@ -145,8 +145,8 @@ describe('picking the step back up after the sign-in', () => {
     expect(recoveryResumes({ ...PRESSED, socialReady: false })).toBe(false);
   });
 
-  it('waits until the recovery step is the screen on show', () => {
-    expect(recoveryResumes({ ...PRESSED, onRecoveryStep: false })).toBe(false);
+  it('waits until a screen the add can finish on is showing', () => {
+    expect(recoveryResumes({ ...PRESSED, readyScreen: false })).toBe(false);
   });
 
   it('never asks for a second approval while the first is away', () => {
