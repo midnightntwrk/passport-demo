@@ -366,22 +366,22 @@ export default function OnboardingScreen(props: OnboardingProps) {
               <div className="mnob-auth-actions">
                 <button
                   type="button"
+                  className="mnob-auth-button mnob-auth-signup"
+                  onClick={onContinue}
+                >
+                  <UserRoundPlus size={20} strokeWidth={1.8} aria-hidden="true" />
+                  <span>Sign up</span>
+                </button>
+                {/* Discover before enrolling, so sign-up cannot overwrite a
+                    surviving Passport whose browser records were cleared. */}
+                <button
+                  type="button"
                   className="mnob-auth-button mnob-auth-login"
                   onClick={onUseDifferentPasskey}
                   disabled={!onUseDifferentPasskey}
                 >
                   <Fingerprint size={20} strokeWidth={1.8} aria-hidden="true" />
                   <span>Log in</span>
-                </button>
-                {/* Discover before enrolling, so sign-up cannot overwrite a
-                    surviving Passport whose browser records were cleared. */}
-                <button
-                  type="button"
-                  className="mnob-auth-button mnob-auth-signup"
-                  onClick={onContinue}
-                >
-                  <UserRoundPlus size={20} strokeWidth={1.8} aria-hidden="true" />
-                  <span>Sign up</span>
                 </button>
               </div>
               {/* THE WAY BACK, and the only entry on this screen that a provider

@@ -168,16 +168,16 @@ test.describe('the landing of a build with a provider sign-in behind it', () => 
     await expect(page.getByRole('button', { name: 'I already have a Passport' })).toHaveCount(0);
     await expect(page.getByRole('button', { name: /^Sign in with/i })).toHaveCount(0);
 
-    /* STACKED FULL-WIDTH ON A PHONE: Log in above Sign up, each as wide as
-       the other, the link beneath both. */
+    /* STACKED FULL-WIDTH: Sign up (the call to action) above Log in, each as
+       wide as the other, the link beneath both. */
     const login = (await page.getByRole('button', { name: 'Log in', exact: true }).boundingBox())!;
     const signup = (await page.getByRole('button', { name: 'Sign up', exact: true }).boundingBox())!;
     const under = (await link.boundingBox())!;
-    expect(signup.y).toBeGreaterThanOrEqual(login.y + login.height);
+    expect(login.y).toBeGreaterThanOrEqual(signup.y + signup.height);
     expect(Math.abs(signup.width - login.width)).toBeLessThan(1);
     expect(Math.abs(signup.x - login.x)).toBeLessThan(1);
-    expect(login.height).toBeGreaterThanOrEqual(48);
-    expect(under.y).toBeGreaterThanOrEqual(signup.y + signup.height);
+    expect(signup.height).toBeGreaterThanOrEqual(48);
+    expect(under.y).toBeGreaterThanOrEqual(login.y + login.height);
 
     const body = (await page.locator('body').innerText()).toLowerCase();
     for (const forbidden of ['wallet address', 'dust', 'contract', 'registry', 'indexer', 'resolver', 'sponsor', 'sdk', 'dynamic']) {
@@ -186,12 +186,12 @@ test.describe('the landing of a build with a provider sign-in behind it', () => 
     await context.close();
   });
 
-  test('sits the two doors side by side where there is room', async ({ browser }) => {
+  test('keeps Sign up above Log in on a wide screen too', async ({ browser }) => {
     const { context, page } = await landing(browser, { width: 1440, height: 900 });
     const login = (await page.getByRole('button', { name: 'Log in', exact: true }).boundingBox())!;
     const signup = (await page.getByRole('button', { name: 'Sign up', exact: true }).boundingBox())!;
-    expect(Math.abs(signup.y - login.y)).toBeLessThan(1);
-    expect(signup.x).toBeGreaterThan(login.x + login.width);
+    expect(login.y).toBeGreaterThanOrEqual(signup.y + signup.height);
+    expect(Math.abs(signup.x - login.x)).toBeLessThan(1);
     await context.close();
   });
 

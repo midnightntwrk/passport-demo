@@ -104,7 +104,7 @@
 
 /* Log in and Sign up: two doors of equal size. Side by side where there is
    room; stacked full-width on a phone (see the 600px rule below). */
-.mnob-auth-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.mnob-auth-actions { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
 .mnob-auth-button {
   min-width: 0;
   min-height: 58px;
@@ -124,10 +124,10 @@
   transition: background .18s ease, border-color .18s ease, box-shadow .18s ease;
 }
 .mnob-auth-button svg { flex-shrink: 0; }
-.mnob-auth-login { background: var(--mn-accent); border-color: var(--mn-accent); color: #fff; box-shadow: 0 4px 12px rgb(0 0 254 / 16%); }
-.mnob-auth-login:hover:not(:disabled) { background: var(--mn-accent-hover); }
-.mnob-auth-signup { background: var(--mn-surface-raised); color: var(--mn-text-primary); }
-.mnob-auth-signup:hover { background: var(--mn-accent-soft); border-color: var(--mn-accent-ink); }
+.mnob-auth-signup { background: var(--mn-accent); border-color: var(--mn-accent); color: #fff; box-shadow: 0 4px 12px rgb(0 0 254 / 16%); }
+.mnob-auth-signup:hover:not(:disabled) { background: var(--mn-accent-hover); }
+.mnob-auth-login { background: var(--mn-surface-raised); color: var(--mn-text-primary); }
+.mnob-auth-login:hover:not(:disabled) { background: var(--mn-accent-soft); border-color: var(--mn-accent-ink); }
 .mnob-auth-button:focus-visible { outline: 2px solid var(--mn-accent-ink); outline-offset: 4px; }
 .mnob-auth-button:disabled { opacity: .5; cursor: default; }
 @media (prefers-reduced-motion: reduce) { .mnob-auth-button { transition: none; } }
