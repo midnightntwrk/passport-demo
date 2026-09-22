@@ -19,6 +19,7 @@ import { type K256DeviceIdentity } from '../identity/custodyContractSigning.js'
 import {
   activateK1Device,
   appendChangeToInboxK1,
+  custodyAccountActivatedOnChain,
   defaultCustodyDeps,
   deployCustodyAccount,
   startCustodyAccountAgain,
@@ -29,6 +30,7 @@ import {
 } from '../identity/custodyContractClient.js'
 import {
   hexToBytes,
+  custodyActivatedRecord,
   custodyFailureSentence,
   nextCustodyStep,
   resolveCustodyUseCounter,
@@ -369,6 +371,52 @@ export default function CustodyPassport({ network, arm, notice: browserNotice = 
     }
     refresh()
   }, [refresh, user])
+
+  /* Whether the read below is already running. See {@link healFromChain}. */
+  const healing = useRef(false)
+
+  /**
+   * A RECORD THAT SAYS UNFINISHED OVER AN ACCOUNT THAT IS FINISHED.
+   *
+   * Live, 2026/09/22. The last step of a setup — turning the key on — was
+   * proved, balanced, and included in a block, and the node's socket dropped
+   * while this tab was waiting on it. The record was therefore never marked
+   * done, and this screen offered the step again over an account that already
+   * had it: the next press re-ran the circuit, the chain refused it because it
+   * was already on, and the person was shown a generic failure about a Passport
+   * that worked perfectly.
+   *
+   * So the record is no longer the last word. When it says the only thing left
+   * is the activation, the account itself is asked, and an account that is
+   * already on heals the record and moves the screen to the name step — with no
+   * press, no approval, and nothing signed. A read that cannot be made, or an
+   * account that genuinely is not on, changes nothing and leaves the offer
+   * where it was.
+   *
+   * It re-runs on `error` as well as on the record, which is what makes a press
+   * that failed this way correct itself in front of the person who made it.
+   */
+  useEffect(() => {
+    const record = view?.record ?? null
+    if (record === null || record.address === null) return
+    if (nextCustodyStep(record) !== 'activate') return
+    /* Not while a setup or a payment is running: that work reads the chain
+       itself and writes the same record, and two writers lose each other. */
+    if (healing.current || inFlight.current) return
+    healing.current = true
+    void (async () => {
+      try {
+        if ((await custodyAccountActivatedOnChain(record)) !== true) return
+        saveCustodyRecord(window.localStorage, custodyActivatedRecord(record, null, null))
+        setError(null)
+        refresh()
+      } catch (cause) {
+        console.info('[account-custody] could not check whether this Passport is on yet', cause)
+      } finally {
+        healing.current = false
+      }
+    })()
+  }, [error, refresh, view])
 
   /**
    * The key that approves, settled once.

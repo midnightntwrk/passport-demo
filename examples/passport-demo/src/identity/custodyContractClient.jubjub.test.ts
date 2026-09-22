@@ -364,6 +364,10 @@ function harness(
             ? { serialize: () => new Uint8Array([chain.operations.size]), data: 'state' }
             : null,
         ),
+      /* WHAT BECAME OF A SUBMISSION, asked of the connection. The waves submit
+         and wait separately since 2026/09/22, so the wait has to be answerable
+         here; a fake without it would fail every wave on a missing member. */
+      watchForTxData: (txId: string) => Promise.resolve({ txId, status: 'SucceedEntirely' }),
     },
     privateStateProvider: {
       setContractAddress: () => undefined,
@@ -425,6 +429,9 @@ function harness(
     },
   );
 
+  /* Named, because `submitTxAsync` is the same submission read for its id. */
+  let contractsFake: { submitTx(providers: unknown, options: unknown): Promise<unknown> };
+
   const deps: Partial<CustodyDeps> = {
     storage: () => storage,
     randomBytes: (length) => new Uint8Array(length).fill(7),
@@ -457,16 +464,25 @@ function harness(
           return Promise.resolve({ public: { txId: `wave-${state.submits}` } });
         },
         findDeployedContract: () => Promise.resolve({ callTx }),
-        /* THE SPLIT SUBMIT, for the same reason as the composer below: nothing
-           in this drill submits a transaction it built itself. */
-        submitTxAsync: () =>
-          Promise.reject(new Error('this drill drives the deploy and activation path only')),
+        /* THE SPLIT SUBMIT, which is how a wave is sent since 2026/09/22: the
+           submission and the wait are separate calls so that a socket dropping
+           under the WAIT can be settled against the chain. Composed here out of
+           the same `submitTx` above, exactly as the library composes them. */
+        submitTxAsync: async (submitProviders: unknown, options: unknown) => {
+          const data = (await contractsFake.submitTx(submitProviders, options)) as {
+            public?: { txId?: string };
+          };
+          return data.public?.txId ?? '';
+        },
         /* THIS DRILL DOES NOT COMPOSE. The shielded spend builds its own
            transaction and is driven by `custodyContractClient.spend.test.ts`;
            everything here goes through `callTx`, so the member is present to
            satisfy the seam and refuses if anything reaches it. */
         createUnprovenCallTx: () =>
           Promise.reject(new Error('this drill drives the deploy and activation path only')),
+      }).then((api) => {
+        contractsFake = api;
+        return api;
       }),
     now: () => {
       state.clock += 5_000;

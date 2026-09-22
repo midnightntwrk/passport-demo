@@ -26,7 +26,12 @@ import {
   CUSTODY_SHARED_CIRCUITS,
   CUSTODY_STORAGE_KEY,
   CUSTODY_PROOF_NOT_BUILT,
+  CUSTODY_SETUP_UNCONFIRMED,
   CUSTODY_UNEXPECTED,
+  custodyActivatedRecord,
+  custodyAlreadyActivated,
+  custodyAnswerWasLost,
+  custodyChainRefused,
   custodyProofNotBuilt,
   custodyProofNotBuiltDetail,
   isCustodyProofNotBuilt,
@@ -735,6 +740,152 @@ describe("a library's preamble around our own sentence", () => {
   it('leaves a sentence with no preamble exactly as it is', () => {
     expect(custodyFailureSentence(new Error('There is nothing of that kind in this Passport to send.'))).toBe(
       'There is nothing of that kind in this Passport to send.',
+    );
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* A step whose answer was lost, and one the chain has already done           */
+/* -------------------------------------------------------------------------- */
+
+describe('an activation the chain has already performed', () => {
+  /** The live failure, verbatim, as midnight-js handed it to the screen. */
+  const LIVE =
+    "Unexpected error executing scoped transaction '<unnamed>': Error: failed assert: already activated";
+
+  it('reads the circuit’s own words as done rather than as broken', () => {
+    expect(custodyAlreadyActivated(new Error(LIVE))).toBe(true);
+    /* And it is emphatically NOT a verdict to give up on. */
+    expect(custodyChainRefused(new Error(LIVE))).toBe(false);
+  });
+
+  it('finds the words wherever in the cause chain they are', () => {
+    const inner = new Error('failed assert: already activated');
+    const outer = new Error('Error executing circuit', { cause: inner });
+    expect(custodyAlreadyActivated(outer)).toBe(true);
+  });
+
+  it('says nothing about a failure that is not one', () => {
+    expect(custodyAlreadyActivated(new Error('the socket closed'))).toBe(false);
+    expect(custodyAlreadyActivated('not an error at all')).toBe(false);
+  });
+
+  /* A CHAIN THAT POINTS AT ITSELF is walked once rather than for ever. It is
+     not a shape anybody writes; it is one a re-thrower can build. */
+  it('walks a cause chain that loops back on itself exactly once', () => {
+    const looped = new Error('round and round');
+    (looped as { cause?: unknown }).cause = looped;
+    expect(custodyAlreadyActivated(looped)).toBe(false);
+  });
+});
+
+describe('a verdict, as against a lost answer', () => {
+  it('calls a failed assert a verdict', () => {
+    expect(custodyChainRefused(new Error('failed assert: device key has small order'))).toBe(true);
+  });
+
+  it('calls a refused proof a verdict', () => {
+    expect(custodyChainRefused(custodyProofNotBuilt('unsatisfiable constraint system'))).toBe(true);
+  });
+
+  /* THE ONE THAT MATTERS. A dropped socket is not the chain saying no, so the
+     caller is free to go and ask the chain what actually happened. */
+  it('calls a dropped socket nothing of the kind', () => {
+    expect(
+      custodyChainRefused(
+        new Error('disconnected from wss://rpc.stagenet.shielded.tools/: 1000:: Normal Closure'),
+      ),
+    ).toBe(false);
+    expect(custodyChainRefused(undefined)).toBe(false);
+  });
+});
+
+describe('the sentence for a step that was sent and not answered for', () => {
+  it('is not the generic one, and is plain enough to be painted', () => {
+    expect(CUSTODY_SETUP_UNCONFIRMED).not.toBe(CUSTODY_UNEXPECTED);
+    expect(custodyFailureSentence(new Error(CUSTODY_SETUP_UNCONFIRMED))).toBe(
+      CUSTODY_SETUP_UNCONFIRMED,
+    );
+  });
+
+  it('says none of the words this demo keeps off a screen', () => {
+    const lower = CUSTODY_SETUP_UNCONFIRMED.toLowerCase();
+    for (const forbidden of [
+      'contract',
+      'registry',
+      'indexer',
+      'resolver',
+      'sponsor',
+      'dust',
+      'wallet address',
+      'sdk',
+      'dynamic',
+    ]) {
+      expect(lower).not.toContain(forbidden);
+    }
+  });
+});
+
+describe('the record for an account the chain shows is on', () => {
+  const half = (): CustodyAccountRecord => ({
+    ...newCustodyRecord({ user: 'u', network: 'n', privateStateId: 'p', saltHex: '', totalWaves: 3 }),
+    address: 'aa'.repeat(32),
+    wavesDone: 3,
+    txHashes: ['first'],
+  });
+
+  it('marks it done, files the device’s point, and keeps the hash', () => {
+    const next = custodyActivatedRecord(half(), { pk: { x: 0x1fn, y: 0x2an } }, 'second');
+    expect(next.activated).toBe(true);
+    expect(nextCustodyStep(next)).toBe('ready');
+    expect(next.pkXHex).toBe('1f');
+    expect(next.pkYHex).toBe('2a');
+    expect(next.txHashes).toEqual(['first', 'second']);
+  });
+
+  /* A SCREEN HEALING A RECORD HOLDS NO DEVICE. Settling one costs an
+     assertion, and a point already on the record must not be overwritten with
+     nothing merely because this caller could not be bothered to ask for one. */
+  it('leaves the point alone when the caller has no device to name', () => {
+    const before = { ...half(), pkXHex: 'ab', pkYHex: 'cd' };
+    const next = custodyActivatedRecord(before, null, null);
+    expect(next.activated).toBe(true);
+    expect(next.pkXHex).toBe('ab');
+    expect(next.pkYHex).toBe('cd');
+    expect(next.txHashes).toEqual(['first']);
+  });
+});
+
+describe('an answer that was lost, as against work that failed', () => {
+  /* THE ONE THAT HAPPENED, twice over: polkadot-js's own words on 2026/09/05
+     and on the night this was fixed. */
+  it('recognises the socket drops this network actually produces', () => {
+    expect(
+      custodyAnswerWasLost(
+        new Error('disconnected from wss://rpc.stagenet.shielded.tools/: 1000:: Normal Closure'),
+      ),
+    ).toBe(true);
+    expect(custodyAnswerWasLost(new Error('WebSocket is not connected'))).toBe(true);
+    expect(custodyAnswerWasLost(new Error('the request timed out'))).toBe(true);
+  });
+
+  /* AND IT IS A POSITIVE TEST, which is the whole of why it exists. Reading
+     every unrecognised failure as a lost answer would put two minutes of
+     polling in front of every honest refusal — a spinner where a sentence
+     used to be. */
+  it('leaves an ordinary failure to be reported at once', () => {
+    expect(custodyAnswerWasLost(new Error('tab closed'))).toBe(false);
+    expect(custodyAnswerWasLost(new Error('there was not enough to cover this'))).toBe(false);
+    expect(custodyAnswerWasLost(null)).toBe(false);
+  });
+
+  it('never waits on a verdict, whichever kind it is', () => {
+    expect(custodyAnswerWasLost(new Error('failed assert: already activated'))).toBe(false);
+    expect(custodyAnswerWasLost(new Error('failed assert: device key has small order'))).toBe(
+      false,
+    );
+    expect(custodyAnswerWasLost(custodyProofNotBuilt('the socket to the prover closed'))).toBe(
+      false,
     );
   });
 });
