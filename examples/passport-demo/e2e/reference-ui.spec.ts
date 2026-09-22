@@ -14,7 +14,7 @@ async function capture(page: Page, info: TestInfo, name: string) {
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.screenshot({
     path: info.outputPath(`${name}.png`),
-    fullPage: !['home', 'send', 'receive'].includes(name),
+    fullPage: !['send', 'receive'].includes(name),
     animations: 'disabled',
   });
 }
@@ -107,7 +107,8 @@ for (const theme of ['Light', 'Dark'] as const) {
         await capture(page, info, 'progress-game');
 
         await completedPassport(page);
-        await expect(page.locator('.mnhome-name')).toContainText(`, ${NAME}`);
+        await expect(page.locator('.mnhome-name')).toContainText(/^Good (morning|afternoon|evening)\.$/);
+        await expect(page.locator('.mnhome-passport-column .mnid-alias')).toHaveText(`${NAME}.night`);
         await expect(page.locator('.mnhome-screen')).toHaveCSS('background-image', 'none');
         await expect(page.locator('.mnhome-action-primary')).toHaveCSS('background-image', 'none');
         await expect(page.locator('.mnnav-tab-active')).toHaveCSS('background-color', 'rgb(0, 0, 254)');
