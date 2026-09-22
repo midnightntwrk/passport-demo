@@ -118,7 +118,20 @@ async function serveAccountCustodyState(page: Page, addresses: readonly string[]
  */
 async function seedPasskeyPassport(
   page: Page,
-  options: { credentialId: string; userKey: string; name: string; musd: string },
+  options: {
+    credentialId: string;
+    userKey: string;
+    /** The `.night` name this Passport holds, or null for one that has none. */
+    name: string | null;
+    musd: string;
+    /**
+     * What the RECORD says about the last step, which is not always what the
+     * chain says. False seeds the state of the live defect of 2026/09/22: the
+     * activation landed and the confirmation did not, so this browser wrote
+     * down "not finished" about an account that is finished.
+     */
+    activated?: boolean;
+  },
 ): Promise<void> {
   const key = `${options.userKey}|${WALK_NETWORK}`;
   const record = {
@@ -131,7 +144,7 @@ async function seedPasskeyPassport(
     pkYHex: null,
     wavesDone: 4,
     totalWaves: 4,
-    activated: true,
+    activated: options.activated ?? true,
     txHashes: [],
   };
   const store = {
@@ -157,10 +170,15 @@ async function seedPasskeyPassport(
         'passport-account-custody:v1',
         JSON.stringify({ [recordKey]: seededRecord }),
       );
-      window.localStorage.setItem(
-        'passport-account-custody-name:v1',
-        JSON.stringify({ [recordKey]: seededName }),
-      );
+      /* A Passport with no name yet writes no name, because a seeded empty
+         string is a name as far as the reader is concerned and would send the
+         walk to Home over the step it is about. */
+      if (seededName !== null) {
+        window.localStorage.setItem(
+          'passport-account-custody-name:v1',
+          JSON.stringify({ [recordKey]: seededName }),
+        );
+      }
       window.localStorage.setItem('passport-k1-coins:v1', JSON.stringify(seededStore));
       window.localStorage.setItem(
         'passport-account-custody-passkey:v1',
@@ -361,6 +379,85 @@ test.describe('a passkey that already holds one', () => {
     await expect(page.getByText('250')).toBeVisible();
     /* And it is named by the device, not by a sign-in. */
     await expect(page.getByText('Held on this device')).toBeVisible();
+
+    await authenticator.remove();
+    await context.close();
+  });
+
+  /* THE LIVE DEFECT OF 2026/09/22, AS A WALK.
+     ----------------------------------------
+     The last step of a setup — turning the key on — was proved, balanced, and
+     included in block 569232 as transaction `c01c7791…`, and the node's socket
+     then closed under the wait (`1000:: Normal Closure`). The record was left
+     saying the setup was unfinished about an account that was finished, and the
+     screen offered the step again: the circuit's dry run refused it with
+     `failed assert: already activated`, which reached the reader as "Something
+     went wrong. Try that again." — for ever, over a working Passport.
+
+     What this holds is the fix from the outside: a record that says unfinished
+     over an account the chain says is on now heals itself on open. No press, no
+     authenticator, nothing signed — the screen simply arrives where the
+     Passport actually is, which is the name step. */
+  test('opens on the name step when the record says unfinished and the chain says done', async ({
+    browser,
+  }) => {
+    const context = await browser.newContext(
+      walkContextOptions({ viewport: { width: 420, height: 900 } }),
+    );
+    const page = await context.newPage();
+    await installNetworkBoundary(page);
+    await serveAccountCustodyState(page, [ACCOUNT_CUSTODY_ADDRESS]);
+    const authenticator = await installVirtualAuthenticator(context, page);
+    await page.goto(WALK);
+
+    await page.getByRole('button', { name: SIGN_IN_BUTTON }).click();
+    await expect(page.getByRole('heading', { name: /Set up\s*your Passport/ })).toBeVisible({
+      timeout: 60_000,
+    });
+    const credentialId = await page.evaluate(() =>
+      window.localStorage.getItem('passport-last-passkey'),
+    );
+
+    /* The half-written record: every wave landed, the activation is not
+       recorded, and no name has been claimed yet. */
+    await seedPasskeyPassport(page, {
+      credentialId: credentialId as string,
+      userKey: 'jubjub:2a1f',
+      name: null,
+      musd: '0',
+      activated: false,
+    });
+    await page.goto(WALK);
+
+    /* AND IT ARRIVES AT THE NAME STEP BY ITSELF. Not "Finish setting up my
+       Passport", and certainly not a failure sentence. */
+    await expect(page.getByRole('heading', { name: /Choose\s*your name/ })).toBeVisible({
+      timeout: 60_000,
+    });
+    await expect(page.getByLabel('Your name')).toBeVisible();
+    /* NO CEREMONY WAS ASKED FOR, which is the other half of the claim: the
+       account was read, not acted on, and reading costs no authenticator. */
+    await expect(page.getByRole('button', { name: SIGN_IN_BUTTON })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Finish setting up my Passport' })).toHaveCount(
+      0,
+    );
+
+    const body = await page.locator('body').innerText();
+    expect(body).not.toContain('Something went wrong');
+
+    /* And the record itself was mended, so the next visit costs no read. */
+    await expect
+      .poll(
+        () =>
+          page.evaluate(() => {
+            const raw = window.localStorage.getItem('passport-account-custody:v1');
+            if (raw === null) return null;
+            const records = JSON.parse(raw) as Record<string, { activated: boolean }>;
+            return Object.values(records)[0]?.activated ?? null;
+          }),
+        { timeout: 30_000 },
+      )
+      .toBe(true);
 
     await authenticator.remove();
     await context.close();

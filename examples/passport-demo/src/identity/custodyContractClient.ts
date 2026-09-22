@@ -113,6 +113,10 @@ import {
   CUSTODY_SEND_FAILED,
   CUSTODY_SEND_UNCONFIRMED,
   CUSTODY_SETUP_INTERRUPTED,
+  CUSTODY_SETUP_UNCONFIRMED,
+  custodyActivatedRecord,
+  custodyAlreadyActivated,
+  custodyAnswerWasLost,
   loadCustodyAuthorityKey,
   loadCustodyRecord,
   newCustodyRecord,
@@ -485,6 +489,19 @@ export const CUSTODY_TX_TTL_MS = 30 * 60 * 1000;
  */
 export const CUSTODY_AUTHORITY_WAIT_MS = 120_000;
 const CUSTODY_AUTHORITY_POLL_MS = 2_000;
+
+/**
+ * How long a step whose answer was lost is given to prove itself on the chain.
+ *
+ * TWO MINUTES, AND IT IS A CEILING RATHER THAN A WAIT. Nothing spends this
+ * unless a submission's own answer failed to arrive; a transaction that was
+ * included is visible within a block or two, and one that was never taken is
+ * not going to appear at all. Past the ceiling the person is told the true
+ * thing — {@link CUSTODY_SETUP_UNCONFIRMED} — rather than being held for ever
+ * against a node that is not answering.
+ */
+export const CUSTODY_CONFIRM_WAIT_MS = 120_000;
+const CUSTODY_CONFIRM_POLL_MS = 3_000;
 
 /** `localStorage` key for the per-device wallet seeds. */
 export const CUSTODY_SEED_KEY = 'passport-account-custody-seed:v1';
@@ -1159,8 +1176,27 @@ async function runWaveOne(
     intent,
   );
 
-  const result = await contracts.submitTx(providers, { unprovenTx });
-  const txHash = await resolveHash(context.providers, result);
+  /* SUBMITTED AND WAITED FOR, SPLIT, and the split is the fix. `submitTx` is
+     `submitTxAsync` followed by an unbounded `watchForTxData`, so a caller
+     using it cannot tell a transaction that was never sent from one that was
+     sent and whose answer was lost — and the two want opposite responses.
+     Everything up to and including the node taking the transaction is reported
+     the moment it fails, unchanged; only the WAIT is settled against the
+     chain. The address is known before anything is sent, so the question is
+     available: is there a contract at it? Without this, a dropped socket here
+     costs a whole second account — the record has no address, the next press
+     deploys again, and the first one sits on chain for ever holding nothing. */
+  const txId = await contracts.submitTxAsync(providers, { unprovenTx });
+  try {
+    await watchForTxData(providers, txId);
+  } catch (cause) {
+    if (!custodyAnswerWasLost(cause)) throw cause;
+    console.info('[account-custody] the answer to the first step was lost; asking the chain', messageOf(cause));
+    if (!(await awaitCustodyDeployed(deps, providers, address))) {
+      throw new Error(CUSTODY_SETUP_UNCONFIRMED);
+    }
+  }
+  const txHash = await resolveHash(context.providers, { txId });
 
   const priv = providers.privateStateProvider as {
     setContractAddress?(address: string): void;
@@ -1308,8 +1344,21 @@ async function runMaintenanceWave(
   );
 
   const contracts = await deps.contracts();
-  const result = await contracts.submitTx(providers, { unprovenTx });
-  const txHash = await resolveHash(providers, result);
+  /* THE SAME SPLIT AS THE DEPLOY, and the same reason. A lost WAIT needs no
+     new machinery here: the counter wait below already polls the chain for two
+     minutes and already refuses on its own deadline, so a wave whose answer
+     never arrived falls through to it rather than out of the function — the
+     counter moving is the update landing, whoever did or did not hear about
+     it. A failure before the node took the transaction still goes straight
+     out, because there is nothing for the chain to have an opinion about. */
+  const txId = await contracts.submitTxAsync(providers, { unprovenTx });
+  try {
+    await watchForTxData(providers, txId);
+  } catch (cause) {
+    if (!custodyAnswerWasLost(cause)) throw cause;
+    console.info('[account-custody] the answer to this step was lost; the counter will settle it', messageOf(cause));
+  }
+  const txHash = await resolveHash(providers, { txId });
 
   /* THE WAIT COMES FIRST, AND THE WRITE AFTER IT. A submission that is accepted
      is not a wave that landed: it can still be dropped, and the counter is what
@@ -1378,6 +1427,99 @@ async function awaitAuthorityCounter(
 }
 
 /* -------------------------------------------------------------------------- */
+/* What the chain says about an account                                       */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Whether the account at `address` is turned on, or null when it cannot be read.
+ *
+ * NULL IS NOT FALSE, and the distinction is the reason this returns three
+ * answers rather than two. `booted` is what the activation circuit asserts on,
+ * so false means the circuit will run and true means it will refuse; but an
+ * indexer that did not answer knows neither, and reading its silence as false
+ * is what would send a second activation at an account that already has one.
+ * Every caller below treats null as "ask again", never as "not yet".
+ */
+async function custodyAccountBooted(
+  providers: Record<string, unknown>,
+  module: CustodyContractModule,
+  address: string,
+): Promise<boolean | null> {
+  try {
+    return module.ledger(await queryStateData(providers, address)).booted;
+  } catch (cause) {
+    console.info('[account-custody] this Passport could not be read just now', messageOf(cause));
+    return null;
+  }
+}
+
+/**
+ * Wait, to a ceiling, for the chain to show the account turned on.
+ *
+ * ONLY EVER REACHED BY A LOST ANSWER. A submission that came back with a
+ * verdict does not come here; this is what a dropped socket costs, and what it
+ * buys is the difference between a Passport that works and a sentence saying it
+ * does not. See {@link CUSTODY_CONFIRM_WAIT_MS}.
+ */
+async function awaitCustodyBooted(
+  deps: CustodyDeps,
+  providers: Record<string, unknown>,
+  module: CustodyContractModule,
+  address: string,
+): Promise<boolean> {
+  const deadline = deps.now() + CUSTODY_CONFIRM_WAIT_MS;
+  for (;;) {
+    if ((await custodyAccountBooted(providers, module, address)) === true) return true;
+    if (deps.now() >= deadline) return false;
+    await deps.sleep(CUSTODY_CONFIRM_POLL_MS);
+  }
+}
+
+/** The same wait for wave 1: is there a contract at the address we built? */
+async function awaitCustodyDeployed(
+  deps: CustodyDeps,
+  providers: Record<string, unknown>,
+  address: string,
+): Promise<boolean> {
+  const reader = providers.publicDataProvider as {
+    queryContractState(address: string): Promise<unknown>;
+  };
+  const deadline = deps.now() + CUSTODY_CONFIRM_WAIT_MS;
+  for (;;) {
+    const state = await reader.queryContractState(address).catch(() => null);
+    if (state) return true;
+    if (deps.now() >= deadline) return false;
+    await deps.sleep(CUSTODY_CONFIRM_POLL_MS);
+  }
+}
+
+/**
+ * Whether the account a record names is already turned on, asked of the chain.
+ *
+ * FOR A SCREEN OPENING ONTO A RECORD IT DOES NOT TRUST. The record says what
+ * this browser managed to write down; a confirmation that never arrived leaves
+ * it saying `activated: false` about an account that is activated and working.
+ * One read settles it, and it costs no ceremony: the device is not needed to
+ * ask, only to act.
+ *
+ * Null for a chain that could not be asked, false for a record with no address
+ * — neither of which is a reason to change anything.
+ */
+export async function custodyAccountActivatedOnChain(
+  record: CustodyAccountRecord,
+  overrides: Partial<CustodyDeps> = {},
+): Promise<boolean | null> {
+  if (record.address === null) return false;
+  const deps = withDefaults(overrides);
+  const wallet = await deps.wallet(record.user);
+  const [module, providers] = await Promise.all([
+    deps.contractModule(),
+    deps.providers(wallet, custodyPrivateStateId(record), custodyStoreAccount(record)),
+  ]);
+  return custodyAccountBooted(providers, module, record.address);
+}
+
+/* -------------------------------------------------------------------------- */
 /* Activation                                                                 */
 /* -------------------------------------------------------------------------- */
 
@@ -1410,6 +1552,41 @@ export async function activateK1Device(
     throw new Error('There is no Passport to add this key to yet.');
   }
 
+  const module = await deps.contractModule();
+  const providers = await deps.providers(
+    wallet,
+    custodyPrivateStateId(record),
+    custodyStoreAccount(record),
+  );
+
+  /**
+   * The finished record, written down once, wherever this call decides the
+   * account is on: because the chain already said so, because the circuit said
+   * so, or because the chain said so after the answer was lost.
+   */
+  const settle = (txHash: string | null): CustodyStepResult => {
+    const next = custodyActivatedRecord(record, device, txHash);
+    saveCustodyRecord(storage, next);
+    return {
+      record: next,
+      txHash,
+      explorerUrl: txHash ? custodyExplorerLink(txHash, network) : null,
+    };
+  };
+
+  /* THE CHAIN BEFORE THE CIRCUIT, the same rule the waves above keep. The
+     record says what this browser wrote down and the account says what
+     happened, and when they disagree the account wins: an activation that
+     landed while the confirmation was lost leaves `activated: false` over a
+     Passport that works, and running the circuit again is a dry run that
+     throws `failed assert: already activated` — which is what a reader was
+     shown as "Something went wrong" on 2026/09/22, about their own finished
+     Passport. A read that cannot be made changes nothing and the call proceeds
+     as it always did. */
+  if ((await custodyAccountBooted(providers, module, record.address)) === true) {
+    return settle(null);
+  }
+
   onPhase?.({ step: 'activate' });
   /* GENERALISATION 3 of 5: the activation circuit and ITS ARGUMENT LIST.
      The two arms do not take the same arguments -- `_with_jubjub` is
@@ -1424,24 +1601,39 @@ export async function activateK1Device(
   const salt = hexToBytes(record.saltHex);
   const activationArgs =
     device.arm === 'jubjub' ? [device.pk, salt] : [device.pk, salt, device.envelope];
-  const result = await callTx[circuit]?.(...activationArgs);
+
+  let result: unknown;
+  try {
+    result = await callTx[circuit]?.(...activationArgs);
+  } catch (cause) {
+    /* ALREADY ON IS DONE, NOT BROKEN. The assert fires on `booted`, nothing
+       ever clears it, and the account it fires about is this one — so the only
+       honest reading of it is that the work this call exists to do is already
+       finished. It is checked before the read below because it is an answer
+       and the read is a question. */
+    if (custodyAlreadyActivated(cause)) {
+      console.info('[account-custody] this Passport was already turned on', messageOf(cause));
+      return settle(null);
+    }
+    /* A LOST ANSWER IS NOT A LOST TRANSACTION, and it is the only failure this
+       waits on. The socket to the node drops on this network often enough to
+       have its own history (2026/09/05, 2026/09/07, 2026/09/22), and it drops
+       while the tab is waiting on a transaction that is already in a block —
+       so the chain is asked, under "Confirming", because that is what is
+       happening. Every other failure is a verdict or a refusal and is reported
+       at once, exactly as it always was: waiting on one buys nothing and costs
+       somebody two minutes. */
+    if (!custodyAnswerWasLost(cause)) throw cause;
+    onPhase?.({ step: 'confirm' });
+    console.info('[account-custody] the answer to this step was lost; asking the chain', messageOf(cause));
+    if (!(await awaitCustodyBooted(deps, providers, module, record.address))) {
+      throw new Error(CUSTODY_SETUP_UNCONFIRMED);
+    }
+    return settle(null);
+  }
 
   onPhase?.({ step: 'confirm' });
-  const providers = await deps.providers(
-    wallet,
-    custodyPrivateStateId(record),
-    custodyStoreAccount(record),
-  );
-  const txHash = await resolveHash(providers, result);
-  const next: CustodyAccountRecord = {
-    ...record,
-    activated: true,
-    pkXHex: device.pk.x.toString(16),
-    pkYHex: device.pk.y.toString(16),
-    txHashes: txHash ? [...record.txHashes, txHash] : record.txHashes,
-  };
-  saveCustodyRecord(storage, next);
-  return { record: next, txHash, explorerUrl: txHash ? custodyExplorerLink(txHash, network) : null };
+  return settle(await resolveHash(providers, result));
 }
 
 /* -------------------------------------------------------------------------- */

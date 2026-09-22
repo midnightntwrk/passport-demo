@@ -838,6 +838,167 @@ export const K1_ENROLMENT_UNCONFIRMED =
 export const CUSTODY_SETUP_INTERRUPTED =
   'Setting up this Passport was interrupted. Start again to finish it.';
 
+/* -------------------------------------------------------------------------- */
+/* A setup whose answer was lost rather than refused                          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The sentence for a step that was sent and never answered for.
+ *
+ * IT IS NOT "SOMETHING WENT WRONG", AND THAT DISTINCTION COST SOMEBODY THEIR
+ * PASSPORT. Live, 2026/09/22: a setup's activation was proved, balanced, and
+ * INCLUDED — transaction `c01c7791…`, block 569232 — and the node's socket
+ * dropped while the tab was waiting on it (`1000:: Normal Closure`, the same
+ * intermittent as 2026/09/05 and 2026/09/07). The wait threw, the failure had
+ * no sentence of its own, and the reader was shown {@link CUSTODY_UNEXPECTED}
+ * over an account that was finished and working.
+ *
+ * A lost answer is not a failed transaction, so the sentence says the true
+ * thing — it is still being set up — and invites the one action that resolves
+ * it either way, because pressing again now READS THE CHAIN before it acts.
+ */
+export const CUSTODY_SETUP_UNCONFIRMED =
+  'Your Passport is being set up. If this takes more than a minute, press again.';
+
+/**
+ * The words the activation circuit asserts with when the account is already on.
+ *
+ * Spelled once, here, because two callers match on it and a copy in the second
+ * one is a copy that stays behind when this one is corrected.
+ */
+export const CUSTODY_ALREADY_ACTIVATED = 'already activated';
+
+/**
+ * Every message in a cause chain, lower-cased and joined.
+ *
+ * THE WHOLE CHAIN, because midnight-js re-throws what the runtime threw and the
+ * words that matter are at the bottom of it. The live failure arrived as
+ * `Unexpected error executing scoped transaction '<unnamed>': Error: failed
+ * assert: already activated`, with `ContractRuntimeError` and `CompactError`
+ * under it — the same words at every level, but nothing guarantees that, and a
+ * reader of the top message alone is one library release away from missing it.
+ *
+ * A chain that points back at itself is walked once. It is not a shape anybody
+ * writes on purpose; it is a shape a re-thrower can produce, and a loop here
+ * would hang the tab rather than fail it.
+ */
+function custodyCauseText(cause: unknown): string {
+  const seen = new Set<unknown>();
+  const parts: string[] = [];
+  let here: unknown = cause;
+  while (here instanceof Error && !seen.has(here)) {
+    seen.add(here);
+    parts.push(here.message);
+    here = (here as { cause?: unknown }).cause;
+  }
+  return parts.join(' ').toLowerCase();
+}
+
+/**
+ * Whether the circuit refused because the account is ALREADY turned on.
+ *
+ * THIS IS A SUCCESS AND NOT A FAILURE, and reading it as one is the whole of
+ * the defect above. The assert fires on `booted`, which nothing ever clears —
+ * so the account the caller is trying to activate is activated, by this very
+ * device, and the only honest thing to do with that answer is to record it and
+ * carry on to the name.
+ */
+export function custodyAlreadyActivated(cause: unknown): boolean {
+  return custodyCauseText(cause).includes(CUSTODY_ALREADY_ACTIVATED);
+}
+
+/**
+ * Whether the chain itself refused, as opposed to the answer being lost.
+ *
+ * THE DIFFERENCE DECIDES WHETHER WAITING IS WORTH ANYTHING. A refused proof or
+ * a failed assert is a verdict: the transaction will never land, and polling
+ * for two minutes only makes somebody wait two minutes for the same sentence.
+ * A dropped socket is not a verdict at all — the transaction may well be in a
+ * block — so the chain is the only thing that can settle it, and the caller
+ * asks it rather than guessing.
+ *
+ * `already activated` is excluded explicitly although it IS a failed assert:
+ * it is the one verdict that means the work is done, and it is handled by
+ * {@link custodyAlreadyActivated} before anything here is consulted. Saying so
+ * in the code as well as in the order of the callers is what keeps the two
+ * answers from ever being read as the same one.
+ */
+export function custodyChainRefused(cause: unknown): boolean {
+  if (isCustodyProofNotBuilt(cause)) return true;
+  const text = custodyCauseText(cause);
+  if (text.includes(CUSTODY_ALREADY_ACTIVATED)) return false;
+  return text.includes('failed assert');
+}
+
+/**
+ * The shapes a lost connection arrives in, as this stack has produced them.
+ *
+ * `socket` and `disconnected` are polkadot-js's, verbatim, from the outages of
+ * 2026/09/05 (`WebSocket is not connected`) and 2026/09/22 (`disconnected from
+ * wss://rpc.stagenet.shielded.tools/: 1000:: Normal Closure`); the rest are
+ * what `fetch` and an aborted request say when the indexer or the node goes
+ * away mid-question.
+ */
+const CUSTODY_LOST_ANSWER_SIGNS: readonly string[] = [
+  'socket',
+  'disconnected',
+  'network',
+  'connection',
+  'econnreset',
+  'fetch failed',
+  'failed to fetch',
+  'timed out',
+  'timeout',
+  'aborted',
+];
+
+/**
+ * Whether the ANSWER was lost, as opposed to the work having failed.
+ *
+ * A POSITIVE TEST, AND IT HAS TO BE. Treating every unrecognised failure as a
+ * lost answer would put two minutes of polling in front of every honest
+ * refusal this layer can produce — a proving service that is not deployed, a
+ * transaction that could not be built, a balance that would not cover a fee —
+ * and what a person would see is a spinner where a sentence used to be. So a
+ * lost answer must LOOK like one, and everything else is reported at once and
+ * unchanged.
+ *
+ * The cost of the choice is that a socket dropping in words nobody has seen
+ * yet falls back to the old behaviour rather than to the new one, which is the
+ * right way round: the old behaviour is a sentence, and the failure mode of the
+ * alternative is a wait nobody can explain.
+ */
+export function custodyAnswerWasLost(cause: unknown): boolean {
+  if (custodyAlreadyActivated(cause)) return false;
+  if (custodyChainRefused(cause)) return false;
+  const text = custodyCauseText(cause);
+  return CUSTODY_LOST_ANSWER_SIGNS.some((sign) => text.includes(sign));
+}
+
+/**
+ * The record for an account the chain shows is turned on.
+ *
+ * The device is optional because the two callers know different things. The
+ * setup driver holds the device it just activated with and files its point, so
+ * a later call can name the roster entry without a second ceremony; a screen
+ * healing a record on open holds no device at all — settling one costs an
+ * assertion — and must not overwrite a point that is already there with
+ * nothing.
+ */
+export function custodyActivatedRecord(
+  record: CustodyAccountRecord,
+  device: { readonly pk: { readonly x: bigint; readonly y: bigint } } | null,
+  txHash: string | null,
+): CustodyAccountRecord {
+  return {
+    ...record,
+    activated: true,
+    pkXHex: device === null ? record.pkXHex : device.pk.x.toString(16),
+    pkYHex: device === null ? record.pkYHex : device.pk.y.toString(16),
+    txHashes: txHash === null ? record.txHashes : [...record.txHashes, txHash],
+  };
+}
+
 /**
  * The two distinct messages enrolment asks a signed-in key to sign.
  *
