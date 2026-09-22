@@ -1,5 +1,16 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
-import { ArrowRight, BadgeCheck, Copy, Loader2, RefreshCw, Search, ShieldCheck } from 'lucide-react'
+import {
+  ArrowRight,
+  BadgeCheck,
+  Copy,
+  Fingerprint,
+  Loader2,
+  RefreshCw,
+  Search,
+  ShieldCheck,
+  Sparkles,
+  Tag,
+} from 'lucide-react'
 
 import { normaliseNameForRecovery, type NameRecoveryOutcome } from '../lib/nameRecovery.js'
 import type { CustodyArm, CustodyIdentity } from '../lib/custodyArm.js'
@@ -26,14 +37,15 @@ import {
   type CustodyAccountRecord,
 } from '../identity/custodyContractPlan.js'
 import {
-  dynamicSetupAction,
   dynamicSetupCopy,
   dynamicSetupInterrupted,
   dynamicSetupPhase,
+  forgetCustodyChosenName,
   k1PrivateStateId,
   custodyRecoveryOutcome,
   readDynamicPassport,
   recoveredCustodyRecord,
+  saveCustodyChosenName,
   saveCustodyName,
   type DynamicPassportView,
 } from '../identity/custodyContractSession.js'
@@ -76,6 +88,29 @@ import {
   custodyUnplacedDeliveries,
   runCustodyWork,
 } from '../lib/custodyScreenRules.js'
+import {
+  CUSTODY_NAME_CHECKING_SENTENCE,
+  CUSTODY_NAME_UNREACHABLE_SENTENCE,
+  custodyNameAvailableSentence,
+  custodyNameEmptySentence,
+  custodyNameFirstAction,
+  custodyNameFirstEnabled,
+  custodyNameFirstStage,
+  custodyNameRaceOutcome,
+  custodyNameTakenSentence,
+  custodyNameWasTaken,
+} from '../lib/custodyNameFirst.js'
+/* `../identity/midnamesText.js` and NOT `../identity/midnames.js`, for the
+   reason `AliasClaim.tsx` gives at the same import: the module that goes and
+   ASKS top-level awaits a 9.84 MB ledger WASM, and naming a value from it here
+   would hold this screen's first render behind that fetch. The rules are text;
+   the question is a dynamic import at the moment it is put. */
+import {
+  aliasDomain,
+  normalizePassportAlias,
+  type AliasAvailability,
+} from '../identity/midnamesText.js'
+import { NETWORK_LABELS, type PassportNetwork } from './NetworkSwitcher.js'
 import type { PassportContractName } from '../identity/contractRuntime.js'
 import type { LocalMidnightWallet } from '../lib/localWallet.js'
 import ThemeToggle from './ThemeToggle'
@@ -205,7 +240,17 @@ export interface CustodyPassportProps {
   notice?: string | null
 }
 
-type Screen = 'create' | 'name' | 'home' | 'recover'
+/**
+ * THE THREE SCREENS OF MAKING ONE, AND THE WAY BACK IN.
+ *
+ * `create` is gone (2026/09/22). It was a page whose whole content was an offer
+ * and a button, sitting between a person and the two things they came for — an
+ * explanation and a name — and the flow it started then asked for the name
+ * afterwards, on a fourth screen, behind a second press. The offer is now the
+ * button on the name step, which is the screen that has something to offer it
+ * ABOUT. See `../lib/custodyNameFirst.ts`.
+ */
+type Screen = 'welcome' | 'name' | 'home' | 'recover'
 
 export default function CustodyPassport({ network, arm, notice: browserNotice = null }: CustodyPassportProps) {
   /**
@@ -273,6 +318,21 @@ export default function CustodyPassport({ network, arm, notice: browserNotice = 
      away rather than offering to create a Passport and throwing
      `CUSTODY_SETUP_INTERRUPTED` at whoever pressed it. */
   const [interrupted, setInterrupted] = useState(false)
+  /* The name that was TAKEN between being chosen and being claimed, so the name
+     step can say so over a field the person is about to retype. Cleared the
+     moment they type. See `../lib/custodyNameFirst.ts`. */
+  const [taken, setTaken] = useState<string | null>(null)
+  /**
+   * Whether the welcome page has been read in this session.
+   *
+   * A REF AND NOT STATE, for the reason `userRef` above exists: {@link refresh}
+   * decides the screen and is a `useCallback` that depends on nothing, so a
+   * refresh fired after the welcome was left would read the value the callback
+   * closed over — `false` — and put the reader back on the introduction. There
+   * is nothing to re-render for either: whoever sets it moves the screen in the
+   * same breath.
+   */
+  const welcomeReadRef = useRef(false)
   const device = useRef<CustodyIdentity | null>(null)
   /* Whether a payment or a setup is running. See {@link run}. */
   const inFlight = useRef(false)
@@ -284,7 +344,20 @@ export default function CustodyPassport({ network, arm, notice: browserNotice = 
     const next = readDynamicPassport({ storage: window.localStorage, user: settled, network })
     setView(next)
     setInterrupted(dynamicSetupInterrupted(next.record))
-    setScreen(next.stage === 'home' ? 'home' : next.stage === 'name' ? 'name' : 'create')
+    /* THE ONE PLACE THE SCREEN IS DECIDED, and it is decided from what is
+       stored rather than from what just happened. `next.stage` is the old
+       four-way answer and is still what says whether the setup is FINISHED —
+       `name` and `home` are both "every step landed"; which of the two is
+       shown is the name-first rule's to say, not this read's. */
+    setScreen(
+      custodyNameFirstStage({
+        setupStarted: next.record !== null,
+        setupFinished: next.stage === 'name' || next.stage === 'home',
+        claimedName: next.name,
+        chosenName: next.chosenName,
+        welcomeRead: welcomeReadRef.current,
+      }),
+    )
     return next
   }, [network])
 
@@ -446,77 +519,161 @@ export default function CustodyPassport({ network, arm, notice: browserNotice = 
   /* Making one                                                             */
   /* ---------------------------------------------------------------------- */
 
-  const createPassport = useCallback(() => {
-    /* The BUTTON says what is happening; the line under it says how far along
-       that is. Putting the counted sentence on both would be the same words
-       twice, which reads as a stutter rather than as progress. */
-    void run(PHASE_LABELS.deploy, async () => {
-      /* An interrupted setup is thrown away first, so this press deploys a
-         fresh Passport rather than pressing the same broken step again. The
-         account already on chain is left where it is: it is dormant, it holds
-         nothing, and there is no transaction that would tidy it away. */
-      const { device: identity } = await ensureIdentity()
-      if (interrupted) {
-        await startCustodyAccountAgain(arm.session, identity)
-        setInterrupted(false)
-      }
-      const onPhase = (phase: CustodyPhase) => {
-        setBusy(phase.detail ? `${PHASE_LABELS[phase.step]}` : PHASE_LABELS[phase.step])
-      }
-      /* Both halves are resumable and both check the chain before they act, so
-         running them one after the other is safe on a second press: whatever
-         already landed is skipped rather than replayed. */
-      let record = (await deployCustodyAccount(arm.session, identity, onPhase)).record
-      if (!record.activated) {
-        record = (await activateK1Device(arm.session, identity, onPhase)).record
-      }
-      /* THE OPENING BALANCE IS ASKED FOR WHEN THE KEY IS ON, and not when the
-         account lands. An unactivated account holds nothing and can be called
-         by nobody, and the service refuses to fund one — so asking at the
-         deploy is a refusal every time, on a schedule. */
-      if (record.address !== null) await askForOpeningBalance(record.address)
-      refresh()
-    })
-  }, [arm, askForOpeningBalance, ensureIdentity, interrupted, refresh, run])
+  /**
+   * The registry's own answer about one name, asked as the person types.
+   *
+   * The ASK is a dynamic import for the reason this file's `midnamesText`
+   * import gives; the debounce and the staleness token are the field's, in
+   * {@link NameStep}, exactly as `AliasClaim.tsx` has done it since 2026/08/25.
+   */
+  const checkName = useCallback(
+    async (alias: string): Promise<AliasAvailability> => {
+      const { checkAliasAvailability } = await import('../identity/midnames.js')
+      return checkAliasAvailability(network as PassportNetwork, alias)
+    },
+    [network],
+  )
 
-  /* ---------------------------------------------------------------------- */
-  /* The name                                                               */
-  /* ---------------------------------------------------------------------- */
+  /**
+   * Registers the chosen name against an account that now exists.
+   *
+   * THE RE-READ BEFORE THE CLAIM IS NOT BELT AND BRACES. The name was chosen
+   * before a three-step setup, which is minutes, and a name is a first-come
+   * thing — so by the time there is an account to bind it to, somebody else may
+   * hold it. Asking once more costs one read and turns a refusal from the
+   * service into a sentence the reader can act on, on a screen with a field in
+   * it. `fresh` because the answer from the typing is exactly the answer that
+   * may have gone stale.
+   *
+   * WHAT A LOST RACE DOES NOT DO IS THROW THE PASSPORT AWAY. The account is
+   * built, activated, and theirs; only the name went. See
+   * {@link custodyNameRaceOutcome}.
+   */
+  const claimChosenName = useCallback(
+    async (options: {
+      alias: string
+      user: string
+      address: string
+    }): Promise<void> => {
+      const { alias, user: owner, address } = options
+      const networkLabel = NETWORK_LABELS[network as PassportNetwork] ?? network
+      const loseTheRace = () => {
+        const outcome = custodyNameRaceOutcome(aliasDomain(alias), networkLabel)
+        forgetCustodyChosenName(window.localStorage, owner, network)
+        setTaken(alias)
+        setError(outcome.sentence)
+        refresh()
+      }
 
-  const claimName = useCallback(
-    (alias: string) => {
-      void run('Choosing your name', async () => {
-        const address = view?.record?.address ?? null
-        if (user === null || address === null) {
-          throw new Error('Your Passport is still being set up. Try again once it is ready.')
-        }
-        const [{ deriveMidnamesOwnerKey }, { sponsorAliasRegistrationAcross }, deps] =
-          await Promise.all([
-            import('../identity/midnames.js'),
-            import('../identity/sponsoredAlias.js'),
-            Promise.resolve(defaultCustodyDeps()),
-          ])
-        /* The name's owner secret comes from this device's own transaction key
-           rather than from anything the sign-in holds, because the sign-in holds
-           nothing a key can be derived from — its signatures carry fresh
-           randomness every time (DKLs23), so there is nothing deterministic to
-           hash. The consequence is written down in `dynamic-integration.md`:
-           the name can be claimed here and cannot be re-pointed from a second
-           device in this version. Coming back to the Passport does not need it.
-           */
-        const { custodyWalletSeed } = await import('../identity/custodyContractClient.js')
-        const ownerKey = await deriveMidnamesOwnerKey(custodyWalletSeed(deps, user))
+      setBusy('Claiming your name')
+      const [{ checkAliasAvailability, deriveMidnamesOwnerKey }, { sponsorAliasRegistrationAcross }, deps] =
+        await Promise.all([
+          import('../identity/midnames.js'),
+          import('../identity/sponsoredAlias.js'),
+          Promise.resolve(defaultCustodyDeps()),
+        ])
+      const stillFree = await checkAliasAvailability(network as PassportNetwork, alias, {
+        fresh: true,
+      })
+      if (stillFree.status === 'taken') {
+        loseTheRace()
+        return
+      }
+      /* The name's owner secret comes from this device's own transaction key
+         rather than from anything the sign-in holds, because the sign-in holds
+         nothing a key can be derived from — its signatures carry fresh
+         randomness every time (DKLs23), so there is nothing deterministic to
+         hash. The consequence is written down in `dynamic-integration.md`: the
+         name can be claimed here and cannot be re-pointed from a second device
+         in this version. Coming back to the Passport does not need it. */
+      const { custodyWalletSeed } = await import('../identity/custodyContractClient.js')
+      const ownerKey = await deriveMidnamesOwnerKey(custodyWalletSeed(deps, owner))
+      try {
         await sponsorAliasRegistrationAcross(FUNDER_URLS, {
           alias,
           ownerKey,
           contractAddress: address,
           network: network as 'stagenet',
         })
-        saveCustodyName(window.localStorage, user, network, alias)
+      } catch (cause) {
+        if (custodyNameWasTaken(cause)) {
+          loseTheRace()
+          return
+        }
+        throw cause
+      }
+      saveCustodyName(window.localStorage, owner, network, alias)
+      forgetCustodyChosenName(window.localStorage, owner, network)
+      setTaken(null)
+      refresh()
+    },
+    [network, refresh],
+  )
+
+  /**
+   * ONE PRESS: the approval, the setup, and the name.
+   *
+   * THE ORDER IS THE POINT (2026/09/22). The name is written down BEFORE the
+   * first transaction leaves, so a reload in the middle of a three-step setup
+   * comes back to a Passport that still knows what it is called; and the claim
+   * runs on the same press as the setup, so nobody is shown a "your Passport is
+   * ready" screen whose only content is a second button.
+   *
+   * The name is written after {@link ensureIdentity} and not before it, because
+   * on the passkey arm the key every store is filed under IS the ceremony's
+   * output: writing earlier would mean writing under a user key that is either
+   * null or somebody else's.
+   */
+  const createPassport = useCallback(
+    (alias: string) => {
+      /* The BUTTON says what is happening; the line under it says how far along
+         that is. Putting the counted sentence on both would be the same words
+         twice, which reads as a stutter rather than as progress. */
+      void run(PHASE_LABELS.deploy, async () => {
+        const settled = await ensureIdentity()
+        const identity = settled.device
+        const owner = settled.userKey
+        saveCustodyChosenName(window.localStorage, owner, network, alias)
+        /* An interrupted setup is thrown away first, so this press deploys a
+           fresh Passport rather than pressing the same broken step again. The
+           account already on chain is left where it is: it is dormant, it holds
+           nothing, and there is no transaction that would tidy it away. */
+        if (interrupted) {
+          await startCustodyAccountAgain(arm.session, identity)
+          setInterrupted(false)
+        }
+        const onPhase = (phase: CustodyPhase) => {
+          setBusy(phase.detail ? `${PHASE_LABELS[phase.step]}` : PHASE_LABELS[phase.step])
+        }
+        /* Both halves are resumable and both check the chain before they act, so
+           running them one after the other is safe on a second press: whatever
+           already landed is skipped rather than replayed. */
+        let record = (await deployCustodyAccount(arm.session, identity, onPhase)).record
+        if (!record.activated) {
+          record = (await activateK1Device(arm.session, identity, onPhase)).record
+        }
+        /* THE OPENING BALANCE IS ASKED FOR WHEN THE KEY IS ON, and not when the
+           account lands. An unactivated account holds nothing and can be called
+           by nobody, and the service refuses to fund one — so asking at the
+           deploy is a refusal every time, on a schedule. */
+        if (record.address !== null) await askForOpeningBalance(record.address)
         refresh()
+        if (record.address === null) {
+          throw new Error('Your Passport is still being set up. Try again once it is ready.')
+        }
+        await claimChosenName({ alias, user: owner, address: record.address })
       })
     },
-    [network, refresh, run, user, view],
+    [
+      arm,
+      askForOpeningBalance,
+      claimChosenName,
+      ensureIdentity,
+      interrupted,
+      network,
+      refresh,
+      run,
+    ],
   )
 
   /* ---------------------------------------------------------------------- */
@@ -1263,18 +1420,63 @@ export default function CustodyPassport({ network, arm, notice: browserNotice = 
         keyPhrase={arm.keyPhrase}
         otherKeyHint={arm.otherKeyHint}
         onFind={findByName}
-        onBack={() => setScreen(view?.stage === 'home' ? 'home' : 'create')}
+        onBack={() =>
+          setScreen(
+            custodyNameFirstStage({
+              setupStarted: view?.record != null,
+              setupFinished: view?.stage === 'name' || view?.stage === 'home',
+              claimedName: view?.name ?? null,
+              chosenName: view?.chosenName ?? null,
+              welcomeRead: welcomeReadRef.current,
+            }),
+          )
+        }
+      />
+    )
+  }
+
+  if (screen === 'welcome') {
+    return (
+      <WelcomeStep
+        kicker={arm.kicker}
+        lede={arm.lede}
+        browserNotice={browserNotice}
+        onChooseName={() => {
+          welcomeReadRef.current = true
+          setScreen('name')
+        }}
+        onRecover={() => setScreen('recover')}
       />
     )
   }
 
   if (screen === 'name') {
+    const setupFinished = view?.stage === 'name' || view?.stage === 'home'
     return (
       <NameStep
+        kicker={arm.kicker}
+        networkLabel={NETWORK_LABELS[network as PassportNetwork] ?? network}
+        chosenName={view?.chosenName ?? null}
+        takenName={taken}
+        action={custodyNameFirstAction({
+          setupStarted: view?.record != null,
+          setupFinished,
+          interrupted,
+        })}
+        hint={
+          busy !== null || (view?.record && nextCustodyStep(view.record) !== 'ready')
+            ? dynamicSetupCopy(dynamicSetupPhase(view?.record ?? null))
+            : 'Setting your Passport up and claiming your name are paid for on your behalf.'
+        }
         busy={busy}
         error={error}
-        onClaim={claimName}
-        onSkip={() => setScreen('home')}
+        checkName={checkName}
+        onCreate={createPassport}
+        onTyping={() => {
+          if (taken !== null) setTaken(null)
+          if (error !== null) setError(null)
+        }}
+        onRecover={() => setScreen('recover')}
       />
     )
   }
@@ -1305,64 +1507,15 @@ export default function CustodyPassport({ network, arm, notice: browserNotice = 
     )
   }
 
-  const phase = dynamicSetupPhase(view?.record ?? null)
+  /* EVERY SCREEN THIS FLOW HAS IS NAMED ABOVE, so there is nothing to fall
+     through to. Until 2026/09/22 the fall-through WAS a screen — "Set up your
+     Passport", one button, no name on it — and it is the screen this work
+     deleted. A stage the rule cannot name is a defect rather than a default,
+     and the honest thing to paint for one is the same "getting ready" the arm
+     gets before it is ready. */
   return (
     <Shell label="Passport">
-      <p className="mnob-kicker">{arm.kicker}</p>
-      <h1 className="mnob-title">
-        <span>Set up</span>
-        <span>your Passport</span>
-      </h1>
-      <p className="mnob-lede">{arm.lede}</p>
-
-      {/* WHAT THIS BROWSER ALREADY HOLDS, said before the offer rather than
-          discovered afterwards as a second Passport with a second name to
-          claim. See `../lib/custodyRoute.ts`. */}
-      {browserNotice !== null ? (
-        <p className="mnob-hint mndyn-browser-notice" role="status">
-          {browserNotice}
-        </p>
-      ) : null}
-
-      <div className="mndyn-actions">
-        <button
-          type="button"
-          className="mnob-primary"
-          onClick={createPassport}
-          disabled={busy !== null}
-        >
-          <span className="mnob-primary-copy">
-            {busy !== null ? (
-              <Loader2 className="mnob-working-spinner" size={17} strokeWidth={2} aria-hidden="true" />
-            ) : (
-              <ShieldCheck size={17} strokeWidth={2} aria-hidden="true" />
-            )}
-            {busy ?? dynamicSetupAction(view?.record ?? null)}
-          </span>
-          <ArrowRight size={17} strokeWidth={2.2} aria-hidden="true" />
-        </button>
-
-        <p className="mnob-hint" role="status">
-          {busy !== null || (view?.record && nextCustodyStep(view.record) !== 'ready')
-            ? dynamicSetupCopy(phase)
-            : 'Setting your Passport up is paid for on your behalf.'}
-        </p>
-
-        {error ? (
-          <div className="mnob-unusable" role="alert">
-            <p className="mnob-unusable-copy">{error}</p>
-          </div>
-        ) : null}
-
-        <button
-          type="button"
-          className="mnob-alt"
-          onClick={() => setScreen('recover')}
-          disabled={busy !== null}
-        >
-          I already have a Passport
-        </button>
-      </div>
+      <p className="mnob-lede">Getting your Passport ready…</p>
     </Shell>
   )
 }
@@ -1387,73 +1540,347 @@ function Shell(props: { label: string; children: React.ReactNode }) {
   )
 }
 
+/* -------------------------------------------------------------------------- */
+/* The page that says what a Passport is                                      */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * THE FOUR PROMISES, and every one of them is a thing this build does today.
+ *
+ * Adapted from `Welcome.tsx`, which has said them to passkey holders since
+ * 2026/08/26 — "an intro page… what is this, what am I getting" (Hector,
+ * 09:47) — and is now said to BOTH arms in the same words. The first point is
+ * the only one that had to change: the passkey road could say "behind the
+ * passkey you just made", and this one cannot, because half its readers signed
+ * in with Google. What is true of both is that nobody issued it to them.
+ *
+ * An intro screen is the worst possible place to over-claim: it is read before
+ * anything can contradict it. Nothing here describes a feature that is coming.
+ */
+const WELCOME_POINTS = [
+  {
+    icon: Fingerprint,
+    title: 'An identity you hold',
+    body: 'Your Passport is yours. Nobody issues it to you, nobody holds it for you, and nobody can take it back.',
+  },
+  {
+    icon: Tag,
+    title: 'A name, not an address',
+    body: 'Pick a name people can actually send to and apps can recognise you by, instead of a long string you have to copy carefully.',
+  },
+  {
+    icon: Sparkles,
+    title: 'Fees are covered for you',
+    body: 'You hold nothing and spend nothing to get started. Setting your Passport up is paid for on your behalf.',
+  },
+  {
+    icon: BadgeCheck,
+    title: 'Prove things privately',
+    body: 'Share what an app genuinely needs to know about you — and nothing else. You are asked every time, and you can say no.',
+  },
+] as const
+
+/**
+ * The first thing a new Passport sees, on either arm.
+ *
+ * ONE SCREEN, ONE ACTION, AND NO SKIP. There was a skip on the passkey road
+ * until 2026/08/30 and it led to the same mandatory name step, which is what a
+ * skip promises not to do. That is even truer here: the name IS the creation
+ * now, so a control offering to walk past it would describe an escape that
+ * does not exist.
+ *
+ * The kicker is the ARM's, whole — "Signed in with Google", or the passkey's
+ * own words — for the reason `../lib/custodyArm.ts` gives: a template that
+ * reads well for one arm is one arm's sentence with a hole in it.
+ */
+function WelcomeStep(props: {
+  kicker: string
+  lede: string
+  browserNotice: string | null
+  onChooseName: () => void
+  onRecover: () => void
+}) {
+  return (
+    <Shell label="Welcome">
+      <p className="mnob-kicker">{props.kicker}</p>
+      <h1 className="mnob-title">
+        <span>Welcome to</span>
+        <span>Passport</span>
+      </h1>
+      <p className="mnob-lede">{props.lede}</p>
+
+      {/* WHAT THIS BROWSER ALREADY HOLDS, said before the offer rather than
+          discovered afterwards as a second Passport with a second name to
+          claim. See `../lib/custodyRoute.ts`. */}
+      {props.browserNotice !== null ? (
+        <p className="mnob-hint mndyn-browser-notice" role="status">
+          {props.browserNotice}
+        </p>
+      ) : null}
+
+      <ul className="mndyn-points">
+        {WELCOME_POINTS.map((point) => (
+          <li key={point.title} className="mndyn-point">
+            <span className="mndyn-point-mark" aria-hidden="true">
+              <point.icon size={16} strokeWidth={2} />
+            </span>
+            <span className="mndyn-point-text">
+              <span className="mndyn-point-title">{point.title}</span>
+              <span className="mndyn-point-body">{point.body}</span>
+            </span>
+          </li>
+        ))}
+      </ul>
+
+      <div className="mndyn-actions">
+        <button type="button" className="mnob-primary" onClick={props.onChooseName}>
+          <span className="mnob-primary-copy">
+            <Tag size={17} strokeWidth={2} aria-hidden="true" />
+            Choose my name
+          </span>
+          <ArrowRight size={17} strokeWidth={2.2} aria-hidden="true" />
+        </button>
+        {/* The way in for somebody who is not new. It is quiet, and under the
+            primary action, because the common reader of this screen genuinely
+            is making their first Passport. */}
+        <button type="button" className="mnob-alt" onClick={props.onRecover}>
+          I already have a Passport
+        </button>
+      </div>
+    </Shell>
+  )
+}
+
+/* -------------------------------------------------------------------------- */
+/* The name, and the press that makes the whole Passport                      */
+/* -------------------------------------------------------------------------- */
+
+/** How long the field waits after the last keystroke before it asks. */
+const NAME_DEBOUNCE_MS = 500
+
+/** What the field knows about what has been typed into it. */
+type NameFieldState =
+  | { kind: 'empty' }
+  | { kind: 'invalid'; message: string }
+  | { kind: 'checking'; alias: string }
+  | { kind: 'answered'; alias: string; availability: AliasAvailability }
+
+/**
+ * THE SCREEN THE WHOLE PASSPORT IS MADE FROM.
+ *
+ * Choose a name, and press once. The press asks for the approval this arm
+ * needs, sets the Passport up in its three counted steps, and registers the
+ * name against it — see `createPassport` above. There is no "choose one later"
+ * on it, and there must not be: the name is not a decoration on a Passport
+ * that already exists, it is part of making one.
+ *
+ * THE FIELD IS `AliasClaim.tsx`'S, DELIBERATELY. Same 500 ms debounce, same
+ * staleness token, same rules (`normalizePassportAlias`), and the same two
+ * sentences about what the registry said — through `../lib/custodyNameFirst.ts`,
+ * so the words on the two roads cannot drift apart. What is NOT carried over is
+ * the queue: the old road could keep a name it had not checked, because there
+ * the account already existed. Here there is nothing honest to queue.
+ */
 function NameStep(props: {
+  kicker: string
+  networkLabel: string
+  /** The name written down before this setup started, prefilled on a resume. */
+  chosenName: string | null
+  /** A name that was taken between being chosen and being claimed. */
+  takenName: string | null
+  /** What the one primary control says. See {@link custodyNameFirstAction}. */
+  action: string
+  hint: string
   busy: string | null
   error: string | null
-  onClaim: (alias: string) => void
-  onSkip: () => void
+  checkName: (alias: string) => Promise<AliasAvailability>
+  onCreate: (alias: string) => void
+  onTyping: () => void
+  onRecover: () => void
 }) {
-  const [name, setName] = useState('')
-  const trimmed = normaliseNameForRecovery(name)
+  const { checkName, chosenName, takenName, onTyping } = props
+  const [value, setValue] = useState(chosenName ?? takenName ?? '')
+  const [field, setField] = useState<NameFieldState>({ kind: 'empty' })
+  const probe = useRef(0)
+
+  const busy = props.busy !== null
+
+  /* A name carried over from a previous visit, or from a race that was lost,
+     goes into the field rather than being asked for again — and is CHECKED
+     rather than assumed, because the reason it is here may be that somebody
+     else took it. */
+  useEffect(() => {
+    const carried = chosenName ?? takenName
+    if (carried === null) return
+    setValue((current) => (current === '' ? carried : current))
+  }, [chosenName, takenName])
+
+  useEffect(() => {
+    const raw = value.trim()
+    if (!raw) {
+      setField({ kind: 'empty' })
+      return undefined
+    }
+    let alias: string
+    try {
+      alias = normalizePassportAlias(raw)
+    } catch (cause) {
+      setField({ kind: 'invalid', message: cause instanceof Error ? cause.message : String(cause) })
+      return undefined
+    }
+    setField({ kind: 'checking', alias })
+    const token = probe.current + 1
+    probe.current = token
+    const timer = window.setTimeout(() => {
+      void checkName(alias).then(
+        (availability) => {
+          if (probe.current !== token) return
+          setField({ kind: 'answered', alias, availability })
+        },
+        (cause: unknown) => {
+          if (probe.current !== token) return
+          setField({
+            kind: 'answered',
+            alias,
+            availability: {
+              status: 'unreachable',
+              detail: cause instanceof Error ? cause.message : String(cause),
+            },
+          })
+        },
+      )
+    }, NAME_DEBOUNCE_MS)
+    return () => window.clearTimeout(timer)
+  }, [checkName, value])
+
+  const alias = field.kind === 'checking' || field.kind === 'answered' ? field.alias : null
+  const available = field.kind === 'answered' && field.availability.status === 'available'
+  const enabled = custodyNameFirstEnabled({ busy, available })
+
   return (
     <Shell label="Passport">
-      <p className="mnob-kicker">Your Passport is ready</p>
+      <p className="mnob-kicker">{props.kicker}</p>
       <h1 className="mnob-title">
         <span>Choose</span>
-        <span>your name</span>
+        <span>your .night name</span>
       </h1>
       <p className="mnob-lede">
-        Pick a name people can send to, instead of a long string they have to copy carefully.
+        Pick a name people can send to, instead of a long string they have to copy carefully. It is
+        part of your Passport from the moment it is made.
       </p>
+
       <form
         className="mnob-stage"
         onSubmit={(event: FormEvent) => {
           event.preventDefault()
-          if (props.busy === null && trimmed) props.onClaim(trimmed)
+          if (enabled && alias !== null) props.onCreate(alias)
         }}
       >
-        <label className="mnob-hint" htmlFor="dynamic-name">
+        <label className="mnob-hint" htmlFor="custody-name">
           Your name
         </label>
         <input
-          id="dynamic-name"
+          id="custody-name"
           className="mnob-input"
           type="text"
           autoCapitalize="none"
           autoCorrect="off"
           spellCheck={false}
-          placeholder="alice, or an address they gave you"
-          value={name}
-          onChange={(event) => setName(event.target.value)}
-          disabled={props.busy !== null}
+          placeholder="alice"
+          value={value}
+          onChange={(event) => {
+            setValue(event.target.value)
+            onTyping()
+          }}
+          disabled={busy}
         />
+
+        <NameAvailability field={field} networkLabel={props.networkLabel} />
+
         {props.error ? (
           <div className="mnob-unusable" role="alert">
             <p className="mnob-unusable-copy">{props.error}</p>
           </div>
         ) : null}
-        <button type="submit" className="mnob-primary" disabled={props.busy !== null || !trimmed}>
+
+        <button type="submit" className="mnob-primary" disabled={!enabled}>
           <span className="mnob-primary-copy">
-            {props.busy !== null ? (
+            {busy ? (
               <Loader2 className="mnob-working-spinner" size={17} strokeWidth={2} aria-hidden="true" />
             ) : (
-              <BadgeCheck size={17} strokeWidth={2} aria-hidden="true" />
+              <ShieldCheck size={17} strokeWidth={2} aria-hidden="true" />
             )}
-            {props.busy ?? 'Claim my name'}
+            {props.busy ?? props.action}
           </span>
           <ArrowRight size={17} strokeWidth={2.2} aria-hidden="true" />
         </button>
-        <p className="mnob-hint">Claiming a name is paid for on your behalf.</p>
-        <button
-          type="button"
-          className="mnob-alt"
-          onClick={props.onSkip}
-          disabled={props.busy !== null}
-        >
-          Choose one later
+
+        {/* The counted line while the setup runs, and the promise before it
+            starts. One `role="status"` element, because a reader watching
+            three steps go by should not have two places to look. */}
+        <p className="mnob-hint" role="status">
+          {props.hint}
+        </p>
+
+        <button type="button" className="mnob-alt" onClick={props.onRecover} disabled={busy}>
+          I already have a Passport
         </button>
       </form>
     </Shell>
+  )
+}
+
+/** The one line under the field, in the words `../lib/custodyNameFirst.ts` sets. */
+function NameAvailability(props: { field: NameFieldState; networkLabel: string }) {
+  const { field, networkLabel } = props
+  if (field.kind === 'empty') {
+    return (
+      <p className="mndyn-status mndyn-status-checking">
+        <span className="mndyn-status-dot" aria-hidden="true" />
+        <span>{custodyNameEmptySentence(networkLabel)}</span>
+      </p>
+    )
+  }
+  if (field.kind === 'invalid') {
+    return (
+      <p className="mndyn-status mndyn-status-error" role="alert">
+        <span className="mndyn-status-dot" aria-hidden="true" />
+        <span>{field.message}</span>
+      </p>
+    )
+  }
+  if (field.kind === 'checking') {
+    return (
+      <p className="mndyn-status mndyn-status-checking" role="status">
+        <Loader2 className="mnob-working-spinner" size={13} aria-hidden="true" />
+        <span>{CUSTODY_NAME_CHECKING_SENTENCE}</span>
+      </p>
+    )
+  }
+  if (field.availability.status === 'available') {
+    return (
+      <p className="mndyn-status mndyn-status-available" role="status">
+        <span className="mndyn-status-dot" aria-hidden="true" />
+        <span>{custodyNameAvailableSentence(aliasDomain(field.alias))}</span>
+      </p>
+    )
+  }
+  if (field.availability.status === 'taken') {
+    return (
+      <p className="mndyn-status mndyn-status-taken" role="status">
+        <span className="mndyn-status-dot" aria-hidden="true" />
+        <span>{custodyNameTakenSentence(aliasDomain(field.alias), networkLabel)}</span>
+      </p>
+    )
+  }
+  /* A question that could not be put is never a "no" — and it is never a yes
+     either, which is why the control stays off. The service's own words go to
+     the console, where they are of use to somebody. */
+  return (
+    <p className="mndyn-status mndyn-status-error" role="status">
+      <span className="mndyn-status-dot" aria-hidden="true" />
+      <span>{CUSTODY_NAME_UNREACHABLE_SENTENCE}</span>
+    </p>
   )
 }
 

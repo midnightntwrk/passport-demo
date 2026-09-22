@@ -307,6 +307,109 @@ export function saveCustodyName(
 }
 
 /* -------------------------------------------------------------------------- */
+/* The name a Passport CHOSE, before it had anything to claim it against      */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * `passport-account-custody-chosen-name:v1` — the `.night` name picked on the
+ * name step and not yet registered, per user and network.
+ *
+ * WHY IT IS A SECOND KEY AND NOT THE ONE ABOVE. {@link CUSTODY_NAME_KEY} means
+ * "this Passport holds this name", and everything downstream of it treats it
+ * that way: it is what Home puts in its heading, what the stage machine reads
+ * as "named", and what a second device would be told on a recovery. A name that
+ * has only been TYPED is none of those things — the registration has not
+ * happened, and it may never happen, because somebody else can claim it in the
+ * minutes a three-step setup takes. Writing it into the same key would put a
+ * name on Home that the network has never heard of.
+ *
+ * WHY IT IS WRITTEN AT ALL. Since 2026/09/22 the name is chosen BEFORE the
+ * Passport is built, so the setup carries an intention with it. A reload
+ * halfway through — which is a tab closing, a phone locking, or a browser
+ * deciding to reclaim memory — would otherwise come back to a built account and
+ * an empty field, and ask a person to choose a name they have already chosen.
+ * It is written before the first transaction leaves and deleted the moment the
+ * claim settles, either way: a claim that succeeded has a real name beside it,
+ * and one that lost a race has nothing left to retry.
+ *
+ * Same map shape and same key function as the claimed store, so an operator
+ * clearing one finds the other beside it.
+ */
+export const CUSTODY_CHOSEN_NAME_KEY = 'passport-account-custody-chosen-name:v1';
+
+/** Every chosen-but-unclaimed name, or an empty map. */
+export function loadCustodyChosenNames(storage: CustodyStorage): Record<string, string> {
+  let raw: string | null = null;
+  try {
+    raw = storage.getItem(CUSTODY_CHOSEN_NAME_KEY);
+  } catch {
+    return {};
+  }
+  if (raw === null) return {};
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    const names: Record<string, string> = {};
+    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof value === 'string' && value.length > 0) names[key] = value;
+    }
+    return names;
+  } catch {
+    return {};
+  }
+}
+
+/** The name this user picked on this network and has not claimed yet, or null. */
+export function loadCustodyChosenName(
+  storage: CustodyStorage,
+  user: string,
+  network: string,
+): string | null {
+  return loadCustodyChosenNames(storage)[custodyNameKey(user, network)] ?? null;
+}
+
+/**
+ * Write the chosen name down, before the setup that will claim it starts.
+ *
+ * A storage that throws is not a reason to refuse the setup: the cost is being
+ * asked for the name again after a reload, and the cost of throwing here is a
+ * Passport that cannot be made at all in private browsing.
+ */
+export function saveCustodyChosenName(
+  storage: CustodyStorage,
+  user: string,
+  network: string,
+  name: string,
+): void {
+  const names = loadCustodyChosenNames(storage);
+  names[custodyNameKey(user, network)] = name;
+  try {
+    storage.setItem(CUSTODY_CHOSEN_NAME_KEY, JSON.stringify(names));
+  } catch (cause) {
+    console.warn(
+      '[account-custody] could not write the chosen name down; a reload will ask for it again',
+      cause,
+    );
+  }
+}
+
+/** Forget it — the claim settled, one way or the other. */
+export function forgetCustodyChosenName(
+  storage: CustodyStorage,
+  user: string,
+  network: string,
+): void {
+  const names = loadCustodyChosenNames(storage);
+  if (!(custodyNameKey(user, network) in names)) return;
+  delete names[custodyNameKey(user, network)];
+  try {
+    storage.setItem(CUSTODY_CHOSEN_NAME_KEY, JSON.stringify(names));
+  } catch (cause) {
+    console.warn('[account-custody] could not forget the chosen name', cause);
+  }
+}
+
+/* -------------------------------------------------------------------------- */
 /* Which Passport a PASSKEY on this device holds                              */
 /* -------------------------------------------------------------------------- */
 
@@ -341,7 +444,15 @@ export interface DynamicPassportView {
   readonly user: string;
   readonly network: string;
   readonly record: CustodyAccountRecord | null;
+  /** The `.night` name this Passport has REGISTERED, or null. */
   readonly name: string | null;
+  /**
+   * The name it PICKED and has not registered yet, or null.
+   *
+   * Never merged into {@link DynamicPassportView.name} and never shown as one.
+   * See {@link CUSTODY_CHOSEN_NAME_KEY}.
+   */
+  readonly chosenName: string | null;
   readonly address: string | null;
   readonly stage: DynamicStage;
 }
@@ -361,11 +472,13 @@ export function readDynamicPassport(options: {
   const user = options.user.toLowerCase();
   const record = loadCustodyRecord(options.storage, user, options.network);
   const name = loadCustodyName(options.storage, user, options.network);
+  const chosenName = loadCustodyChosenName(options.storage, user, options.network);
   return {
     user,
     network: options.network,
     record,
     name,
+    chosenName,
     address: record?.address ?? null,
     stage: dynamicStage({ identity: 'dynamic', record, name }),
   };

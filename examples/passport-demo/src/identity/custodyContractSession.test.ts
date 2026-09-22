@@ -33,6 +33,11 @@ import {
   dynamicStage,
   dynamicUserKey,
   custodyNameKey,
+  CUSTODY_CHOSEN_NAME_KEY,
+  forgetCustodyChosenName,
+  loadCustodyChosenName,
+  loadCustodyChosenNames,
+  saveCustodyChosenName,
   k1PrivateStateId,
   custodyRecoveryOutcome,
   loadCustodyName,
@@ -318,7 +323,99 @@ describe('the name store', () => {
   });
 });
 
+describe('the name a Passport CHOSE and has not claimed', () => {
+  it('is kept in its own key, apart from the one it holds', () => {
+    const storage = memoryStorage();
+    saveCustodyChosenName(storage, '0xA', 'stagenet', 'alice');
+    /* The claimed store is untouched: a typed name is not a registration, and
+       everything downstream of `CUSTODY_NAME_KEY` treats what is in it as one. */
+    expect(storage.getItem(CUSTODY_NAME_KEY)).toBeNull();
+    expect(loadCustodyChosenName(storage, '0xa', 'stagenet')).toBe('alice');
+  });
+
+  it('is per user and per network, like everything else this Passport owns', () => {
+    const storage = memoryStorage();
+    saveCustodyChosenName(storage, '0xa', 'stagenet', 'alice');
+    saveCustodyChosenName(storage, '0xb', 'stagenet', 'bob');
+    expect(loadCustodyChosenName(storage, '0xa', 'stagenet')).toBe('alice');
+    expect(loadCustodyChosenName(storage, '0xb', 'stagenet')).toBe('bob');
+    expect(loadCustodyChosenName(storage, '0xa', 'preview')).toBeNull();
+  });
+
+  it('is forgotten when the claim settles, either way', () => {
+    const storage = memoryStorage();
+    saveCustodyChosenName(storage, '0xa', 'stagenet', 'alice');
+    saveCustodyChosenName(storage, '0xb', 'stagenet', 'bob');
+    forgetCustodyChosenName(storage, '0xa', 'stagenet');
+    expect(loadCustodyChosenName(storage, '0xa', 'stagenet')).toBeNull();
+    /* And nobody else's is taken with it. */
+    expect(loadCustodyChosenName(storage, '0xb', 'stagenet')).toBe('bob');
+  });
+
+  it('reads a store that is not a map of names as empty', () => {
+    /* Not JSON at all, and JSON that is not an object of strings. Both are a
+       store somebody else wrote, and neither is a reason to refuse a setup. */
+    expect(loadCustodyChosenNames(memoryStorage({ [CUSTODY_CHOSEN_NAME_KEY]: '{' }))).toEqual({});
+    expect(loadCustodyChosenNames(memoryStorage({ [CUSTODY_CHOSEN_NAME_KEY]: '[]' }))).toEqual({});
+    expect(
+      loadCustodyChosenNames(memoryStorage({ [CUSTODY_CHOSEN_NAME_KEY]: '{"a|b":7,"c|d":""}' })),
+    ).toEqual({});
+  });
+
+  it('says so in the console when the forgetting itself is refused', () => {
+    /* A store that reads and will not be written — which is where a name that
+       has been claimed would otherwise sit forever, offering to claim it
+       again. The console is told; the screen is not, because the claim
+       succeeded. */
+    const readable = memoryStorage();
+    saveCustodyChosenName(readable, '0xa', 'stagenet', 'alice');
+    const storage: CustodyStorage = {
+      getItem: (key) => readable.getItem(key),
+      setItem: () => {
+        throw new Error('denied');
+      },
+      removeItem: () => {
+        throw new Error('denied');
+      },
+    };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    forgetCustodyChosenName(storage, '0xa', 'stagenet');
+    expect(warn).toHaveBeenCalledOnce();
+    warn.mockRestore();
+  });
+
+  it('forgets nothing it was not holding', () => {
+    const storage = memoryStorage();
+    forgetCustodyChosenName(storage, '0xa', 'stagenet');
+    expect(loadCustodyChosenNames(storage)).toEqual({});
+  });
+
+  it('reads a storage that throws as empty rather than refusing the setup', () => {
+    expect(loadCustodyChosenNames(refusingStorage())).toEqual({});
+    expect(loadCustodyChosenName(refusingStorage(), '0xa', 'stagenet')).toBeNull();
+  });
+
+  it('says so in the console rather than on screen when a write is refused', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    saveCustodyChosenName(refusingStorage(), '0xa', 'stagenet', 'alice');
+    expect(warn).toHaveBeenCalledOnce();
+    warn.mockRestore();
+  });
+});
+
 describe('readDynamicPassport', () => {
+  it('carries the chosen name beside the claimed one, never merged into it', () => {
+    const storage = memoryStorage({
+      [CUSTODY_STORAGE_KEY]: JSON.stringify({ [custodyRecordKey(RECORD.user, 'stagenet')]: RECORD }),
+    });
+    saveCustodyChosenName(storage, RECORD.user, 'stagenet', 'alice');
+    const view = readDynamicPassport({ storage, user: RECORD.user, network: 'stagenet' });
+    expect(view.chosenName).toBe('alice');
+    /* A Passport with a name it has only TYPED has not got a name. */
+    expect(view.name).toBeNull();
+    expect(view.stage).toBe('name');
+  });
+
   it('assembles the record, the name, and the stage in one read', () => {
     const storage = memoryStorage({
       [CUSTODY_STORAGE_KEY]: JSON.stringify({ [custodyRecordKey(RECORD.user, 'stagenet')]: RECORD }),
@@ -329,6 +426,7 @@ describe('readDynamicPassport', () => {
       network: 'stagenet',
       record: RECORD,
       name: 'alice',
+      chosenName: null,
       address: RECORD.address,
       stage: 'home',
     });

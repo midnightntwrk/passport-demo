@@ -710,6 +710,16 @@
  * balance, and not nothing). No React, no storage, no network, no wallet: the
  * values the screen already holds go in and a decision comes out.
  *
+ * `src/lib/custodyNameFirst.ts` went IN on 2026/09/22 with the module itself.
+ * It decides which of the three screens somebody making a Passport is on, and
+ * the reason it cannot live in the `.tsx` is that two of its answers are only
+ * ever seen after something has gone wrong. A reload halfway through a
+ * three-step setup must come back to the name already chosen rather than to an
+ * introduction; a name taken by somebody else between the choosing and the
+ * claim must cost the name and NOT the account that was just built. Neither is
+ * reachable by walking the happy path, and both are a Passport lost or a
+ * stranger's name shown if they are wrong. No React, no storage, no network.
+ *
  * `src/identity/timestamps.ts` went IN on 2026/08/26 with the module itself: it
  * is the ISO-8601 reader `backup.ts` and `incentiveStore.ts` now share, it is
  * four lines of pure decision, and both of its answers are drilled by
@@ -781,6 +791,7 @@ export default mergeConfig(
           'src/lib/custodyDelivery.ts',
           'src/lib/custodyRoute.ts',
           'src/lib/custodyScreenRules.ts',
+          'src/lib/custodyNameFirst.ts',
           'src/lib/dynamicSession.ts',
           'src/lib/endpoints.ts',
           'src/lib/feeReadinessPoll.ts',
