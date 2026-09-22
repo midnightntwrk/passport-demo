@@ -83,9 +83,9 @@ import './home.css'
 export interface HomeScreenProps {
   displayName: string | null
   /**
-   * The `.night` name held on the active network, without its suffix. When set
-   * the greeting reads "Good morning, alice"; when null it falls back to the
-   * previous greeting-plus-displayName behaviour.
+   * The `.night` name held on the active network, without its suffix. Home
+   * presents the name in its identity card rather than repeating it in the
+   * greeting; this still suppresses the fallback display-name line.
    */
   aliasLabel?: string | null
   /**
@@ -810,11 +810,8 @@ export default function HomeScreen(props: HomeScreenProps) {
       <div className="mnhome-body">
         <div className="mnhome-identity">
           <p className="mnhome-kicker">Passport</p>
-          <h1 className="mnhome-name">
-            {aliasLabel ? `${timeOfDayGreeting()}, ${aliasLabel}` : timeOfDayGreeting()}
-          </h1>
+          <h1 className="mnhome-name">{timeOfDayGreeting()}.</h1>
           {!aliasLabel && displayName ? <p className="mnhome-person">{displayName}</p> : null}
-          <p className="mnhome-summary">Your Passport, at a glance.</p>
         </div>
 
         {error ? (

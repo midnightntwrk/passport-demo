@@ -13,14 +13,9 @@
   letter-spacing: -.04em;
   font-weight: 750;
 }
+.mnhome-name { text-wrap: balance; }
 .mnhome-kicker { display: none; }
-.mnhome-summary {
-  margin: 10px 0 0;
-  color: var(--mn-text-secondary);
-  font-size: 14px;
-  line-height: 1.5;
-}
-.mnhome-body { gap: 24px; padding-top: 26px; }
+.mnhome-body { gap: 28px; padding-top: 30px; }
 .mnhome-overview,
 .mnhome-passport-column,
 .mnhome-discover,
@@ -33,59 +28,70 @@
 .mnhome-discover > * { min-width: 0; }
 .mnhome-passport-column { align-content: start; }
 
-/* The name is the signature object, not a made-up portfolio total. All its
-   status text and recovery controls still come from EcosystemIdentity. */
+/* The name is the signature object, not a made-up portfolio total. Its blue
+   edge and symbol carry the brand without turning half the viewport cobalt. */
 .mnhome-passport-column > .mnid-card:not(.mnid-account) {
   position: relative;
   display: flex;
   flex-direction: column;
-  min-height: 180px;
-  padding: 22px;
-  border: 0;
+  justify-content: center;
+  min-height: 170px;
+  padding: 24px;
+  border: 1px solid var(--mn-border-hairline);
   border-radius: 20px;
-  background: var(--mn-accent);
-  color: #fff;
+  background:
+    radial-gradient(circle at 100% 0%, var(--mn-accent-soft), transparent 48%),
+    var(--mn-surface-raised);
+  color: var(--mn-text-primary);
   box-shadow: none;
-  --mn-text-primary: #fff;
-  --mn-text-secondary: #e3e4ff;
-  --mn-text-muted: #e3e4ff;
-  --mn-accent-ink: #fff;
+  overflow: hidden;
+}
+.mnhome-passport-column > .mnid-card:not(.mnid-account)::after {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 4px;
+  background: var(--mn-accent);
 }
 .mnhome-passport-column > .mnid-card:not(.mnid-account)::before {
   content: '';
   position: absolute;
-  top: 20px;
-  right: 20px;
+  top: 22px;
+  right: 22px;
   display: block;
-  width: 34px;
-  height: 34px;
-  background: url('/midnight-symbol-white.svg') center / contain no-repeat;
+  width: 28px;
+  height: 28px;
+  background: var(--mn-accent);
+  -webkit-mask: url('/midnight-symbol-white.svg') center / contain no-repeat;
+  mask: url('/midnight-symbol-white.svg') center / contain no-repeat;
 }
 .mnhome-passport-column .mnid-card-head {
-  padding-right: 38px;
+  padding-right: 32px;
   flex-wrap: wrap;
-  gap: 10px;
-  margin-bottom: 14px;
+  gap: 8px;
+  margin-bottom: 16px;
 }
 .mnhome-passport-column .mnid-alias {
-  font-size: clamp(23px, 5.8vw, 34px);
-  font-weight: 650;
-  line-height: 1.14;
+  font-size: clamp(22px, 4.5vw, 31px);
+  font-weight: 700;
+  line-height: 1.18;
   letter-spacing: -.035em;
 }
 .mnhome-passport-column .mnid-pill {
   height: auto;
   min-height: 24px;
   white-space: normal;
-  color: #fff;
-  background: transparent;
-  border: 1px solid #ffffff66;
   padding: 5px 9px;
   font-size: 10px;
 }
+.mnhome-passport-column .mnid-pill-registered {
+  color: var(--mn-accent-ink);
+  background: var(--mn-accent-soft);
+  border: 1px solid transparent;
+}
 .mnhome-passport-column .mnid-register {
-  background: #fff;
-  color: #0000fe;
+  background: var(--mn-accent);
+  color: var(--mn-accent-text);
 }
 .mnhome-passport-column .mnid-account {
   padding: 17px 20px;
@@ -150,6 +156,39 @@
 .mnapps-card-copy strong { font-size: 16px; font-weight: 650; }
 .mnapps-card-copy small { line-height: 1.6; }
 .mnapps-list:has(> :only-child) { grid-template-columns: minmax(0, 1fr); }
+/* Home's featured card gets its own hierarchy; the Apps catalogue stays a
+   compact, consistent list. The existing SVG follows the active theme. */
+.mnhome-discover .mnapps-card-illustrated {
+  min-height: 0;
+  grid-template-columns: minmax(0, 1fr) 40px;
+  gap: 16px 10px;
+  padding: 16px;
+  border-radius: 20px;
+  overflow: hidden;
+}
+.mnhome-discover .mnapps-card-art {
+  grid-column: 1 / -1;
+  width: auto;
+  height: 128px;
+  margin: -16px -16px 0;
+  border-radius: 19px 19px 0 0;
+  background:
+    radial-gradient(circle at 50% 80%, var(--mn-accent-soft), transparent 65%),
+    var(--mn-surface-card);
+}
+.mnhome-discover .mnapps-card-art .mnraffle-art { width: 174px; }
+.mnhome-discover .mnapps-card-copy { gap: 8px; align-self: center; }
+.mnhome-discover .mnapps-card-copy strong { font-size: 17px; font-weight: 700; }
+.mnhome-discover .mnapps-card-copy small { font-size: 13px; line-height: 1.5; }
+.mnhome-discover .mnapps-card-arrow {
+  width: 40px;
+  height: 40px;
+  padding: 11px;
+  border: 1px solid var(--mn-border-hairline);
+  border-radius: 50%;
+  color: var(--mn-accent-ink);
+  background: var(--mn-surface-card);
+}
 .mnhome-activity-day {
   padding: 18px 20px;
   border: 1px solid var(--mn-border-hairline);
@@ -276,10 +315,9 @@
   .mnhome-body { padding-top: 36px; padding-bottom: 40px; gap: 28px; }
   .mnhome-overview,
   .mnhome-discover { grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr); gap: 24px; }
-  .mnhome-passport-column > .mnid-card:not(.mnid-account) { min-height: 278px; padding: 28px; }
-  .mnhome-passport-column > .mnid-card:not(.mnid-account)::before { width: 40px; height: 40px; top: 28px; right: 28px; }
+  .mnhome-passport-column > .mnid-card:not(.mnid-account) { min-height: 216px; padding: 28px; }
+  .mnhome-passport-column > .mnid-card:not(.mnid-account)::before { width: 32px; height: 32px; top: 28px; right: 28px; }
   .mnhome-passport-column .mnid-card-head { flex-direction: column; align-items: flex-start; }
-  .mnhome-passport-column .mnid-alias { margin-top: 48px; }
   .mnhome-funds { padding: 28px; }
   .mnhome-funds .mnhome-actions { order: 2; margin-top: auto; padding-top: 12px; }
   .mnhome-funds-heading h2 { font-size: 26px; }
@@ -306,6 +344,20 @@
   .mnapps-screen { padding-bottom: 48px; }
   .mnapps-list { gap: 20px; }
   .mnapps-card { min-height: 144px; }
+  .mnhome-discover .mnapps-card-illustrated {
+    grid-template-columns: 144px minmax(0, 1fr) 40px;
+    min-height: 176px;
+    gap: 20px;
+    padding: 16px;
+  }
+  .mnhome-discover .mnapps-card-art {
+    grid-column: auto;
+    width: 144px;
+    height: 144px;
+    margin: 0;
+    border-radius: 14px;
+  }
+  .mnhome-discover .mnapps-card-art .mnraffle-art { width: 126px; }
   .mnid-bar { min-height: 80px; }
   .mnid-body { width: min(100% - 80px, 680px); flex: 0 1 auto; padding-top: 48px; }
   .mnid-screen .mnid-lede { max-width: 560px; }
