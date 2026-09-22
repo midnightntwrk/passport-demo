@@ -12,6 +12,7 @@ import {
 } from 'lucide-react'
 
 import { normaliseNameForRecovery, type NameRecoveryOutcome } from '../lib/nameRecovery.js'
+import RecoveryStep from './RecoveryStep'
 import { saveBackupRecord, type BackupRecord } from '../lib/backupDevice.js'
 import { saveAdoption, type AdoptionHandoff } from '../lib/custodyAdoption.js'
 import {
@@ -2809,91 +2810,8 @@ function NameAvailability(props: {
 }
 
 /* -------------------------------------------------------------------------- */
-/* The way back, offered once                                                 */
+/* Finding an existing Passport                                              */
 /* -------------------------------------------------------------------------- */
-
-/**
- * ONE SCREEN, TWO ANSWERS, AND NEITHER OF THEM IS A DEAD END.
- *
- * It stands between a claimed name and Home, and it is the last thing asked
- * before the everyday surface opens — which is the only moment in this flow
- * when somebody has a Passport worth protecting and has not yet started using
- * it. Afterwards it is a card competing with a balance; before the name there
- * is nothing to be brought back TO.
- *
- * WHAT IT DOES NOT SAY. It does not say what holds the Passport, because that
- * is machinery. It does not claim the old phone's history comes with it — the
- * one honest limit is stated in {@link RECOVERY_COPY.lede} as what a new phone
- * CAN do. And it does not scold: "Not now" is offered in the same weight as
- * every other secondary control in this flow, because it is a real answer and
- * Home keeps a way in for anybody who changes their mind.
- *
- * A FAILURE LEAVES BOTH CONTROLS WHERE THEY WERE. The sentence above them says
- * the Passport is set up and the way back is not, and the secondary control is
- * then the way on to Home — which is why it is wired to the same press as
- * "Not now" rather than to a retry that would be the third thing on a screen
- * whose whole point is that there are two.
- */
-function RecoveryStep(props: {
-  provider: string | null
-  busy: string | null
-  error: string | null
-  onAdd: () => void
-  onSkip: () => void
-}) {
-  const working = props.busy !== null
-  return (
-    <Shell label="Passport">
-      <p className="mnob-kicker">{RECOVERY_COPY.kicker}</p>
-      <h1 className="mnob-title">
-        <span>Add a way</span>
-        <span>back</span>
-      </h1>
-      <p className="mnob-lede">{RECOVERY_COPY.lede}</p>
-      <div className="mnob-stage">
-        {props.error ? (
-          <div className="mnob-unusable" role="alert">
-            <p className="mnob-unusable-copy">{props.error}</p>
-          </div>
-        ) : null}
-        <button
-          type="button"
-          className="mnob-primary"
-          onClick={props.onAdd}
-          disabled={working}
-          data-testid="add-recovery"
-        >
-          <span className="mnob-primary-copy">
-            {working ? (
-              <Loader2
-                className="mnob-working-spinner"
-                size={17}
-                strokeWidth={2}
-                aria-hidden="true"
-              />
-            ) : (
-              <ShieldCheck size={17} strokeWidth={2} aria-hidden="true" />
-            )}
-            {working ? props.busy : RECOVERY_COPY.action}
-          </span>
-          <ArrowRight size={17} strokeWidth={2.2} aria-hidden="true" />
-        </button>
-        <p className="mnob-hint">
-          <BadgeCheck size={14} strokeWidth={2} aria-hidden="true" /> {RECOVERY_COPY.hint}
-        </p>
-        <button
-          type="button"
-          className="mnob-alt"
-          onClick={props.onSkip}
-          disabled={working}
-          data-testid="skip-recovery"
-        >
-          {props.error === null ? RECOVERY_COPY.skip : RECOVERY_COPY.continue}
-        </button>
-      </div>
-    </Shell>
-  )
-}
 
 function RecoverStep(props: {
   /** "…that {keyPhrase} is part of it". See `../lib/custodyArm.ts`. */
@@ -3043,4 +2961,3 @@ async function readCustodyActions(indexerHttpUrl: string, address: string) {
     return null
   }
 }
-

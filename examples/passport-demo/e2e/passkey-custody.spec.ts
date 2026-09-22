@@ -1107,10 +1107,27 @@ test.describe('a passkey Passport that has just been named', () => {
     await expect(page.getByRole('heading', { name: /Add a way\s*back/ })).toBeVisible({
       timeout: 60_000,
     });
-    await expect(page.getByTestId('add-recovery')).toContainText(
-      'Add recovery with Google, Microsoft, X, Discord, or email',
-    );
+    await expect(page.getByTestId('add-recovery')).toHaveText('Add recovery');
+    await expect(page.getByText('Google, Microsoft, X, Discord, or email', { exact: true })).toBeVisible();
     await expect(page.getByTestId('skip-recovery')).toHaveText('Not now');
+    await expect(page.locator('.mnrecovery-art img')).toBeVisible();
+    await expect(page.locator('.mnrecovery .mnob-foot')).toHaveCount(0);
+    await expect(page.locator('#mn-splash')).toHaveCount(0);
+    for (const notice of await page.getByRole('button', { name: 'Dismiss notification' }).all()) {
+      await notice.click();
+    }
+    // The same actual recovery screen at phone, tablet, and desktop widths.
+    for (const width of [320, 390, 768, 1440]) {
+      await page.setViewportSize({ width, height: 900 });
+      for (const theme of ['Light', 'Dark']) {
+        await page.getByRole('button', { name: theme, exact: true }).click();
+        await expect(page.getByTestId('add-recovery')).toBeInViewport();
+        expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+        const action = await page.getByTestId('add-recovery').boundingBox();
+        expect(action!.height).toBeGreaterThanOrEqual(48);
+        await page.screenshot({ path: test.info().outputPath(`recovery-${theme}-${width}.png`), fullPage: true });
+      }
+    }
     /* Home is behind it and has not been painted. */
     await expect(greeting(page)).toHaveCount(0);
 
