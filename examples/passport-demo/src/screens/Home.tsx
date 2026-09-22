@@ -60,6 +60,7 @@ import InstallPassport from './InstallPassport.js'
 import { type PassportNetwork } from './NetworkSwitcher.js'
 import NotificationToggle from './NotificationToggle.js'
 import PassportContractCard, { type PassportContractCardProps } from './PassportContract.js'
+import { RECOVERY_COPY, type RecoveryHomeEntry } from '../lib/recoveryStep.js'
 import SendSheet, { type SendSheetHolding, type SendSheetProps } from './SendSheet.js'
 import ThemeToggle from './ThemeToggle.js'
 /* The colour's own mark, where this build has one. Falls back to the glyph
@@ -403,6 +404,23 @@ export interface HomeScreenProps {
    */
   onOpenBackup?: () => void
   /**
+   * THE WAY BACK, SAID IN ONE LINE — and offered in one small control where
+   * there is not one yet.
+   *
+   * `on` is a statement beside the name and nothing more: there is nothing to
+   * press about a thing that is done, and a control there would invite a
+   * second one. `add` is the entry for a Passport that skipped the step after
+   * its name or was made before the step existed, and it sits exactly where
+   * "Back up or restore" sat — the rarely-and-deliberately shelf beside the
+   * support link, not the everyday surface. `hidden`, or omitting the prop
+   * altogether, renders neither, which is every build with no sign-in behind
+   * it. See `../lib/recoveryStep.ts`.
+   */
+  recovery?: {
+    state: RecoveryHomeEntry
+    onAdd?: () => void
+  } | null
+  /**
    * Whether the signed-in identity panel belongs on this Home.
    *
    * IT IS A DEVELOPER PANEL and it says so: an Ethereum address, a "Sign a test
@@ -459,6 +477,7 @@ export default function HomeScreen(props: HomeScreenProps) {
     onIncentiveRedeemed,
     supportUrl,
     onOpenBackup,
+    recovery,
     showSignedInIdentity,
     onSignOut,
   } = props
@@ -1088,6 +1107,15 @@ export default function HomeScreen(props: HomeScreenProps) {
             beneath the name it belongs to. */}
         {passportContract ? <PassportContractCard {...passportContract} /> : null}
 
+        {/* And whether this Passport can be opened anywhere else, in one line
+            under the account it belongs to. */}
+        {recovery?.state === 'on' ? (
+          <p className="mnhome-recovery" data-testid="recovery-state">
+            <ShieldCheck size={13} aria-hidden="true" />
+            <span>{RECOVERY_COPY.homeOn}</span>
+          </p>
+        ) : null}
+
         {/* The applications, directly below the wallet summary — the same
             registry, cards, and in-Passport browser as the Apps tab. */}
         <FeaturedApps
@@ -1277,6 +1305,16 @@ export default function HomeScreen(props: HomeScreenProps) {
           <button type="button" className="mnhome-support" onClick={onOpenBackup}>
             <ShieldCheck size={14} aria-hidden="true" />
             <span>Back up or restore</span>
+          </button>
+        ) : null}
+
+        {/* The same shelf, for the Passport that has no way back yet. Never
+            beside "Recovery: on" — `recoveryHomeEntry` answers one or the
+            other, never both. */}
+        {recovery?.state === 'add' && recovery.onAdd ? (
+          <button type="button" className="mnhome-support" onClick={recovery.onAdd}>
+            <ShieldCheck size={14} aria-hidden="true" />
+            <span>{RECOVERY_COPY.homeAdd}</span>
           </button>
         ) : null}
 

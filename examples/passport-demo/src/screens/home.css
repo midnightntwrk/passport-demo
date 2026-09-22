@@ -1493,3 +1493,19 @@ button.mnhome-support { font-family: inherit; cursor: pointer; }
   grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   gap: 10px;
 }
+
+/* THE WAY BACK, in one line under the account card (2026/09/22).
+   Deliberately quiet: it states a fact about a Passport that is already safe,
+   and anything louder would read as a warning about one that is not. The
+   offer for a Passport without one is a `.mnhome-support` control down on the
+   shelf beside the support link, which is where rare and deliberate things
+   live. See `src/lib/recoveryStep.ts`. */
+.mnhome-recovery {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: -4px 0 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--mn-text-secondary);
+}

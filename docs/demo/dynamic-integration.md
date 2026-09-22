@@ -114,7 +114,7 @@ The demo's deployed account contract is the prototype (hash-preimage device witn
 |---|---|
 | `examples/passport-demo/src/lib/dynamicSession.ts` | The gate, the pure session mapping, the cross-root store. No imports. |
 | `examples/passport-demo/src/lib/dynamic.tsx` | The lazily-loaded provider wrapper and `useDynamicSession()`. |
-| `examples/passport-demo/src/screens/ContinueWithSocial.tsx` | The welcome screen's secondary entry. |
+| `examples/passport-demo/src/screens/RecoverWithProvider.tsx` | The way back on a device with no key — the only place a provider sign-in is offered (2026/09/22). |
 | `examples/passport-demo/src/screens/DynamicIdentity.tsx` | Home's identity row and the test-signature action. |
 | `examples/passport-demo/src/lib/dynamicSession.test.ts` | The gate and the mapping, drilled. |
 | `examples/passport-demo/src/lib/dynamicBundle.test.ts` | The import-graph gate that keeps the SDK out of the entry chunk. |

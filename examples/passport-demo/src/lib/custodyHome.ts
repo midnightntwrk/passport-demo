@@ -58,6 +58,7 @@ import {
   type CustodyAssetRow,
 } from './custodyAssets.js';
 import type { PendingBalanceNotes } from './pendingBalances.js';
+import type { RecoveryHomeEntry } from './recoveryStep.js';
 
 /* -------------------------------------------------------------------------- */
 /* What the Passport holds                                                    */
@@ -308,6 +309,15 @@ export interface CustodyHomeView {
   readonly onRefresh: () => void;
   readonly onDismissError: () => void;
   readonly onDismissStopped: () => void;
+  /**
+   * WHETHER THIS PASSPORT CAN BE OPENED ANYWHERE ELSE, and what Home may do
+   * about it. `state` is `./recoveryStep.ts`'s answer; `onAdd` is the press
+   * that starts the same add the step after the name offers.
+   */
+  readonly recovery?: {
+    readonly state: RecoveryHomeEntry;
+    readonly onAdd: () => void;
+  };
   readonly send: CustodyHomeSend;
 }
 

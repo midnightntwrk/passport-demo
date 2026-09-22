@@ -11,11 +11,23 @@ import {
 } from 'lucide-react'
 
 import { normaliseNameForRecovery, type NameRecoveryOutcome } from '../lib/nameRecovery.js'
+import { saveBackupRecord, type BackupRecord } from '../lib/backupDevice.js'
+import { saveAdoption, type AdoptionHandoff } from '../lib/custodyAdoption.js'
+import {
+  RECOVERY_COPY,
+  loadRecoveryRecord,
+  recoveryFailureSentence,
+  recoveryHomeEntry,
+  recoveryRefusal,
+  recoveryResumes,
+  recoveryStepDue,
+} from '../lib/recoveryStep.js'
 import type { CustodyArm, CustodyIdentity } from '../lib/custodyArm.js'
 import { parseEndpointList } from '../lib/endpoints.js'
 import { type K256DeviceIdentity } from '../identity/custodyContractSigning.js'
 import {
   activateK1Device,
+  addDeviceK1,
   appendChangeToInboxK1,
   custodyAccountActivatedOnChain,
   defaultCustodyDeps,
@@ -284,6 +296,50 @@ export interface CustodyPassportProps {
    * per account: see `custodyMilestonesLanded`.
    */
   onActivity?: (entry: CustodyActivityEntry) => void
+  /**
+   * THE PROVIDER SIGN-IN, AS A WAY BACK — and as nothing else.
+   *
+   * Narrow on purpose: whether somebody is signed in, what to call the
+   * provider, how to open the overlay, how to reach the key behind it, and how
+   * to leave. This screen needs no more than that, and giving it more would put
+   * a vendor inside a flow whose whole design is that there is not one.
+   *
+   * Null where the build has no sign-in, which is most builds — and then the
+   * recovery step is never due (`../lib/recoveryStep.ts`) and this screen is
+   * exactly what it was before the step existed.
+   */
+  social?: CustodySocialSignIn | null
+  /**
+   * Hand a Passport found by a sign-in over to a key made on THIS device.
+   *
+   * THE SIGN-IN NEVER HOLDS IT, which is the ruling of 2026/09/22 and the
+   * reason this is a hand-off rather than a recovery. A provider key is a way
+   * back — it proves who is asking — and what opens a Passport on a new phone
+   * is a key that phone makes. So the found account is written down and the
+   * host is asked for the enrolment; the second half runs under the new key.
+   * See `../lib/custodyAdoption.ts` and `../identity/custodyAdopt.ts`.
+   */
+  onRecoverToDeviceKey?: ((handoff: AdoptionHandoff) => void) | null
+  /** Leave the way-back road — signs out of the provider and goes back. */
+  onLeaveRecovery?: (() => void) | null
+}
+
+/** What this screen may ask of a provider sign-in, and the whole of it. */
+export interface CustodySocialSignIn {
+  /** `disabled`, `loading`, `signed-out`, or `signed-in`. */
+  readonly status: string
+  /** "Google", "Discord", … — whatever the session reports, or null. */
+  readonly provider: string | null
+  /** What to call the person, for a receipt. Never shown as an address. */
+  readonly handle: string | null
+  /** Whether the session has a key behind it yet. */
+  readonly address: string | null
+  /** Opens the provider's own overlay. */
+  openAuthFlow(): void
+  /** The key behind the sign-in, recovered from a signature it makes. */
+  device(): Promise<K256DeviceIdentity>
+  /** Ends the sign-in. */
+  signOut(): void
 }
 
 /**
@@ -296,7 +352,7 @@ export interface CustodyPassportProps {
  * button on the name step, which is the screen that has something to offer it
  * ABOUT. See `../lib/custodyNameFirst.ts`.
  */
-type Screen = 'welcome' | 'name' | 'home' | 'recover'
+type Screen = 'welcome' | 'name' | 'recovery' | 'home' | 'recover'
 
 export default function CustodyPassport({
   network,
@@ -304,6 +360,9 @@ export default function CustodyPassport({
   notice: browserNotice = null,
   renderHome,
   onActivity,
+  social = null,
+  onRecoverToDeviceKey = null,
+  onLeaveRecovery = null,
 }: CustodyPassportProps) {
   /**
    * The key every store this Passport owns is filed under.
@@ -413,6 +472,46 @@ export default function CustodyPassport({
     [],
   )
 
+  /* ---------------------------------------------------------------------- */
+  /* The way back                                                            */
+  /* ---------------------------------------------------------------------- */
+
+  /** What this Passport's record says about a way back, or null. */
+  const [recoveryRecord, setRecoveryRecord] = useState<BackupRecord | null>(null)
+  /**
+   * Whether the offer has been PRESSED and not yet answered.
+   *
+   * It exists because the press does not finish the job: it opens a provider's
+   * own overlay, and on a phone that can mean leaving this app and coming back
+   * to a fresh load of it. What comes back finds this false, the session
+   * signed in, and the step still due — which is the state
+   * `recoveryResumes` reads, and why the reader is not asked a second time.
+   */
+  const [recoveryIntended, setRecoveryIntended] = useState(false)
+  /* One add at a time. A second run would ask for a second approval for an
+     enrolment that is already away. */
+  const recoveryRunning = useRef(false)
+  /**
+   * Whether the key holding this Passport IS a provider key.
+   *
+   * There is nothing to offer such a Passport: the way back it would be given
+   * is the key it is already held by. See `../lib/recoveryStep.ts`.
+   */
+  const heldBySocial = arm.kind === 'dynamic'
+  const socialAvailable = social !== null && social.status !== 'disabled'
+  /* The two answers above, where a callback made on an earlier render can read
+     them — the same device {@link refresh} needs and for the same reason
+     `userRef` exists. Written in an effect declared BEFORE the one that calls
+     `refresh`, so the first read of the day already sees them. */
+  const socialRef = useRef<CustodySocialSignIn | null>(social)
+  const socialAvailableRef = useRef(socialAvailable)
+  const heldBySocialRef = useRef(heldBySocial)
+  useEffect(() => {
+    socialRef.current = social
+    socialAvailableRef.current = socialAvailable
+    heldBySocialRef.current = heldBySocial
+  })
+
   /** Re-reads what is stored and moves the screen to match it. */
   const refresh = useCallback((): DynamicPassportView | null => {
     const settled = userRef.current
@@ -420,6 +519,12 @@ export default function CustodyPassport({
     const next = readDynamicPassport({ storage: window.localStorage, user: settled, network })
     setView(next)
     setInterrupted(dynamicSetupInterrupted(next.record))
+    /* THE WAY BACK IS READ HERE AND NOWHERE ELSE, which is what makes the step
+       resumable: nothing remembers that the reader was on it, so a browser
+       closed on the offer comes back to the offer and one that answered it —
+       either way — comes back to Home. */
+    const record = loadRecoveryRecord(window.localStorage, settled, network)
+    setRecoveryRecord(record)
     /* THE ONE PLACE THE SCREEN IS DECIDED, and it is decided from what is
        stored rather than from what just happened. `next.stage` is the old
        four-way answer and is still what says whether the setup is FINISHED —
@@ -432,6 +537,13 @@ export default function CustodyPassport({
         claimedName: next.name,
         chosenName: next.chosenName,
         welcomeRead: welcomeReadRef.current,
+        recoveryDue: recoveryStepDue({
+          setupFinished: next.stage === 'name' || next.stage === 'home',
+          claimedName: next.name,
+          socialAvailable: socialAvailableRef.current,
+          heldBySocial: heldBySocialRef.current,
+          record,
+        }),
       }),
     )
     return next
@@ -1724,6 +1836,28 @@ export default function CustodyPassport({
 
       const outcome = custodyRecoveryOutcome(resolved, { operations, holdsDevice })
       if (outcome.kind !== 'found' || pk === null) return outcome
+      /**
+       * FOUND BY A SIGN-IN, AND HANDED TO A KEY THIS DEVICE MAKES.
+       *
+       * The check above is the whole of what a sign-in is for on this road: the
+       * name resolved, and the key behind the sign-in is one of the account's
+       * own devices. What it is NOT for is holding the Passport afterwards —
+       * that is the ruling of 2026/09/22 — so nothing is filed under the
+       * sign-in's key here. The account is written down and the host is asked
+       * for a key of this device's own; the second half runs under that key and
+       * enrols it, with the sign-in approving. See `../identity/custodyAdopt.ts`.
+       */
+      if (arm.kind === 'dynamic' && onRecoverToDeviceKey !== null) {
+        const handoff: AdoptionHandoff = {
+          network,
+          address,
+          name: label,
+          socialUser: restoredUser,
+        }
+        saveAdoption(window.localStorage, handoff)
+        onRecoverToDeviceKey(handoff)
+        return outcome
+      }
       const restored: CustodyAccountRecord = recoveredCustodyRecord({
         user: restoredUser,
         network,
@@ -1763,8 +1897,115 @@ export default function CustodyPassport({
       refresh()
       return outcome
     },
-    [ensureIdentity, network, refresh],
+    [arm.kind, ensureIdentity, network, onRecoverToDeviceKey, refresh],
   )
+
+  /* ---------------------------------------------------------------------- */
+  /* Adding the way back                                                     */
+  /* ---------------------------------------------------------------------- */
+
+  /**
+   * Puts the provider's key on this account as a SECOND device.
+   *
+   * ONE APPROVAL, AND IT IS THE KEY ON THIS DEVICE THAT GIVES IT. The key being
+   * added is not on the account yet and so cannot approve its own enrolment;
+   * the key that already holds the Passport can, which is why the signer here
+   * is this device's and the argument is the provider's. `addDeviceK1` is
+   * idempotent — a key already on the account returns without asking for
+   * anything — so a run repeated after a browser was closed costs nothing.
+   *
+   * A FAILURE IS NOT A FAILURE OF THE PASSPORT, and the sentence says so. What
+   * is offered underneath is the same thing that was offered before the press:
+   * Home. See `../lib/recoveryStep.ts#recoveryFailureSentence`.
+   */
+  const runRecoveryAdd = useCallback(
+    async (signIn: CustodySocialSignIn): Promise<void> => {
+      if (recoveryRunning.current) return
+      recoveryRunning.current = true
+      setBusy(RECOVERY_COPY.busy)
+      setError(null)
+      try {
+        const identity = await ensureIdentity()
+        const spare = await signIn.device()
+        await addDeviceK1(arm.session, identity.device, spare, (phase) =>
+          setBusy(PHASE_LABELS[phase.step] ?? RECOVERY_COPY.busy),
+        )
+        saveBackupRecord(window.localStorage, identity.userKey, network, {
+          doneAt: Date.now(),
+          ...(signIn.provider === null ? {} : { provider: signIn.provider }),
+        })
+        setNotice(RECOVERY_COPY.done(signIn.provider))
+      } catch (cause) {
+        console.warn('[account-custody] the way back could not be added', cause)
+        setError(recoveryFailureSentence(cause))
+      } finally {
+        recoveryRunning.current = false
+        setRecoveryIntended(false)
+        setBusy(null)
+        refresh()
+      }
+    },
+    [arm.session, ensureIdentity, network, refresh],
+  )
+
+  /** The press on the offer. */
+  const addRecovery = useCallback((): void => {
+    const signIn = socialRef.current
+    if (signIn === null) return
+    const refusal = recoveryRefusal({
+      status: signIn.status,
+      hasKey: (signIn.address ?? '').length > 0,
+    })
+    if (refusal !== null) {
+      setError(refusal)
+      return
+    }
+    if (signIn.status !== 'signed-in') {
+      /* The overlay is opened and the press is REMEMBERED, because the reader
+         may not come back to this render — see {@link recoveryIntended}. */
+      setRecoveryIntended(true)
+      setError(null)
+      signIn.openAuthFlow()
+      return
+    }
+    void runRecoveryAdd(signIn)
+  }, [runRecoveryAdd])
+
+  /**
+   * "Not now", and the same press under a failure.
+   *
+   * THE ANSWER IS WRITTEN DOWN, which is what makes it an answer: a step that
+   * comes back every time somebody opens their Passport is a nag, and offering
+   * "Not now" while meaning "not this once" is a small lie. Home keeps a way in
+   * for anybody who changes their mind (`recoveryHomeEntry`).
+   */
+  const skipRecovery = useCallback((): void => {
+    const settled = userRef.current
+    if (settled !== null) {
+      saveBackupRecord(window.localStorage, settled, network, { dismissedAt: Date.now() })
+    }
+    setRecoveryIntended(false)
+    setError(null)
+    refresh()
+  }, [network, refresh])
+
+  /* Picks the add back up for somebody who has just come back from a
+     provider's overlay. See `recoveryResumes`, which owns the rule. */
+  useEffect(() => {
+    if (
+      !recoveryResumes({
+        intended: recoveryIntended,
+        onRecoveryStep: screen === 'recovery',
+        socialReady: social !== null && social.status === 'signed-in' && (social.address ?? '').length > 0,
+        record: recoveryRecord,
+        busy: busy !== null,
+      })
+    ) {
+      return
+    }
+    if (social === null) return
+    void runRecoveryAdd(social)
+  }, [busy, recoveryIntended, recoveryRecord, runRecoveryAdd, screen, social])
 
   /* ---------------------------------------------------------------------- */
   /* What is on screen                                                      */
@@ -1779,27 +2020,6 @@ export default function CustodyPassport({
   }
 
 
-
-  if (screen === 'recover') {
-    return (
-      <RecoverStep
-        keyPhrase={arm.keyPhrase}
-        otherKeyHint={arm.otherKeyHint}
-        onFind={findByName}
-        onBack={() =>
-          setScreen(
-            custodyNameFirstStage({
-              setupStarted: view?.record != null,
-              setupFinished: view?.stage === 'name' || view?.stage === 'home',
-              claimedName: view?.name ?? null,
-              chosenName: view?.chosenName ?? null,
-              welcomeRead: welcomeReadRef.current,
-            }),
-          )
-        }
-      />
-    )
-  }
 
   /**
    * THE SCREEN WHEN NOTHING IS SETTLED YET, and it is not a spinner.
@@ -1818,6 +2038,54 @@ export default function CustodyPassport({
    * in.
    */
   const stage: Screen = screen ?? (welcomeReadRef.current ? 'name' : 'welcome')
+
+  /**
+   * A PROVIDER SIGN-IN NEVER MAKES A PASSPORT (2026/09/22).
+   *
+   * The only road a sign-in opens is the way back: somebody on a new phone who
+   * already holds a Passport and added this account as their way in. So a
+   * sign-in with nothing behind it is never shown the welcome page, the name
+   * field, or an offer to create — it is shown this, and what it finds is
+   * handed to a key this device makes rather than kept by the sign-in. See
+   * `onRecoverToDeviceKey`.
+   *
+   * A SIGN-IN THAT ALREADY HOLDS ONE IS LEFT ALONE. `stage === 'home'` is a
+   * finished, named Passport filed under the sign-in's own key — made before
+   * today's ruling, and opening it is not creating it. It goes to its Home
+   * exactly as it did.
+   */
+  if (screen === 'recover' || (arm.kind === 'dynamic' && stage !== 'home')) {
+    return (
+      <RecoverStep
+        keyPhrase={arm.keyPhrase}
+        otherKeyHint={arm.otherKeyHint}
+        onFind={findByName}
+        onBack={
+          arm.kind === 'dynamic'
+            ? onLeaveRecovery === null
+              ? null
+              : onLeaveRecovery
+            : () =>
+                setScreen(
+                  custodyNameFirstStage({
+                    setupStarted: view?.record != null,
+                    setupFinished: view?.stage === 'name' || view?.stage === 'home',
+                    claimedName: view?.name ?? null,
+                    chosenName: view?.chosenName ?? null,
+                    welcomeRead: welcomeReadRef.current,
+                    recoveryDue: recoveryStepDue({
+                      setupFinished: view?.stage === 'name' || view?.stage === 'home',
+                      claimedName: view?.name ?? null,
+                      socialAvailable,
+                      heldBySocial,
+                      record: recoveryRecord,
+                    }),
+                  }),
+                )
+        }
+      />
+    )
+  }
 
   if (stage === 'welcome') {
     return (
@@ -1861,6 +2129,18 @@ export default function CustodyPassport({
           if (error !== null) setError(null)
         }}
         onRecover={() => setScreen('recover')}
+      />
+    )
+  }
+
+  if (stage === 'recovery') {
+    return (
+      <RecoveryStep
+        provider={social?.provider ?? null}
+        busy={busy}
+        error={error}
+        onAdd={addRecovery}
+        onSkip={skipRecovery}
       />
     )
   }
@@ -1914,6 +2194,14 @@ export default function CustodyPassport({
         dismissStoppedSend()
       },
       onDismissStopped: dismissStoppedSend,
+      /* WHETHER THIS PASSPORT CAN BE OPENED ANYWHERE ELSE — one line where it
+         can, one small entry where it cannot yet. The offer after the name is
+         asked once; this is where somebody who said "not now", or whose
+         Passport predates the step, finds it again. */
+      recovery: {
+        state: recoveryHomeEntry({ socialAvailable, heldBySocial, record: recoveryRecord }),
+        onAdd: addRecovery,
+      },
       send: {
         networkId: network,
         resolveName,
@@ -2344,13 +2632,101 @@ function NameAvailability(props: {
   )
 }
 
+/* -------------------------------------------------------------------------- */
+/* The way back, offered once                                                 */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * ONE SCREEN, TWO ANSWERS, AND NEITHER OF THEM IS A DEAD END.
+ *
+ * It stands between a claimed name and Home, and it is the last thing asked
+ * before the everyday surface opens — which is the only moment in this flow
+ * when somebody has a Passport worth protecting and has not yet started using
+ * it. Afterwards it is a card competing with a balance; before the name there
+ * is nothing to be brought back TO.
+ *
+ * WHAT IT DOES NOT SAY. It does not say what holds the Passport, because that
+ * is machinery. It does not claim the old phone's history comes with it — the
+ * one honest limit is stated in {@link RECOVERY_COPY.lede} as what a new phone
+ * CAN do. And it does not scold: "Not now" is offered in the same weight as
+ * every other secondary control in this flow, because it is a real answer and
+ * Home keeps a way in for anybody who changes their mind.
+ *
+ * A FAILURE LEAVES BOTH CONTROLS WHERE THEY WERE. The sentence above them says
+ * the Passport is set up and the way back is not, and the secondary control is
+ * then the way on to Home — which is why it is wired to the same press as
+ * "Not now" rather than to a retry that would be the third thing on a screen
+ * whose whole point is that there are two.
+ */
+function RecoveryStep(props: {
+  provider: string | null
+  busy: string | null
+  error: string | null
+  onAdd: () => void
+  onSkip: () => void
+}) {
+  const working = props.busy !== null
+  return (
+    <Shell label="Passport">
+      <p className="mnob-kicker">{RECOVERY_COPY.kicker}</p>
+      <h1 className="mnob-title">
+        <span>Add a way</span>
+        <span>back</span>
+      </h1>
+      <p className="mnob-lede">{RECOVERY_COPY.lede}</p>
+      <div className="mnob-stage">
+        {props.error ? (
+          <div className="mnob-unusable" role="alert">
+            <p className="mnob-unusable-copy">{props.error}</p>
+          </div>
+        ) : null}
+        <button
+          type="button"
+          className="mnob-primary"
+          onClick={props.onAdd}
+          disabled={working}
+          data-testid="add-recovery"
+        >
+          <span className="mnob-primary-copy">
+            {working ? (
+              <Loader2
+                className="mnob-working-spinner"
+                size={17}
+                strokeWidth={2}
+                aria-hidden="true"
+              />
+            ) : (
+              <ShieldCheck size={17} strokeWidth={2} aria-hidden="true" />
+            )}
+            {working ? props.busy : RECOVERY_COPY.action}
+          </span>
+          <ArrowRight size={17} strokeWidth={2.2} aria-hidden="true" />
+        </button>
+        <p className="mnob-hint">
+          <BadgeCheck size={14} strokeWidth={2} aria-hidden="true" /> {RECOVERY_COPY.hint}
+        </p>
+        <button
+          type="button"
+          className="mnob-alt"
+          onClick={props.onSkip}
+          disabled={working}
+          data-testid="skip-recovery"
+        >
+          {props.error === null ? RECOVERY_COPY.skip : RECOVERY_COPY.continue}
+        </button>
+      </div>
+    </Shell>
+  )
+}
+
 function RecoverStep(props: {
   /** "…that {keyPhrase} is part of it". See `../lib/custodyArm.ts`. */
   keyPhrase: string
   /** What to try when the name turns out to be somebody else's. */
   otherKeyHint: string
   onFind: (name: string) => Promise<NameRecoveryOutcome>
-  onBack: () => void
+  /** Where "Go back" goes, or null where there is nowhere behind this screen. */
+  onBack: (() => void) | null
 }) {
   const [name, setName] = useState('')
   const [busy, setBusy] = useState(false)
@@ -2424,9 +2800,11 @@ function RecoverStep(props: {
           <ShieldCheck size={14} strokeWidth={2} aria-hidden="true" /> Knowing the name is not enough
           on its own.
         </p>
-        <button type="button" className="mnob-alt" onClick={props.onBack} disabled={busy}>
-          Go back
-        </button>
+        {props.onBack ? (
+          <button type="button" className="mnob-alt" onClick={props.onBack} disabled={busy}>
+            {RECOVERY_COPY.recoverBack}
+          </button>
+        ) : null}
       </form>
     </Shell>
   )

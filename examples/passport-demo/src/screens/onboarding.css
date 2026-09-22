@@ -315,7 +315,7 @@
 
 /* The social entry, and the note it turns into once somebody is signed in.
    Present in the stylesheet unconditionally; rendered only by a build with a
-   Dynamic environment id (see `ContinueWithSocial.tsx`). Quieter than
+   Dynamic environment id. Quieter than
    `.mnob-primary` and louder than `.mnob-alt`, because it is a real second
    route rather than a variation on the first — but it is never the way this
    screen is finished. */

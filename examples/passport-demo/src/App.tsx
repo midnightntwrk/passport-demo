@@ -197,6 +197,14 @@ const CustodyPassport = lazy(() => import('./screens/CustodyPassport.js'));
 import { choosePassportIdentity } from './lib/dynamicSession.js';
 import { useDynamicSession } from './lib/dynamic.js';
 import { useDynamicCustodyArm, usePasskeyCustodyArm } from './lib/custodyArms.js';
+/* The way-back hand-off, and what Home may say about a way back. Nothing at run
+   time but the standard library, which is why both may be reached statically
+   from here — see their module headers. */
+import { adoptionStage, clearAdoption, loadAdoption } from './lib/custodyAdoption.js';
+import { RECOVERY_COPY } from './lib/recoveryStep.js';
+/* A TYPE, which is erased: naming it here pulls nothing into the entry chunk. */
+import type { K256DeviceIdentity } from './identity/custodyContractSigning.js';
+const RecoverWithProvider = lazy(() => import('./screens/RecoverWithProvider.js'));
 import {
   accountCustodyEnabled,
   custodyOtherKeyNotice,
@@ -6189,6 +6197,35 @@ export default function PassportDemo() {
     [localWalletNetworkId, profile],
   );
 
+  /* ------------------------------------------------------------------ */
+  /* COMING BACK ON A NEW DEVICE                                         */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * The hand-off in flight, if there is one.
+   *
+   * Read from storage rather than held in the screen that started it, because
+   * the screen that started it is GONE by the time the second half runs: a key
+   * made on this device wins the identity question the moment it exists, and
+   * `CustodyPassport` is re-created under that key's own arm. See
+   * `./lib/custodyAdoption.ts`.
+   *
+   * Re-read when the profile changes, which is exactly the event that separates
+   * the two halves.
+   */
+  const [adoption, setAdoption] = useState(() => loadAdoption(window.localStorage));
+  useEffect(() => {
+    setAdoption(loadAdoption(window.localStorage));
+  }, [profile, localWalletNetworkId]);
+  /**
+   * Whether the reader asked for the way back from the landing.
+   *
+   * It only matters before a sign-in lands: once one has, the custody screen
+   * itself is the way-back road (`CustodyPassport`, dynamic arm) and this is
+   * the flag that says the landing should not come back underneath it.
+   */
+  const [recoverWithProvider, setRecoverWithProvider] = useState(false);
+
   const passkeyArm = usePasskeyCustodyArm({
     contractRoot: passportContractRoot,
     knownUserKey: passkeyCustodyUser,
@@ -6219,6 +6256,99 @@ export default function PassportDemo() {
   /* The two way-out panels hold the screen open in their own right. They have
      to: a failure that suppresses the error banner in favour of its panel
      would otherwise have nothing left keeping onboarding on screen. */
+  /** The network every way-back decision on this render is about. */
+  const custodyNetwork = localWalletNetworkId ?? configuredWalletNetwork ?? selectedNetwork;
+
+  /**
+   * THE SIGN-IN, AS A WAY BACK (2026/09/22).
+   *
+   * Narrow on purpose: whether somebody is signed in, what to call the
+   * provider, how to open the overlay, how to reach the key behind it, and how
+   * to leave. The custody screen needs no more than that, and giving it more
+   * would put a vendor inside a screen whose whole design is that there is not
+   * one.
+   *
+   * Null where the build has no sign-in at all, which is most builds — and then
+   * the step after the name is never due and that screen renders exactly what
+   * it rendered before the step existed.
+   */
+  const custodySocial = useMemo(
+    () =>
+      dynamicSession.status === 'disabled'
+        ? null
+        : {
+            status: dynamicSession.status,
+            provider: dynamicSession.provider,
+            handle: dynamicSession.handle,
+            address: dynamicSession.evmAddress,
+            openAuthFlow: dynamicSession.openAuthFlow,
+            signOut: () => void dynamicSession.signOut(),
+            device: async () => {
+              const identity = await dynamicArm.ensureIdentity();
+              return identity.device as K256DeviceIdentity;
+            },
+          },
+    [dynamicArm, dynamicSession],
+  );
+
+  /**
+   * Which half of a hand-off is next, asked on every render and costing
+   * nothing. See `./lib/custodyAdoption.ts`.
+   *
+   * `alreadyAdopted` is the POINTER, not the chain: a pointer for this
+   * credential is this browser's own record that the key it holds already opens
+   * that Passport, which is precisely what the second half writes.
+   */
+  const adoptStage = adoptionStage({
+    handoff: adoption,
+    /* THE NETWORK THE APP IS ON, not the one an open wallet reports. A device
+       with no key on it has no wallet, and that is the whole population this
+       road exists for — reading the wallet here would make a resumed hand-off
+       permanently idle on exactly the device it is meant to rescue. */
+    network: custodyNetwork,
+    hasDeviceKey: profile !== null,
+    socialSignedIn:
+      dynamicSession.status === 'signed-in' && (dynamicSession.evmAddress ?? '').length > 0,
+    alreadyAdopted: passkeyCustodyUser !== null,
+  });
+
+  /* One at a time, and never restarted by a re-render. A second run would ask
+     for a second approval for a transaction that is already away. */
+  const adoptRunning = useRef(false);
+  useEffect(() => {
+    if (adoptStage !== 'adopt' || adoptRunning.current) return;
+    const handoff = adoption;
+    const credentialId = profile?.passkey.credentialId;
+    const session = dynamicArm.session;
+    if (handoff === null || !credentialId || session === null) return;
+    adoptRunning.current = true;
+    void (async () => {
+      try {
+        const [{ adoptDeviceKey }, identity] = await Promise.all([
+          import('./identity/custodyAdopt.js'),
+          dynamicArm.ensureIdentity(),
+        ]);
+        await adoptDeviceKey({
+          handoff,
+          contractRoot: passportContractRoot,
+          credentialId,
+          session,
+          socialDevice: identity.device as K256DeviceIdentity,
+          storage: window.localStorage,
+        });
+        /* CLEARED ONLY ON SUCCESS. A failure is a hand-off to be resumed, and
+           the next open resumes it — every step of it is safe to repeat. */
+        clearAdoption(window.localStorage);
+        setAdoption(null);
+        setRecoverWithProvider(false);
+      } catch (cause) {
+        console.warn('[account-custody] this Passport could not be brought here yet', cause);
+      } finally {
+        adoptRunning.current = false;
+      }
+    })();
+  }, [adoptStage, adoption, dynamicArm, passportContractRoot, profile]);
+
   const showOnboarding =
     !sessionActive ||
     onboardingIntent !== null ||
@@ -9814,6 +9944,11 @@ export default function PassportDemo() {
         activity={homeActivity}
         appsProfile={custodyAppsProfile}
         supportUrl={(import.meta.env.VITE_TELEGRAM_URL as string | undefined) ?? null}
+        /* WHETHER THIS PASSPORT CAN BE OPENED ANYWHERE ELSE. "Recovery: on"
+           beside the account where it can; the small entry beside the support
+           link where it cannot yet — which is where somebody who answered "not
+           now" after their name goes looking for it. */
+        recovery={custody.recovery ?? { state: 'hidden' }}
         /* NO BACK-UP FILE FOR THIS PASSPORT YET, so no control offering one.
            `identity/backup.ts` exports the prototype's stores — the passkey
            profile, the alias records, the prototype account — and none of them
@@ -9925,12 +10060,67 @@ export default function PassportDemo() {
           what this branch decides is which contract the Passport that comes
           next is made on. A passkey holder who already has a Passport on the
           old contract never reaches it. */}
-      {custodyArm !== null ? (
+      {/* THE SECOND HALF OF A HAND-OFF, WHICH IS NOT A SCREEN ANYBODY PRESSES.
+          A key has just been made on this device for a Passport a sign-in
+          found, and the enrolment that puts it on the account is running. It
+          takes one approval from the sign-in and no press at all here, so what
+          is on screen is a line saying what is happening — not the welcome page
+          the custody screen would otherwise paint over it, and not the
+          dead-end card this road replaced. */}
+      {adoptStage === 'adopt' ? (
+        <section className="mnob-screen" aria-busy="true">
+          <header className="mnob-bar">
+            <img className="mnob-wordmark" src="/midnight-wordmark.svg" alt="Midnight" />
+            <span className="mnob-bar-label">Passport</span>
+          </header>
+          <div className="mnob-body">
+            <p className="mnob-kicker">{RECOVERY_COPY.recoverEntry}</p>
+            <h1 className="mnob-title">
+              <span>Opening your</span>
+              <span>Passport</span>
+            </h1>
+            <p className="mnob-lede" role="status" data-testid="adopting">
+              Adding this device to {adoption?.name ?? 'your Passport'}.night. Approve it with the
+              account you just signed in with.
+            </p>
+          </div>
+          <footer className="mnob-foot">
+            <span>Test network demo — not production</span>
+          </footer>
+        </section>
+      ) : recoverWithProvider && custodyArm === null ? (
+        /* THE WAY BACK, BEFORE THERE IS ANYTHING TO HOLD A SCREEN UP. Pressed
+           from the landing on a device with no key: there is no arm yet, and
+           there will not be until a sign-in lands. The moment one does,
+           `custodyArm` is the sign-in's and the branch below takes over — where
+           it is pinned to the way-back road, because a sign-in never makes a
+           Passport. */
+        <Suspense fallback={<div className="passport-experience-loading" role="status" />}>
+          <RecoverWithProvider
+            status={dynamicSession.status}
+            onSignIn={dynamicSession.openAuthFlow}
+            onBack={() => setRecoverWithProvider(false)}
+          />
+        </Suspense>
+      ) : custodyArm !== null && adoptStage !== 'enrol' ? (
         <Suspense fallback={<div className="passport-experience-loading" role="status" />}>
           <CustodyPassport
-            network={localWalletNetworkId ?? configuredWalletNetwork ?? selectedNetwork}
+            network={custodyNetwork}
             arm={custodyArm}
             notice={passkeyOtherKeyNotice}
+            /* The sign-in, as a way back and as nothing else. */
+            social={custodySocial}
+            /* A Passport a sign-in FINDS is handed to a key made here: the
+               enrolment is the host's, because it replaces the screen that
+               asked for it. See `./lib/custodyAdoption.ts`. */
+            onRecoverToDeviceKey={(handoff) => {
+              setAdoption(handoff);
+              startPasskeyOnboarding('enrol-new');
+            }}
+            onLeaveRecovery={() => {
+              setRecoverWithProvider(false);
+              void dynamicSession.signOut();
+            }}
             /* A FINISHED PASSPORT LANDS ON THE REAL HOME (2026/09/22). The
                screen keeps onboarding — the welcome page, the name step, the
                counted setup, and coming back by name — and hands everything
@@ -9977,6 +10167,14 @@ export default function PassportDemo() {
           hasExistingPassport={localPassportKnown}
           onContinue={() => startPasskeyOnboarding('auto')}
           onUseDifferentPasskey={() => void runDiscoverableSignIn()}
+          /* "I already have a Passport" — and nothing else on this screen is a
+             provider sign-in any more. Absent where the build has none, which
+             is every build shipped today. */
+          onRecoverWithProvider={
+            dynamicSession.status === 'disabled'
+              ? undefined
+              : () => setRecoverWithProvider(true)
+          }
           onDismissError={() => setOnboardingError(null)}
           /* The two dead ends that now have a way out, and it is the SAME way
              out: `onCreateNewPasskey` enrols DELIBERATELY. It is deliberately

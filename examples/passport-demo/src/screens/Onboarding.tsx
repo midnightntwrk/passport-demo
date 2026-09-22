@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react'
 import { ArrowRight, Eraser, Fingerprint, Loader2, X } from 'lucide-react'
 import ThemeToggle from './ThemeToggle'
-import ContinueWithSocial from './ContinueWithSocial'
+import { RECOVERY_COPY } from '../lib/recoveryStep.js'
 import './onboarding.css'
 
 /**
@@ -22,11 +22,15 @@ import './onboarding.css'
  * control on the screen: nothing here waits on a vendor, and the boot cannot
  * be held hostage to one.
  *
- * Since 2026/09/14 a build given a `VITE_DYNAMIC_ENVIRONMENT_ID` also renders
- * `<ContinueWithSocial />` beneath the hint. It is not a second way in. It
- * proves who somebody is to a provider and then hands them straight back to
- * the button above, because the passkey is still what this device's Passport
- * is held by — see that component's header and `docs/demo/dynamic-integration.md`.
+ * THE PROVIDER SIGN-IN IS NOT ON THIS SCREEN ANY MORE (2026/09/22).
+ * `<ContinueWithSocial />` sat beneath the hint from 2026/09/14 and offered
+ * "Continue with Google, Microsoft, X, or Discord" to anybody who arrived. It
+ * read as a second way to START, and a sign-in cannot start a Passport: it
+ * proves who somebody is and produces nothing a new Passport would be held by.
+ * The product owner's drawing of today gives it the one job it can do —
+ * opening a Passport that already exists, on a device that has no key for it —
+ * and `onRecoverWithProvider` below is the entry to that road. The component
+ * component itself is gone with it.
  */
 export interface OnboardingProps {
   stage: 'welcome' | 'working'
@@ -56,6 +60,16 @@ export interface OnboardingProps {
    * one created and bound to it if none exists here yet.
    */
   onUseDifferentPasskey?: () => void
+  /**
+   * "I already have a Passport" — the way back, on a device with no key.
+   *
+   * THE ONLY ROAD A PROVIDER SIGN-IN OPENS. It leads to a screen that signs in
+   * with a provider, asks for the `.night` name, and checks with Midnight that
+   * the sign-in is one of that Passport's own devices before a key is made
+   * here. Omit it — which every build with no sign-in behind it does — and no
+   * control appears, exactly as before. See `./RecoverWithProvider.tsx`.
+   */
+  onRecoverWithProvider?: () => void
   /**
    * The authenticator's own account of a credential that answered WITHOUT a
    * PRF result, or null when that has not happened. It cannot open a Passport,
@@ -220,6 +234,7 @@ export default function OnboardingScreen(props: OnboardingProps) {
     hasExistingPassport,
     onContinue,
     onUseDifferentPasskey,
+    onRecoverWithProvider,
     unusableCredential,
     keylessPasskey,
     unusableDevice,
@@ -355,11 +370,21 @@ export default function OnboardingScreen(props: OnboardingProps) {
               <ArrowRight size={17} strokeWidth={2.2} aria-hidden="true" />
             </button>
             <p className="mnob-hint">{continueHint}</p>
-            {/* Renders nothing at all unless this build was given a Dynamic
-                environment id, which no build shipped today has — so there is
-                no condition to write here. See the component's own header, and
-                the note about "the only way in" at the top of this file. */}
-            <ContinueWithSocial />
+            {/* THE WAY BACK, and the only entry on this screen that a provider
+                sign-in is behind. It is not a way to start — see the header —
+                so it sits below the one primary control, in the same weight as
+                the other secondary paths. Absent in every build with no
+                sign-in behind it, which is every build shipped today. */}
+            {onRecoverWithProvider ? (
+              <button
+                type="button"
+                className="mnob-alt"
+                onClick={onRecoverWithProvider}
+                data-testid="already-have-passport"
+              >
+                {RECOVERY_COPY.recoverEntry}
+              </button>
+            ) : null}
             {onUseDifferentPasskey ? (
               <button
                 type="button"
