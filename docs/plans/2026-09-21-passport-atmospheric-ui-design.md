@@ -1,7 +1,11 @@
-# Passport atmospheric UI design
+# Passport UI design
 
 **Date:** 2026/09/21  
 **Status:** Implemented on `codex/modern-passkey-ui`
+
+**Reference correction:** 2026/09/22 — the supplied screenshots supersede the
+atmospheric direction for every screen after login. Keep the approved login;
+restore the clean product interface rather than extending its hero treatment.
 
 ## Intent
 
@@ -10,10 +14,10 @@ Refresh the Passport demo into a richer, calmer product experience without chang
 ## Brand system
 
 - Use Midnight Black (`#0A0A0A`), White (`#FFFFFF`), and Midnight Blue (`#0000FE`) as the primary palette from the Midnight brand hub.
-- Use Outfit for display and interface typography.
+- Keep Outfit on the approved login; use the reference's system sans-serif stack on product screens.
 - Retain the official Midnight wordmark and symbol already shipped with the app.
 - Treat violet as a subordinate atmospheric highlight; cobalt remains the recognisable brand anchor.
-- The entry illustration is a vector credential in Midnight Blue with the official symbol, concealed fields, and a lock. Its small proof badge inherits the active theme. The earlier eclipse assets remain available for the signed-in background.
+- The entry illustration is a vector credential in Midnight Blue with the official symbol, concealed fields, and a lock. Its small proof badge inherits the active theme. The earlier eclipse assets are not used on product screens.
 
 ## Experience
 
@@ -21,7 +25,23 @@ The entry screen leads with a simple animated credential, a compact brand bar, a
 
 At desktop widths of 960px and above, the introduction and enlarged illustration sit beside a dedicated sign-in panel. Smaller screens retain the stacked layout. Both login controls have matching dimensions, inset icon tiles, and short supporting copy; the primary action uses solid Midnight Blue. The artwork's backing, proof badge, borders, and text follow the selected theme.
 
-The identity-creation journey carries the same hierarchy, glass-like raised surfaces, and compact motion. The signed-in shell shifts from onboarding to utility: the active Midnight name becomes the hero, Send and Receive become the primary actions, assets are easier to scan, and navigation behaves like a floating dock.
+After login, use plain white or Midnight Black backgrounds, bold headings,
+neutral grey panels, and solid blue actions. Home leads with the time-of-day
+greeting and the holder's name. Balances stay in aligned rows. The floating
+navigation uses a solid blue active segment with white icon and label.
+
+Welcome, name selection, and registration progress retain the screenshot's
+single-column structure, pill-shaped name field, visible progress stages,
+and optional waiting game. Send and Receive remain centred dialogs on desktop
+and reachable sheets on mobile; tall content scrolls inside the dialog.
+Native passkey prompts and all authentication/transaction logic remain intact.
+
+Reference ledger: restore the greeting, remove the background eclipse and
+product gradients, return neutral token icons and cards, restore bold type
+and uppercase navigation labels, and remove duplicate CSS overrides. Retain
+official Midnight Blue (`#0000FE`) rather than sampling the older reference's
+brighter blue. Apps retains its wider
+720px desktop discovery column; Home and Assets use 560px, onboarding 520px.
 
 ## Motion and accessibility
 

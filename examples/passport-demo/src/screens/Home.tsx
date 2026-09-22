@@ -809,12 +809,9 @@ export default function HomeScreen(props: HomeScreenProps) {
 
       <div className="mnhome-body">
         <div className="mnhome-identity">
-          <p className="mnhome-kicker">{aliasLabel ? 'Welcome back' : 'Passport'}</p>
-          {/* The alias is the identity, so it receives the display line of its
-              own beneath a quiet welcome. Without one, the time-of-day
-              greeting remains the honest fallback. */}
+          <p className="mnhome-kicker">Passport</p>
           <h1 className="mnhome-name">
-            {aliasLabel ?? timeOfDayGreeting()}
+            {aliasLabel ? `${timeOfDayGreeting()}, ${aliasLabel}` : timeOfDayGreeting()}
           </h1>
           {!aliasLabel && displayName ? <p className="mnhome-person">{displayName}</p> : null}
         </div>
@@ -875,7 +872,6 @@ export default function HomeScreen(props: HomeScreenProps) {
             machinery, and fees are the sponsor's. */}
         {account ? (
           <>
-            <h2 className="mnhome-section-title">Your assets</h2>
             {/* LINE ITEMS, NOT CARDS (2026/09/01), and the same line items the
                 Assets tab uses. "We show them like line items, so it's a
                 table" was said of the Assets page, but the strip here was the
