@@ -1699,20 +1699,30 @@ function NameStep(props: {
   onRecover: () => void
 }) {
   const { checkName, chosenName, takenName, onTyping } = props
-  const [value, setValue] = useState(chosenName ?? takenName ?? '')
+  const [value, setValue] = useState('')
   const [field, setField] = useState<NameFieldState>({ kind: 'empty' })
   const probe = useRef(0)
 
   const busy = props.busy !== null
 
-  /* A name carried over from a previous visit, or from a race that was lost,
-     goes into the field rather than being asked for again — and is CHECKED
-     rather than assumed, because the reason it is here may be that somebody
-     else took it. */
+  /**
+   * A name carried over from a previous visit, or from a race that was lost,
+   * goes into the field rather than being asked for again — and is CHECKED
+   * rather than assumed, because the reason it is here may be that somebody
+   * else took it.
+   *
+   * ONCE EACH, WHICH THE REF IS FOR. Without it, clearing the field to type
+   * something else put the carried name straight back: the effect sees an
+   * empty field and a name to put in it, and it is the same effect either way.
+   * Somebody whose name was taken would then be unable to delete the name they
+   * had just been told they cannot have.
+   */
+  const carried = useRef<string | null>(null)
   useEffect(() => {
-    const carried = chosenName ?? takenName
-    if (carried === null) return
-    setValue((current) => (current === '' ? carried : current))
+    const name = chosenName ?? takenName
+    if (name === null || carried.current === name) return
+    carried.current = name
+    setValue(name)
   }, [chosenName, takenName])
 
   useEffect(() => {
@@ -1754,7 +1764,13 @@ function NameStep(props: {
   }, [checkName, value])
 
   const alias = field.kind === 'checking' || field.kind === 'answered' ? field.alias : null
-  const available = field.kind === 'answered' && field.availability.status === 'available'
+  /* A NAME THE CLAIM ITSELF FOUND TAKEN OUTRANKS THE FIELD'S OWN ANSWER, and
+     it has to: the field asked before the setup, the claim asked after it, and
+     the later answer is the true one. Without this the line under the field
+     would go on saying a name is free beside a message saying it is gone. */
+  const lostTheRace = alias !== null && alias === takenName
+  const available =
+    !lostTheRace && field.kind === 'answered' && field.availability.status === 'available'
   const enabled = custodyNameFirstEnabled({ busy, available })
 
   return (
@@ -1795,7 +1811,11 @@ function NameStep(props: {
           disabled={busy}
         />
 
-        <NameAvailability field={field} networkLabel={props.networkLabel} />
+        <NameAvailability
+          field={field}
+          networkLabel={props.networkLabel}
+          takenName={takenName}
+        />
 
         {props.error ? (
           <div className="mnob-unusable" role="alert">
@@ -1831,8 +1851,24 @@ function NameStep(props: {
 }
 
 /** The one line under the field, in the words `../lib/custodyNameFirst.ts` sets. */
-function NameAvailability(props: { field: NameFieldState; networkLabel: string }) {
-  const { field, networkLabel } = props
+function NameAvailability(props: {
+  field: NameFieldState
+  networkLabel: string
+  /** A name the claim found taken, whatever the field was told earlier. */
+  takenName: string | null
+}) {
+  const { field, networkLabel, takenName } = props
+  if (
+    (field.kind === 'checking' || field.kind === 'answered') &&
+    field.alias === takenName
+  ) {
+    return (
+      <p className="mndyn-status mndyn-status-taken" role="status">
+        <span className="mndyn-status-dot" aria-hidden="true" />
+        <span>{custodyNameTakenSentence(aliasDomain(field.alias), networkLabel)}</span>
+      </p>
+    )
+  }
   if (field.kind === 'empty') {
     return (
       <p className="mndyn-status mndyn-status-checking">

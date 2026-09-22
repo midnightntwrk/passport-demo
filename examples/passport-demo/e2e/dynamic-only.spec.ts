@@ -89,18 +89,21 @@ test.describe('a Passport held by a social sign-in', () => {
     /* The sign-in is what the screen is about, and it names the PROVIDER —
        never the vendor, whom the reader has never chosen. */
     await expect(page.getByText('Signed in with Google')).toBeVisible();
-    await expect(page.getByRole('heading', { name: /Set up\s*your Passport/ })).toBeVisible();
+    /* THE SAME WELCOME PAGE THE PASSKEY ROAD SHOWS, said to a person who
+       signed in with Google. Before 2026/09/22 this arm opened on an offer —
+       "Set up your Passport", one button — and was never told what a Passport
+       is at all. */
+    await expect(page.getByRole('heading', { name: /Welcome to\s*Passport/ })).toBeVisible();
+    await expect(page.getByRole('heading', { name: /Set up\s*your Passport/ })).toHaveCount(0);
+    await expect(page.getByText('Fees are covered for you')).toBeVisible();
 
     /* The sentence this whole path exists to delete. Until 2026/09/16 a social
        sign-in ended here, on the welcome screen, being told to go and make a
        passkey. */
     await expect(page.getByText('Finish with your passkey above')).toHaveCount(0);
 
-    /* One offer, and the two things that are true about it. */
-    await expect(page.getByRole('button', { name: 'Create my Passport' })).toBeEnabled();
-    await expect(
-      page.getByText('Setting your Passport up is paid for on your behalf.'),
-    ).toBeVisible();
+    /* One way on, and one way back in for somebody who is not new. */
+    await expect(page.getByRole('button', { name: 'Choose my name' })).toBeEnabled();
     await expect(
       page.getByRole('button', { name: 'I already have a Passport' }),
     ).toBeVisible();
@@ -152,7 +155,56 @@ test.describe('a Passport held by a social sign-in', () => {
     await expect(page.getByRole('button', { name: 'Find my Passport' })).toBeEnabled();
 
     await page.getByRole('button', { name: 'Go back' }).click();
-    await expect(page.getByRole('button', { name: 'Create my Passport' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Choose my name' })).toBeVisible();
+
+    await context.close();
+  });
+
+  test('asks for the name first, and makes the whole Passport on that one press', async ({
+    browser,
+  }) => {
+    const context = await browser.newContext(
+      walkContextOptions({ viewport: { width: 420, height: 900 } }),
+    );
+    const page = await context.newPage();
+    await installNetworkBoundary(page);
+    await page.goto(WALK);
+
+    await page.getByRole('button', { name: 'Choose my name' }).click();
+    await expect(page.getByRole('heading', { name: /Choose\s*your \.night name/ })).toBeVisible();
+
+    /* Nothing may be built over a name the registry has not answered for, and
+       there is nothing on this step that walks past it — the name is part of
+       making the Passport, not a decoration on one that exists. */
+    await expect(page.getByRole('button', { name: 'Create my Passport' })).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'Choose one later' })).toHaveCount(0);
+
+    /* A name that is really taken, decoded by the shipped Midnames module from
+       the stagenet `.night` TLD's own recorded state. */
+    await page.getByLabel('Your name').fill(RESOLVABLE_NAME);
+    await expect(page.getByText(`${RESOLVABLE_NAME}.night is already taken`)).toBeVisible({
+      timeout: 120_000,
+    });
+    await expect(page.getByRole('button', { name: 'Create my Passport' })).toBeDisabled();
+
+    /* And one that is not. */
+    await page.getByLabel('Your name').fill('alice');
+    await expect(page.getByText('alice.night is available')).toBeVisible({ timeout: 120_000 });
+    await expect(page.getByRole('button', { name: 'Create my Passport' })).toBeEnabled();
+
+    /* THE NAME IS WRITTEN DOWN BEFORE ANYTHING IS BUILT, which is what makes a
+       reload halfway through a three-step setup come back to the name already
+       chosen rather than to an empty field over an account that exists. */
+    await page.getByRole('button', { name: 'Create my Passport' }).click();
+    await expect
+      .poll(
+        () =>
+          page.evaluate(() =>
+            window.localStorage.getItem('passport-account-custody-chosen-name:v1'),
+          ),
+        { timeout: 120_000 },
+      )
+      .toContain('alice');
 
     await context.close();
   });
@@ -167,6 +219,13 @@ test.describe('a Passport held by a social sign-in', () => {
     await installNetworkBoundary(page);
     await page.goto(WALK);
 
+    /* The welcome, the name, and then the one press that makes the whole
+       thing — the order this flow has had since 2026/09/22. */
+    await page.getByRole('button', { name: 'Choose my name' }).click();
+    await page.getByLabel('Your name').fill('alice');
+    await expect(page.getByRole('button', { name: 'Create my Passport' })).toBeEnabled({
+      timeout: 120_000,
+    });
     await page.getByRole('button', { name: 'Create my Passport' }).click();
 
     /* The count line, while it is working. Three steps, and the copy says so
