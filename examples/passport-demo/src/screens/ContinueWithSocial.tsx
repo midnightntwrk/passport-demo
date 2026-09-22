@@ -37,9 +37,9 @@ export default function ContinueWithSocial() {
   const loading = session.status === 'loading'
   const ready = session.status === 'signed-out'
   const status = loading
-    ? 'Getting the sign-in ready…'
+    ? 'Getting Dynamic sign-in ready…'
     : session.status === 'disabled'
-      ? 'Signing in with a provider is not available right now. You can continue with a passkey.'
+      ? 'Dynamic sign-in is currently unavailable. You can continue with a passkey.'
       : null
 
   return (
@@ -55,15 +55,21 @@ export default function ContinueWithSocial() {
         onClick={session.openAuthFlow}
         disabled={!ready}
         aria-busy={loading}
+        aria-label="Continue with Dynamic"
         aria-describedby={status ? statusId : undefined}
       >
-        <Orbit size={18} strokeWidth={1.9} aria-hidden="true" />
-        <span className="mnob-social-copy">Continue with Google, Microsoft, X, or Discord</span>
+        <span className="mnob-method-icon" aria-hidden="true">
+          <Orbit size={22} strokeWidth={1.7} />
+        </span>
+        <span className="mnob-social-copy mnob-method-copy">
+          <span>Continue with Dynamic</span>
+          <small aria-hidden="true">Connect with your account</small>
+        </span>
         {loading ? (
           <LoaderCircle size={18} className="mnob-social-spin" aria-hidden="true" />
-        ) : ready ? (
+        ) : (
           <ArrowRight size={17} strokeWidth={2.2} aria-hidden="true" />
-        ) : null}
+        )}
       </button>
       {status ? (
         <p id={statusId} className="mnob-social-note" role="status">{status}</p>
