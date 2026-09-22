@@ -132,7 +132,7 @@ const sendAmount = (page: Page) => page.locator('.mnhome-send-amount input');
 /* The landing, where a build with a provider sign-in behind it is entered     */
 /* -------------------------------------------------------------------------- */
 
-const LOST_DEVICE_LINK = 'Lost your device? Recover with Google, Microsoft, X, Discord, or email';
+const LOST_DEVICE_LINK = 'Lost your device? Recover your Passport';
 
 test.describe('the landing of a build with a provider sign-in behind it', () => {
   async function landing(browser: Browser, viewport?: { width: number; height: number }) {
@@ -620,7 +620,7 @@ test.describe('a Passport that has been paid', () => {
     await expect(assetRow(page, 'mUSD')).toContainText('40');
 
     /* The name card, and the line under it. */
-    await expect(page.getByText('Your name on Stagenet')).toBeVisible();
+    await expect(page.getByText('Your name on Stagenet')).toHaveCount(0);
     await expect(page.getByText('Registered on Stagenet')).toBeVisible();
     await expect(page.locator('.mnid-alias')).toHaveText('walker.night');
     await expect(page.getByText('Your account is ready')).toBeVisible();

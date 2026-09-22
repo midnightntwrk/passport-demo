@@ -129,7 +129,6 @@ export function EcosystemIdentity(props: EcosystemProps) {
     <>
       <article className={`mnid-card${embedded ? ' mnid-card-embedded' : ''}`}>
         <div className="mnid-card-head">
-          <p className="mnid-kicker">Your name on {NETWORK_LABELS[network]}</p>
           {record ? <StatusPill record={record} network={network} /> : null}
         </div>
 

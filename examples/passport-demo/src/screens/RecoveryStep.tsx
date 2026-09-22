@@ -33,21 +33,18 @@ export default function RecoveryStep(props: {
             </div>
           ) : null}
           <div className="mnrecovery-actions">
-            <p className="mnrecovery-providers" id="recovery-providers">Google, Microsoft, X, Discord, or email</p>
             <button
               type="button"
               className="mnrecovery-primary"
               onClick={props.onAdd}
               disabled={working}
               aria-label={working ? props.busy ?? 'Adding recovery' : 'Add recovery'}
-              aria-describedby="recovery-providers recovery-hint"
               data-testid="add-recovery"
             >
               {working ? <Loader2 size={20} className="mnrecovery-spinner" aria-hidden="true" /> : <ShieldCheck size={20} aria-hidden="true" />}
               <span role="status">{working ? props.busy : 'Add recovery'}</span>
               <ArrowRight size={20} aria-hidden="true" />
             </button>
-            <p className="mnrecovery-hint" id="recovery-hint">One approval. Fees covered.</p>
             <button type="button" className="mnrecovery-secondary" onClick={props.onSkip} disabled={working} data-testid="skip-recovery">
               {props.error === null ? RECOVERY_COPY.skip : RECOVERY_COPY.continue}
             </button>

@@ -640,7 +640,7 @@ test.describe('a passkey that already holds one', () => {
     await expect(assetRow(page, 'mUSD')).toContainText('250');
 
     /* The name card, the account line, the trail, and the bar. */
-    await expect(page.getByText('Your name on Stagenet')).toBeVisible();
+    await expect(page.getByText('Your name on Stagenet')).toHaveCount(0);
     await expect(page.getByText('Registered on Stagenet')).toBeVisible();
     await expect(page.locator('.mnid-alias')).toHaveText('walker.night');
     await expect(page.getByText('Your account is ready')).toBeVisible();
@@ -1108,7 +1108,7 @@ test.describe('a passkey Passport that has just been named', () => {
       timeout: 60_000,
     });
     await expect(page.getByTestId('add-recovery')).toHaveText('Add recovery');
-    await expect(page.getByText('Google, Microsoft, X, Discord, or email', { exact: true })).toBeVisible();
+    await expect(page.getByText('Google, Microsoft, X, Discord, or email', { exact: true })).toHaveCount(0);
     await expect(page.getByTestId('skip-recovery')).toHaveText('Not now');
     await expect(page.locator('.mnrecovery-art img')).toBeVisible();
     await expect(page.locator('.mnrecovery .mnob-foot')).toHaveCount(0);

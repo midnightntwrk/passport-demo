@@ -246,7 +246,7 @@ export const RECOVERY_COPY = {
   lede:
     'Your Passport lives on this device. Add a way back and you can open it again on a new ' +
     'phone if this one is lost.',
-  action: 'Add recovery with Google, Microsoft, X, Discord, or email',
+  action: 'Add recovery',
   skip: 'Not now',
   busy: 'Adding your way back',
   hint: 'Adding it is paid for on your behalf, and takes one approval.',
@@ -269,9 +269,9 @@ export const RECOVERY_COPY = {
   recoverLede:
     'Sign in with the account you added as your way back, then tell Passport the name you ' +
     'already hold.',
-  recoverAction: 'Sign in with Google, Microsoft, X, Discord, or email',
+  recoverAction: 'Sign in to recover',
   recoverEntry: 'I already have a Passport',
   /** The landing's quiet link under Log in and Sign up, into the same road. */
-  landingEntry: 'Lost your device? Recover with Google, Microsoft, X, Discord, or email',
+  landingEntry: 'Lost your device? Recover your Passport',
   recoverBack: 'Go back',
 } as const;
