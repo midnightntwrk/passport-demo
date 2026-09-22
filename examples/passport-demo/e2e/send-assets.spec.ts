@@ -387,7 +387,7 @@ test('a name takes a shielded asset too, and is reviewed as the two steps it is'
 test('the review step names the asset that was chosen', async () => {
   await page.getByPlaceholder('0.0').fill('0.000001');
   await page.getByRole('button', { name: /^Review$/ }).click();
-  await expect(page.getByText('Review this transfer')).toBeVisible();
+  await expect(page.getByText('Review transfer')).toBeVisible();
 
   const review = await page.locator('.mnhome-send-rows').innerText();
   /* THE ASSET LEADS. This row used to exist only for a shielded send, which

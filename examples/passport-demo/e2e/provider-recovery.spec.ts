@@ -743,7 +743,7 @@ test.describe('a Passport that has been paid', () => {
     await sendAmount(page).fill('10');
     await expect(page.getByRole('button', { name: /^Review$/ })).toBeEnabled({ timeout: 30_000 });
     await page.getByRole('button', { name: /^Review$/ }).click();
-    await expect(page.getByText('Review this transfer')).toBeVisible();
+    await expect(page.getByText('Review transfer')).toBeVisible();
     await page.locator('.mnhome-send-primary').click();
 
     /* ONE SENTENCE, AND THE CONTROL BACK. Where this run stops is worth being

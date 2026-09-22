@@ -935,7 +935,7 @@ test('a `.night` name is a recipient, and the review step shows the name', async
   await page.getByRole('textbox').nth(1).fill('0.000001');
   await page.getByRole('button', { name: /^Review$/ }).click();
 
-  await expect(page.getByText('Review this transfer')).toBeVisible();
+  await expect(page.getByText('Review transfer')).toBeVisible();
   const review = await page.locator('.mnhome-send-rows').innerText();
   expect(review).toContain(`${RESOLVABLE_NAME}.night`);
   /* NO HEX. Not the account, not any part of it beyond the four characters the
@@ -1078,7 +1078,7 @@ test('a send whose passkey will not answer offers a retry and a way out, in the 
      in the way. */
   await page.getByPlaceholder('0.0').fill('0.000001');
   await page.getByRole('button', { name: /^Review$/ }).click();
-  await expect(page.getByText('Review this transfer')).toBeVisible();
+  await expect(page.getByText('Review transfer')).toBeVisible();
 
   await page.evaluate(() => {
     (window as unknown as { __refuseNextAssertion?: boolean }).__refuseNextAssertion = true;
