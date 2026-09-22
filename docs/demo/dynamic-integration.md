@@ -207,7 +207,7 @@ account's device set, neither of which is the owner key.
 | `src/lib/custodyAssets.ts` | The rows Home and Send read money through, and what a typed amount means in each asset's own units. Pure; 100 % covered. |
 | `src/screens/DynamicPassport.tsx` | The whole path, as one screen with its own state. Lazily loaded. |
 | `src/lib/dynamicWalk.ts` | A stand-in sign-in for the mocked walk, with a real secp256k1 signer. Deleted from any build that does not set `VITE_DYNAMIC_WALK`. |
-| `e2e/dynamic-only.spec.ts` | The mocked walk: the welcome path, the recovery offer, the one-sentence refusal, and — from a seeded Passport against recordings of the real stagenet account — the mUSD row, a mUSD payment, and a NIGHT payment to a Passport of the same kind. |
+| `e2e/provider-recovery.spec.ts` | The mocked walk: the way back a sign-in opens (landing → sign-in → name → the device check), and — from a seeded Passport against recordings of the real stagenet account — the mUSD row, a mUSD payment, and a NIGHT payment to a Passport of the same kind. |
 
 ## 10. What it costs a build that has none of this
 

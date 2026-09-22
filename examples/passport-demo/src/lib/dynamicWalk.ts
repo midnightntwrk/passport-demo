@@ -80,8 +80,33 @@ export function dynamicWalkAddress(search: string): string | null {
   const value = new URLSearchParams(search).get(DYNAMIC_WALK_PARAM);
   if (value === null) return null;
   const trimmed = value.trim();
-  if (trimmed.length === 0 || trimmed === '1') return DYNAMIC_WALK_ADDRESS;
+  if (trimmed.length === 0 || trimmed === '1' || trimmed === DYNAMIC_WALK_SIGNED_OUT) {
+    return DYNAMIC_WALK_ADDRESS;
+  }
   return trimmed;
+}
+
+/**
+ * The value that seeds a session which is AVAILABLE but not signed in.
+ *
+ * IT IS THE ONLY WAY TO WALK THE TWO SCREENS THIS BUILD ADDED (2026/09/22).
+ * Both of them exist for somebody who has not signed in yet — the landing's "I
+ * already have a Passport", and the way-back step after the name — and both are
+ * absent from a build whose seam reports `disabled`. Seeding a session that is
+ * already signed in skips straight past them.
+ *
+ * So `?dynamicwalk=out` publishes `signed-out`, with an `openAuthFlow` that
+ * publishes the signed-in session the overlay would have published. That is the
+ * same substitution the rest of this module makes and no more: what is replaced
+ * is the vendor's overlay, and every line the app runs on either side of it —
+ * which screen it renders, when it picks the add back up, what it signs — is
+ * the shipped one.
+ */
+export const DYNAMIC_WALK_SIGNED_OUT = 'out';
+
+/** Whether this URL wants the signed-out seed. */
+export function dynamicWalkStartsSignedOut(search: string): boolean {
+  return new URLSearchParams(search).get(DYNAMIC_WALK_PARAM)?.trim() === DYNAMIC_WALK_SIGNED_OUT;
 }
 
 /**
@@ -93,8 +118,17 @@ export function seedDynamicWalk(search: string): boolean {
   const address = dynamicWalkAddress(search);
   if (address === null) return false;
 
+  const signedIn = {
+    status: 'signed-in' as const,
+    provider: DYNAMIC_WALK_PROVIDER,
+    handle: DYNAMIC_WALK_HANDLE,
+    evmAddress: address,
+  };
+
   const actions: DynamicActions = {
-    openAuthFlow: () => {},
+    /* The overlay, stood in for: it publishes what a completed sign-in would
+       publish, and the app picks the flow back up exactly as it does live. */
+    openAuthFlow: () => publishDynamicSession(signedIn),
     /* The EIP-191 path, refused with the sentence the real bridge refuses an
        externally connected wallet with. Nothing on this path uses it — the k256
        arm cannot verify a keccak of a prefixed string — and a stand-in that
@@ -114,12 +148,11 @@ export function seedDynamicWalk(search: string): boolean {
   };
 
   publishDynamicActions(actions);
-  publishDynamicSession({
-    status: 'signed-in',
-    provider: DYNAMIC_WALK_PROVIDER,
-    handle: DYNAMIC_WALK_HANDLE,
-    evmAddress: address,
-  });
+  publishDynamicSession(
+    dynamicWalkStartsSignedOut(search)
+      ? { status: 'signed-out', provider: null, handle: null, evmAddress: null }
+      : signedIn,
+  );
   return true;
 }
 

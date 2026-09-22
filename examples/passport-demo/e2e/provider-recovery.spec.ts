@@ -1,5 +1,18 @@
 /**
- * THE DYNAMIC-ONLY PASSPORT, walked — the welcome path, with no passkey in it.
+ * THE PROVIDER SIGN-IN, walked — the ONE road it opens, and the Passports it
+ * does not make.
+ *
+ * RENAMED FROM `dynamic-only.spec.ts` ON 2026/09/22, because there is no such
+ * thing as a Dynamic-only Passport any more. A sign-in proves who somebody is;
+ * it produces no key a Passport should be held by, so it may not create one.
+ * What it may do is open a Passport that already exists on a device that has no
+ * key for it — the way back — and that is what the first block below walks,
+ * from the landing button through the sign-in to the check.
+ *
+ * The blocks after it drive a Passport that a sign-in already held before
+ * today's ruling. Opening one is not creating one, so they are unchanged: they
+ * are this suite's coverage of the real Home, the Assets shelf, and a payment
+ * made from an account custody Passport.
  *
  * WHAT IS REAL IN THIS RUN
  * ------------------------
@@ -68,12 +81,22 @@ import { fileURLToPath } from 'node:url';
 import { expect, test, type Page } from '@playwright/test';
 
 import { PASSPORT_ACCOUNT_ADDRESS, RESOLVABLE_NAME, installNetworkBoundary } from './mocks.js';
-import { walkContextOptions } from './walkContext.js';
+import { SIGN_IN_BUTTON, walkContextOptions } from './walkContext.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
 /** The URL that hands the app a stand-in sign-in. See `src/lib/dynamicWalk.ts`. */
 const WALK = '/?dynamicwalk=1';
+
+/**
+ * The URL that hands the app a sign-in that is AVAILABLE and not signed in.
+ *
+ * It is the only state the landing's "I already have a Passport" and the
+ * way-back step after the name are reachable from: a build with no sign-in
+ * behind it shows neither, and a build that is already signed in is past both.
+ * See `src/lib/dynamicWalk.ts`.
+ */
+const WALK_SIGNED_OUT = '/?dynamicwalk=out';
 
 /**
  * THE REAL HOME, WHICH IS WHERE A FINISHED PASSPORT NOW LANDS.
@@ -104,8 +127,8 @@ const sendPicker = (page: Page) => page.locator('.mnhome-send-asset');
 const sendRecipient = (page: Page) => page.locator('.mnhome-send').getByRole('textbox').first();
 const sendAmount = (page: Page) => page.locator('.mnhome-send-amount input');
 
-test.describe('a Passport held by a social sign-in', () => {
-  test('welcomes a signed-in person with a Passport of their own, not a passkey', async ({
+test.describe('a provider sign-in on a device with no Passport', () => {
+  test('is never offered a Passport to make, and is shown the way back instead', async ({
     browser,
   }) => {
     const context = await browser.newContext(
@@ -115,37 +138,23 @@ test.describe('a Passport held by a social sign-in', () => {
     await installNetworkBoundary(page);
     await page.goto(WALK);
 
-    /* The sign-in is what the screen is about, and it names the PROVIDER —
-       never the vendor, whom the reader has never chosen. */
-    await expect(page.getByText('Signed in with Google')).toBeVisible();
-    /* THE SAME WELCOME PAGE THE PASSKEY ROAD SHOWS, said to a person who
-       signed in with Google. Before 2026/09/22 this arm opened on an offer —
-       "Set up your Passport", one button — and was never told what a Passport
-       is at all. */
-    await expect(page.getByRole('heading', { name: /Welcome to\s*Passport/ })).toBeVisible();
-    await expect(page.getByRole('heading', { name: /Set up\s*your Passport/ })).toHaveCount(0);
-    await expect(page.getByText('Fees are covered for you')).toBeVisible();
-
-    /* The sentence this whole path exists to delete. Until 2026/09/16 a social
-       sign-in ended here, on the welcome screen, being told to go and make a
-       passkey. */
-    await expect(page.getByText('Finish with your passkey above')).toHaveCount(0);
-
-    /* One way on, and one way back in for somebody who is not new. */
-    await expect(page.getByRole('button', { name: 'Choose my name' })).toBeEnabled();
-    await expect(
-      page.getByRole('button', { name: 'I already have a Passport' }),
-    ).toBeVisible();
+    /* THE RULING OF 2026/09/22, ASSERTED. Until today a signed-in person with
+       nothing behind them was shown the welcome page, then the name step, and
+       the Passport they made was held by the sign-in. A sign-in produces a key
+       that proves who somebody is and nothing a Passport should be held by, so
+       the only road it opens now is the way back — and the two screens that
+       made one are absent, not merely hard to reach. */
+    await expect(page.getByRole('heading', { name: /Find it\s*by its name/ })).toBeVisible({
+      timeout: 60_000,
+    });
+    await expect(page.getByRole('heading', { name: /Welcome to\s*Passport/ })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Choose my name' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Create my Passport' })).toHaveCount(0);
 
     /* NONE OF THE WORDS A READER HAS NO USE FOR. The rule this demo keeps
        everywhere, asserted rather than trusted, because a developer-shaped
        path is where it slips first. */
     const body = (await page.locator('body').innerText()).toLowerCase();
-    /* `wallet address` and `sdk` are on the list because the vocabulary audit
-       put them there and this screen's own header promises them. They are
-       asserted as the two-word phrase and the acronym respectively: "wallet"
-       alone is allowed — a Passport IS one — and it is the ADDRESS a reader
-       has no use for. */
     for (const forbidden of [
       'contract',
       'registry',
@@ -155,6 +164,7 @@ test.describe('a Passport held by a social sign-in', () => {
       'dust',
       'wallet address',
       'sdk',
+      'dynamic',
     ]) {
       expect(body, `"${forbidden}" is on screen`).not.toContain(forbidden);
     }
@@ -162,7 +172,9 @@ test.describe('a Passport held by a social sign-in', () => {
     await context.close();
   });
 
-  test('offers coming back by name, and says a name alone is not enough', async ({ browser }) => {
+  test('says a name alone is not enough, and checks the sign-in against it', async ({
+    browser,
+  }) => {
     const context = await browser.newContext(
       walkContextOptions({ viewport: { width: 420, height: 900 } }),
     );
@@ -170,9 +182,9 @@ test.describe('a Passport held by a social sign-in', () => {
     await installNetworkBoundary(page);
     await page.goto(WALK);
 
-    await page.getByRole('button', { name: 'I already have a Passport' }).click();
-
-    await expect(page.getByRole('heading', { name: /Find it\s*by its name/ })).toBeVisible();
+    await expect(page.getByRole('heading', { name: /Find it\s*by its name/ })).toBeVisible({
+      timeout: 60_000,
+    });
     /* The name is the QUESTION and the account is the answer — the sentence
        that stops somebody thinking a public name is a credential. */
     await expect(page.getByText('Knowing the name is not enough on its own.')).toBeVisible();
@@ -183,13 +195,10 @@ test.describe('a Passport held by a social sign-in', () => {
     await page.getByLabel('Your name').fill('alice');
     await expect(page.getByRole('button', { name: 'Find my Passport' })).toBeEnabled();
 
-    await page.getByRole('button', { name: 'Go back' }).click();
-    await expect(page.getByRole('button', { name: 'Choose my name' })).toBeVisible();
-
     await context.close();
   });
 
-  test('asks for the name first, and makes the whole Passport on that one press', async ({
+  test('walks the whole road a new device takes, from the landing to the check', async ({
     browser,
   }) => {
     const context = await browser.newContext(
@@ -197,81 +206,46 @@ test.describe('a Passport held by a social sign-in', () => {
     );
     const page = await context.newPage();
     await installNetworkBoundary(page);
-    await page.goto(WALK);
+    await serveAccountCustodyState(page, [PASSPORT_ACCOUNT_ADDRESS]);
+    /* A build whose sign-in is AVAILABLE and not yet signed in, which is the
+       only state either of today's new screens is reachable from. See
+       `src/lib/dynamicWalk.ts`. */
+    await page.goto(`${WALK_SIGNED_OUT}`);
 
-    await page.getByRole('button', { name: 'Choose my name' }).click();
-    await expect(page.getByRole('heading', { name: /Choose\s*your \.night name/ })).toBeVisible();
+    /* THE LANDING, AND THE BUTTON THAT IS NOT ON IT. "Continue with Google,
+       Microsoft, X, or Discord" sat under the passkey from 2026/09/14 and read
+       as a second way to START. It is gone; what is there is the one question a
+       sign-in can answer. */
+    await expect(page.getByRole('button', { name: SIGN_IN_BUTTON })).toBeVisible({
+      timeout: 60_000,
+    });
+    await expect(
+      page.getByRole('button', { name: /Continue with Google, Microsoft, X, or Discord/ }),
+    ).toHaveCount(0);
 
-    /* Nothing may be built over a name the registry has not answered for, and
-       there is nothing on this step that walks past it — the name is part of
-       making the Passport, not a decoration on one that exists. */
-    await expect(page.getByRole('button', { name: 'Create my Passport' })).toBeDisabled();
-    await expect(page.getByRole('button', { name: 'Choose one later' })).toHaveCount(0);
+    await page.getByTestId('already-have-passport').click();
 
-    /* A name that is really taken, decoded by the shipped Midnames module from
-       the stagenet `.night` TLD's own recorded state. */
+    /* THE ONLY PLACE A PROVIDER SIGN-IN IS OFFERED. */
+    await expect(page.getByRole('heading', { name: /Open your\s*Passport here/ })).toBeVisible();
+    await page.getByTestId('recover-sign-in').click();
+
+    /* And signing in lands on the name, not on a Passport being made. */
+    await expect(page.getByRole('heading', { name: /Find it\s*by its name/ })).toBeVisible({
+      timeout: 60_000,
+    });
     await page.getByLabel('Your name').fill(RESOLVABLE_NAME);
-    await expect(page.getByText(`${RESOLVABLE_NAME}.night is already taken`)).toBeVisible({
-      timeout: 120_000,
-    });
-    await expect(page.getByRole('button', { name: 'Create my Passport' })).toBeDisabled();
+    await page.getByRole('button', { name: 'Find my Passport' }).click();
 
-    /* And one that is not. */
-    await page.getByLabel('Your name').fill('alice');
-    await expect(page.getByText('alice.night is available')).toBeVisible({ timeout: 120_000 });
-    await expect(page.getByRole('button', { name: 'Create my Passport' })).toBeEnabled();
-
-    /* THE NAME IS WRITTEN DOWN BEFORE ANYTHING IS BUILT, which is what makes a
-       reload halfway through a three-step setup come back to the name already
-       chosen rather than to an empty field over an account that exists. */
-    await page.getByRole('button', { name: 'Create my Passport' }).click();
-    await expect
-      .poll(
-        () =>
-          page.evaluate(() =>
-            window.localStorage.getItem('passport-account-custody-chosen-name:v1'),
-          ),
-        { timeout: 120_000 },
-      )
-      .toContain('alice');
-
-    await context.close();
-  });
-
-  test('refuses in one sentence when the service that finishes setup is not there', async ({
-    browser,
-  }) => {
-    const context = await browser.newContext(
-      walkContextOptions({ viewport: { width: 420, height: 900 } }),
-    );
-    const page = await context.newPage();
-    await installNetworkBoundary(page);
-    await page.goto(WALK);
-
-    /* The welcome, the name, and then the one press that makes the whole
-       thing — the order this flow has had since 2026/09/22. */
-    await page.getByRole('button', { name: 'Choose my name' }).click();
-    await page.getByLabel('Your name').fill('alice');
-    await expect(page.getByRole('button', { name: 'Create my Passport' })).toBeEnabled({
-      timeout: 120_000,
-    });
-    await page.getByRole('button', { name: 'Create my Passport' }).click();
-
-    /* The count line, while it is working. Three steps, and the copy says so
-       rather than leaving somebody watching an unlabelled spinner. */
-    await expect(page.locator('p.mnob-hint[role="status"]')).toHaveText(
-      'Setting up your Passport, step 1 of 3',
-    );
-
-    /* Then one sentence, and the control back. NOT a spinner that runs until a
-       proof timeout ten minutes later, which is what an unreachable proving
-       service gives by default — the reason `custodyProofProvider` refuses
-       immediately, and the reason this assertion is here. */
-    const alert = page.getByRole('alert');
-    await expect(alert).toBeVisible({ timeout: 60_000 });
-    const sentence = (await alert.innerText()).trim();
-    expect(sentence.split('\n').filter((line) => line.trim().length > 0)).toHaveLength(1);
-    await expect(page.getByRole('button', { name: /my Passport/ })).toBeEnabled();
+    /* WHERE THIS WALK STOPS, AND WHY IT IS THE HONEST PLACE. The account the
+       recordings serve is somebody else's: its device set holds the key the
+       gate run enrolled, not this walk's stand-in signer. So the check does
+       exactly what it is for — it refuses — and the sentence names the sign-in
+       rather than blaming the name. A run where the check PASSES enrols a
+       passkey and adds it, and that is a live run's to prove; the sequence is
+       written down in `docs/demo/account-custody-layer-design.md`. */
+    await expect(
+      page.getByText(/is not part of|No Passport is registered under that name/),
+    ).toBeVisible({ timeout: 120_000 });
 
     await context.close();
   });

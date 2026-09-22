@@ -99,7 +99,7 @@ const MUSD_COLOUR = '1a2917fbed8b5ce44d12ebc7d337689045f6c96a6bbd39cf3d8691ab310
  * A real account on the account custody build, recorded off stagenet, and the
  * two recordings midnight-js wants before it will open a connection to it.
  *
- * Shared with `dynamic-only.spec.ts` deliberately: the account is the same
+ * Shared with `provider-recovery.spec.ts` deliberately: the account is the same
  * whichever arm holds it, which is the claim the whole adapter rests on.
  */
 const ACCOUNT_CUSTODY_STATE = fs.readFileSync(
@@ -145,7 +145,7 @@ async function serveAccountCustodyState(page: Page, addresses: readonly string[]
  * everything else is keyed by, and the two are written separately on purpose:
  * that separation IS the design, and a seeding helper that collapsed them would
  * stop testing it. The stored shapes are spelled out here rather than imported,
- * for the reason `dynamic-only.spec.ts` gives: the walk's point is that the
+ * for the reason `provider-recovery.spec.ts` gives: the walk's point is that the
  * SHIPPED reader reads what a previous session left behind.
  */
 async function seedPasskeyPassport(
@@ -842,6 +842,201 @@ test.describe('a passkey Passport paying somebody', () => {
     expect(await page.locator('.mnhome-send').innerText()).not.toContain('not built yet');
     /* And the shielded balance beside it is offered, which is what sends. */
     await expect(sendPicker(page).locator('option')).toHaveCount(2);
+
+    await close();
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The way back, offered once between the name and Home                       */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * A finished, named passkey Passport, on a build whose sign-in is AVAILABLE and
+ * not yet signed in.
+ *
+ * `?dynamicwalk=out` is what makes the step reachable at all: it is offered
+ * only where a provider sign-in exists, and a build whose seam reports
+ * `disabled` — which is every other spec in this suite, and every build shipped
+ * today — never sees it. The sign-in itself is the stand-in's, and pressing the
+ * offer publishes the session the overlay would have published. See
+ * `src/lib/dynamicWalk.ts`.
+ *
+ * The setup is started once for real, for the reason `passkeyPassportOnHome`
+ * gives: the key this Passport is filed under is the DEVICE POINT, and a record
+ * seeded under an invented key is a record every call refuses.
+ */
+async function passkeyPassportAfterTheName(
+  browser: import('@playwright/test').Browser,
+  options: { recovered?: boolean } = {},
+): Promise<{ page: Page; close: () => Promise<void> }> {
+  const context = await browser.newContext(
+    walkContextOptions({ viewport: { width: 420, height: 900 } }),
+  );
+  const page = await context.newPage();
+  await installNetworkBoundary(page);
+  await serveAccountCustodyState(page, [ACCOUNT_CUSTODY_ADDRESS, PASSPORT_ACCOUNT_ADDRESS]);
+  const authenticator = await installVirtualAuthenticator(context, page);
+  await page.goto(WALK);
+  await page.getByRole('button', { name: SIGN_IN_BUTTON }).click();
+  await expect(page.getByRole('heading', { name: /Welcome to\s*Passport/ })).toBeVisible({
+    timeout: 60_000,
+  });
+  await page.getByRole('button', { name: 'Choose my name' }).click();
+  await page.getByLabel('Your name').fill('walker');
+  await expect(page.getByRole('button', { name: 'Create my Passport' })).toBeEnabled({
+    timeout: 120_000,
+  });
+  await page.getByRole('button', { name: 'Create my Passport' }).click();
+  const seeded = await page.waitForFunction(
+    () => {
+      const credentialId = window.localStorage.getItem('passport-last-passkey');
+      const raw = window.localStorage.getItem('passport-account-custody-passkey:v1');
+      if (credentialId === null || raw === null) return null;
+      const pointers = JSON.parse(raw) as Record<string, string>;
+      const entry = Object.entries(pointers)[0];
+      return entry === undefined ? null : { credentialId, userKey: entry[1] };
+    },
+    undefined,
+    { timeout: 60_000 },
+  );
+  const identity = (await seeded.jsonValue()) as { credentialId: string; userKey: string };
+
+  await seedPasskeyPassport(page, {
+    credentialId: identity.credentialId,
+    userKey: identity.userKey,
+    name: 'walker',
+    musd: '250',
+  });
+  if (options.recovered === true) {
+    /* A Passport that already has a way back, written in the shape the app's
+       own store writes it — `passport-account-custody-backup:v1`, per account
+       and per network. Carried from passport-demo #83 unchanged, so a Passport
+       that added one on that road is recognised here. */
+    await page.addInitScript(
+      ([slot]) => {
+        window.localStorage.setItem(
+          'passport-account-custody-backup:v1',
+          JSON.stringify({ [slot]: { doneAt: 1_800_000_000_000, provider: 'Google' } }),
+        );
+      },
+      [`${identity.userKey.toLowerCase()}|${WALK_NETWORK}`] as const,
+    );
+  }
+  await page.goto(`${WALK}&dynamicwalk=out`);
+  return {
+    page,
+    close: async () => {
+      await authenticator.remove();
+      await context.close();
+    },
+  };
+}
+
+test.describe('a passkey Passport that has just been named', () => {
+  test('is offered a way back, and "Not now" is an answer rather than a delay', async ({
+    browser,
+  }) => {
+    const { page, close } = await passkeyPassportAfterTheName(browser);
+
+    /* THE STEP, BETWEEN THE NAME AND HOME. It is not a card on Home and it is
+       not a banner: it is the last screen of onboarding, which is the one
+       moment somebody has a Passport worth protecting and has not started
+       using it. */
+    await expect(page.getByRole('heading', { name: /Add a way\s*back/ })).toBeVisible({
+      timeout: 60_000,
+    });
+    await expect(page.getByTestId('add-recovery')).toContainText(
+      'Add recovery with Google, Microsoft, X, Discord, or email',
+    );
+    await expect(page.getByTestId('skip-recovery')).toHaveText('Not now');
+    /* Home is behind it and has not been painted. */
+    await expect(greeting(page)).toHaveCount(0);
+
+    /* NONE OF THE WORDS A READER HAS NO USE FOR, on the newest screen in the
+       flow — which is where vocabulary slips first. */
+    const body = (await page.locator('body').innerText()).toLowerCase();
+    for (const forbidden of [
+      'contract',
+      'registry',
+      'indexer',
+      'resolver',
+      'sponsor',
+      'dust',
+      'wallet address',
+      'sdk',
+      'dynamic',
+    ]) {
+      expect(body, `"${forbidden}" is on screen`).not.toContain(forbidden);
+    }
+
+    await page.getByTestId('skip-recovery').click();
+    await expect(greeting(page)).toBeVisible({ timeout: 60_000 });
+
+    /* AND IT IS NOT ASKED AGAIN. "Not now" that came back on the next open
+       would be a nag rather than an answer; the skip is written down exactly as
+       a success is, and the next open goes straight to Home. */
+    await page.goto(`${WALK}&dynamicwalk=out`);
+    await expect(greeting(page)).toBeVisible({ timeout: 60_000 });
+    await expect(page.getByRole('heading', { name: /Add a way\s*back/ })).toHaveCount(0);
+
+    /* What is left is the small entry beside the support link, which is where
+       somebody who changed their mind goes looking for it. */
+    await expect(page.getByRole('button', { name: 'Add recovery' })).toBeVisible();
+    await expect(page.getByTestId('recovery-state')).toHaveCount(0);
+
+    await close();
+  });
+
+  test('says the way back is on, and stops offering it, once there is one', async ({
+    browser,
+  }) => {
+    const { page, close } = await passkeyPassportAfterTheName(browser, { recovered: true });
+
+    /* Straight past the step — the answer it asks for is already recorded —
+       and Home states the fact in one line beside the account it is about. */
+    await expect(greeting(page)).toBeVisible({ timeout: 60_000 });
+    await expect(page.getByRole('heading', { name: /Add a way\s*back/ })).toHaveCount(0);
+    await expect(page.getByTestId('recovery-state')).toHaveText('Recovery: on');
+    /* A statement, and not a control: there is nothing to press about a thing
+       that is done. */
+    await expect(page.getByRole('button', { name: 'Add recovery' })).toHaveCount(0);
+
+    await close();
+  });
+
+  test('never leaves anybody stuck on the offer, whichever way the add ends', async ({
+    browser,
+  }) => {
+    const { page, close } = await passkeyPassportAfterTheName(browser);
+    await expect(page.getByTestId('add-recovery')).toBeVisible({ timeout: 60_000 });
+
+    /* YES. The press opens the provider's overlay — stood in for here — and the
+       session it publishes is what the step picks itself back up from. */
+    await page.getByTestId('add-recovery').click();
+
+    /* WHERE THIS WALK STOPS, AND WHY THAT IS THE HONEST PLACE. Putting the
+       sign-in's key on the account is a real circuit call, and this tier has no
+       proving service behind it — the same wall every other write in this suite
+       meets. So what is asserted is the property that holds whichever way it
+       ends: the reader is never stranded. Either the add lands and Home is
+       painted with the way back on it, or it does not and there is ONE plain
+       sentence saying the Passport is fine, with the control to Home back
+       underneath. A spinner that ran to a ten-minute proof timeout would fail
+       this, and that is the defect it exists to catch. */
+    const settled = page
+      .locator('.mnhome-name, .mnob-unusable-copy')
+      .first();
+    await expect(settled).toBeVisible({ timeout: 120_000 });
+
+    if ((await page.getByTestId('skip-recovery').count()) > 0) {
+      await expect(page.locator('.mnob-unusable-copy')).toHaveCount(1);
+      await expect(page.locator('.mnob-unusable-copy')).toContainText('Your Passport is set up');
+      await expect(page.getByTestId('skip-recovery')).toBeEnabled();
+      await expect(page.getByTestId('skip-recovery')).toHaveText('Continue to my Passport');
+      await page.getByTestId('skip-recovery').click();
+    }
+    await expect(greeting(page)).toBeVisible({ timeout: 60_000 });
 
     await close();
   });
