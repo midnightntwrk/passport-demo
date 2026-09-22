@@ -92,6 +92,7 @@ import {
   jubjubChallenges,
   k256Challenges,
   deviceEntry,
+  enrolmentEntry,
   bootCommitment,
 } from './custodyContractSigning.js';
 import { type JubjubSigner } from './custodyJubjubSigner.js';
@@ -2702,6 +2703,155 @@ export async function appendInboxK1(
         device.arm === 'jubjub'
           ? jubjubChallenges.appendInbox(pure, context, pk, entry)
           : k256Challenges.appendInbox(pure, context, pk, entry),
+    },
+    onPhase,
+    overrides,
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* A second key on the same Passport                                          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Enrol ANOTHER device on this account, authorised by one that is already on
+ * it — the whole of the spare-key decision of 2026/09/21, in one call.
+ *
+ * IT IS CROSS-ARM BY CONSTRUCTION AND NOT BY A BRANCH. `add_device` takes a
+ * derived ENTRY rather than a key, so the contract sees 32 opaque bytes and
+ * never learns which curve produced them. That is what lets the device key back
+ * up a sign-in (the backup: a jubjub device signs, a k256 entry goes in) and a
+ * sign-in bring a Passport to a new phone (the recovery: a k256 device signs, a
+ * jubjub entry goes in) through the same function, with the arm deciding only
+ * which circuit is proved and which challenge is built.
+ *
+ * THE EPOCH IS READ, NOT ASSUMED. `enrolmentEntry` binds the new device's entry
+ * to the account's CURRENT `device_epoch`, and an entry derived at a stale one
+ * is dead weight that still counts toward `device_count` — the contract cannot
+ * tell the difference and neither can the holder, until the day the spare key
+ * is needed and does not work. So the ledger is read here before the entry is
+ * built, which is a second read of a state `k1Call` reads again for its own
+ * `auth_nonce`. Deliberate: those two reads answer different questions and
+ * sharing one would mean building the entry against a nonce that may since have
+ * moved.
+ *
+ * ALREADY ENROLLED IS NOT AN ERROR. The probe below is the same series scan
+ * `k1Call` and the recovery check do, and a device it finds is a device that is
+ * already on the account — so the call is skipped and nobody is asked for an
+ * approval. That matters because the recovery flow is resumable: a browser
+ * closed between making a key and recording it comes back and runs this again,
+ * and a second enrolment would cost a second approval and insert a second entry
+ * for one device.
+ */
+export async function addDeviceK1(
+  session: CustodySession,
+  device: CustodyCallDevice,
+  newDevice: JubjubDeviceIdentity | K256DeviceIdentity,
+  onPhase?: (phase: CustodyPhase) => void,
+  overrides: Partial<CustodyDeps> = {},
+): Promise<CustodyStepResult> {
+  const deps = withDefaults(overrides);
+  const user = custodyUserKey(session, device);
+  const wallet = await deps.wallet(user);
+  const network = wallet.network.networkId;
+  const record = loadCustodyRecord(deps.storage(), user, network);
+  if (!record || record.address === null || nextCustodyStep(record) !== 'ready') {
+    throw new Error('This Passport is not finished being set up yet.');
+  }
+
+  const module = await deps.contractModule();
+  const { providers } = await openCustodyAccount(deps, wallet, record, [
+    `add_device_with_${device.arm}`,
+  ]);
+  const addressBytes = hexToBytes(record.address);
+  const state = module.ledger(await queryStateData(providers, record.address));
+
+  /* Already on the account? Then there is nothing to do and nothing to ask
+     for. `resolveCustodyUseCounter` throws when the series is not in the set,
+     which is the ordinary answer here rather than a failure. */
+  try {
+    resolveCustodyUseCounter({
+      entryAt: (counter) =>
+        deviceEntry(module.pureCircuits, newDevice, addressBytes, state.device_epoch, counter),
+      isMember: (entry) => state.devices.member(entry),
+    });
+    return { record, txHash: null, explorerUrl: null };
+  } catch {
+    /* Not enrolled, which is what this function is for. */
+  }
+
+  const entry = enrolmentEntry(
+    module.pureCircuits,
+    newDevice,
+    addressBytes,
+    state.device_epoch,
+  );
+  return k1Call(
+    session,
+    device,
+    {
+      operation: 'add_device',
+      args: [entry],
+      /* The SIGNING device's arm picks the challenge, never the new one's: the
+         new device is 32 bytes of argument and signs nothing here. */
+      challenge: (pure, context, pk) =>
+        device.arm === 'jubjub'
+          ? jubjubChallenges.addDevice(pure, context, pk, entry)
+          : k256Challenges.addDevice(pure, context, pk, entry),
+    },
+    onPhase,
+    overrides,
+  );
+}
+
+/**
+ * Point this account's deliveries at a new key.
+ *
+ * WHAT IT IS FOR, AND IT IS ONE THING. A Passport brought back on a new device
+ * has a new key on it, and the secret that OPENS this account's deliveries is
+ * derived from the key that made the Passport — which is on the device that is
+ * gone. Nothing a sign-in can do reproduces it: the embedded signer's ECDSA is
+ * randomised, so even a signature over a fixed message is different every time
+ * (audited 2026/09/16). So the account is pointed at the new device's own key
+ * instead, and everything paid in from that moment is readable here.
+ *
+ * WHAT IT DOES NOT DO IS RECOVER THE PAST. Deliveries already in the account
+ * were sealed to the old key and stay sealed to it; the contract's own note on
+ * this circuit says a client SHOULD re-seal what it holds under the new key
+ * afterwards, and a client that cannot READ them cannot re-seal them. That is
+ * the honest limit of coming back on a new device today, it is on the screen in
+ * one sentence, and closing it needs something the contract does not have —
+ * see the pull request.
+ *
+ * JUBJUB ONLY, and not by preference. `challenge_rotate_enc_key_with_k256` is
+ * not on the compiled build's pure-circuit surface this app declares
+ * (`custodyContractSigning.ts`), so there is no way to build the challenge a
+ * k256 signature would have to be over. The one caller wants the new DEVICE
+ * key to sign anyway — it is the key whose secret the account is being pointed
+ * at — so the gap costs nothing and is refused out loud rather than worked
+ * around.
+ */
+export async function rotateEncKeyK1(
+  session: CustodySession,
+  device: CustodyCallDevice,
+  newPublicKeyHex: string,
+  onPhase?: (phase: CustodyPhase) => void,
+  overrides: Partial<CustodyDeps> = {},
+): Promise<CustodyStepResult> {
+  if (device.arm !== 'jubjub') {
+    throw new Error('Only the key on a device can point this Passport at a new one.');
+  }
+  const newKey = hexToBytes(newPublicKeyHex);
+  if (newKey.length !== 32) {
+    throw new Error(`an account encryption key is 32 bytes, got ${newKey.length}`);
+  }
+  return k1Call(
+    session,
+    device,
+    {
+      operation: 'rotate_enc_key',
+      args: [newKey],
+      challenge: (pure, context, pk) => jubjubChallenges.rotateEncKey(pure, context, pk, newKey),
     },
     onPhase,
     overrides,
