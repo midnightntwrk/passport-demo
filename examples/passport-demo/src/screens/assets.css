@@ -535,3 +535,27 @@
   aspect-ratio: 1 / 1;
   object-fit: cover;
 }
+
+/* A small visual anchor above the actual holdings; balances stay line items. */
+.mnassets-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 112px;
+  align-items: center;
+  gap: 8px;
+  min-height: 150px;
+}
+.mnassets-head-copy { min-width: 0; }
+.mnassets-hero-art { display: block; width: 112px; height: 112px; object-fit: contain; }
+.mnassets-head .mnassets-lede { max-width: 400px; }
+@media (min-width: 800px) {
+  .mnassets-bar, .mnassets-head, .mnassets-shelf, .mnassets-screen > .mnassets-empty {
+    width: min(100% - 64px, 760px);
+  }
+  .mnassets-head { grid-template-columns: minmax(0, 1fr) 210px; min-height: 230px; }
+  .mnassets-hero-art { width: 210px; height: 210px; }
+  .mnassets-shelf { padding-top: 28px; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .mnassets-hero-art { animation: mnassets-art-arrive .55s ease-out both; }
+  @keyframes mnassets-art-arrive { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+}

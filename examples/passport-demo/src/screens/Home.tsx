@@ -1195,14 +1195,26 @@ export default function HomeScreen(props: HomeScreenProps) {
                 role="presentation"
               >
                 <div
-                  className="mnhome-addr-modal"
+                  className="mnhome-addr-modal mnhome-surface-modal mnhome-receive-modal"
                   role="dialog"
                   aria-modal="true"
                   aria-label="Receive to your Passport"
                   onClick={(event) => event.stopPropagation()}
                 >
-                  <div className="mnhome-addr-head">
-                    <p className="mnhome-micro">Receive</p>
+                  <div className="mnhome-addr-head mnhome-surface-head">
+                    <div className="mnhome-surface-heading">
+                      <span className="mnhome-surface-eyebrow">Your Passport</span>
+                      <h2 className="mnhome-surface-title">Receive</h2>
+                      <p className="mnhome-surface-description">Share your name or scan the code.</p>
+                    </div>
+                    <img
+                      className="mnhome-surface-art"
+                      src="/passport-receive.webp"
+                      alt=""
+                      aria-hidden="true"
+                      width="1254"
+                      height="1254"
+                    />
                     <button
                       type="button"
                       className="mnhome-icon-button"

@@ -1449,19 +1449,30 @@ export default function SendSheet(props: SendSheetProps) {
       role="presentation"
     >
       <div
-        className="mnhome-addr-modal mnhome-send"
+        className="mnhome-addr-modal mnhome-send mnhome-surface-modal"
         role="dialog"
         aria-modal="true"
         aria-labelledby="mnhome-send-title"
         onClick={(event) => event.stopPropagation()}
       >
-        <div className="mnhome-addr-head">
-          <p className="mnhome-micro" id="mnhome-send-title">
-            {/* The heading names the CHOSEN asset, because that is now the
-                first thing decided on this sheet rather than the last thing
-                inferred from it. */}
-            {step === 'review' ? 'Review this transfer' : `Send ${asset.symbol}`}
-          </p>
+        <div className="mnhome-addr-head mnhome-surface-head">
+          <div className="mnhome-surface-heading">
+            <span className="mnhome-surface-eyebrow">Your Passport</span>
+            <h2 className="mnhome-surface-title" id="mnhome-send-title">
+              {step === 'review' ? 'Review transfer' : `Send ${asset.symbol}`}
+            </h2>
+            <p className="mnhome-surface-description">
+              {step === 'review' ? 'Check the details before you confirm.' : 'Choose an asset, then tell us where it goes.'}
+            </p>
+          </div>
+          <img
+            className="mnhome-surface-art"
+            src="/passport-send.webp"
+            alt=""
+            aria-hidden="true"
+            width="1254"
+            height="1254"
+          />
           <button
             type="button"
             className="mnhome-icon-button"

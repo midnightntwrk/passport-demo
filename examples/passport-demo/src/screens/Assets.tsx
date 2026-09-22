@@ -326,12 +326,19 @@ export default function AssetsScreen(props: AssetsScreenProps) {
       </header>
 
       <header className="mnassets-head">
-        <p className="mnassets-kicker">Your Passport</p>
-        <h1 className="mnassets-title">Assets</h1>
-        <p className="mnassets-lede">
-          Everything your Passport holds, on this network. Tokens are balances you can spend;
-          items are one of a kind.
-        </p>
+        <div className="mnassets-head-copy">
+          <p className="mnassets-kicker">Your Passport</p>
+          <h1 className="mnassets-title">Assets</h1>
+          <p className="mnassets-lede">Your tokens and one-of-a-kind items, in one place.</p>
+        </div>
+        <img
+          className="mnassets-hero-art"
+          src="/passport-assets.webp"
+          alt=""
+          aria-hidden="true"
+          width="1254"
+          height="1254"
+        />
       </header>
 
       {account ? (

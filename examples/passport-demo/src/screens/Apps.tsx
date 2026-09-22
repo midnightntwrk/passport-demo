@@ -303,12 +303,19 @@ export default function AppsScreen(props: AppsScreenProps) {
         </header>
 
         <header className="mnapps-head">
-          <p className="mnapps-kicker">Midnight apps</p>
-          <h1 className="mnapps-title">Apps</h1>
-          <p className="mnapps-lede">
-            Open a Midnight dApp inside Passport. Nothing about you leaves this
-            device until you approve it.
-          </p>
+          <div className="mnapps-head-copy">
+            <p className="mnapps-kicker">Midnight apps</p>
+            <h1 className="mnapps-title">Apps</h1>
+            <p className="mnapps-lede">Find something to explore. You approve what each app can see.</p>
+          </div>
+          <img
+            className="mnapps-hero-art"
+            src="/passport-apps.webp"
+            alt=""
+            aria-hidden="true"
+            width="1254"
+            height="1254"
+          />
         </header>
 
         {/* The Companion sits above the search box rather than in the grid: it
@@ -402,9 +409,7 @@ export default function AppsScreen(props: AppsScreenProps) {
         ) : null}
 
         <p className="mnapps-note">
-          Passport cannot reach inside an app that is served from another site — every
-          browser forbids it, and no framework works around that. Apps built for Passport
-          ask you directly instead, and every request appears here for your approval.
+          Apps ask before accessing your Passport. You choose what to share.
         </p>
       </section>
 
