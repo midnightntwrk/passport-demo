@@ -2134,7 +2134,7 @@ export default function CustodyPassport({
 
   const setupProgress =
     setupRows === null || setupPhase === null ? null : (
-      <>
+      <div className="mnob-setup-progress">
         <ProgressTimeline
           rows={setupRows.map((row): TimelineRow => ({
             id: row.id,
@@ -2169,7 +2169,7 @@ export default function CustodyPassport({
             </button>
           )
         ) : null}
-      </>
+      </div>
     )
 
   /* ---------------------------------------------------------------------- */
