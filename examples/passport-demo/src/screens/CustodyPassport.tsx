@@ -95,6 +95,7 @@ import {
   custodyActivityMarkKey,
   custodyMilestoneEntry,
   custodyMilestoneTxHash,
+  custodyOpeningDepositTxHash,
   custodyMilestonesLanded,
   custodyHomeSendableHoldings,
   custodySendPhase,
@@ -1074,6 +1075,10 @@ export default function CustodyPassport({
    * why the whole of it is allowed to fail quietly — what is already stored is
    * still shown.
    */
+  /* The account's chain history as the last delivery walk read it, so the
+     opening-balance rows can link to the sponsor's deposits. */
+  const lastActionsRef = useRef<Awaited<ReturnType<typeof readCustodyActions>>>(null)
+
   const walkDeliveries = useCallback(
     async (
       wallet: { network: { indexerHttpUrl: string } },
@@ -1093,6 +1098,7 @@ export default function CustodyPassport({
       const indexerHttpUrl = wallet.network.indexerHttpUrl
       const reader = await accountModule.readCustodyAccountView({ indexerHttpUrl }, account.address)
       const actions = await readCustodyActions(indexerHttpUrl, account.address)
+      lastActionsRef.current = actions
       const txIdFor =
         actions === null ? () => null : custodyTxIdForInboxIndex(actions)
       const walked = await readInboxCustody(account, encSecretKeyHex, reader, {
@@ -1325,17 +1331,27 @@ export default function CustodyPassport({
       shielded: tokens,
       stablecoinColourHex: STABLECOIN_COLOUR,
     }), STABLECOIN_COLOUR)
+    const writtenNow: typeof owed = []
     for (const milestone of owed) {
+      const opening = milestone === 'opening-night' || milestone === 'opening-stablecoin'
+      const txHash = opening
+        ? custodyOpeningDepositTxHash(milestone, lastActionsRef.current)
+        : custodyMilestoneTxHash(milestone, record.txHashes, registerTxId)
+      /* An opening row waits for the history that names its deposit, so it is
+         written once and with its View link; the next read writes it. */
+      if (opening && txHash === null) continue
       onActivity(
         custodyMilestoneEntry(milestone, {
           name: view?.name ?? null,
           ...(stablecoinRow ? { stablecoinSymbol: stablecoinRow.symbol } : {}),
-          txHash: custodyMilestoneTxHash(milestone, record.txHashes, registerTxId),
+          txHash,
         }),
       )
+      writtenNow.push(milestone)
     }
+    if (writtenNow.length === 0) return
     try {
-      window.localStorage.setItem(key, JSON.stringify([...written, ...owed]))
+      window.localStorage.setItem(key, JSON.stringify([...written, ...writtenNow]))
     } catch {
       // As above: nothing on screen depends on the write succeeding.
     }

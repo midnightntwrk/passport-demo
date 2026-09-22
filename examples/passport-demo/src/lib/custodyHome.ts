@@ -562,6 +562,30 @@ export function custodyMilestoneTxHash(
 }
 
 /**
+ * The sponsor's opening deposit into this account, read off the account's own
+ * chain history (2026/09/22), so the two opening rows carry a View link like
+ * every other row. The history is oldest first; the opening grant is the FIRST
+ * `deposit_unshielded` (NIGHT) or `deposit_shielded` (stablecoin) that
+ * succeeded. Null when the history has not been read or holds no such call.
+ */
+export function custodyOpeningDepositTxHash(
+  milestone: CustodyMilestone,
+  rows: readonly { entryPoint: string | null; txHash: string | null; status?: string | null }[] | null,
+): string | null {
+  if (rows === null) return null;
+  const wanted =
+    milestone === 'opening-night' ? 'deposit_unshielded' : milestone === 'opening-stablecoin' ? 'deposit_shielded' : null;
+  if (wanted === null) return null;
+  const row = rows.find(
+    (candidate) =>
+      candidate.entryPoint === wanted &&
+      candidate.txHash !== null &&
+      (candidate.status === undefined || candidate.status === null || candidate.status === 'SUCCESS'),
+  );
+  return row?.txHash ?? null;
+}
+
+/**
  * Where the written milestones are remembered, per account and network.
  *
  * PER ACCOUNT, not per browser and not per holder: a second Passport made on

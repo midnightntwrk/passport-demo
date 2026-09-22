@@ -9,7 +9,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { MUSD_COLOUR_HEX, NIGHT_COLOUR_HEX } from './colour.js';
-import {
+import { custodyOpeningDepositTxHash,
   CUSTODY_NIGHT_SEND_REFUSAL,
   custodyActivityMarkKey,
   custodyHomeAccount,
@@ -458,5 +458,31 @@ describe('what none of these sentences may say', () => {
     expect(CUSTODY_NIGHT_SEND_REFUSAL).toBe(
       'Paying somebody from this Passport is coming. Everything else here works.',
     );
+  });
+});
+
+describe('custodyOpeningDepositTxHash', () => {
+  const rows = [
+    { entryPoint: null, txHash: 'deploy' },
+    { entryPoint: 'activate_initial_device_with_jubjub', txHash: 'act' },
+    { entryPoint: 'deposit_unshielded', txHash: 'night-failed', status: 'FAILURE' },
+    { entryPoint: 'deposit_unshielded', txHash: 'night-1', status: 'SUCCESS' },
+    { entryPoint: 'deposit_shielded', txHash: 'musd-1', status: null },
+    { entryPoint: 'deposit_shielded', txHash: 'musd-2' },
+    { entryPoint: 'deposit_unshielded', txHash: null },
+  ];
+
+  it('links the opening NIGHT to the first successful deposit_unshielded', () => {
+    expect(custodyOpeningDepositTxHash('opening-night', rows)).toBe('night-1');
+  });
+
+  it('links the opening stablecoin to the first deposit_shielded', () => {
+    expect(custodyOpeningDepositTxHash('opening-stablecoin', rows)).toBe('musd-1');
+  });
+
+  it('says nothing for other milestones, an unread history, or a history without the call', () => {
+    expect(custodyOpeningDepositTxHash('created', rows)).toBeNull();
+    expect(custodyOpeningDepositTxHash('opening-night', null)).toBeNull();
+    expect(custodyOpeningDepositTxHash('opening-stablecoin', [{ entryPoint: 'deposit_unshielded', txHash: 'x' }])).toBeNull();
   });
 });
