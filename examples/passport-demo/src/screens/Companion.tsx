@@ -23,6 +23,9 @@ function CompanionFace(props: { size: number; active: boolean; fallbackSize: num
         <BotAvatar
           type="clover"
           face="mouth"
+          color="#0000FE"
+          brightness={1.25}
+          saturation={1.1}
           size={props.size}
           state={props.active ? 'working' : 'default'}
           seed={0.37}
