@@ -75,14 +75,11 @@ for (const theme of ['Light', 'Dark'] as const) {
         await page.goto('/');
         await page.getByRole('button', { name: theme, exact: true }).click();
         await expect(page.getByRole('button', { name: SIGN_IN_BUTTON })).toBeVisible();
-        await expect(page.getByRole('button', { name: 'Log in', exact: true })).toBeVisible();
-        await expect(page.locator('.mnob-auth-button')).toHaveCount(2);
-        for (const button of await page.locator('.mnob-auth-button').all()) {
-          expect((await button.boundingBox())!.height).toBeGreaterThanOrEqual(48);
-        }
+        // One way in, as the flow has it: a single primary that creates or signs in.
+        await expect(page.locator('.mnob-primary')).toHaveCount(1);
+        expect((await page.locator('.mnob-primary').boundingBox())!.height).toBeGreaterThanOrEqual(48);
         await expect(page.getByRole('button', { name: 'Continue with Dynamic', exact: true })).toHaveCount(0);
         await expect(page.getByText('Your identity stays yours.')).toHaveCount(0);
-        await expect(page.getByRole('button', { name: 'Use a different passkey' })).toHaveCount(0);
         await expect(page.locator('.mn-passport-art-proof')).toHaveCSS('animation-name', 'none');
         await expect(page.locator('.mn-passport-art-proof')).toHaveCSS('opacity', '1');
         await capture(page, info, 'login');
@@ -154,6 +151,59 @@ for (const theme of ['Light', 'Dark'] as const) {
         await page.getByPlaceholder('Search apps').fill('no-such-app');
         await expect(page.locator('.mnapps-empty')).toHaveText('No app matches “no-such-app”.');
         await capture(page, info, 'apps-empty');
+        expect(errors).toEqual([]);
+      } finally {
+        await context.close();
+      }
+    });
+  }
+}
+
+/* THE NEW ROAD, IN THE SAME LOOK. A passkey with no Passport makes its next one
+   on the new account (`?accwalk=1` selects that road in this build, and no
+   deployment). Its welcome, name step, and progress share the onboarding sheet
+   with the sign-in, so this holds that the sign-in's atmosphere stops at the
+   sign-in and the steps after it are the plain product screens above. Nothing
+   is proved or submitted: the prover is held open, as `passkey-custody.spec.ts`
+   holds it. */
+for (const theme of ['Light', 'Dark'] as const) {
+  for (const viewport of [
+    { width: 1440, height: 1000 },
+    { width: 390, height: 844 },
+    { width: 320, height: 568 },
+  ]) {
+    test(`${theme} ${viewport.width}: the new road's setup steps follow the reference`, async ({ browser }, info) => {
+      const context = await browser.newContext({ viewport, serviceWorkers: 'block', reducedMotion: 'reduce' });
+      const page = await context.newPage();
+      const errors: string[] = [];
+      page.on('pageerror', error => errors.push(error.message));
+      await installNetworkBoundary(page);
+      await page.route('**/zk/**', () => {});
+      await installVirtualAuthenticator(context, page);
+      try {
+        await page.goto('/?accwalk=1');
+        await page.getByRole('button', { name: theme, exact: true }).click();
+        await expect(page.locator('.mnob-landing')).toBeVisible();
+        await page.getByRole('button', { name: SIGN_IN_BUTTON }).click();
+
+        await expect(page.getByRole('heading', { name: /Welcome to\s*Passport/ })).toBeVisible({ timeout: 60_000 });
+        const screen = page.locator('.mnob-screen.mndyn');
+        await expect(screen).toHaveCSS('background-image', 'none');
+        await expect(screen).toHaveCSS('border-top-width', '0px');
+        await expect(page.locator('.mnob-title')).toHaveCSS('font-weight', '700');
+        await capture(page, info, 'road-welcome');
+
+        await page.getByRole('button', { name: 'Choose my name' }).click();
+        await page.getByLabel('Your name').fill(NAME);
+        await expect(page.getByText(`${NAME}.night is available`)).toBeVisible({ timeout: 60_000 });
+        const create = page.getByRole('button', { name: 'Create my Passport' });
+        await expect(create).toHaveCSS('background-image', 'none');
+        expect((await create.boundingBox())!.height).toBeGreaterThanOrEqual(48);
+        await capture(page, info, 'road-name');
+
+        await create.click();
+        await expect(page.locator('.mnid-stepper-item').nth(2)).toHaveAttribute('data-state', 'active', { timeout: 60_000 });
+        await capture(page, info, 'road-progress');
         expect(errors).toEqual([]);
       } finally {
         await context.close();
