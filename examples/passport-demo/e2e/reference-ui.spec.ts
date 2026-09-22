@@ -50,6 +50,8 @@ async function completedPassport(page: Page) {
 for (const theme of ['Light', 'Dark'] as const) {
   for (const viewport of [
     { width: 1440, height: 1000 },
+    { width: 1024, height: 768 },
+    { width: 768, height: 1024 },
     { width: 390, height: 844 },
     { width: 320, height: 568 },
   ]) {
@@ -73,13 +75,22 @@ for (const theme of ['Light', 'Dark'] as const) {
         await page.goto('/');
         await page.getByRole('button', { name: theme, exact: true }).click();
         await expect(page.getByRole('button', { name: SIGN_IN_BUTTON })).toBeVisible();
-        await expect(page.getByRole('button', { name: 'Continue with Dynamic', exact: true })).toBeVisible();
+        await expect(page.getByRole('button', { name: 'Log in', exact: true })).toBeVisible();
+        await expect(page.locator('.mnob-auth-button')).toHaveCount(2);
+        for (const button of await page.locator('.mnob-auth-button').all()) {
+          expect((await button.boundingBox())!.height).toBeGreaterThanOrEqual(48);
+        }
+        await expect(page.getByRole('button', { name: 'Continue with Dynamic', exact: true })).toHaveCount(0);
+        await expect(page.getByText('Your identity stays yours.')).toHaveCount(0);
+        await expect(page.getByRole('button', { name: 'Use a different passkey' })).toHaveCount(0);
+        await expect(page.locator('.mn-passport-art-proof')).toHaveCSS('animation-name', 'none');
+        await expect(page.locator('.mn-passport-art-proof')).toHaveCSS('opacity', '1');
         await capture(page, info, 'login');
 
         await page.getByRole('button', { name: SIGN_IN_BUTTON }).click();
         await expect(page.locator('.mnid-title')).toHaveText('Welcome to Passport', { timeout: 60_000 });
         await expect(page.locator('.mnid-screen')).toHaveCSS('background-image', 'none');
-        await expect(page.locator('.mnid-title')).toHaveCSS('font-weight', '800');
+        await expect(page.locator('.mnid-title')).toHaveCSS('font-weight', '700');
         await capture(page, info, 'welcome');
         await page.getByRole('button', { name: 'Choose my name' }).click();
         await page.getByLabel('Your Midnight name').fill(NAME);
@@ -101,6 +112,18 @@ for (const theme of ['Light', 'Dark'] as const) {
         await expect(page.locator('.mnnav-tab-active')).toHaveCSS('background-color', 'rgb(0, 0, 254)');
         await expect(page.locator('.mnnav-tab-active')).toHaveCSS('color', 'rgb(255, 255, 255)');
         await expect(page.locator('.mnhome-token-row')).toHaveCount(3);
+        const overview = await page.locator('.mnhome-overview').boundingBox();
+        const funds = await page.locator('.mnhome-funds').boundingBox();
+        const identity = await page.locator('.mnhome-passport-column').boundingBox();
+        const action = await page.locator('.mnhome-action-primary').boundingBox();
+        expect(action!.height).toBeGreaterThanOrEqual(48);
+        if (viewport.width >= 960) {
+          expect(overview!.width).toBeCloseTo(Math.min(viewport.width - 80, 1120), 0);
+          expect(funds!.x).toBeGreaterThan(identity!.x + identity!.width);
+        } else {
+          expect(funds!.y).toBeGreaterThan(identity!.y);
+          expect(overview!.width).toBeLessThan(viewport.width);
+        }
         await expect(page.getByRole('button', { name: /Midnight Raffle/ })).toBeVisible();
         for (const notice of await page.getByRole('button', { name: 'Dismiss notification' }).all()) {
           await notice.click();

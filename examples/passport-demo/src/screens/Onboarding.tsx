@@ -1,15 +1,13 @@
 import type { ReactNode } from 'react'
-import { ArrowRight, Eraser, Fingerprint, Loader2, ShieldCheck, X } from 'lucide-react'
+import { Eraser, Fingerprint, Loader2, UserRoundPlus, X } from 'lucide-react'
 import ThemeToggle from './ThemeToggle'
-import ContinueWithSocial from './ContinueWithSocial'
 import PassportIllustration from './PassportIllustration'
 import './onboarding.css'
 
 /**
- * Onboarding — one primary action (2026/08/05 decision).
+ * Passkey onboarding — separate log-in and sign-up (2026/09/22).
  *
- * "Sign in" and "Create passkey" are consolidated into a single button whose
- * behaviour the integrator resolves: if a local Passport profile exists in
+ * Sign-up retains the safe discovery-first flow: if a Passport profile exists in
  * this browser the existing sign-in/unlock flow runs, otherwise the
  * create flow runs — and that flow ASKS THE AUTHENTICATOR before it enrols
  * anything. "No local profile" is not "no passkey": site data cleared with the
@@ -19,9 +17,8 @@ import './onboarding.css'
  * WebAuthn discoverable credentials mean the assertion path also covers a
  * passkey synced from another device.
  *
- * Dynamic is the secondary sign-in route. Its button stays visible while
- * loading or unavailable; only a ready session can open authentication.
- * Passkey onboarding stays independent of the vendor's availability.
+ * The welcome surface separates log-in and sign-up. Recovery controls appear only
+ * when an authentication failure needs them, not on the normal sign-in view.
  */
 export interface OnboardingProps {
   stage: 'welcome' | 'working'
@@ -29,23 +26,22 @@ export interface OnboardingProps {
   error?: string | null
   /**
    * Whether a Passport passkey is already enrolled in this browser. `null`
-   * while the lookup is still running; the button works in every case — this
-   * only tunes the sentence beneath it.
+   * while the lookup is still running. Used to gate recovery controls that
+   * forget existing browser records, never to assume a credential is absent.
    *
    * `false` means only that this BROWSER holds no record. The device may still
-   * hold the passkey, which is why the copy below promises a sign-in rather
-   * than a creation, and why the flow behind the button discovers first.
+   * hold the passkey, which is why sign-up discovers before enrolling.
    */
   hasExistingPassport: boolean | null
   /**
-   * The one action. Signs in when a local Passport exists here; otherwise
+   * Sign-up. Signs in when a local Passport exists here; otherwise
    * discovers first and enrols only when no passkey answers. A refused
    * enrolment (the authenticator already holds the credential) must route
    * into sign-in, never into an error.
    */
   onContinue: () => void
   /**
-   * Quiet secondary path: a DISCOVERABLE WebAuthn assertion with no
+   * Log-in: a DISCOVERABLE WebAuthn assertion with no
    * allow-list, so the platform shows its own picker of resident passkeys.
    * Whichever credential the user picks signs in to its own profile, or has
    * one created and bound to it if none exists here yet.
@@ -238,13 +234,6 @@ export default function OnboardingScreen(props: OnboardingProps) {
     (unusableCredential || keylessPasskey || unusableDevice) && stage === 'welcome',
   )
 
-  const continueHint =
-    hasExistingPassport === true
-      ? 'Unlocks the Passport on this device with its passkey.'
-      : hasExistingPassport === false
-        ? 'Signs you in if this device already has a Passport, and creates one if it does not.'
-        : 'Uses a passkey on this device — sign in, or create your Passport the first time.'
-
   return (
     <section className="mnob-screen" aria-busy={stage === 'working'}>
       <header className="mnob-bar">
@@ -275,7 +264,6 @@ export default function OnboardingScreen(props: OnboardingProps) {
         <div className="mnob-signin">
           <div className="mnob-signin-heading">
             <h2>Welcome to Passport</h2>
-            <p>Choose how you’d like to continue.</p>
           </div>
 
           {error ? (
@@ -343,53 +331,38 @@ export default function OnboardingScreen(props: OnboardingProps) {
               browser holds records, because forgetting them is a real thing to
               want here and is never a loop. */}
           {unusableDevice && stage === 'welcome' ? (
-            <PasskeyWayOut copy={unusableDevice} onStartFresh={startFresh} />
+            <>
+              <PasskeyWayOut copy={unusableDevice} onStartFresh={startFresh} />
+              {onUseDifferentPasskey ? (
+                <button type="button" className="mnob-alt" onClick={onUseDifferentPasskey}>
+                  Try another passkey
+                </button>
+              ) : null}
+            </>
           ) : null}
 
           {stage === 'welcome' ? (
             <div className="mnob-stage" key="welcome">
-              <button
-                type="button"
-                className="mnob-primary"
-                onClick={onContinue}
-                aria-label="Continue with Passkey"
-              >
-                <span className="mnob-primary-copy">
-                  <span className="mnob-method-icon" aria-hidden="true">
-                    <Fingerprint size={22} strokeWidth={1.7} />
-                  </span>
-                  <span className="mnob-method-copy">
-                    <span>Continue with Passkey</span>
-                    <small aria-hidden="true">Use your device to sign in</small>
-                  </span>
-                </span>
-                <ArrowRight size={17} strokeWidth={2.2} aria-hidden="true" />
-              </button>
-              {/* Both sign-in choices stay visible while Dynamic starts. */}
-              <ContinueWithSocial />
-              <div className="mnob-privacy-note">
-                <ShieldCheck size={17} strokeWidth={1.8} aria-hidden="true" />
-                <span>
-                  <strong>Your identity stays yours.</strong>
-                  <small>Passport only shares what you approve.</small>
-                </span>
-              </div>
-              <p className="mnob-hint mnob-route-hint">{continueHint}</p>
-              {onUseDifferentPasskey ? (
+              <div className="mnob-auth-actions">
                 <button
                   type="button"
-                  className="mnob-alt"
+                  className="mnob-auth-button mnob-auth-login"
                   onClick={onUseDifferentPasskey}
+                  disabled={!onUseDifferentPasskey}
                 >
-                  Use a different passkey
+                  <Fingerprint size={20} strokeWidth={1.8} aria-hidden="true" />
+                  <span>Log in</span>
                 </button>
-              ) : null}
-              {/* THE THIRD PATH, and the only one on this screen that goes
-                  FORWARD rather than back. The two above both reopen what this
-                  browser already holds; when that is an orphaned Passport —
-                  a name with no account behind it — neither of them can help,
-                  and until 2026/09/04 there was nothing here that could. */}
-              {startFresh && !wayOutShown ? <StartFresh onStartFresh={startFresh} /> : null}
+                {/* Discover before enrolling, so sign-up cannot overwrite a
+                    surviving Passport whose browser records were cleared. */}
+                <button type="button" className="mnob-auth-button mnob-auth-signup" onClick={onContinue}>
+                  <UserRoundPlus size={20} strokeWidth={1.8} aria-hidden="true" />
+                  <span>Sign up</span>
+                </button>
+              </div>
+              {/* Recovery stays available after a failure without adding a
+                  destructive reset action to the normal welcome view. */}
+              {startFresh && error && !wayOutShown ? <StartFresh onStartFresh={startFresh} /> : null}
             </div>
           ) : null}
 
@@ -414,11 +387,6 @@ export default function OnboardingScreen(props: OnboardingProps) {
         </div>
       </div>
 
-      {/* The footer carries the honesty note alone — there is no second route
-          to link to. */}
-      <footer className="mnob-foot">
-        <span>Midnight · Test network demo — not production</span>
-      </footer>
     </section>
   )
 }

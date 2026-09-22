@@ -476,7 +476,7 @@ test('a passkey that cannot derive a key says so in plain words, and never loops
 
   /* What IS offered is the door that leads off this platform: the platform's
      own picker, which reaches a passkey held on another device. */
-  await expect(h.page.getByRole('button', { name: /Use a different passkey/i })).toBeVisible();
+  await expect(h.page.getByRole('button', { name: /Try another passkey/i })).toBeVisible();
 
   /* PRESSED AGAIN, because a person in a dead end presses the main button
      again. It must land in the same explained state rather than degrading into

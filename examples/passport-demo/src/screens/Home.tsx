@@ -814,6 +814,7 @@ export default function HomeScreen(props: HomeScreenProps) {
             {aliasLabel ? `${timeOfDayGreeting()}, ${aliasLabel}` : timeOfDayGreeting()}
           </h1>
           {!aliasLabel && displayName ? <p className="mnhome-person">{displayName}</p> : null}
+          <p className="mnhome-summary">Your Passport, at a glance.</p>
         </div>
 
         {error ? (
@@ -833,6 +834,29 @@ export default function HomeScreen(props: HomeScreenProps) {
           </p>
         ) : null}
 
+        <div className="mnhome-overview">
+          <div className="mnhome-passport-column">
+            {identity ? (
+              <EcosystemIdentity
+                network={network}
+                record={identity.record}
+                incentives={identity.incentives}
+                variant="card"
+                onClaimName={identity.onClaimName}
+                onFindExisting={identity.onFindExisting}
+                onRegisterNow={identity.onRegisterNow}
+                registerNowDisabledReason={identity.registerNowDisabledReason}
+                registerNowBusy={identity.registerNowBusy}
+                registerNowPhase={identity.registerNowPhase}
+              />
+            ) : null}
+            {passportContract ? <PassportContractCard {...passportContract} /> : null}
+          </div>
+          <section className="mnhome-funds" aria-labelledby="passport-balances-title">
+            <div className="mnhome-funds-heading">
+              <h2 id="passport-balances-title">Your assets</h2>
+              <p>Token balances</p>
+            </div>
         {/* The money row. Send is present only when there is an account to
             withdraw from — see the `send` prop. Receive opens the sheet below:
             the `.night` name to be paid at, and the address beneath it. */}
@@ -879,9 +903,8 @@ export default function HomeScreen(props: HomeScreenProps) {
                 on one tab and a row on the other would read as two different
                 facts about the same money.
 
-                The column headings are for assistive technology only: this
-                strip has never had a visible heading of its own, and giving it
-                one now to label two columns would be furniture. */}
+                The panel supplies the visible heading; the table's column
+                headings remain available to assistive technology. */}
             <table className="mnhome-assets">
               <caption className="mnhome-sr">
                 What your Passport holds, and how much of each.
@@ -945,6 +968,9 @@ export default function HomeScreen(props: HomeScreenProps) {
             ) : null}
           </>
         ) : null}
+
+          </section>
+        </div>
 
         {account?.status === 'unavailable' ? (
           /* FIXED PROSE. The reader's own words go to the console — see
@@ -1026,28 +1052,7 @@ export default function HomeScreen(props: HomeScreenProps) {
           </article>
         ))}
 
-        {/* Identity: the name held on this network, its real registration
-            transactions or the reason it is only queued, and what has been
-            redeemed across the ecosystem. */}
-        {identity ? (
-          <EcosystemIdentity
-            network={network}
-            record={identity.record}
-            incentives={identity.incentives}
-            variant="card"
-            onClaimName={identity.onClaimName}
-            onFindExisting={identity.onFindExisting}
-            onRegisterNow={identity.onRegisterNow}
-            registerNowDisabledReason={identity.registerNowDisabledReason}
-            registerNowBusy={identity.registerNowBusy}
-            registerNowPhase={identity.registerNowPhase}
-          />
-        ) : null}
-
-        {/* Whether the account behind the name is ready — one line, directly
-            beneath the name it belongs to. */}
-        {passportContract ? <PassportContractCard {...passportContract} /> : null}
-
+        <div className="mnhome-discover">
         {/* The applications, directly below the wallet summary — the same
             registry, cards, and in-Passport browser as the Apps tab. */}
         <FeaturedApps
@@ -1063,6 +1068,7 @@ export default function HomeScreen(props: HomeScreenProps) {
             them: the grid is what a person came to Home to USE, and the trail
             is what they come back to check. */}
         {activity ? <ActivityFeed entries={activity} /> : null}
+        </div>
 
         {sendOpen && send ? (
           <SendSheet
@@ -1227,6 +1233,7 @@ export default function HomeScreen(props: HomeScreenProps) {
             )
           : null}
 
+        <div className="mnhome-utilities">
         {onOpenBackup ? (
           <button type="button" className="mnhome-support" onClick={onOpenBackup}>
             <ShieldCheck size={14} aria-hidden="true" />
@@ -1250,6 +1257,7 @@ export default function HomeScreen(props: HomeScreenProps) {
             build shipped today this footer is unchanged. Same reason as
             above: the condition belongs inside the component that knows it. */}
         <DynamicIdentity />
+        </div>
 
       </div>
     </section>

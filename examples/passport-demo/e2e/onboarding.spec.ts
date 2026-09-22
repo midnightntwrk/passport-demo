@@ -93,21 +93,19 @@ async function visibleText(): Promise<string> {
   return page.locator('body').innerText();
 }
 
-test('the landing screen keeps both sign-in choices visible, and says what network this is', async () => {
+test('the landing screen separates passkey log-in and sign-up without extra footer copy', async () => {
   await page.goto('/');
 
   await expect(page.getByRole('heading', { name: /Midnight\s*Passport/ })).toBeVisible();
   await expect(page.getByRole('button', { name: SIGN_IN_BUTTON })).toBeVisible();
-  await expect(page.getByText(/Test network demo — not production/)).toBeVisible();
+  await expect(page.getByText(/Test network demo — not production/)).toHaveCount(0);
 
-  /* The offline preview has no Dynamic environment. Keep its route visible
-     and explain availability, while passkey sign-in remains usable. */
-  await expect(page.getByRole('button', { name: 'Continue with Dynamic' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Continue with Dynamic' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Continue with Dynamic' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: SIGN_IN_BUTTON })).toBeEnabled();
-  await expect(page.getByText('Dynamic sign-in is currently unavailable. You can continue with a passkey.')).toBeVisible();
-  const primaries = await page.getByRole('button', { name: /Continue|Create|Sign in/i }).count();
-  expect(primaries).toBe(2);
+  await expect(page.getByRole('button', { name: 'Log in', exact: true })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Use a different passkey' })).toHaveCount(0);
+  const primaries = await page.getByRole('button', { name: SIGN_IN_BUTTON }).count();
+  expect(primaries).toBe(1);
 
   // Nothing about a wallet, a seed phrase, or a fee before anything has happened.
   const text = await visibleText();
@@ -1332,7 +1330,7 @@ test('a Passport whose passkey this device cannot produce is offered a new one',
     await seedStrandedProfile(stranded, STRANDED_CREDENTIAL_ID);
     await stranded.reload();
 
-    await stranded.getByRole('button', { name: SIGN_IN_BUTTON }).click();
+    await stranded.getByRole('button', { name: 'Log in', exact: true }).click();
 
     /* Not a sentence about what went wrong. A sentence about what can be done
        about it, and the control that does it. */
@@ -1376,10 +1374,10 @@ test('a Passport whose passkey this device cannot produce is offered a new one',
   }
 });
 
-test('a picker with nothing in it offers a new passkey too, not just an apology', async ({
+test('log-in with an empty picker offers a new passkey, not just an apology', async ({
   browser,
 }) => {
-  /* The other half. "Use a different passkey" runs a DISCOVERABLE assertion,
+  /* Log in runs a DISCOVERABLE assertion,
      so the platform shows its own picker — and for this user it is empty, or
      they close it, which WebAuthn reports identically. This path used to end
      in a sentence, which was the worse failure of the two: it is where the
@@ -1396,7 +1394,7 @@ test('a picker with nothing in it offers a new passkey too, not just an apology'
     await seedStrandedProfile(stranded, STRANDED_CREDENTIAL_ID);
     await stranded.reload();
 
-    await stranded.getByRole('button', { name: /Use a different passkey/i }).click();
+    await stranded.getByRole('button', { name: 'Log in', exact: true }).click();
 
     await expect(stranded.getByText(/Could not load your passkey/i)).toBeVisible({
       timeout: 60_000,

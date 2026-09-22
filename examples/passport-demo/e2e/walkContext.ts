@@ -42,7 +42,9 @@ import { test, type BrowserContextOptions } from '@playwright/test';
  * and buys a live gate that goes on working across a deploy in either
  * direction.
  */
-export const SIGN_IN_BUTTON = /Continue with Pass(?:port|key)/i;
+// The discovery-first entry is now Sign up. Explicit returning-account tests
+// use Log in; legacy deployed builds still expose Continue with Passkey.
+export const SIGN_IN_BUTTON = /^Sign up$|Continue with Pass(?:port|key)/i;
 
 /** The context options that describe a DEVICE rather than a behaviour. */
 const EMULATION = [

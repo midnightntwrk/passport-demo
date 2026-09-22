@@ -76,7 +76,7 @@ const POINTS = [
 
 export default function WelcomeScreen({ onChooseName }: WelcomeProps) {
   return (
-    <section className="mnid-screen">
+    <section className="mnid-screen mnid-welcome">
       <header className="mnid-bar">
         <img className="mnid-wordmark" src="/midnight-wordmark.svg" alt="Midnight" />
         <span className="mnid-step">Welcome</span>
