@@ -1428,6 +1428,39 @@ export function failoverProvingProvider(
  * was still lagging — can ask again later without re-running the whole retry
  * window on a render.
  */
+/**
+ * Whether the indexer has a transaction, by midnight-js's identifier: `true`
+ * when it does, `false` when it ANSWERED and has none, and `null` when it could
+ * not be asked. Unlike {@link resolveTxHashOnce}, "no such transaction" and
+ * "no answer" are kept apart, because a stopped payment is settled as not sent
+ * on the first and never on the second.
+ */
+export async function resolveTxOnChainOnce(
+  indexerHttpUrl: string,
+  identifier: string,
+): Promise<boolean | null> {
+  const query = `{ transactions(offset: { identifier: "${identifier}" }) { hash } }`;
+  try {
+    const response = await fetch(indexerHttpUrl, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ query }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!response.ok) return null;
+    const body = (await response.json()) as {
+      data?: { transactions?: Array<{ hash?: string }> | null };
+      errors?: unknown[];
+    };
+    if (Array.isArray(body.errors) && body.errors.length > 0) return null;
+    const rows = body.data?.transactions;
+    if (!Array.isArray(rows)) return null;
+    return rows.length > 0;
+  } catch {
+    return null;
+  }
+}
+
 export async function resolveTxHashOnce(
   indexerHttpUrl: string,
   identifier: string,

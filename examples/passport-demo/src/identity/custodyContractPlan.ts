@@ -295,6 +295,37 @@ export const CUSTODY_SEND_FAILED = 'That payment did not go through, and nothing
 export const CUSTODY_SEND_UNCONFIRMED =
   'Your payment was sent and this Passport could not confirm it. Check your balance in a moment to see whether it left.';
 
+/**
+ * The payment was handed to the network and never reached the chain.
+ *
+ * Seen live 2026/09/22: a proved, balanced transaction the node took and the
+ * chain never recorded, and a Send sheet that waited on it for ever. The wait
+ * is now bounded ({@link CUSTODY_SUBMIT_WAIT_MS}); when it runs out the
+ * account itself is asked, and an account whose `auth_nonce` has not moved has
+ * not run the call — every gated call advances it — so nothing left it. The
+ * same signature can never be replayed once anything else moves the nonce.
+ */
+export const CUSTODY_SEND_NOT_SENT = "That payment didn't go through. Nothing left your Passport.";
+
+/** How long a submitted payment is waited on before the account is asked. */
+export const CUSTODY_SUBMIT_WAIT_MS = 3 * 60 * 1000;
+
+/**
+ * What a payment whose wait ran out is, from the account's own `auth_nonce`.
+ *
+ * `not-sent` only when the account was READ and its nonce is still the one
+ * the payment was signed against: the gated call advances it, so an unmoved
+ * nonce is an account that has not run the call. Anything else — a nonce that
+ * moved, or a read that failed — is `unknown`, and the hedged sentence stays.
+ */
+export function custodySubmitVerdict(input: {
+  readonly signedNonce: bigint;
+  readonly liveNonce: bigint | null;
+}): 'not-sent' | 'unknown' {
+  if (input.liveNonce === null) return 'unknown';
+  return input.liveNonce === input.signedNonce ? 'not-sent' : 'unknown';
+}
+
 /** The `name` on the error carrying {@link CUSTODY_PROOF_NOT_BUILT}. */
 export const CUSTODY_PROOF_NOT_BUILT_NAME = 'CustodyProofNotBuilt';
 

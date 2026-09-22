@@ -121,16 +121,16 @@ const refusals: { name: string; input: Partial<CustodyShieldedSendPlanInput>; se
       sentence: 'Enter an amount greater than zero.',
     },
     {
-      name: 'the recipient holds an older kind of Passport',
+      name: 'the recipient holds a Passport on the older version',
       input: { recipientModule: 'account' },
       sentence:
-        'That Passport is an older kind, and this version cannot pay it this way. Ask them to set their Passport up again.',
+        "This name belongs to a Passport on the older version, so it can't be paid from this one. Paying between the two versions isn't supported.",
     },
     {
       name: 'the recipient holds the first prototype build',
       input: { recipientModule: 'account-v1' },
       sentence:
-        'That Passport is an older kind, and this version cannot pay it this way. Ask them to set their Passport up again.',
+        "This name belongs to a Passport on the older version, so it can't be paid from this one. Paying between the two versions isn't supported.",
     },
     {
       name: 'the name belongs to something that is not a Passport',
@@ -277,7 +277,7 @@ const stages: {
     stage: 'sending',
     patch: { sendTxId: 'cc'.repeat(32) },
     step: 'report',
-    says: /either it reached alice\.night or nothing left/,
+    says: /Checking whether your payment to alice\.night went through/,
   },
   {
     name: 'sending, with nothing ever submitted',

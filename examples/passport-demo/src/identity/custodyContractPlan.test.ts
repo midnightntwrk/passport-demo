@@ -889,3 +889,13 @@ describe('an answer that was lost, as against work that failed', () => {
     );
   });
 });
+
+describe('custodySubmitVerdict — a payment whose wait ran out', () => {
+  it('is not sent only when the account was read and its nonce has not moved', async () => {
+    const { custodySubmitVerdict, CUSTODY_SEND_NOT_SENT } = await import('./custodyContractPlan.js');
+    expect(custodySubmitVerdict({ signedNonce: 7n, liveNonce: 7n })).toBe('not-sent');
+    expect(custodySubmitVerdict({ signedNonce: 7n, liveNonce: 8n })).toBe('unknown');
+    expect(custodySubmitVerdict({ signedNonce: 7n, liveNonce: null })).toBe('unknown');
+    expect(CUSTODY_SEND_NOT_SENT).toBe("That payment didn't go through. Nothing left your Passport.");
+  });
+});

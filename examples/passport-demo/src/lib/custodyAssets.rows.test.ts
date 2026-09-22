@@ -193,7 +193,7 @@ describe('what a Passport says about a payment it did not see land', () => {
       stage: 'sending',
       patch: { sendTxId: 'cc'.repeat(32) },
       kind: 'report',
-      says: /either it reached alice\.night or nothing left/,
+      says: /Checking whether your payment to alice\.night went through/,
     },
     /* NOTHING WAS EVER SUBMITTED, so the offer is still a report — there is
        something to say — but what it says is the stronger sentence. */

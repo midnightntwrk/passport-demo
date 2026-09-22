@@ -63,7 +63,12 @@
  * accident, and the screen now has the send it described.
  */
 
-import type { CustodyAccountRecord, CustodyStorage } from './custodyContractPlan.js';
+import {
+  CUSTODY_SEND_NOT_SENT,
+  CUSTODY_SUBMIT_WAIT_MS,
+  type CustodyAccountRecord,
+  type CustodyStorage,
+} from './custodyContractPlan.js';
 import type { PassportContractName } from './contractRuntime.js';
 
 /* -------------------------------------------------------------------------- */
@@ -331,7 +336,7 @@ export function custodyShieldedSendRefusal(input: CustodyShieldedSendPlanInput):
     return 'That name does not belong to a Passport that can be paid.';
   }
   if (route === 'prototype') {
-    return 'That Passport is an older kind, and this version cannot pay it this way. Ask them to set their Passport up again.';
+    return "This name belongs to a Passport on the older version, so it can't be paid from this one. Paying between the two versions isn't supported.";
   }
   if (input.heldCoin === null) {
     return 'Your Passport holds none of that to send.';
@@ -813,6 +818,25 @@ export interface CustodyShieldedSendRecord {
   /** The one transaction, once there is an id for it. */
   readonly sendTxId: string | null;
   readonly startedAt: number;
+  /** When the transaction was handed to the network, or null before that. */
+  readonly sentAt?: number | null;
+  /**
+   * What the submit wrote to the coin store, so a payment found NOT to have
+   * reached the chain after a reload is taken back exactly as the tab that
+   * sent it would have taken it back. Decimal strings for the two integers.
+   */
+  readonly undo?: CustodySendUndo | null;
+}
+
+/** The coin-store write a submit made, as it is stored. */
+export interface CustodySendUndo {
+  readonly held: {
+    readonly colour: string;
+    readonly nonce: string;
+    readonly value: string;
+    readonly mtIndex: string;
+  };
+  readonly change: { readonly colour: string; readonly nonce: string } | null;
 }
 
 /** `localStorage` key for the in-flight shielded send, one per account. */
@@ -881,7 +905,74 @@ function recordFromRow(row: unknown): CustodyShieldedSendRecord | null {
         : '',
     sendTxId: typeof candidate.sendTxId === 'string' ? candidate.sendTxId : null,
     startedAt: typeof candidate.startedAt === 'number' ? candidate.startedAt : 0,
+    /* Only where written, so a record from before these existed reads back
+       exactly as it was stored. */
+    ...(typeof candidate.sentAt === 'number' ? { sentAt: candidate.sentAt } : {}),
+    ...(undoFromRow(candidate.undo) !== null ? { undo: undoFromRow(candidate.undo) } : {}),
   };
+}
+
+const DECIMAL = /^(0|[1-9][0-9]*)$/;
+
+function undoFromRow(row: unknown): CustodySendUndo | null {
+  if (!row || typeof row !== 'object') return null;
+  const candidate = row as { held?: unknown; change?: unknown };
+  const held = candidate.held as Record<string, unknown> | undefined;
+  if (
+    !held ||
+    typeof held !== 'object' ||
+    typeof held.colour !== 'string' ||
+    typeof held.nonce !== 'string' ||
+    typeof held.value !== 'string' ||
+    !DECIMAL.test(held.value) ||
+    typeof held.mtIndex !== 'string' ||
+    !DECIMAL.test(held.mtIndex)
+  ) {
+    return null;
+  }
+  const change = candidate.change as Record<string, unknown> | null | undefined;
+  const changeRow =
+    change && typeof change === 'object' && typeof change.colour === 'string' && typeof change.nonce === 'string'
+      ? { colour: change.colour, nonce: change.nonce }
+      : null;
+  return {
+    held: { colour: held.colour, nonce: held.nonce, value: held.value, mtIndex: held.mtIndex },
+    change: changeRow,
+  };
+}
+
+/**
+ * What a stopped payment with a transaction behind it came to, from what the
+ * chain can say (2026/09/22).
+ *
+ *   `landed`      the indexer has the transaction.
+ *   `not-landed`  the indexer answered that it does not, and the wait a
+ *                 submitted payment is given has run out since it was sent.
+ *   `checking`    anything else: inside the wait, or an indexer that could not
+ *                 be asked. Never a guess either way.
+ *
+ * `onChain` is `true`, `false`, or `null` for "could not be asked".
+ */
+export function custodyStoppedSendVerdict(input: {
+  readonly record: CustodyShieldedSendRecord;
+  readonly onChain: boolean | null;
+  readonly now: number;
+}): 'landed' | 'not-landed' | 'checking' {
+  if (input.onChain === true) return 'landed';
+  const sentAt = input.record.sentAt ?? input.record.startedAt;
+  if (input.onChain === false && input.now - sentAt >= CUSTODY_SUBMIT_WAIT_MS) return 'not-landed';
+  return 'checking';
+}
+
+/** The sentence for each verdict, about the person it was paid to. */
+export function custodyStoppedSendSentence(
+  record: CustodyShieldedSendRecord,
+  verdict: 'landed' | 'not-landed' | 'checking',
+): string {
+  const who = record.recipientLabel.trim().length > 0 ? record.recipientLabel.trim() : 'them';
+  if (verdict === 'landed') return `Sent. ${who} has it.`;
+  if (verdict === 'not-landed') return CUSTODY_SEND_NOT_SENT;
+  return `Checking whether your payment to ${who} went through…`;
 }
 
 function readSends(storage: CustodyStorage): Record<string, CustodyShieldedSendRecord> {
@@ -987,5 +1078,8 @@ export function custodyShieldedSendOutcome(record: CustodyShieldedSendRecord): s
      buys a person whose tab closed half-way. The balance is the answer and it
      is on the screen this sentence is shown beside, so the sentence points at
      it rather than offering a button that would have nothing to do. */
-  return `Your payment to ${who} was sent as one payment: either it reached ${who} or nothing left your Passport. Your balance below says which.`;
+  /* A TRANSACTION EXISTS, and what it came to is asked of the chain by the
+     screen (`custodyStoppedSendVerdict`). Until that answers, the sentence says
+     it is being checked — never a hedge that leaves the reader to work it out. */
+  return custodyStoppedSendSentence(record, 'checking');
 }

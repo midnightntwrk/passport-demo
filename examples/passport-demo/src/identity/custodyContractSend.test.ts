@@ -18,6 +18,8 @@ import {
   changeCoinFromResult,
   clearCustodyShieldedSend,
   custodyShieldedSendOutcome,
+  custodyStoppedSendSentence,
+  custodyStoppedSendVerdict,
   loadCustodyShieldedSend,
   newCustodyShieldedSend,
   nextCustodyShieldedSendStep,
@@ -290,7 +292,7 @@ describe('custodyShieldedSendRefusal', () => {
        each — and the only other route is through a wallet the ruling forbids. */
     for (const module of ['account', 'account-v1'] as const) {
       expect(custodyShieldedSendRefusal(shieldedInput({ recipientModule: module }))).toMatch(
-        /older kind/,
+        /on the older version, so it can't be paid from this one/,
       );
     }
   });
@@ -710,8 +712,8 @@ describe('the record a stopped send leaves behind', () => {
   it('says where the value is, and never claims more than it can see', () => {
     expect(custodyShieldedSendOutcome(send({ stage: 'done' }))).toMatch(/alice\.night has it/);
     const inFlight = custodyShieldedSendOutcome(send({ sendTxId: 'cc'.repeat(32) }));
-    expect(inFlight).toMatch(/one payment/);
-    expect(inFlight).toMatch(/either it reached alice\.night or nothing left your Passport/);
+    /* ASKED OF THE CHAIN, and until it answers the line says so (2026/09/22). */
+    expect(inFlight).toBe('Checking whether your payment to alice.night went through…');
     /* AND IT PROMISES NOTHING NOBODY WROTE: no resume, no button, no wait. */
     expect(inFlight).not.toMatch(/by itself|on its own|Finish/);
     /* With no name to use, the sentence still has to work. */
@@ -720,7 +722,7 @@ describe('the record a stopped send leaves behind', () => {
     );
     expect(
       custodyShieldedSendOutcome(send({ recipientLabel: '', sendTxId: 'cc'.repeat(32) })),
-    ).toMatch(/reached them/);
+    ).toMatch(/payment to them went through/);
   });
 
   /* THE STRONGER SENTENCE, AND WHEN IT IS EARNED (defect 18, fixed
@@ -738,11 +740,75 @@ describe('the record a stopped send leaves behind', () => {
     expect(untouched).not.toMatch(/either it reached|one payment|Finish|by itself/);
   });
 
-  it('hedges only once there is a transaction that could have landed', () => {
+  it('checks only once there is a transaction that could have landed', () => {
     /* The SAME stage, the only difference being that a transaction exists. */
     const away = custodyShieldedSendOutcome(send({ sendTxId: 'cc'.repeat(32) }));
-    expect(away).toMatch(/either it reached alice\.night or nothing left your Passport/);
-    expect(away).not.toMatch(/Nothing was sent/);
+    expect(away).toMatch(/Checking whether your payment to alice\.night went through/);
+    expect(away).not.toMatch(/Nothing was sent|either it reached|says which/);
+  });
+
+  it('answers a stopped payment from the chain: sent, not sent, or still checking', () => {
+    const now = 1_800_000_000_000;
+    const away = send({ sendTxId: 'cc'.repeat(32), startedAt: now - 60_000 });
+    /* The indexer has it: sent, whenever it is asked. */
+    expect(custodyStoppedSendVerdict({ record: away, onChain: true, now })).toBe('landed');
+    expect(custodyStoppedSendSentence(away, 'landed')).toBe('Sent. alice.night has it.');
+    /* Answered and absent, but still inside the wait: not yet a verdict. */
+    expect(custodyStoppedSendVerdict({ record: away, onChain: false, now })).toBe('checking');
+    /* Answered and absent, and the wait has passed since it was SENT. */
+    const late = { ...away, sentAt: now - 3 * 60 * 1000 };
+    expect(custodyStoppedSendVerdict({ record: late, onChain: false, now })).toBe('not-landed');
+    expect(custodyStoppedSendSentence(late, 'not-landed')).toBe(
+      "That payment didn't go through. Nothing left your Passport.",
+    );
+    /* An indexer that could not be asked is never a verdict, however late. */
+    expect(custodyStoppedSendVerdict({ record: late, onChain: null, now })).toBe('checking');
+    expect(custodyStoppedSendSentence(late, 'checking')).toBe(
+      'Checking whether your payment to alice.night went through…',
+    );
+  });
+
+  it('keeps what a submit wrote, so a payment that never landed can be taken back', () => {
+    const storage = new Map<string, string>();
+    const store = {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => void storage.set(key, value),
+      removeItem: (key: string) => void storage.delete(key),
+    };
+    const undo = {
+      held: { colour: 'aa'.repeat(32), nonce: 'bb'.repeat(32), value: '100', mtIndex: '12' },
+      change: { colour: 'aa'.repeat(32), nonce: 'cc'.repeat(32) },
+    };
+    const record = { ...send({ sendTxId: 'dd'.repeat(32) }), sentAt: 5, undo };
+    saveCustodyShieldedSend(store, record);
+    const read = loadCustodyShieldedSend(store, {
+      network: record.network,
+      accountAddress: record.accountAddress,
+    });
+    expect(read?.sentAt).toBe(5);
+    expect(read?.undo).toEqual(undo);
+    /* No change coin is a real answer, kept as null. */
+    saveCustodyShieldedSend(store, { ...record, undo: { ...undo, change: null } });
+    expect(
+      loadCustodyShieldedSend(store, { network: record.network, accountAddress: record.accountAddress })
+        ?.undo?.change,
+    ).toBeNull();
+    /* A malformed undo is dropped, never half-read. */
+    for (const broken of [
+      'nope',
+      { held: null },
+      { held: { ...undo.held, value: '-1' } },
+      { held: { ...undo.held, mtIndex: 7 } },
+      { held: { ...undo.held, colour: 1 } },
+      { held: { ...undo.held, nonce: 1 } },
+      { held: { ...undo.held, value: 1 } },
+    ]) {
+      saveCustodyShieldedSend(store, { ...record, undo: broken as never });
+      expect(
+        loadCustodyShieldedSend(store, { network: record.network, accountAddress: record.accountAddress })
+          ?.undo,
+      ).toBeUndefined();
+    }
   });
 });
 
