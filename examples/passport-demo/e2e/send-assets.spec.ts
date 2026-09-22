@@ -673,7 +673,8 @@ test('a sender whose account can pay in one transaction is reviewed as one trans
      say Transferring" (reviewer, 2026/09/08) — and the row that promises what
      somebody is about to wait through says the same word for the same reason. */
   expect(review).toContain('Transferring');
-  expect(review).toContain('in one network transaction');
+  /* The explainer under it is gone (2026/09/22): the word says enough. */
+  expect(review).not.toContain('in one network transaction');
   /* THE DEFECT THIS GUARDS. Nothing on this path is two steps, and a row that
      still said so would be describing the older build's send over the new
      build's transfer. */
