@@ -307,7 +307,7 @@ test('a passkey found on a forgetful browser is signed in to, and the name is a 
     await clearSiteData(h);
     await h.page.reload();
 
-    await h.page.getByRole('button', { name: /Use a different passkey/i }).click();
+    await h.page.getByRole('button', { name: 'Log in', exact: true }).click();
 
     await expect(h.page.getByRole('heading', { name: /Welcome to Passport/i })).toBeVisible({
       timeout: 120_000,
@@ -354,7 +354,7 @@ test('a blob naming an account the chain will not answer for holds nothing up', 
     await clearSiteData(h);
     await h.page.reload();
 
-    await h.page.getByRole('button', { name: /Use a different passkey/i }).click();
+    await h.page.getByRole('button', { name: 'Log in', exact: true }).click();
 
     await expect(h.page.getByRole('heading', { name: /Welcome to Passport/i })).toBeVisible({
       timeout: 120_000,

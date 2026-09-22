@@ -93,18 +93,25 @@ async function visibleText(): Promise<string> {
   return page.locator('body').innerText();
 }
 
-test('the landing screen offers one way in, and says what network this is', async () => {
+test('the landing screen offers Log in and Sign up, and says what network this is', async () => {
   await page.goto('/');
 
   await expect(page.getByRole('heading', { name: /Midnight\s*Passport/ })).toBeVisible();
-  await expect(page.getByRole('button', { name: SIGN_IN_BUTTON })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Sign up', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Log in', exact: true })).toBeEnabled();
   await expect(page.getByText(/Test network demo — not production/)).toBeVisible();
 
-  /* One primary action. There is no hosted route to offer and no vendor
-     sign-in to wait on, so a second primary button would be a promise this
-     demo cannot keep. */
-  const primaries = await page.getByRole('button', { name: /Continue|Create|Sign in/i }).count();
-  expect(primaries).toBe(1);
+  /* TWO DOORS, AND NOTHING ELSE THAT STARTS ANYTHING (2026/09/22). The one
+     "Continue with Passkey" is gone, and so is its quiet "Use a different
+     passkey": "Log in" is that picker now. This build has no provider sign-in
+     behind it, so the recovery link is absent too — `provider-recovery.spec.ts`
+     walks the build that has one. */
+  await expect(page.locator('.mnob-auth-button')).toHaveCount(2);
+  await expect(page.getByRole('button', { name: /Continue with/i })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: /Use a different passkey/i })).toHaveCount(0);
+  await expect(page.getByTestId('recover-lost-device')).toHaveCount(0);
+  const primaries = await page.getByRole('button', { name: /Continue|Create|Sign in|Sign up|Log in/i }).count();
+  expect(primaries).toBe(2);
 
   // Nothing about a wallet, a seed phrase, or a fee before anything has happened.
   const text = await visibleText();
@@ -1376,7 +1383,7 @@ test('a Passport whose passkey this device cannot produce is offered a new one',
 test('a picker with nothing in it offers a new passkey too, not just an apology', async ({
   browser,
 }) => {
-  /* The other half. "Use a different passkey" runs a DISCOVERABLE assertion,
+  /* The other half. "Log in" runs a DISCOVERABLE assertion,
      so the platform shows its own picker — and for this user it is empty, or
      they close it, which WebAuthn reports identically. This path used to end
      in a sentence, which was the worse failure of the two: it is where the
@@ -1393,7 +1400,7 @@ test('a picker with nothing in it offers a new passkey too, not just an apology'
     await seedStrandedProfile(stranded, STRANDED_CREDENTIAL_ID);
     await stranded.reload();
 
-    await stranded.getByRole('button', { name: /Use a different passkey/i }).click();
+    await stranded.getByRole('button', { name: 'Log in', exact: true }).click();
 
     await expect(stranded.getByText(/Could not load your passkey/i)).toBeVisible({
       timeout: 60_000,

@@ -271,5 +271,7 @@ export const RECOVERY_COPY = {
     'already hold.',
   recoverAction: 'Sign in with Google, Microsoft, X, Discord, or email',
   recoverEntry: 'I already have a Passport',
+  /** The landing's quiet link under Log in and Sign up, into the same road. */
+  landingEntry: 'Lost your device? Recover with Google, Microsoft, X, Discord, or email',
   recoverBack: 'Go back',
 } as const;

@@ -78,9 +78,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Browser, type Page } from '@playwright/test';
 
 import { PASSPORT_ACCOUNT_ADDRESS, RESOLVABLE_NAME, installNetworkBoundary } from './mocks.js';
+import { installVirtualAuthenticator } from './passkey.js';
 import { SIGN_IN_BUTTON, walkContextOptions } from './walkContext.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -91,7 +92,7 @@ const WALK = '/?dynamicwalk=1';
 /**
  * The URL that hands the app a sign-in that is AVAILABLE and not signed in.
  *
- * It is the only state the landing's "I already have a Passport" and the
+ * It is the only state the landing's "Lost your device? Recover with …" and the
  * way-back step after the name are reachable from: a build with no sign-in
  * behind it shows neither, and a build that is already signed in is past both.
  * See `src/lib/dynamicWalk.ts`.
@@ -126,6 +127,142 @@ async function openSend(page: Page): Promise<void> {
 const sendPicker = (page: Page) => page.locator('.mnhome-send-asset');
 const sendRecipient = (page: Page) => page.locator('.mnhome-send').getByRole('textbox').first();
 const sendAmount = (page: Page) => page.locator('.mnhome-send-amount input');
+
+/* -------------------------------------------------------------------------- */
+/* The landing, where a build with a provider sign-in behind it is entered     */
+/* -------------------------------------------------------------------------- */
+
+const LOST_DEVICE_LINK = 'Lost your device? Recover with Google, Microsoft, X, Discord, or email';
+
+test.describe('the landing of a build with a provider sign-in behind it', () => {
+  async function landing(browser: Browser, viewport?: { width: number; height: number }) {
+    /* The project's device wins over a spec's viewport (see `walkContext.ts`),
+       so the one walk that needs a wide screen sets it after. */
+    const context = await browser.newContext(
+      viewport ? { ...walkContextOptions({}), viewport } : walkContextOptions({ viewport: { width: 420, height: 900 } }),
+    );
+    const page = await context.newPage();
+    await installNetworkBoundary(page);
+    await page.goto(WALK_SIGNED_OUT);
+    await expect(page.getByRole('button', { name: 'Sign up', exact: true })).toBeVisible({
+      timeout: 60_000,
+    });
+    return { context, page };
+  }
+
+  test('shows Sign up, Log in, and the way back, and no provider button', async ({ browser }) => {
+    const { context, page } = await landing(browser);
+
+    /* EXACTLY THREE CONTROLS THAT GO ANYWHERE: the two doors and the link
+       under them. The theme toggle is furniture, not a way in. */
+    await expect(page.locator('.mnob-auth-button')).toHaveCount(2);
+    await expect(page.getByRole('button', { name: 'Log in', exact: true })).toBeEnabled();
+    await expect(page.getByRole('button', { name: 'Sign up', exact: true })).toBeEnabled();
+    const link = page.getByRole('button', { name: LOST_DEVICE_LINK, exact: true });
+    await expect(link).toBeVisible();
+    await expect(page.getByTestId('recover-lost-device')).toHaveText(LOST_DEVICE_LINK);
+
+    /* The things that are NOT here any more. */
+    await expect(page.getByRole('button', { name: /Continue with/i })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: /Use a different passkey/i })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'I already have a Passport' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: /^Sign in with/i })).toHaveCount(0);
+
+    /* STACKED FULL-WIDTH ON A PHONE: Log in above Sign up, each as wide as
+       the other, the link beneath both. */
+    const login = (await page.getByRole('button', { name: 'Log in', exact: true }).boundingBox())!;
+    const signup = (await page.getByRole('button', { name: 'Sign up', exact: true }).boundingBox())!;
+    const under = (await link.boundingBox())!;
+    expect(signup.y).toBeGreaterThanOrEqual(login.y + login.height);
+    expect(Math.abs(signup.width - login.width)).toBeLessThan(1);
+    expect(Math.abs(signup.x - login.x)).toBeLessThan(1);
+    expect(login.height).toBeGreaterThanOrEqual(48);
+    expect(under.y).toBeGreaterThanOrEqual(signup.y + signup.height);
+
+    const body = (await page.locator('body').innerText()).toLowerCase();
+    for (const forbidden of ['wallet address', 'dust', 'contract', 'registry', 'indexer', 'resolver', 'sponsor', 'sdk', 'dynamic']) {
+      expect(body, `"${forbidden}" is on screen`).not.toContain(forbidden);
+    }
+    await context.close();
+  });
+
+  test('sits the two doors side by side where there is room', async ({ browser }) => {
+    const { context, page } = await landing(browser, { width: 1440, height: 900 });
+    const login = (await page.getByRole('button', { name: 'Log in', exact: true }).boundingBox())!;
+    const signup = (await page.getByRole('button', { name: 'Sign up', exact: true }).boundingBox())!;
+    expect(Math.abs(signup.y - login.y)).toBeLessThan(1);
+    expect(signup.x).toBeGreaterThan(login.x + login.width);
+    await context.close();
+  });
+
+  test('Sign up reaches the welcome', async ({ browser }) => {
+    const { context, page } = await landing(browser);
+    const authenticator = await installVirtualAuthenticator(context, page);
+    try {
+      await page.getByRole('button', { name: 'Sign up', exact: true }).click();
+      await expect(page.getByRole('heading', { name: /Welcome to\s*Passport/i })).toBeVisible({
+        timeout: 120_000,
+      });
+      await expect(page.getByRole('button', { name: 'Choose my name' })).toBeVisible();
+    } finally {
+      await authenticator.remove().catch(() => {});
+      await context.close();
+    }
+  });
+
+  test('Log in opens the picker, and a picker with nothing in it offers a new passkey', async ({
+    browser,
+  }) => {
+    const { context, page } = await landing(browser);
+    const authenticator = await installVirtualAuthenticator(context, page);
+    try {
+      /* THE PICKER PATH. Log in asks the platform for any passkey it holds for
+         this site, with no list of its own. The walk counts the requests it
+         makes: exactly one GET, and no CREATE — Log in never enrols. */
+      await page.evaluate(() => {
+        const w = window as unknown as { __gets: number; __creates: number; __allow: number };
+        w.__gets = 0;
+        w.__creates = 0;
+        w.__allow = -1;
+        const get = navigator.credentials.get.bind(navigator.credentials);
+        const create = navigator.credentials.create.bind(navigator.credentials);
+        navigator.credentials.get = (o?: CredentialRequestOptions) => {
+          w.__gets += 1;
+          w.__allow = o?.publicKey?.allowCredentials?.length ?? 0;
+          return get(o);
+        };
+        navigator.credentials.create = (o?: CredentialCreationOptions) => {
+          w.__creates += 1;
+          return create(o);
+        };
+      });
+      await page.getByRole('button', { name: 'Log in', exact: true }).click();
+      await expect
+        .poll(() => page.evaluate(() => (window as unknown as { __gets: number }).__gets), {
+          timeout: 60_000,
+        })
+        .toBe(1);
+      expect(await page.evaluate(() => (window as unknown as { __allow: number }).__allow)).toBe(0);
+
+      /* This authenticator holds nothing, so the picker comes back empty and
+         the landing says so — with the way to make one, not an apology. */
+      await expect(page.getByText(/Could not load your passkey/i)).toBeVisible({ timeout: 60_000 });
+      await expect(page.getByRole('button', { name: /Create a new passkey/i })).toBeVisible();
+      expect(await page.evaluate(() => (window as unknown as { __creates: number }).__creates)).toBe(0);
+    } finally {
+      await authenticator.remove().catch(() => {});
+      await context.close();
+    }
+  });
+
+  test('the recovery link reaches the provider sign-in screen', async ({ browser }) => {
+    const { context, page } = await landing(browser);
+    await page.getByRole('button', { name: LOST_DEVICE_LINK, exact: true }).click();
+    await expect(page.getByRole('heading', { name: /Open your\s*Passport here/ })).toBeVisible();
+    await expect(page.getByTestId('recover-sign-in')).toBeVisible();
+    await context.close();
+  });
+});
 
 test.describe('a provider sign-in on a device with no Passport', () => {
   test('is never offered a Passport to make, and is shown the way back instead', async ({
@@ -223,7 +360,7 @@ test.describe('a provider sign-in on a device with no Passport', () => {
       page.getByRole('button', { name: /Continue with Google, Microsoft, X, or Discord/ }),
     ).toHaveCount(0);
 
-    await page.getByTestId('already-have-passport').click();
+    await page.getByTestId('recover-lost-device').click();
 
     /* THE ONLY PLACE A PROVIDER SIGN-IN IS OFFERED. */
     await expect(page.getByRole('heading', { name: /Open your\s*Passport here/ })).toBeVisible();

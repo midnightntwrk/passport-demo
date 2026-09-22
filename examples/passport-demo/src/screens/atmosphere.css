@@ -102,6 +102,53 @@
 
 .mnob-landing .mnob-alt { min-height: 44px; }
 
+/* Log in and Sign up: two doors of equal size. Side by side where there is
+   room; stacked full-width on a phone (see the 600px rule below). */
+.mnob-auth-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.mnob-auth-button {
+  min-width: 0;
+  min-height: 58px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--mn-border-medium);
+  border-radius: 16px;
+  font-family: inherit;
+  font-size: 16px;
+  font-weight: 500;
+  letter-spacing: -.015em;
+  line-height: 1.2;
+  cursor: pointer;
+  transition: background .18s ease, border-color .18s ease, box-shadow .18s ease;
+}
+.mnob-auth-button svg { flex-shrink: 0; }
+.mnob-auth-login { background: var(--mn-accent); border-color: var(--mn-accent); color: #fff; box-shadow: 0 4px 12px rgb(0 0 254 / 16%); }
+.mnob-auth-login:hover:not(:disabled) { background: var(--mn-accent-hover); }
+.mnob-auth-signup { background: var(--mn-surface-raised); color: var(--mn-text-primary); }
+.mnob-auth-signup:hover { background: var(--mn-accent-soft); border-color: var(--mn-accent-ink); }
+.mnob-auth-button:focus-visible { outline: 2px solid var(--mn-accent-ink); outline-offset: 4px; }
+.mnob-auth-button:disabled { opacity: .5; cursor: default; }
+@media (prefers-reduced-motion: reduce) { .mnob-auth-button { transition: none; } }
+@media (max-width: 600px) {
+  .mnob-auth-actions { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* The way back: a quiet link under the two doors, never a third door. */
+.mnob-landing .mnob-alt.mnob-recover-link {
+  display: block;
+  width: 100%;
+  margin-top: 14px;
+  padding: 10px 0;
+  text-align: center;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  font-weight: 500;
+  line-height: 1.45;
+  text-wrap: balance;
+}
+
 .mnob-landing .mnob-route-hint { font-size: 12px; }
 
 /* The action group should stay within reach on a phone.

@@ -2859,7 +2859,7 @@ export default function PassportDemo() {
          user would loop. Both controls the screen already carries do lead
          somewhere from here, and the sentence names them. */
       throw new Error(
-        'You already have a Passport on this device. Choose "Use a different passkey" to pick it, or "Continue with Passkey" to try again.',
+        'You already have a Passport on this device. Choose "Log in" to pick it, or "Sign up" to try again.',
       );
     }
     try {
@@ -3085,7 +3085,7 @@ export default function PassportDemo() {
          action. So the chain from here reaches a working Passport in every
          case, rather than terminating in advice. */
       throw new Error(
-        'This browser already holds a Passport passkey. Choose "Continue with Passkey" to reopen it.',
+        'This browser already holds a Passport passkey. Choose "Log in" to reopen it.',
       );
     }
     const knownCredentialIds = await knownLocalCredentialIds();
@@ -3232,7 +3232,7 @@ export default function PassportDemo() {
          control for the same reason: "Create passkey" has not been on this
          screen since 2026/08/05. */
       throw new Error(
-        'No Passport passkey is enrolled in this browser yet. Choose "Continue with Passkey" to make one.',
+        'No Passport passkey is enrolled in this browser yet. Choose "Sign up" to make one.',
       );
     }
     setOnboardingBusyLabel('Unlocking your Passport with this device');
@@ -10167,7 +10167,7 @@ export default function PassportDemo() {
           hasExistingPassport={localPassportKnown}
           onContinue={() => startPasskeyOnboarding('auto')}
           onUseDifferentPasskey={() => void runDiscoverableSignIn()}
-          /* "I already have a Passport" — and nothing else on this screen is a
+          /* "Lost your device? Recover with …" — and nothing else on this screen is a
              provider sign-in any more. Absent where the build has none, which
              is every build shipped today. */
           onRecoverWithProvider={

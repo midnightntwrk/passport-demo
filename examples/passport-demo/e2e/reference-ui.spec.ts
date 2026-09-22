@@ -75,9 +75,13 @@ for (const theme of ['Light', 'Dark'] as const) {
         await page.goto('/');
         await page.getByRole('button', { name: theme, exact: true }).click();
         await expect(page.getByRole('button', { name: SIGN_IN_BUTTON })).toBeVisible();
-        // One way in, as the flow has it: a single primary that creates or signs in.
-        await expect(page.locator('.mnob-primary')).toHaveCount(1);
-        expect((await page.locator('.mnob-primary').boundingBox())!.height).toBeGreaterThanOrEqual(48);
+        // Two doors, as the flow has it: Log in (the picker) and Sign up.
+        await expect(page.getByRole('button', { name: 'Log in', exact: true })).toBeVisible();
+        await expect(page.locator('.mnob-auth-button')).toHaveCount(2);
+        for (const button of await page.locator('.mnob-auth-button').all()) {
+          expect((await button.boundingBox())!.height).toBeGreaterThanOrEqual(48);
+        }
+        await expect(page.getByRole('button', { name: 'Use a different passkey' })).toHaveCount(0);
         await expect(page.getByRole('button', { name: 'Continue with Dynamic', exact: true })).toHaveCount(0);
         await expect(page.getByText('Your identity stays yours.')).toHaveCount(0);
         await expect(page.locator('.mn-passport-art-proof')).toHaveCSS('animation-name', 'none');
