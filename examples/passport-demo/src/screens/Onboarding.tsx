@@ -2,6 +2,7 @@ import type { ReactNode } from 'react'
 import { ArrowRight, Eraser, Fingerprint, Loader2, X } from 'lucide-react'
 import ThemeToggle from './ThemeToggle'
 import { RECOVERY_COPY } from '../lib/recoveryStep.js'
+import PassportIllustration from './PassportIllustration'
 import './onboarding.css'
 
 /**
@@ -278,14 +279,16 @@ export default function OnboardingScreen(props: OnboardingProps) {
       </header>
 
       <div className="mnob-body">
-        <p className="mnob-kicker">Identity for the Midnight network</p>
-        <h1 className="mnob-title">
-          <span>Midnight</span>
-          <span>Passport</span>
+        <PassportIllustration />
+        <h1
+          className="mnob-title"
+          aria-label="Midnight Passport — your private identity for the Midnight network"
+        >
+          <span>Your private identity</span>
+          <span>for the Midnight network.</span>
         </h1>
         <p className="mnob-lede">
-          One passkey. Your names, addresses, and credentials — held on this
-          device, proven in private.
+          One identity. More control. A more private internet, together.
         </p>
 
         {error ? (

@@ -13,18 +13,18 @@ Refresh the Passport demo into a richer, calmer product experience without chang
 - Use Outfit for display and interface typography.
 - Retain the official Midnight wordmark and symbol already shipped with the app.
 - Treat violet as a subordinate atmospheric highlight; cobalt remains the recognisable brand anchor.
-- Provide separate generated eclipse artwork for light and dark surfaces. Each asset resolves into its page background rather than relying on CSS inversion.
+- The entry illustration is a vector credential in Midnight Blue with the official symbol, concealed fields, and a lock. Its small proof badge inherits the active theme. The earlier eclipse assets remain available for the signed-in background.
 
 ## Experience
 
-The entry screen leads with a quiet eclipse, a compact brand bar, and one clear promise: “Your private identity for the Midnight network.” Passkey remains the primary action. Dynamic stays visible as a visually related secondary sign-in path, with an explanatory disabled state while loading or unavailable. A brief privacy reassurance explains the interaction model without adding another decision.
+The entry screen leads with a simple animated credential, a compact brand bar, and one clear promise: “Your private identity for the Midnight network.” Only a verification proof emerges from the credential; its fields remain concealed. This illustration communicates selective sharing and is decorative, not a real verification status. Passkey remains the primary action. Dynamic stays visible as a visually related secondary sign-in path, with an explanatory disabled state while loading or unavailable. A brief privacy reassurance explains the interaction model without adding another decision.
 
 The identity-creation journey carries the same hierarchy, glass-like raised surfaces, and compact motion. The signed-in shell shifts from onboarding to utility: the active Midnight name becomes the hero, Send and Receive become the primary actions, assets are easier to scan, and navigation behaves like a floating dock.
 
 ## Motion and accessibility
 
 - Entry motion uses short opacity, translation, blur, and scale transitions with staggered timing.
-- The eclipse uses a low-amplitude breathing animation and a restrained orbiting glint.
+- The credential moves by four pixels over an eight-second cycle while a verification proof fades into view, rests, and recedes. Reduced motion leaves the credential and proof visible without animation.
 - `prefers-reduced-motion` removes non-essential transitions and staged entrance effects.
 - Interactive controls retain visible focus treatment, semantic buttons, status text, and existing accessibility labels.
 - Mobile widths, short viewports, and desktop widths use the same content hierarchy without horizontal overflow.
