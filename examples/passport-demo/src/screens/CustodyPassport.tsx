@@ -1435,7 +1435,25 @@ export default function CustodyPassport({ network, arm, notice: browserNotice = 
     )
   }
 
-  if (screen === 'welcome') {
+  /**
+   * THE SCREEN WHEN NOTHING IS SETTLED YET, and it is not a spinner.
+   *
+   * A PASSKEY THAT HAS NEVER OPENED A PASSPORT ON THIS BROWSER HAS NO USER KEY,
+   * because the key is its device point and that costs a user-verified
+   * assertion — so {@link refresh} returns early, `screen` stays null, and it
+   * stays null until the ceremony that the first press asks for. The old
+   * fall-through hid that: the setup offer was what rendered when nothing else
+   * matched, so it covered both "nothing is stored" and "nothing is known yet"
+   * without either being written down.
+   *
+   * Written down now. A null screen is somebody with nothing behind them, which
+   * is the welcome page — or the name step, once they have read it. The Dynamic
+   * arm never sees this branch: a sign-in knows its key the moment it is signed
+   * in.
+   */
+  const stage: Screen = screen ?? (welcomeReadRef.current ? 'name' : 'welcome')
+
+  if (stage === 'welcome') {
     return (
       <WelcomeStep
         kicker={arm.kicker}
@@ -1450,7 +1468,7 @@ export default function CustodyPassport({ network, arm, notice: browserNotice = 
     )
   }
 
-  if (screen === 'name') {
+  if (stage === 'name') {
     const setupFinished = view?.stage === 'name' || view?.stage === 'home'
     return (
       <NameStep
@@ -1481,7 +1499,7 @@ export default function CustodyPassport({ network, arm, notice: browserNotice = 
     )
   }
 
-  if (screen === 'home') {
+  if (stage === 'home') {
     return (
       <HomeStep
         badge={arm.badge}
@@ -1507,12 +1525,13 @@ export default function CustodyPassport({ network, arm, notice: browserNotice = 
     )
   }
 
-  /* EVERY SCREEN THIS FLOW HAS IS NAMED ABOVE, so there is nothing to fall
-     through to. Until 2026/09/22 the fall-through WAS a screen — "Set up your
-     Passport", one button, no name on it — and it is the screen this work
-     deleted. A stage the rule cannot name is a defect rather than a default,
-     and the honest thing to paint for one is the same "getting ready" the arm
-     gets before it is ready. */
+  /* EVERY SCREEN THIS FLOW HAS IS NAMED ABOVE, and `stage` is one of four, so
+     nothing reaches this line. Until 2026/09/22 the fall-through WAS a screen —
+     "Set up your Passport", one button, no name on it — and it is the screen
+     this work deleted; what is left is the branch TypeScript needs and nobody
+     reads. It paints the same "getting ready" the arm gets before it is ready
+     rather than nothing, because a blank screen is the one thing that would be
+     worse than an unreachable one. */
   return (
     <Shell label="Passport">
       <p className="mnob-lede">Getting your Passport ready…</p>
