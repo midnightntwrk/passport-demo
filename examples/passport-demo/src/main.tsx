@@ -25,6 +25,7 @@ import { ErrorBoundary } from './lib/errorBoundary.js';
 import './screens/tokens.css';
 import './styles.css';
 import './screens/atmosphere.css';
+import './screens/workspace.css';
 
 initTheme();
 

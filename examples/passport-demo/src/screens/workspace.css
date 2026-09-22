@@ -1,0 +1,325 @@
+/* Mobile-first Passport workspace. Shared surfaces deliberately exclude the
+   approved sign-in screen. Desktop expands the same content, never duplicates it. */
+:root {
+  --mn-workspace-width: 1120px;
+  --mn-workspace-gap: 24px;
+}
+
+.mnhome-name,
+.mnassets-title,
+.mnapps-title {
+  font-size: clamp(28px, 6.8vw, 38px);
+  line-height: 1.14;
+  letter-spacing: -.04em;
+  font-weight: 750;
+}
+.mnhome-kicker { display: none; }
+.mnhome-summary {
+  margin: 10px 0 0;
+  color: var(--mn-text-secondary);
+  font-size: 14px;
+  line-height: 1.5;
+}
+.mnhome-body { gap: 24px; padding-top: 26px; }
+.mnhome-overview,
+.mnhome-passport-column,
+.mnhome-discover,
+.mnhome-utilities {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+.mnhome-overview > *,
+.mnhome-discover > * { min-width: 0; }
+.mnhome-passport-column { align-content: start; }
+
+/* The name is the signature object, not a made-up portfolio total. All its
+   status text and recovery controls still come from EcosystemIdentity. */
+.mnhome-passport-column > .mnid-card:not(.mnid-account) {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 180px;
+  padding: 22px;
+  border: 0;
+  border-radius: 20px;
+  background: var(--mn-accent);
+  color: #fff;
+  box-shadow: none;
+  --mn-text-primary: #fff;
+  --mn-text-secondary: #e3e4ff;
+  --mn-text-muted: #e3e4ff;
+  --mn-accent-ink: #fff;
+}
+.mnhome-passport-column > .mnid-card:not(.mnid-account)::before {
+  content: '';
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  display: block;
+  width: 34px;
+  height: 34px;
+  background: url('/midnight-symbol-white.svg') center / contain no-repeat;
+}
+.mnhome-passport-column .mnid-card-head {
+  padding-right: 38px;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.mnhome-passport-column .mnid-alias {
+  font-size: clamp(23px, 5.8vw, 34px);
+  font-weight: 650;
+  line-height: 1.14;
+  letter-spacing: -.035em;
+}
+.mnhome-passport-column .mnid-pill {
+  height: auto;
+  min-height: 24px;
+  white-space: normal;
+  color: #fff;
+  background: transparent;
+  border: 1px solid #ffffff66;
+  padding: 5px 9px;
+  font-size: 10px;
+}
+.mnhome-passport-column .mnid-register {
+  background: #fff;
+  color: #0000fe;
+}
+.mnhome-passport-column .mnid-account {
+  padding: 17px 20px;
+  border-radius: 16px;
+  box-shadow: none;
+}
+.mnid-account-icon-ready { color: var(--mn-accent-ink); }
+.mnhome-funds {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  min-width: 0;
+  padding: 22px;
+  border: 1px solid var(--mn-border-hairline);
+  border-radius: 20px;
+  background: var(--mn-surface-raised);
+}
+.mnhome-funds-heading h2 {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 650;
+  letter-spacing: -.03em;
+}
+.mnhome-funds-heading p {
+  margin: 6px 0 0;
+  font-size: 13px;
+  color: var(--mn-text-muted);
+}
+.mnhome-actions { gap: 10px; }
+.mnhome-action {
+  min-height: 48px;
+  border-radius: 12px;
+  box-shadow: none;
+}
+.mnhome-token-icon { width: 36px; height: 36px; }
+.mnhome-token-name,
+.mnhome-token-value { padding-block: 17px; }
+.mnhome-token-value { font-size: 19px; font-weight: 600; }
+.mnhome-funds .mnhome-onway { margin: 0; }
+
+.mnhome-discover { gap: 24px; align-items: start; }
+.mnhome-discover .mnapps-section-label,
+.mnhome-activity > .mnhome-micro {
+  margin: 0 0 16px;
+  color: var(--mn-text-primary);
+  font-size: 20px;
+  font-weight: 650;
+  text-transform: none;
+  letter-spacing: -.025em;
+}
+.mnhome-discover .mnapps-list { grid-template-columns: minmax(0, 1fr); }
+.mnapps-card { box-shadow: none; border-radius: 18px; padding: 20px; }
+.mnapps-card-illustrated { grid-template-columns: 78px minmax(0, 1fr) 16px; }
+.mnapps-card-art {
+  grid-column: auto;
+  width: 78px;
+  height: 88px;
+  margin: 0;
+  border-radius: 14px;
+}
+.mnapps-card-art .mnraffle-art { width: 72px; }
+.mnapps-card-copy strong { font-size: 16px; font-weight: 650; }
+.mnapps-card-copy small { line-height: 1.6; }
+.mnapps-list:has(> :only-child) { grid-template-columns: minmax(0, 1fr); }
+.mnhome-activity-day {
+  padding: 18px 20px;
+  border: 1px solid var(--mn-border-hairline);
+  border-radius: 18px;
+  background: var(--mn-surface-raised);
+}
+.mnhome-activity-day + .mnhome-activity-day { margin-top: 12px; }
+.mnhome-activity-row { padding-block: 15px; }
+.mnhome-activity-detail { line-height: 1.6; }
+.mnhome-utilities {
+  padding-top: 20px;
+  border-top: 1px solid var(--mn-border-hairline);
+}
+.mnhome-utilities .mnhome-support {
+  min-height: 48px;
+  margin: 0;
+  justify-content: flex-start;
+  padding-inline: 18px;
+  border-radius: 12px;
+}
+
+/* Collection pages retain real tables, with a deliberate shared panel. */
+.mnassets-shelf {
+  padding: 22px;
+  margin-top: 22px;
+  border: 1px solid var(--mn-border-hairline);
+  border-radius: 20px;
+  background: var(--mn-surface-raised);
+}
+.mnassets-shelf + .mnassets-shelf { padding-top: 22px; }
+.mnassets-lede,
+.mnapps-lede { max-width: 560px; }
+.mnapps-section[aria-labelledby='mnapps-featured'] {
+  background: var(--mn-surface-card);
+  border: 1px solid var(--mn-border-hairline);
+  padding: 22px;
+  border-radius: 20px;
+}
+.mnapps-search { border-color: var(--mn-border-hairline); border-radius: 14px; }
+
+/* Onboarding is a focused task, not a full-height empty column. */
+.mnid-body { padding-bottom: 40px; }
+.mnid-screen .mnid-title { font-weight: 700; line-height: 1.12; }
+.mnid-screen .mnid-actions { margin-top: 24px; padding-top: 8px; }
+.mnid-screen .mnid-point {
+  padding: 20px;
+  border: 1px solid var(--mn-border-hairline);
+  border-radius: 16px;
+  background: var(--mn-surface-raised);
+}
+.mnid-screen .mnid-points { gap: 12px; }
+.mnid-welcome .mnid-actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  padding: 16px 0 max(16px, env(safe-area-inset-bottom));
+  background: var(--mn-surface-page);
+}
+.mnid-primary { border-radius: 14px; min-height: 52px; box-shadow: none; }
+.mnid-field { border-radius: 16px; box-shadow: none; }
+
+/* Transaction surfaces: crisp hierarchy, touch-sized controls, bounded scroll. */
+.mnhome-addr-modal {
+  padding: 24px;
+  border-radius: 24px;
+  width: min(100%, 480px);
+}
+.mnhome-addr-head { margin-bottom: 20px; }
+.mnhome-addr-head > .mnhome-micro {
+  color: var(--mn-text-primary);
+  font-size: 22px;
+  font-weight: 650;
+  text-transform: none;
+  letter-spacing: -.03em;
+}
+.mnhome-addr-modal .mnhome-icon-button { width: 40px; height: 40px; }
+.mnhome-send-primary,
+.mnhome-send-secondary { border-radius: 14px; min-height: 48px; }
+.mnhome-recv-name-value { font-size: clamp(16px, 4vw, 21px); }
+.mnhome-recv-name { border-radius: 16px; }
+.mnhome-recv-qr-plate { border-radius: 20px; padding: 20px; }
+
+@media (max-width: 380px) {
+  .mnhome-funds,
+  .mnassets-shelf,
+  .mnapps-section[aria-labelledby='mnapps-featured'] { padding: 16px; }
+  .mnapps-card { padding: 14px; gap: 10px; }
+  .mnapps-card-illustrated { grid-template-columns: 54px minmax(0, 1fr) 12px; }
+  .mnapps-card-art { width: 54px; height: 70px; }
+  .mnapps-card-art .mnraffle-art { width: 54px; }
+  .mnhome-addr-modal { padding: 18px; }
+  .mnhome-activity-day { padding: 14px; }
+}
+
+@media (max-width: 959px) {
+  .mnhome-passport-column .mnid-alias { font-size: 24px; }
+  .mnhome-bar .mnhome-icon-button,
+  .mnassets-bar .mnassets-icon-button { width: 40px; height: 40px; }
+  .mnhome-bar-actions .mnthemetoggle-option,
+  .mnassets-bar-actions .mnthemetoggle-option { width: 30px; min-height: 32px; }
+  .mnid-welcome .mnid-point { padding: 16px; }
+}
+
+@media (min-width: 960px) {
+  .mnhome-bar,
+  .mnhome-body,
+  .mnassets-bar,
+  .mnassets-head,
+  .mnassets-shelf,
+  .mnassets-screen > .mnassets-empty,
+  .mnid-bar {
+    width: min(100% - 80px, var(--mn-workspace-width));
+  }
+  .mnapps-screen > * { max-width: var(--mn-workspace-width); }
+  .mnhome-bar,
+  .mnassets-bar,
+  .mnapps-bar { min-height: 80px; }
+  .mnhome-bar-actions,
+  .mnassets-bar-actions,
+  .mnapps-bar-actions { align-items: center; }
+  .mnhome-wordmark,
+  .mnassets-wordmark,
+  .mnapps-wordmark { width: 112px; }
+  .mnhome-body { padding-top: 36px; padding-bottom: 40px; gap: 28px; }
+  .mnhome-overview,
+  .mnhome-discover { grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr); gap: 24px; }
+  .mnhome-passport-column > .mnid-card:not(.mnid-account) { min-height: 278px; padding: 28px; }
+  .mnhome-passport-column > .mnid-card:not(.mnid-account)::before { width: 40px; height: 40px; top: 28px; right: 28px; }
+  .mnhome-passport-column .mnid-card-head { flex-direction: column; align-items: flex-start; }
+  .mnhome-passport-column .mnid-alias { margin-top: 48px; }
+  .mnhome-funds { padding: 28px; }
+  .mnhome-funds .mnhome-actions { order: 2; margin-top: auto; padding-top: 12px; }
+  .mnhome-funds-heading h2 { font-size: 26px; }
+  .mnhome-utilities { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .mnnav-backdrop { display: none; }
+  .mnnav {
+    top: 17px;
+    bottom: auto;
+    width: 306px;
+    height: 46px;
+    padding: 0;
+    border: 0;
+    border-radius: 12px;
+    background: var(--mn-surface-page);
+    box-shadow: none;
+  }
+  .mnnav-tab { flex-direction: row; gap: 8px; font-size: 13px; letter-spacing: 0; text-transform: none; border-radius: 10px; }
+  .mnnav-tab svg { width: 17px; height: 17px; }
+  .mnassets-head,
+  .mnapps-head { padding-top: 36px; padding-bottom: 12px; }
+  .mnassets-shelf { padding: 28px; }
+  .mnassets-shelf + .mnassets-shelf { padding-top: 28px; }
+  .mnassets-screen { padding-bottom: 48px; }
+  .mnapps-screen { padding-bottom: 48px; }
+  .mnapps-list { gap: 20px; }
+  .mnapps-card { min-height: 144px; }
+  .mnid-bar { min-height: 80px; }
+  .mnid-body { width: min(100% - 80px, 680px); flex: 0 1 auto; padding-top: 48px; }
+  .mnid-screen .mnid-lede { max-width: 560px; }
+  .mnid-screen .mnid-points { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+  .mnid-screen .mnid-point { grid-template-columns: 1fr; gap: 16px; padding: 24px; }
+  .mnid-screen .mnid-point-title { font-size: 16px; }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .mnhome-overview,
+  .mnhome-discover { animation: passport-workspace-enter .45s ease-out both; }
+  .mnhome-discover { animation-delay: .08s; }
+  @keyframes passport-workspace-enter {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+}
