@@ -762,7 +762,11 @@ export default function HomeScreen(props: HomeScreenProps) {
     () => encodeReceivePayload({ domain: nightName, accountAddress }),
     [accountAddress, nightName],
   )
-  const [receiveCode, setReceiveCode] = useState<{ size: number; path: string } | null>(null)
+  const [receiveCode, setReceiveCode] = useState<{
+    size: number
+    path: string
+    eyes: { x: number; y: number }[]
+  } | null>(null)
   useEffect(() => {
     setReceiveCode(null)
     if (!receiveOpen || !receivePayload) return undefined
@@ -779,13 +783,38 @@ export default function HomeScreen(props: HomeScreenProps) {
            INTO the matrix rather than left to a stylesheet — a camera reads
            the image, not the CSS around it. */
         const matrix = encode(receivePayload, { ecc: 'M', border: 4 })
+        /* THE LOOK (2026/09/22): rounded dots and rounded finder eyes in
+           Midnight Blue on the white plate, drawn from the same matrix. The
+           three 7x7 finder patterns sit 4 modules in from the corners (the
+           border); their cells are skipped here and painted as eyes below. */
+        const border = 4
+        const eyeAt = (row: number, column: number): boolean => {
+          const inside = (r: number, c: number) => row >= r && row < r + 7 && column >= c && column < c + 7
+          const far = matrix.size - border - 7
+          return inside(border, border) || inside(border, far) || inside(far, border)
+        }
         let path = ''
+        /* Softly rounded squares that nearly touch: the round look without
+           shrinking the modules below what a phone camera resolves. */
+        const inset = 0.04
+        const side = 1 - inset * 2
+        const r = 0.3
+        const straight = side - r * 2
         for (let row = 0; row < matrix.size; row += 1) {
           for (let column = 0; column < matrix.size; column += 1) {
-            if (matrix.data[row]?.[column]) path += `M${column} ${row}h1v1h-1z`
+            if (!matrix.data[row]?.[column] || eyeAt(row, column)) continue
+            const x = column + inset
+            const y = row + inset
+            path += `M${x + r} ${y}h${straight}a${r} ${r} 0 0 1 ${r} ${r}v${straight}a${r} ${r} 0 0 1 ${-r} ${r}h${-straight}a${r} ${r} 0 0 1 ${-r} ${-r}v${-straight}a${r} ${r} 0 0 1 ${r} ${-r}z`
           }
         }
-        setReceiveCode({ size: matrix.size, path })
+        const far = matrix.size - border - 7
+        const eyes = [
+          [border, border],
+          [border, far],
+          [far, border],
+        ].map(([row, column]) => ({ x: column, y: row }))
+        setReceiveCode({ size: matrix.size, path, eyes })
       })
       .catch((cause: unknown) => {
         // The address row below still works; nothing here claims otherwise.
@@ -1229,11 +1258,16 @@ export default function HomeScreen(props: HomeScreenProps) {
                           <svg
                             className="mnhome-recv-qr-code"
                             viewBox={`0 0 ${receiveCode.size} ${receiveCode.size}`}
-                            shapeRendering="crispEdges"
                             role="img"
                             aria-label={`QR code for ${nightName ?? 'your Passport'}`}
                           >
-                            <path d={receiveCode.path} fill="#000000" />
+                            <path d={receiveCode.path} fill="#0000FE" />
+                            {receiveCode.eyes.map((eye) => (
+                              <g key={`${eye.x}-${eye.y}`}>
+                                <rect x={eye.x + 0.5} y={eye.y + 0.5} width={6} height={6} rx={1.8} fill="none" stroke="#0000FE" strokeWidth={1} />
+                                <rect x={eye.x + 2} y={eye.y + 2} width={3} height={3} rx={0.9} fill="#0000FE" />
+                              </g>
+                            ))}
                           </svg>
                         ) : (
                           <div className="mnhome-recv-qr-wait" aria-hidden="true" />
