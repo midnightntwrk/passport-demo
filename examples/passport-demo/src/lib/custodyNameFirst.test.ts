@@ -94,6 +94,35 @@ describe('which screen a Passport being made is on', () => {
   });
 });
 
+describe('the way back, between the name and Home', () => {
+  const NAMED: CustodyNameFirstInput = {
+    setupStarted: true,
+    setupFinished: true,
+    claimedName: 'alice',
+    chosenName: null,
+    welcomeRead: true,
+  };
+
+  it('stops a newly named Passport on the recovery step', () => {
+    expect(custodyNameFirstStage({ ...NAMED, recoveryDue: true })).toBe('recovery');
+  });
+
+  it('goes straight to Home once the step has been answered', () => {
+    expect(custodyNameFirstStage({ ...NAMED, recoveryDue: false })).toBe('home');
+  });
+
+  it('goes straight to Home for every caller that predates the step', () => {
+    expect(custodyNameFirstStage(NAMED)).toBe('home');
+  });
+
+  it('never shows it to a Passport that has no name yet', () => {
+    expect(custodyNameFirstStage({ ...NAMED, setupFinished: false, recoveryDue: true })).toBe(
+      'name',
+    );
+    expect(custodyNameFirstStage({ ...NAMED, claimedName: null, recoveryDue: true })).toBe('name');
+  });
+});
+
 describe('what the one primary control says', () => {
   it('offers to create when nothing has been built', () => {
     expect(

@@ -41,6 +41,16 @@ export type CustodyNameFirstStage =
   | 'welcome'
   /** Choose the name, and make the Passport with it. */
   | 'name'
+  /**
+   * Named, and offered a way back before the everyday surface opens.
+   *
+   * ONE SCREEN, ASKED ONCE, and whether it is due at all is decided by
+   * `./recoveryStep.ts` rather than here. This module only says where it sits
+   * in the order: after the name, because a Passport with no name is not yet a
+   * thing anybody could be brought back TO, and before Home, because after
+   * Home it is a card competing with a balance.
+   */
+  | 'recovery'
   /** Made, named, and usable. */
   | 'home';
 
@@ -56,6 +66,14 @@ export interface CustodyNameFirstInput {
   readonly chosenName: string | null;
   /** Whether the welcome page has been read and left in this session. */
   readonly welcomeRead: boolean;
+  /**
+   * Whether the way back is still to be offered. See
+   * `./recoveryStep.ts#recoveryStepDue`, which owns every rule about it.
+   *
+   * Optional, and false when omitted, so every caller that predates the step —
+   * and every build with no sign-in behind it — reads exactly as it did.
+   */
+  readonly recoveryDue?: boolean;
 }
 
 /**
@@ -81,7 +99,13 @@ export interface CustodyNameFirstInput {
  * until it is read.
  */
 export function custodyNameFirstStage(input: CustodyNameFirstInput): CustodyNameFirstStage {
-  if (input.setupFinished && input.claimedName !== null) return 'home';
+  if (input.setupFinished && input.claimedName !== null) {
+    /* THE STEP IS RESUMABLE BECAUSE IT IS DECIDED HERE. Nothing remembers that
+       the reader was on it: the answer is recomputed from what is stored on
+       every read, so a browser closed on the offer comes back to the offer and
+       one that answered it comes back to Home. */
+    return input.recoveryDue === true ? 'recovery' : 'home';
+  }
   if (input.setupStarted || input.chosenName !== null) return 'name';
   return input.welcomeRead ? 'name' : 'welcome';
 }
