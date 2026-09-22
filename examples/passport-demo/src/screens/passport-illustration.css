@@ -5,9 +5,12 @@
   color: var(--mn-text-primary);
 }
 .mn-passport-art svg { display: block; width: 100%; height: auto; overflow: visible; }
-.mn-passport-art-backing { fill: var(--mn-surface-card); stroke: var(--mn-border-medium); }
+.mn-passport-art-backing { fill: var(--mn-surface-raised); stroke: var(--mn-border-medium); }
 .mn-passport-art-mark { filter: invert(1); }
-.mn-passport-art-float { animation: mn-passport-float 8s ease-in-out infinite; }
+.mn-passport-art-float {
+  animation: mn-passport-float 8s ease-in-out infinite;
+  filter: drop-shadow(0 8px 12px rgba(0, 0, 254, .12));
+}
 .mn-passport-art-proof {
   animation: mn-passport-proof 8s ease-in-out infinite;
   filter: drop-shadow(0 3px 6px rgba(0, 0, 0, .08));

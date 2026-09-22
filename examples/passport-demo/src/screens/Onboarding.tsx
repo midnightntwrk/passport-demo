@@ -258,145 +258,160 @@ export default function OnboardingScreen(props: OnboardingProps) {
       </header>
 
       <div className="mnob-body">
-        <PassportIllustration />
-        <h1
-          className="mnob-title"
-          aria-label="Midnight Passport — your private identity for the Midnight network"
-        >
-          <span>Your private identity</span>
-          <span>for the Midnight network.</span>
-        </h1>
-        <p className="mnob-lede">
-          One identity. More control. A more private internet, together.
-        </p>
+        <div className="mnob-intro">
+          <PassportIllustration />
+          <h1
+            className="mnob-title"
+            aria-label="Midnight Passport — your private identity for the Midnight network"
+          >
+            <span>Your private identity</span>
+            <span>for the Midnight network.</span>
+          </h1>
+          <p className="mnob-lede">
+            One identity. More control. A more private internet, together.
+          </p>
+        </div>
 
-        {error ? (
-          <div className="mnob-error" role="alert">
-            <span className="mnob-error-copy">{error}</span>
-            {onDismissError ? (
+        <div className="mnob-signin">
+          <div className="mnob-signin-heading">
+            <h2>Welcome to Passport</h2>
+            <p>Choose how you’d like to continue.</p>
+          </div>
+
+          {error ? (
+            <div className="mnob-error" role="alert">
+              <span className="mnob-error-copy">{error}</span>
+              {onDismissError ? (
+                <button
+                  type="button"
+                  className="mnob-error-dismiss"
+                  onClick={onDismissError}
+                  aria-label="Dismiss error"
+                >
+                  <X size={14} strokeWidth={2.4} aria-hidden="true" />
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+
+          {/* DEAD END ONE, AND ITS WAY OUT.
+              A resident credential answered and returned no PRF output, so it
+              cannot open a Passport. The explanation stays — it is the only
+              thing that makes the next click comprehensible — but the advice is
+              now a BUTTON that does what it says. It used to be a sentence
+              pointing at "Use a different passkey", which asserts and never
+              enrols, so the same credential answered the picker again and the
+              user was stuck (found by adversarial verification, 2026/08/26). */}
+          {unusableCredential && stage === 'welcome' ? (
+            <PasskeyWayOut
+              copy={
+                <>
+                  {unusableCredential} It cannot open a Passport — Passport needs the WebAuthn PRF
+                  extension to derive your keys. Any passkey this browser already holds a Passport
+                  for is left untouched.
+                </>
+              }
+              onCreateNewPasskey={onCreateNewPasskey}
+              onStartFresh={startFresh}
+            />
+          ) : null}
+
+          {/* DEAD END TWO, AND THE SAME WAY OUT (2026/08/30).
+              Nothing answered at all. This browser holds Passport records, the
+              platform will not produce the passkey they name, and the saved-
+              passkey sheet had nothing in it to load. Every control on this
+              screen used to be a way of LOADING a passkey, which is exactly what
+              had just failed, so the state was terminal — the user's own
+              question was why it always has to load one. The copy does not claim
+              the passkey is gone, because WebAuthn never says so; it says what
+              can be seen, and offers the thing that works either way. */}
+          {keylessPasskey && stage === 'welcome' ? (
+            <PasskeyWayOut
+              copy={keylessPasskey}
+              onCreateNewPasskey={onCreateNewPasskey}
+              onStartFresh={startFresh}
+            />
+          ) : null}
+
+          {/* DEAD END THREE, AND THE ONE WITH NO BUTTON OF ITS OWN (2026/09/04).
+              A passkey was made here and came back unable to derive a key. Every
+              control this screen could offer that MAKES something would ask the
+              same platform the same question and get the same passkey, so none
+              is offered: the sentence names the two things that do lead
+              somewhere, and "Use a different passkey" beneath it is the one of
+              them this screen can run. `onStartFresh` still appears where this
+              browser holds records, because forgetting them is a real thing to
+              want here and is never a loop. */}
+          {unusableDevice && stage === 'welcome' ? (
+            <PasskeyWayOut copy={unusableDevice} onStartFresh={startFresh} />
+          ) : null}
+
+          {stage === 'welcome' ? (
+            <div className="mnob-stage" key="welcome">
               <button
                 type="button"
-                className="mnob-error-dismiss"
-                onClick={onDismissError}
-                aria-label="Dismiss error"
+                className="mnob-primary"
+                onClick={onContinue}
+                aria-label="Continue with Passkey"
               >
-                <X size={14} strokeWidth={2.4} aria-hidden="true" />
+                <span className="mnob-primary-copy">
+                  <span className="mnob-method-icon" aria-hidden="true">
+                    <Fingerprint size={22} strokeWidth={1.7} />
+                  </span>
+                  <span className="mnob-method-copy">
+                    <span>Continue with Passkey</span>
+                    <small aria-hidden="true">Use your device to sign in</small>
+                  </span>
+                </span>
+                <ArrowRight size={17} strokeWidth={2.2} aria-hidden="true" />
               </button>
-            ) : null}
-          </div>
-        ) : null}
-
-        {/* DEAD END ONE, AND ITS WAY OUT.
-            A resident credential answered and returned no PRF output, so it
-            cannot open a Passport. The explanation stays — it is the only
-            thing that makes the next click comprehensible — but the advice is
-            now a BUTTON that does what it says. It used to be a sentence
-            pointing at "Use a different passkey", which asserts and never
-            enrols, so the same credential answered the picker again and the
-            user was stuck (found by adversarial verification, 2026/08/26). */}
-        {unusableCredential && stage === 'welcome' ? (
-          <PasskeyWayOut
-            copy={
-              <>
-                {unusableCredential} It cannot open a Passport — Passport needs the WebAuthn PRF
-                extension to derive your keys. Any passkey this browser already holds a Passport
-                for is left untouched.
-              </>
-            }
-            onCreateNewPasskey={onCreateNewPasskey}
-            onStartFresh={startFresh}
-          />
-        ) : null}
-
-        {/* DEAD END TWO, AND THE SAME WAY OUT (2026/08/30).
-            Nothing answered at all. This browser holds Passport records, the
-            platform will not produce the passkey they name, and the saved-
-            passkey sheet had nothing in it to load. Every control on this
-            screen used to be a way of LOADING a passkey, which is exactly what
-            had just failed, so the state was terminal — the user's own
-            question was why it always has to load one. The copy does not claim
-            the passkey is gone, because WebAuthn never says so; it says what
-            can be seen, and offers the thing that works either way. */}
-        {keylessPasskey && stage === 'welcome' ? (
-          <PasskeyWayOut
-            copy={keylessPasskey}
-            onCreateNewPasskey={onCreateNewPasskey}
-            onStartFresh={startFresh}
-          />
-        ) : null}
-
-        {/* DEAD END THREE, AND THE ONE WITH NO BUTTON OF ITS OWN (2026/09/04).
-            A passkey was made here and came back unable to derive a key. Every
-            control this screen could offer that MAKES something would ask the
-            same platform the same question and get the same passkey, so none
-            is offered: the sentence names the two things that do lead
-            somewhere, and "Use a different passkey" beneath it is the one of
-            them this screen can run. `onStartFresh` still appears where this
-            browser holds records, because forgetting them is a real thing to
-            want here and is never a loop. */}
-        {unusableDevice && stage === 'welcome' ? (
-          <PasskeyWayOut copy={unusableDevice} onStartFresh={startFresh} />
-        ) : null}
-
-        {stage === 'welcome' ? (
-          <div className="mnob-stage" key="welcome">
-            <button
-              type="button"
-              className="mnob-primary"
-              onClick={onContinue}
-            >
-              <span className="mnob-primary-copy">
-                <Fingerprint size={18} strokeWidth={2} aria-hidden="true" />
-                Continue with Passkey
-              </span>
-              <ArrowRight size={17} strokeWidth={2.2} aria-hidden="true" />
-            </button>
-            {/* Both sign-in choices stay visible while Dynamic starts. */}
-            <ContinueWithSocial />
-            <div className="mnob-privacy-note">
-              <ShieldCheck size={17} strokeWidth={1.8} aria-hidden="true" />
-              <span>
-                <strong>Your identity stays yours.</strong>
-                <small>Passport only shares what you approve.</small>
-              </span>
+              {/* Both sign-in choices stay visible while Dynamic starts. */}
+              <ContinueWithSocial />
+              <div className="mnob-privacy-note">
+                <ShieldCheck size={17} strokeWidth={1.8} aria-hidden="true" />
+                <span>
+                  <strong>Your identity stays yours.</strong>
+                  <small>Passport only shares what you approve.</small>
+                </span>
+              </div>
+              <p className="mnob-hint mnob-route-hint">{continueHint}</p>
+              {onUseDifferentPasskey ? (
+                <button
+                  type="button"
+                  className="mnob-alt"
+                  onClick={onUseDifferentPasskey}
+                >
+                  Use a different passkey
+                </button>
+              ) : null}
+              {/* THE THIRD PATH, and the only one on this screen that goes
+                  FORWARD rather than back. The two above both reopen what this
+                  browser already holds; when that is an orphaned Passport —
+                  a name with no account behind it — neither of them can help,
+                  and until 2026/09/04 there was nothing here that could. */}
+              {startFresh && !wayOutShown ? <StartFresh onStartFresh={startFresh} /> : null}
             </div>
-            <p className="mnob-hint mnob-route-hint">{continueHint}</p>
-            {onUseDifferentPasskey ? (
-              <button
-                type="button"
-                className="mnob-alt"
-                onClick={onUseDifferentPasskey}
-              >
-                Use a different passkey
-              </button>
-            ) : null}
-            {/* THE THIRD PATH, and the only one on this screen that goes
-                FORWARD rather than back. The two above both reopen what this
-                browser already holds; when that is an orphaned Passport —
-                a name with no account behind it — neither of them can help,
-                and until 2026/09/04 there was nothing here that could. */}
-            {startFresh && !wayOutShown ? <StartFresh onStartFresh={startFresh} /> : null}
-          </div>
-        ) : null}
+          ) : null}
 
-        {stage === 'working' ? (
-          <div className="mnob-stage" key="working">
-            <div className="mnob-working" role="status">
-              <Loader2
-                className="mnob-working-spinner"
-                size={19}
-                strokeWidth={2}
-                aria-hidden="true"
-              />
-              <span className="mnob-working-copy">
-                {busyLabel ?? 'Working…'}
-              </span>
+          {stage === 'working' ? (
+            <div className="mnob-stage" key="working">
+              <div className="mnob-working" role="status">
+                <Loader2
+                  className="mnob-working-spinner"
+                  size={19}
+                  strokeWidth={2}
+                  aria-hidden="true"
+                />
+                <span className="mnob-working-copy">
+                  {busyLabel ?? 'Working…'}
+                </span>
+              </div>
+              <p className="mnob-working-hint">
+                Follow the prompt from your device to continue.
+              </p>
             </div>
-            <p className="mnob-working-hint">
-              Follow the prompt from your device to continue.
-            </p>
-          </div>
-        ) : null}
+          ) : null}
+        </div>
       </div>
 
       {/* The footer carries the honesty note alone — there is no second route
