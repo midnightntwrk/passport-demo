@@ -27,6 +27,7 @@ import {
   restartK1CoinCandidates,
   widenK1CoinCandidates,
   k1CoinCandidates,
+  k1CoinPositionsLeft,
   k1ColourBalance,
   k1PrivateStateId,
   k1PrivateStateProvider,
@@ -1907,4 +1908,82 @@ describe('a delivery of a coin that is already queued', () => {
     ).toEqual({ outcome: 'known', nonce: OTHER_NONCE });
     expect(ask).not.toHaveBeenCalled();
   });
+});
+
+/* -------------------------------------------------------------------------- */
+/* WHETHER THERE IS A POSITION LEFT TO TRY                                    */
+/*                                                                            */
+/* WHY THE QUESTION IS ASKED AT ALL (live, 2026/09/21). The spend's candidate  */
+/* retry is armed by the words a failure arrives with, and on the sponsored    */
+/* route those words are a fixed sentence: the service redacts the proof       */
+/* server's own text on purpose, so a refusal can never say "merkle" and the   */
+/* retry could not fire on the only route a Passport uses. What arms it there  */
+/* instead is this — a refusal that IS the service's verdict retries while      */
+/* there is somewhere to retry TO, which is also what bounds the approvals.    */
+/*                                                                            */
+/* IT HAS TO AGREE WITH `advance ?? widen` EXACTLY, because it is a prediction */
+/* of that expression made before it writes anything. The last drill walks a   */
+/* whole rotation and holds the two to each other step by step.                */
+/* -------------------------------------------------------------------------- */
+
+describe('whether a colour has a position left to try', () => {
+  it('says yes while the coin is not on the last reported position', () => {
+    putK1CoinCandidates(ALICE, coin({ colour: MUSD }), [7n, 8n]);
+    expect(k1CoinPositionsLeft(ALICE, MUSD)).toBe(true);
+  });
+
+  it('says yes for a settled coin, because the sweep is still available', () => {
+    /* THE CASE THAT MATTERS MOST. A `'learned'` coin keeps its one position and
+       no candidates — and that position is the head of the transaction's
+       window, which is a GUESS whenever the transaction carried more than the
+       Passport's own output. D1 sat in exactly this state live on 2026/09/18:
+       recorded at 3813, on the chain at 3814, nothing to advance to. The sweep
+       is what rescues it, so the answer here is yes. */
+    putK1Coin(ALICE, coin({ colour: MUSD, mtIndex: 3813n }));
+    expect(k1CoinCandidates(ALICE, MUSD)).toEqual([]);
+    expect(k1CoinPositionsLeft(ALICE, MUSD)).toBe(true);
+  });
+
+  it('agrees with `advance ?? widen` at every step, and says no on the step it runs out', () => {
+    /* IT IS A PREDICTION OF THAT EXPRESSION, made before it writes anything, so
+       the two are held to each other step by step rather than at the end: a
+       predicate that disagrees with the rotation it predicts is worse than no
+       predicate at all. */
+    putK1CoinCandidates(ALICE, coin({ colour: MUSD }), [7n, 8n]);
+    let moves = 0;
+    for (;;) {
+      const predicted = k1CoinPositionsLeft(ALICE, MUSD);
+      const moved = advanceK1CoinCandidate(ALICE, MUSD) ?? widenK1CoinCandidates(ALICE, MUSD);
+      if (moved === null) {
+        /* THE STEP A SPEND GIVES UP ON, and the one the refusal rule is read
+           at: the coin is on the last position of a list the sweep has already
+           widened, and there is nothing left to ask anybody to approve. */
+        expect(predicted).toBe(false);
+        break;
+      }
+      expect(predicted).toBe(true);
+      moves += 1;
+      /* Bounded, so a predicate that never goes false fails the drill rather
+         than hanging it. */
+      if (moves > 40) throw new Error('the rotation never ran out');
+    }
+    /* Two reported positions and the eight the sweep adds around them: nine
+       moves after the first attempt, which is what bounds the approvals. */
+    expect(moves).toBe(9);
+    /* AND THE HEAD IS BACK ON THE COIN, which is what `advanceK1CoinCandidate`
+       does on exhaustion — so the next press starts where the chain's own
+       answer put it, and the answer here is yes again. A press is a fresh
+       rotation, not a continuation of the one that gave up. */
+    expect(heldK1Coin(ALICE, MUSD)?.mtIndex).toBe(7n);
+    expect(k1CoinPositionsLeft(ALICE, MUSD)).toBe(true);
+  });
+
+  it('says no where there is no coin, and never throws on nonsense', () => {
+    expect(k1CoinPositionsLeft(ALICE, MUSD)).toBe(false);
+    /* TOTAL ON PURPOSE: it is read inside a `catch`, where a throw of its own
+       would replace the failure it was called about. */
+    expect(k1CoinPositionsLeft(ALICE, 'not-a-colour')).toBe(false);
+    expect(k1CoinPositionsLeft({ network: '', address: '' }, MUSD)).toBe(false);
+  });
+
 });

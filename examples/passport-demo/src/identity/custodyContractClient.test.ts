@@ -1954,14 +1954,23 @@ describe('the shielded withdrawal', () => {
     expect(test.calls.filter((c) => c.circuit === 'withdraw_shielded_with_k256')).toHaveLength(10);
   });
 
-  /* A2, 2026/09/18. `proving-failed` is the service's code for "the prover ran
-     and declined", and a wrong candidate position is only ONE of the things
-     that reaches. A verifier key that does not match reaches it too, and
-     rotating on the code alone asked the holder to approve ten times for a
-     failure no position could fix — and then reported the same sentence it
-     would have reported after the first. The service's own words are what
-     decide it now. */
-  it('stops after one attempt when the refusal says nothing about a position', async () => {
+  /* A2, 2026/09/18, REVERSED ON 2026/09/21 — and the reversal is the point.
+     `proving-failed` is the service's code for "the prover ran and declined",
+     and a wrong candidate position is only ONE of the things that reaches it: a
+     verifier key that does not match reaches it too. The first answer to that
+     was to judge the service's own WORDS, and it could not work, because the
+     deployed sponsor redacts them to one fixed sentence on purpose — so the
+     predicate was false for every sponsored refusal and the retry could not
+     fire on the only route a Passport uses. A first payment out of a freshly
+     funded Passport stopped on the first refusal with `Public transcript input
+     mismatch` in the proof server's log, which is exactly the failure the
+     retry exists for.
+
+     So a verdict retries while there is somewhere to retry TO, and the bound
+     moves from the wording to the list: the reported window plus one sweep of
+     it, which is the same worst case the code had before the wording test was
+     reached for, and no more. The two drills below hold that bound. */
+  it('retries a verdict that says nothing about a position, and stops with the list', async () => {
     const { test, account, session, device } = await readyPassport({
       circuitResult: changeResult(60n),
       proofRefusals: 50,
@@ -1985,13 +1994,17 @@ describe('the shielded withdrawal', () => {
       ),
     ).rejects.toThrow('That payment could not be completed just now. Try again in a moment.');
 
-    expect(test.calls.filter((c) => c.circuit === 'withdraw_shielded_with_k256')).toHaveLength(1);
+    /* THE LIST IS THE BOUND: the two reported positions and the eight the
+       sweep adds around them, and not one attempt more — a verdict no position
+       could fix costs what it costs and then it is over. */
+    expect(test.calls.filter((c) => c.circuit === 'withdraw_shielded_with_k256')).toHaveLength(10);
     /* And the store is left canonical: the head is the position the chain
        offered first, and the list is intact for the next press. */
-    expect(k1CoinCandidates(account, COLOUR)).toEqual([5n, 6n]);
+    expect(k1CoinCandidates(account, COLOUR)[0]).toBe(5n);
+    expect(k1CoinCandidates(account, COLOUR)).toContain(6n);
   });
 
-  it('stops after one attempt when the refusal carried no words at all', async () => {
+  it('retries a refusal that carried no words at all, on the same bound', async () => {
     const { test, account, session, device } = await readyPassport({
       circuitResult: changeResult(60n),
       proofRefusals: 50,
@@ -2014,7 +2027,7 @@ describe('the shielded withdrawal', () => {
       ),
     ).rejects.toThrow('That payment could not be completed just now. Try again in a moment.');
 
-    expect(test.calls.filter((c) => c.circuit === 'withdraw_shielded_with_k256')).toHaveLength(1);
+    expect(test.calls.filter((c) => c.circuit === 'withdraw_shielded_with_k256')).toHaveLength(10);
   });
 
   it('gives up rather than looping when the candidates run out', async () => {

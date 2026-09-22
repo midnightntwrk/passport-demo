@@ -1467,25 +1467,121 @@ export function advanceK1CoinCandidate(account: K1Account, colour: string): K1He
   const target = requireAccount(account);
   const wanted = requireColour(colour);
   const draft = draftOf(loadK1CoinStore(target));
-  const list = Object.hasOwn(draft.mtIndexCandidates, wanted)
-    ? draft.mtIndexCandidates[wanted]
-    : [];
+  const list = candidateListOf(draft, wanted);
   /* Nothing to suggest, or nothing to suggest it for. Whatever list there is
      stays exactly as it is: every writer of a coin in this colour clears it
      ({@link putK1Coin}, {@link dropK1Coin}, {@link replaceK1Coin},
      {@link settleK1Coin}), so it can only outlive the coin it belongs to. */
   if (list.length === 0 || !Object.hasOwn(draft.coins, wanted)) return null;
-  const next = list.indexOf(draft.coins[wanted].mtIndex) + 1;
-  if (next >= list.length) {
+  const next = nextCandidatePosition(draft, wanted);
+  if (next === null) {
     /* Every position tried. The head goes back on the coin so the next spend
        starts where the reconciliation put it, and the list is kept. */
     draft.coins[wanted] = { ...draft.coins[wanted], mtIndex: list[0] };
     saveDraft(target, draft);
     return null;
   }
-  draft.coins[wanted] = { ...draft.coins[wanted], mtIndex: list[next] };
+  draft.coins[wanted] = { ...draft.coins[wanted], mtIndex: next };
   saveDraft(target, draft);
   return coinFromStoredRow(draft.coins[wanted]);
+}
+
+/* -------------------------------------------------------------------------- */
+/* What is still worth trying, asked WITHOUT writing anything                 */
+/* -------------------------------------------------------------------------- */
+
+/** A colour's candidate list as it stands, or an empty one. */
+function candidateListOf(draft: K1StoreDraft, colour: string): string[] {
+  return Object.hasOwn(draft.mtIndexCandidates, colour)
+    ? draft.mtIndexCandidates[colour]
+    : [];
+}
+
+/**
+ * The position AFTER the one the held coin sits on, or null.
+ *
+ * The arithmetic {@link advanceK1CoinCandidate} used to carry inline, lifted
+ * out so {@link k1CoinPositionsLeft} can ask the same question without writing
+ * — one copy, because a predicate that disagrees with the rotation it predicts
+ * is worse than no predicate at all.
+ */
+function nextCandidatePosition(draft: K1StoreDraft, colour: string): string | null {
+  const list = candidateListOf(draft, colour);
+  if (list.length === 0 || !Object.hasOwn(draft.coins, colour)) return null;
+  const next = list.indexOf(draft.coins[colour].mtIndex) + 1;
+  return next >= list.length ? null : list[next];
+}
+
+/**
+ * What the sweep would append, and the list it would append to — or null where
+ * there is no coin to sweep around.
+ *
+ * Lifted out of {@link widenK1CoinCandidates} for {@link nextCandidatePosition}'s
+ * reason, and it is pure: nothing here reads or writes storage.
+ */
+function sweepPlan(
+  draft: K1StoreDraft,
+  colour: string,
+): { readonly list: string[]; readonly added: string[] } | null {
+  if (!Object.hasOwn(draft.coins, colour)) return null;
+  const reported = candidateListOf(draft, colour);
+  const list = reported.length > 0 ? reported : [draft.coins[colour].mtIndex];
+  let span = 1;
+  while (span < list.length && BigInt(list[span]) === BigInt(list[span - 1]) + 1n) span += 1;
+  const first = BigInt(list[0]);
+  const last = BigInt(list[span - 1]);
+  const sweep = BigInt(K1_CANDIDATE_SWEEP);
+  const lo = first > sweep ? first - sweep : 0n;
+  const hi = last + sweep + 1n;
+  const held = new Set(list);
+  const added: string[] = [];
+  for (let index = lo; index < hi; index += 1n) {
+    const text = index.toString();
+    if (held.has(text)) continue;
+    held.add(text);
+    added.push(text);
+  }
+  return { list, added };
+}
+
+/**
+ * Whether this colour has a position left to try — the exact question
+ * `advanceK1CoinCandidate(…) ?? widenK1CoinCandidates(…)` answers, asked
+ * before either of them writes a thing.
+ *
+ * WHY THE SPEND NEEDS TO ASK IT AHEAD OF TIME (live, 2026/09/21). The retry
+ * that rotates a coin through its candidate positions is armed by the words a
+ * failure arrives with, and on the sponsored route those words are a fixed
+ * sentence: the service redacts the proof server's own text deliberately, so
+ * that a malformed transaction cannot make it publish its filesystem and its
+ * internal endpoints (`../../../passport-balancer/src/proveAccountCustody.ts`,
+ * `REFUSAL_DETAIL`). `spendPositionMayBeWrong` can match nothing in it, so the
+ * retry could not fire at all on the only route a Passport actually uses — the
+ * first payment out of a freshly funded Passport stopped on the first refusal
+ * with no second position ever tried.
+ *
+ * What replaces the wording there is this: a refusal that IS the proof
+ * server's verdict on the transaction retries while there is somewhere to
+ * retry TO, and is over the moment there is not. That is what bounds the
+ * approvals — the reported window plus one sweep of it, and nothing after.
+ *
+ * Total on purpose. It is read inside a `catch`, where a throw of its own
+ * would replace the failure it was called about, so an unreadable account or
+ * colour is `false` rather than an exception.
+ */
+export function k1CoinPositionsLeft(account: K1Account, colour: string): boolean {
+  let draft: K1StoreDraft;
+  let wanted: string | null;
+  try {
+    wanted = normalisedColourHex(colour);
+    if (wanted === null) return false;
+    draft = draftOf(loadK1CoinStore(requireAccount(account)));
+  } catch {
+    return false;
+  }
+  if (nextCandidatePosition(draft, wanted) !== null) return true;
+  const plan = sweepPlan(draft, wanted);
+  return plan !== null && plan.added.length > 0;
 }
 
 /**
@@ -1522,9 +1618,6 @@ export function widenK1CoinCandidates(account: K1Account, colour: string): K1Hel
   const wanted = requireColour(colour);
   const draft = draftOf(loadK1CoinStore(target));
   if (!Object.hasOwn(draft.coins, wanted)) return null;
-  const reported = Object.hasOwn(draft.mtIndexCandidates, wanted)
-    ? draft.mtIndexCandidates[wanted]
-    : [];
   /* A SETTLED COIN HAS NO LIST, AND IS THE CASE THAT MATTERS MOST (live,
      2026/09/18). Reconciliation keeps the winning position and drops the
      candidates, which is right — until the chain moves the coin and the one
@@ -1539,7 +1632,6 @@ export function widenK1CoinCandidates(account: K1Account, colour: string): K1Hel
      that position, so a second call recomputes the same neighbours and adds
      nothing — and a spend whose loop is `advance ?? widen` would never end if
      widening kept finding more. */
-  const list = reported.length > 0 ? reported : [draft.coins[wanted].mtIndex];
   /* THE REPORTED WINDOW IS THE ASCENDING CONTIGUOUS PREFIX, and reading it back
      off the list is what makes this idempotent. The indexer reports
      `[startIndex, endIndex)`, which `putK1CoinCandidates` stores in order, and
@@ -1547,22 +1639,13 @@ export function widenK1CoinCandidates(account: K1Account, colour: string): K1Hel
      second call, the same neighbours are computed, and nothing is added. A
      sweep computed from the WHOLE list would widen around its own last
      addition every time and never run out, which is a person asked for an
-     approval per round for ever. */
-  let span = 1;
-  while (span < list.length && BigInt(list[span]) === BigInt(list[span - 1]) + 1n) span += 1;
-  const first = BigInt(list[0]);
-  const last = BigInt(list[span - 1]);
-  const sweep = BigInt(K1_CANDIDATE_SWEEP);
-  const lo = first > sweep ? first - sweep : 0n;
-  const hi = last + sweep + 1n;
-  const held = new Set(list);
-  const added: string[] = [];
-  for (let index = lo; index < hi; index += 1n) {
-    const text = index.toString();
-    if (held.has(text)) continue;
-    held.add(text);
-    added.push(text);
-  }
+     approval per round for ever.
+
+     The arithmetic itself is {@link sweepPlan}'s, so that
+     {@link k1CoinPositionsLeft} can predict this call without making it. */
+  const plan = sweepPlan(draft, wanted);
+  if (plan === null) return null;
+  const { list, added } = plan;
   if (added.length === 0) return null;
   draft.mtIndexCandidates[wanted] = [...list, ...added];
   draft.coins[wanted] = { ...draft.coins[wanted], mtIndex: added[0] };
