@@ -37,9 +37,9 @@ export default function ContinueWithSocial() {
   const loading = session.status === 'loading'
   const ready = session.status === 'signed-out'
   const status = loading
-    ? 'Getting Dynamic sign-in ready…'
+    ? 'Getting the sign-in ready…'
     : session.status === 'disabled'
-      ? 'Dynamic sign-in is currently unavailable. You can continue with a passkey.'
+      ? 'Signing in with a provider is not available right now. You can continue with a passkey.'
       : null
 
   return (
@@ -58,7 +58,7 @@ export default function ContinueWithSocial() {
         aria-describedby={status ? statusId : undefined}
       >
         <Orbit size={18} strokeWidth={1.9} aria-hidden="true" />
-        <span className="mnob-social-copy">Continue with Dynamic</span>
+        <span className="mnob-social-copy">Continue with Google, Microsoft, X, or Discord</span>
         {loading ? (
           <LoaderCircle size={18} className="mnob-social-spin" aria-hidden="true" />
         ) : ready ? (
