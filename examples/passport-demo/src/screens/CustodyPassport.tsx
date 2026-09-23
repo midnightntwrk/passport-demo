@@ -153,6 +153,7 @@ import {
   custodyNameFirstAction,
   custodyNameFirstEnabled,
   custodyNameFirstStage,
+  custodyNextScreen,
   custodyNameRaceOutcome,
   custodyNameTakenSentence,
   custodyNameWasTaken,
@@ -631,8 +632,7 @@ export default function CustodyPassport({
        four-way answer and is still what says whether the setup is FINISHED —
        `name` and `home` are both "every step landed"; which of the two is
        shown is the name-first rule's to say, not this read's. */
-    setScreen(
-      custodyNameFirstStage({
+    const decided = custodyNameFirstStage({
         setupStarted: next.record !== null,
         setupFinished: next.stage === 'name' || next.stage === 'home',
         claimedName: next.name,
@@ -649,8 +649,8 @@ export default function CustodyPassport({
              waves behind Home — so the step waits for them. */
           accountComplete: next.record === null || !custodyWavesPending(next.record),
         }),
-      }),
-    )
+      })
+    setScreen((shown) => custodyNextScreen(shown, decided))
     return next
   }, [network])
 

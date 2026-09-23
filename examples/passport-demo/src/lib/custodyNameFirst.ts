@@ -128,6 +128,19 @@ export function custodyNameFirstStage(input: CustodyNameFirstInput): CustodyName
   return input.welcomeRead ? 'name' : 'welcome';
 }
 
+/**
+ * The screen to show after a fresh read, given the one already on show.
+ *
+ * NEVER TAKE SOMEBODY OFF HOME FOR THE WAY BACK (live, 2026/09/22). The way
+ * back waits for the waves that finish behind Home, so the read that makes it
+ * due lands a minute after the person reached Home, possibly mid-send. Once on
+ * Home they keep it; Home carries the "Add recovery" entry, and the full step
+ * is offered again on the next visit, before Home.
+ */
+export function custodyNextScreen<S extends string>(shown: S | null, next: S): S {
+  return shown === 'home' && next === 'recovery' ? shown : next;
+}
+
 /* -------------------------------------------------------------------------- */
 /* What the one button says                                                   */
 /* -------------------------------------------------------------------------- */

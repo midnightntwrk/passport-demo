@@ -8,6 +8,7 @@ import {
   custodyNameFirstAction,
   custodyNameFirstEnabled,
   custodyNameFirstStage,
+  custodyNextScreen,
   custodyNameRaceOutcome,
   custodyNameTakenSentence,
   custodyNameWasTaken,
@@ -268,5 +269,19 @@ describe('somebody else got the name first', () => {
     expect(outcome.forgetChosenName).toBe(true);
     expect(outcome.stage).toBe('name');
     expect(outcome.sentence).toBe('alice.night is already taken on Stagenet. Try another name.');
+  });
+});
+
+describe('custodyNextScreen', () => {
+  it('keeps Home when the way back becomes due behind it', () => {
+    expect(custodyNextScreen('home', 'recovery')).toBe('home');
+  });
+  it('shows the way back when it is due before Home', () => {
+    expect(custodyNextScreen('name', 'recovery')).toBe('recovery');
+    expect(custodyNextScreen(null, 'recovery')).toBe('recovery');
+  });
+  it('otherwise follows the read', () => {
+    expect(custodyNextScreen('recovery', 'home')).toBe('home');
+    expect(custodyNextScreen('home', 'name')).toBe('name');
   });
 });
