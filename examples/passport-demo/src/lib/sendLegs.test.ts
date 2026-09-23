@@ -378,6 +378,13 @@ describe('sendFailureNotice', () => {
     );
   });
 
+  it('does not say it twice when the sentence already says nothing moved', () => {
+    const message = "That payment didn't go through. Nothing left your Passport.";
+    expect(
+      sendFailureNotice({ legLanded: false, message, amountLabel: '10 mUSD', assetSymbol: 'mUSD' }),
+    ).toBe(message);
+  });
+
   it('names the item rather than a balance when there is only one of it', () => {
     expect(
       sendFailureNotice({

@@ -410,10 +410,12 @@ export function custodySendPhase(
   switch (step) {
     case null:
       return null;
+    /* `sign` is read here as opening the account too: the sheet's own
+       `checking` line names the fee service, which is not a word a custody
+       Passport's screens say (2026/09/22). */
     case 'wallet':
-      return 'connecting';
     case 'sign':
-      return 'checking';
+      return 'connecting';
     case 'submit':
       return 'submitting';
     case 'confirm':
