@@ -62,6 +62,21 @@ const WALK = '/?accwalk=1';
 const WALK_NETWORK = 'stagenet';
 
 /**
+ * Whether this build serves the account custody verifier keys that wave 1's
+ * deploy needs. A status alone does not say so: `vite preview` answers a
+ * missing file with its SPA fallback, `200 text/html`, and on a CI runner —
+ * whose pinned ZK bundle carries no account-custody artefacts — that made the
+ * skip below never fire and the walk fail on "Expected ZK artifact, but
+ * received text/html" (2026/09/23). A key is binary; the fallback is HTML.
+ */
+async function servesCustodyVerifierKeys(page: Page): Promise<boolean> {
+  const probe = await page.request.get(
+    '/zk/account-custody/keys/activate_initial_device_with_jubjub.verifier',
+  );
+  return probe.ok() && !(probe.headers()['content-type'] ?? '').includes('text/html');
+}
+
+/**
  * THE REAL HOME, WHICH IS WHERE A FINISHED PASSPORT NOW LANDS.
  *
  * Until 2026/09/22 a Passport on this contract landed on a page of its own — a
@@ -382,11 +397,8 @@ test.describe('a passkey with no Passport yet', () => {
        build the setup cannot even be constructed and this walk would assert
        nothing true. It is skipped there, with the reason on record; the live
        run on stagenet (RUN-onboard.md) is where this flow is proven. */
-    const probe = await page.request.get(
-      '/zk/account-custody/keys/activate_initial_device_with_jubjub.verifier',
-    );
     test.skip(
-      !probe.ok(),
+      !(await servesCustodyVerifierKeys(page)),
       'this build carries no account-custody verifier keys, so wave 1 cannot be built here',
     );
     await installVirtualAuthenticator(context, page);
@@ -479,11 +491,8 @@ test.describe('a passkey with no Passport yet', () => {
     /* Asked BEFORE the prover is held open, for the same reason the walk above
        asks it: a build with no account-custody verifier keys cannot construct
        wave 1 at all, so this walk would assert nothing true. */
-    const probe = await page.request.get(
-      '/zk/account-custody/keys/activate_initial_device_with_jubjub.verifier',
-    );
     test.skip(
-      !probe.ok(),
+      !(await servesCustodyVerifierKeys(page)),
       'this build carries no account-custody verifier keys, so wave 1 cannot be built here',
     );
 
