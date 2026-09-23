@@ -38,6 +38,7 @@ import {
 import {
   activateK1Device,
   addDeviceK1,
+  custodyLiveSubmitProvider,
   deployCustodyWaveOne,
   finishCustodyWaves,
   warmCustodySetup,
@@ -1378,7 +1379,9 @@ describe('the setup’s own seams', () => {
         },
       },
     );
-    expect(calls.sort()).toEqual(['contracts', 'ledger', 'module', 'wallet:alice']);
+    /* NO WALLET, even with the user known (2026/09/23): an idle connection is
+       one the node closes, so it is opened at the press. */
+    expect(calls.sort()).toEqual(['contracts', 'ledger', 'module']);
     /* No user yet — a passkey before its ceremony — and no wallet is built. */
     calls.length = 0;
     await warmCustodySetup(
@@ -1392,6 +1395,42 @@ describe('the setup’s own seams', () => {
       },
     );
     expect(calls).toEqual([]);
+    info.mockRestore();
+  });
+});
+
+describe('a submission on a connection the network had closed', () => {
+  /* The provider every custody submit goes through: the deploy, the waves,
+     the activation, and a payment. The balanced transaction is offered again,
+     as the same object, on the provider a fresh connection builds. */
+  it('resubmits the same balanced transaction once on a fresh connection', async () => {
+    const tx = { balanced: 'bytes' };
+    const sent: unknown[] = [];
+    const closed = new Error('Transaction submission error', {
+      cause: new Error('WebSocket is already in CLOSING or CLOSED state'),
+    });
+    closed.name = 'SubmissionError';
+    const stale = {
+      getCoinPublicKey: () => 'coin',
+      submitTx: (next: unknown) => {
+        sent.push(next);
+        return Promise.reject(closed);
+      },
+    };
+    const reconnect = vi.fn(() =>
+      Promise.resolve({
+        submitTx: (next: unknown) => {
+          sent.push(next);
+          return Promise.resolve('tx-id');
+        },
+      }),
+    );
+    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    const live = custodyLiveSubmitProvider(stale, () => true, reconnect);
+    expect((live.getCoinPublicKey as () => string)()).toBe('coin');
+    await expect((live.submitTx as (tx: unknown) => Promise<unknown>)(tx)).resolves.toBe('tx-id');
+    expect(sent).toEqual([tx, tx]);
+    expect(reconnect).toHaveBeenCalledTimes(1);
     info.mockRestore();
   });
 });

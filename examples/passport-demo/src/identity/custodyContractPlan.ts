@@ -1358,7 +1358,101 @@ const RUNTIME_ERROR_NAMES: ReadonlySet<string> = new Set([
  * and free of the vocabulary. Everything else becomes {@link CUSTODY_UNEXPECTED},
  * and the real cause goes to the console, where it is of use to somebody.
  */
+/* -------------------------------------------------------------------------- */
+/* A submission that went out on a dead connection                            */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The words a closed node socket arrives in, as this stack has produced them:
+ * the browser's own `WebSocket is already in CLOSING or CLOSED state`, and
+ * polkadot-js's `disconnected from wss://…: 1000:: Normal Closure` and
+ * `WebSocket is not connected` (2026/09/05, 2026/09/22, 2026/09/23).
+ */
+const CUSTODY_SOCKET_CLOSED_SIGNS: readonly string[] = [
+  'closing or closed state',
+  'websocket is not connected',
+  'disconnected from',
+  'normal closure',
+  'socket is closed',
+];
+
+/**
+ * Whether a submission failed because the connection to the node was closed.
+ *
+ * LIVE ON THE DEV SITE, 2026/09/23 01:53 UTC. The setup's deploy was balanced
+ * and never reached the chain; the node had closed the wallet's idle socket
+ * while the person typed their name, and the submit went out on it. A
+ * submission refused THAT way is not a verdict about the transaction, so the
+ * same balanced transaction can be offered again on a fresh connection.
+ */
+export function custodySocketClosed(cause: unknown): boolean {
+  const text = custodyCauseText(cause);
+  return CUSTODY_SOCKET_CLOSED_SIGNS.some((sign) => text.includes(sign));
+}
+
+/**
+ * Whether a failure is the wallet's submission failing rather than a verdict.
+ *
+ * midnight-js wraps a submit that failed for any reason in a `SubmissionError`
+ * whose message is "Transaction submission error" — which is what reached the
+ * screen, verbatim, on 2026/09/23. It is never painted; see
+ * {@link custodyFailureSentence}.
+ */
+export function custodySubmissionLost(cause: unknown): boolean {
+  for (let step: unknown = cause, depth = 0; step instanceof Error && depth < 8; depth += 1) {
+    if (step.name === 'SubmissionError') return true;
+    step = step.cause;
+  }
+  return custodyCauseText(cause).includes('transaction submission error') || custodySocketClosed(cause);
+}
+
+/** One route to the node: submit on it, and whether it is still open. */
+export interface CustodySubmitRoute<T> {
+  submit(tx: unknown): Promise<T>;
+  /** False only when the connection is KNOWN to be closed. */
+  isOpen(): boolean;
+}
+
+/**
+ * Submit an already-balanced transaction, on a live connection.
+ *
+ * TWO RULES, AND ONE RECONNECT BETWEEN THEM. A connection known to be closed
+ * is replaced before anything is sent on it. A submission refused because the
+ * socket closed under it is offered ONCE more, as the same bytes, on a fresh
+ * connection: a closed socket is not a verdict, the sponsor's booking for the
+ * balanced transaction lasts thirty minutes, and a transaction the node did in
+ * fact take cannot apply twice. Every other failure travels unchanged — so the
+ * send path's own rules about what a refusal means are untouched.
+ */
+export async function custodySubmitOnLiveConnection<T>(
+  tx: unknown,
+  current: CustodySubmitRoute<T>,
+  reconnect: () => Promise<CustodySubmitRoute<T>>,
+  log: (line: string) => void = () => undefined,
+): Promise<T> {
+  let route = current;
+  let reconnected = false;
+  if (!route.isOpen()) {
+    log('[account-custody] the connection to the network had closed; opening a fresh one before submitting');
+    route = await reconnect();
+    reconnected = true;
+  }
+  try {
+    return await route.submit(tx);
+  } catch (cause) {
+    if (reconnected || !custodySocketClosed(cause)) throw cause;
+    log('[account-custody] the connection closed under the submission; offering the same transaction on a fresh one');
+    const fresh = await reconnect();
+    return fresh.submit(tx);
+  }
+}
+
 export function custodyFailureSentence(cause: unknown): string {
+  /* A SUBMISSION THAT FAILED IS NOT OURS TO PAINT: "Transaction submission
+     error" reached a setup screen verbatim on 2026/09/23. The setup turns it
+     into its own resumable sentence before it gets here; anything else that
+     carries it gets the plain one. */
+  if (custodySubmissionLost(cause)) return CUSTODY_UNEXPECTED;
   const message = unwrapCustodyMessage(cause instanceof Error ? cause.message.trim() : '');
   if (message.length === 0 || message.length > 160) return CUSTODY_UNEXPECTED;
   /* A RUNTIME ERROR IS NEVER ONE OF OURS. Every refusal this layer writes is a

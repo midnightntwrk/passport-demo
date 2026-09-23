@@ -35,6 +35,7 @@ import {
   defaultCustodyDeps,
   deployCustodyWaveOne,
   finishCustodyWaves,
+  freshCustodyWallet,
   startCustodyAccountAgain,
   warmCustodySetup,
   withdrawShieldedK1,
@@ -50,6 +51,8 @@ import {
   custodyActivatedRecord,
   custodyFailureSentence,
   custodyOpeningBalanceDue,
+  custodySubmissionLost,
+  CUSTODY_SETUP_UNCONFIRMED,
   custodyWavesPending,
   loadCustodyRecord,
   nextCustodyStep,
@@ -1154,12 +1157,32 @@ export default function CustodyPassport({
          steps. Putting the same sentence on both would be the same words twice,
          which reads as a stutter rather than as progress. */
       void run(PHASE_LABELS.deploy, async () => {
+        try {
+          await setUp()
+        } catch (cause) {
+          /* A SUBMISSION THAT DID NOT GET THROUGH IS NOT A BROKEN PASSPORT
+             (2026/09/23: "Transaction submission error", verbatim, over a
+             setup that simply had not reached the chain). Everything here is
+             resumable — the next press reads the chain first — so the
+             sentence is the one that says so. */
+          if (custodySubmissionLost(cause)) {
+            console.warn('[account-custody] a setup step did not reach the network', cause)
+            throw new Error(CUSTODY_SETUP_UNCONFIRMED)
+          }
+          throw cause
+        }
+      })
+      async function setUp(): Promise<void> {
         /* The ceremony is the first thing the press costs, and it is the
            reader's own step — so the timeline names it before anything is
            asked of them rather than after they have answered. */
         setSetupSignal('identity')
         const settled = await ensureIdentity()
         clock.mark('identity')
+        /* THE CONNECTION IS OPENED NOW, not while the name was typed: an idle
+           socket is one the node closes, and the deploy must not go out on it. */
+        await freshCustodyWallet(settled.userKey)
+        clock.mark('connection')
         /* THE CEREMONY IS OVER THE MOMENT IT ANSWERS, and the timeline says so
            here rather than waiting for the custody road's first report. */
         setSetupSignal('deploy')
@@ -1230,7 +1253,7 @@ export default function CustodyPassport({
         clock.mark('home')
         /* And behind it: the rest of the roster, then the opening balance. */
         void backgroundRef.current(settled, clock)
-      })
+      }
     },
     [arm, ensureIdentity, interrupted, network, refresh, run, startNameClaim],
   )

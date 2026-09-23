@@ -8,6 +8,9 @@ import {
   custodyAccountIsUsable,
   custodyOpeningBalanceDue,
   custodyRecordMerged,
+  custodySocketClosed,
+  custodySubmissionLost,
+  custodySubmitOnLiveConnection,
   custodyWavesPending,
   k1ArmCircuits,
   k1EnrolmentChallenges,
@@ -1076,5 +1079,107 @@ describe('withinCustodyBound', () => {
     await expect(withinCustodyBound(Promise.resolve(3), 1_000)).resolves.toEqual({ kind: 'done', value: 3 });
     await expect(withinCustodyBound(new Promise(() => undefined), 5)).resolves.toEqual({ kind: 'timeout' });
     await expect(withinCustodyBound(Promise.reject(new Error('no')), 1_000)).rejects.toThrow('no');
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* A submission on a dead connection (dev site, 2026/09/23 01:53 UTC)         */
+/* -------------------------------------------------------------------------- */
+
+/** midnight-js's own wrapper, as it reached the screen. */
+function submissionError(inner: string): Error {
+  const error = new Error('Transaction submission error', { cause: new Error(inner) });
+  error.name = 'SubmissionError';
+  return error;
+}
+
+describe('a submission whose connection to the network had closed', () => {
+  it('recognises the closed socket in every shape this stack has produced', () => {
+    for (const words of [
+      'WebSocket is already in CLOSING or CLOSED state',
+      'disconnected from wss://rpc.stagenet.shielded.tools/: 1000:: Normal Closure',
+      'WebSocket is not connected',
+      'the socket is closed',
+    ]) {
+      expect(custodySocketClosed(submissionError(words)), words).toBe(true);
+    }
+    expect(custodySocketClosed(new Error('Custom error: 104'))).toBe(false);
+    expect(custodySocketClosed('not an error')).toBe(false);
+  });
+
+  it('knows a submission that failed from a verdict, however it is wrapped', () => {
+    expect(custodySubmissionLost(submissionError('anything'))).toBe(true);
+    expect(custodySubmissionLost(new Error('Transaction submission error'))).toBe(true);
+    expect(
+      custodySubmissionLost(new Error('outer', { cause: submissionError('inner') })),
+    ).toBe(true);
+    expect(custodySubmissionLost(new Error('WebSocket is not connected'))).toBe(true);
+    expect(custodySubmissionLost(new Error('failed assert: already activated'))).toBe(false);
+  });
+
+  /* It reached a setup screen verbatim. Never again, on any surface. */
+  it('never paints the submission error', () => {
+    expect(custodyFailureSentence(submissionError('closed'))).toBe(CUSTODY_UNEXPECTED);
+    expect(custodyFailureSentence(new Error('Transaction submission error'))).toBe(CUSTODY_UNEXPECTED);
+  });
+
+  const route = (submit: (tx: unknown) => Promise<string>, open = true) => ({
+    submit,
+    isOpen: () => open,
+  });
+
+  it('offers the SAME transaction once more on a fresh connection when the socket closed under it', async () => {
+    const tx = { balanced: true };
+    const seen: unknown[] = [];
+    const stale = route((sent) => {
+      seen.push(sent);
+      return Promise.reject(submissionError('WebSocket is already in CLOSING or CLOSED state'));
+    });
+    const reconnect = vi.fn(() =>
+      Promise.resolve(
+        route((sent) => {
+          seen.push(sent);
+          return Promise.resolve('tx-id');
+        }),
+      ),
+    );
+    const lines: string[] = [];
+    await expect(custodySubmitOnLiveConnection(tx, stale, reconnect, (l) => lines.push(l))).resolves.toBe('tx-id');
+    expect(reconnect).toHaveBeenCalledTimes(1);
+    expect(seen).toEqual([tx, tx]);
+    expect(seen[1]).toBe(tx);
+    expect(lines).toHaveLength(1);
+  });
+
+  it('opens a fresh connection first when the current one is known to be closed', async () => {
+    const stale = route(() => Promise.reject(new Error('must not be used')), false);
+    const reconnect = vi.fn(() => Promise.resolve(route(() => Promise.resolve('fresh'))));
+    await expect(custodySubmitOnLiveConnection({}, stale, reconnect)).resolves.toBe('fresh');
+    expect(reconnect).toHaveBeenCalledTimes(1);
+  });
+
+  /* Bounded: one reconnect, whichever way it was reached. */
+  it('reconnects once, and only once', async () => {
+    const closed = () => Promise.reject(submissionError('WebSocket is not connected'));
+    const reconnect = vi.fn(() => Promise.resolve(route(closed)));
+    await expect(custodySubmitOnLiveConnection({}, route(closed, false), reconnect)).rejects.toThrow(
+      'Transaction submission error',
+    );
+    expect(reconnect).toHaveBeenCalledTimes(1);
+    reconnect.mockClear();
+    await expect(custodySubmitOnLiveConnection({}, route(closed), reconnect)).rejects.toThrow(
+      'Transaction submission error',
+    );
+    expect(reconnect).toHaveBeenCalledTimes(1);
+  });
+
+  /* A refusal about the transaction is the send path's to read, unchanged. */
+  it('passes every other failure through untouched, without reconnecting', async () => {
+    const refused = new Error('1010: Invalid Transaction: Custom error: 104');
+    const reconnect = vi.fn(() => Promise.resolve(route(() => Promise.resolve('x'))));
+    await expect(
+      custodySubmitOnLiveConnection({}, route(() => Promise.reject(refused)), reconnect),
+    ).rejects.toBe(refused);
+    expect(reconnect).not.toHaveBeenCalled();
   });
 });

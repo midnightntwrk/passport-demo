@@ -133,6 +133,8 @@ import {
   newCustodyRecord,
   nextCustodyStep,
   custodyWavesPending,
+  custodySubmitOnLiveConnection,
+  type CustodySubmitRoute,
   CUSTODY_STILL_FINISHING,
   parseProveCustodyResponse,
   proveAccountCustodyDetail,
@@ -152,6 +154,7 @@ import {
   compiledContractFor,
   contractZkConfigProvider,
   createContractProviders,
+  walletProviderFor,
   loadContractModule,
   messageOf,
   resolveTransactionHash,
@@ -4047,10 +4050,13 @@ export function resetCustodySessionState(): void {
  * gives the person ten to thirty seconds of typing for free, so the screen
  * calls this when the field is shown and the press finds it all in hand.
  *
- * The wallet is built only where the user is already known: on the passkey arm
- * the user key IS the device point, which costs the ceremony the press asks
- * for. Everything else needs nobody. Every failure is swallowed — a warm-up
- * that fails leaves the press to do the work exactly as it always did.
+ * THE WALLET IS NOT OPENED HERE (2026/09/23). It was, and its socket to the
+ * node sat idle while the person typed; the node closed it, and the deploy
+ * went out on the dead socket and never reached the chain. The connection is
+ * opened at the press instead (`freshCustodyWallet`). `user` is kept in the
+ * signature for the callers and the drills that pass it. Every failure is
+ * swallowed — a warm-up that fails leaves the press to do the work exactly as
+ * it always did.
  */
 export async function warmCustodySetup(
   options: { readonly user: string | null; readonly arm: K1Arm },
@@ -4068,7 +4074,6 @@ export async function warmCustodySetup(
       Promise.all(allCustodyCircuits(options.arm).map((circuit) => zk.getVerifierKey(circuit))),
     ),
   ];
-  if (options.user !== null) tasks.push(deps.wallet(options.user));
   const settled = await Promise.allSettled(tasks);
   const failed = settled.filter((outcome) => outcome.status === 'rejected').length;
   if (failed > 0) {
@@ -4086,6 +4091,93 @@ function withDefaults(overrides: Partial<CustodyDeps>): CustodyDeps {
 
 /** The connection each user's calls are made on, shared for the tab. */
 const openWallets = new Map<string, Promise<LocalMidnightWallet>>();
+/** Whose connection a wallet is, so a submission on it can reopen it. */
+const walletUsers = new WeakMap<LocalMidnightWallet, string>();
+/** When each user's connection was opened, so an idle one can be refreshed. */
+const walletOpenedAt = new Map<string, number>();
+
+/**
+ * Whether a wallet's socket to the node is KNOWN to be closed.
+ *
+ * polkadot-js's `ApiPromise.isConnected`, on the submission service the facade
+ * submits through. Anything that does not carry one reads as open, and the
+ * failure of the submission itself is then what says otherwise.
+ */
+function walletSocketOpen(wallet: LocalMidnightWallet): boolean {
+  const service = (wallet.facade as unknown as { submissionService?: { api?: { isConnected?: unknown } } })
+    .submissionService;
+  return service?.api?.isConnected !== false;
+}
+
+/**
+ * The providers' submit, made to survive a node socket closed while idle.
+ *
+ * LIVE ON THE DEV SITE, 2026/09/23. The setup's deploy was balanced, then
+ * submitted on a socket the node had closed while the person typed, and never
+ * reached the chain. Every custody submission — the deploy, the waves, the
+ * activation, a payment — goes through here: a connection known to be closed
+ * is replaced first, and a submission refused because the socket closed under
+ * it is offered once more, as the same balanced bytes, on a fresh connection.
+ * See `custodySubmitOnLiveConnection`.
+ */
+export function custodyLiveSubmitProvider(
+  walletProvider: { submitTx(tx: unknown): Promise<unknown> } & Record<string, unknown>,
+  isOpen: () => boolean,
+  reconnect: () => Promise<{ submitTx(tx: unknown): Promise<unknown> }>,
+): Record<string, unknown> {
+  return {
+    ...walletProvider,
+    submitTx: (tx: unknown) =>
+      custodySubmitOnLiveConnection(
+        tx,
+        { submit: (next) => walletProvider.submitTx(next), isOpen },
+        async (): Promise<CustodySubmitRoute<unknown>> => {
+          const fresh = await reconnect();
+          return { submit: (next) => fresh.submitTx(next), isOpen: () => true };
+        },
+        (line) => console.info(line),
+      ),
+  };
+}
+
+/** The same, for one user's shared connection: reconnecting reopens it. */
+function submitOnLiveConnection(
+  walletProvider: { submitTx(tx: unknown): Promise<unknown> } & Record<string, unknown>,
+  wallet: LocalMidnightWallet,
+  user: string,
+): Record<string, unknown> {
+  return custodyLiveSubmitProvider(
+    walletProvider,
+    () => walletSocketOpen(wallet),
+    async () => {
+      const deps = defaultCustodyDeps();
+      deps.releaseWallet?.(user);
+      return walletProviderFor(await deps.wallet(user));
+    },
+  );
+}
+
+/**
+ * The user's connection, refreshed when it has sat idle past
+ * {@link CUSTODY_IDLE_WALLET_MS} or is known to be closed. For the setup press:
+ * a connection opened when the page loaded may have been closed by the node
+ * while the person was typing.
+ */
+export async function freshCustodyWallet(user: string): Promise<void> {
+  const deps = defaultCustodyDeps();
+  const opened = walletOpenedAt.get(user);
+  const held = openWallets.get(user);
+  if (held !== undefined && opened !== undefined) {
+    const wallet = await held.catch(() => null);
+    const stale = Date.now() - opened > CUSTODY_IDLE_WALLET_MS;
+    if (wallet !== null && !stale && walletSocketOpen(wallet)) return;
+    deps.releaseWallet?.(user);
+  }
+  await deps.wallet(user);
+}
+
+/** How long an idle connection is trusted before a setup press reopens it. */
+export const CUSTODY_IDLE_WALLET_MS = 20_000;
 
 /**
  * The real dependencies, every one of them behind a function so that importing
@@ -4112,6 +4204,8 @@ export function defaultCustodyDeps(): CustodyDeps {
       if (held !== undefined) return held;
       const opening = createLocalMidnightWallet(custodyWalletSeed(defaultCustodyDeps(), user));
       openWallets.set(user, opening);
+      walletOpenedAt.set(user, Date.now());
+      void opening.then((wallet) => walletUsers.set(wallet, user)).catch(() => undefined);
       opening.catch(() => {
         if (openWallets.get(user) === opening) openWallets.delete(user);
       });
@@ -4119,6 +4213,7 @@ export function defaultCustodyDeps(): CustodyDeps {
     },
     releaseWallet: (user) => {
       openWallets.delete(user);
+      walletOpenedAt.delete(user);
     },
     contractModule: async () =>
       (await loadContractModule(ACCOUNT_CUSTODY_CONTRACT)) as unknown as CustodyContractModule,
@@ -4133,8 +4228,22 @@ export function defaultCustodyDeps(): CustodyDeps {
         compiledContractFor(ACCOUNT_CUSTODY_CONTRACT, ACCOUNT_CUSTODY_LABEL, custodyWitnesses()),
         import('@midnightntwrk/ledger-v9'),
       ]);
+      const owner = walletUsers.get(wallet);
+      const live =
+        owner === undefined
+          ? {}
+          : (() => {
+              const submitting = submitOnLiveConnection(
+                (providers as { walletProvider: { submitTx(tx: unknown): Promise<unknown> } & Record<string, unknown> })
+                  .walletProvider,
+                wallet,
+                owner,
+              );
+              return { walletProvider: submitting, midnightProvider: submitting };
+            })();
       return {
         ...(providers as Record<string, unknown>),
+        ...live,
         /* THE STORE IS THE PRIVATE STATE. `createContractProviders` builds an
            in-memory provider, which is the right answer for a device secret
            the caller has just handed over and the wrong one for a coin: a
