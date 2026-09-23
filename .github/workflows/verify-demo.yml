@@ -35,7 +35,13 @@ name: Verify Passport demo
 # YAML anchors in a workflow file, so there is no way to say "the same list".
 # Keep them identical.
 on:
+  # A pull request runs the quick checks: type-check, unit tests, and the
+  # connect and release-naming suites. The heavy ones (the 100% coverage gate,
+  # the PWA build, and the tier-1 end-to-end walks) run only when the pull
+  # request carries the `full-ci` label, on every push to main, and on a manual
+  # run. Adding the label starts a full run; any other label is ignored.
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
     paths:
       - 'examples/passport-demo/**'
       - 'examples/passport-balancer/**'
@@ -85,6 +91,7 @@ jobs:
   # ---------------------------------------------------------------------------
   gates:
     name: Typecheck and unit tests
+    if: github.event.action != 'labeled' || github.event.label.name == 'full-ci'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -184,7 +191,12 @@ jobs:
         run: npm run test --workspace passport-demo-backend
 
       - name: App unit tests with coverage
+        if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci')
         run: npm run test:coverage --workspace passport-demo
+
+      - name: App unit tests (no coverage gate without the full-ci label)
+        if: github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'full-ci')
+        run: npm run test --workspace passport-demo
 
   # ---------------------------------------------------------------------------
   # THE SUITES NOTHING RAN. Test suites existed in this repository that no
@@ -225,6 +237,7 @@ jobs:
   # ---------------------------------------------------------------------------
   suites:
     name: Connect and release-naming suites
+    if: github.event.action != 'labeled' || github.event.label.name == 'full-ci'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -252,6 +265,7 @@ jobs:
   # ---------------------------------------------------------------------------
   bundle:
     name: PWA checks and tier-1 end-to-end
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci')
     runs-on: ubuntu-latest
     needs: gates
     timeout-minutes: 40
