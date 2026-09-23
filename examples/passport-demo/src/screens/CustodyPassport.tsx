@@ -79,6 +79,7 @@ import {
 import type { PassportContractName } from '../identity/contractRuntime.js'
 import type { LocalMidnightWallet } from '../lib/localWallet.js'
 import ThemeToggle from './ThemeToggle'
+import NameArtwork from './NameArtwork.js'
 import './onboarding.css'
 import './dynamic-passport.css'
 
@@ -1371,7 +1372,7 @@ export default function CustodyPassport({ network, arm, notice: browserNotice = 
 /* The steps                                                                  */
 /* -------------------------------------------------------------------------- */
 
-function Shell(props: { label: string; children: React.ReactNode }) {
+function Shell(props: { label: string; children: React.ReactNode; bodyClassName?: string }) {
   return (
     <section className="mnob-screen mndyn">
       <header className="mnob-bar">
@@ -1379,10 +1380,9 @@ function Shell(props: { label: string; children: React.ReactNode }) {
         <span className="mnob-bar-label">{props.label}</span>
         <ThemeToggle size="sm" className="mnob-theme" />
       </header>
-      <div className="mnob-body">{props.children}</div>
-      <footer className="mnob-foot">
-        <span>Test network demo — not production</span>
-      </footer>
+      <div className={`mnob-body${props.bodyClassName ? ` ${props.bodyClassName}` : ''}`}>
+        {props.children}
+      </div>
     </section>
   )
 }
@@ -1396,17 +1396,20 @@ function NameStep(props: {
   const [name, setName] = useState('')
   const trimmed = normaliseNameForRecovery(name)
   return (
-    <Shell label="Passport">
-      <p className="mnob-kicker">Your Passport is ready</p>
-      <h1 className="mnob-title">
-        <span>Choose</span>
-        <span>your name</span>
-      </h1>
-      <p className="mnob-lede">
-        Pick a name people can send to, instead of a long string they have to copy carefully.
-      </p>
+    <Shell label="Passport" bodyClassName="mndyn-name-body">
+      <div className="mndyn-name-intro">
+        <p className="mnob-kicker">Your Passport is ready</p>
+        <h1 className="mnob-title">
+          <span>Choose your</span>
+          <span>.night name</span>
+        </h1>
+        <p className="mnob-lede">
+          Pick a name people can send to, instead of a long string they have to copy carefully.
+        </p>
+      </div>
+      <NameArtwork className="mndyn-name-art" />
       <form
-        className="mnob-stage"
+        className="mnob-stage mndyn-name-stage"
         onSubmit={(event: FormEvent) => {
           event.preventDefault()
           if (props.busy === null && trimmed) props.onClaim(trimmed)
@@ -1787,4 +1790,3 @@ async function readCustodyActions(indexerHttpUrl: string, address: string) {
     return null
   }
 }
-
