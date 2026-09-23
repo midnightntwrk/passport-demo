@@ -37,6 +37,7 @@ import { OFFER_AFTER_MS } from '../lib/waitingGame.js'
 import { NETWORK_LABELS, type PassportNetwork } from './NetworkSwitcher.js'
 import { PasskeyWayOutActions } from './PasskeyWayOut.js'
 import ProgressTimeline, { useTimelineClock, type TimelineRow } from './ProgressTimeline.js'
+import NameArtwork from './NameArtwork.js'
 import WaitingGame from './WaitingGame.js'
 import ThemeToggle from './ThemeToggle.js'
 import './identity.css'
@@ -510,8 +511,8 @@ export default function AliasClaimScreen(props: AliasClaimProps) {
   })
 
   return (
-    <section className="mnid-screen" aria-busy={busy}>
-      <header className="mnid-bar">
+    <section className="mnid-screen mnclaim-screen" aria-busy={busy}>
+      <header className="mnid-bar mnclaim-bar">
         <img className="mnid-wordmark" src="/midnight-wordmark.svg" alt="Midnight" />
         {/* No step counter since 2026/08/06: the name is the LAST thing
             before the dashboard, not step 2 of a three-screen wizard. */}
@@ -519,26 +520,28 @@ export default function AliasClaimScreen(props: AliasClaimProps) {
         <ThemeToggle size="sm" className="mnid-theme" />
       </header>
 
-      <div className="mnid-body">
-        <p className="mnid-kicker">Your Midnight name</p>
-        <h1 className="mnid-title">Choose your .night name</h1>
-        <p className="mnid-lede">
-          {registrationSupported ? (
-            <>
-              This is the name people send to and apps recognise you by. It is a real Midnames
-              registration on {NETWORK_LABELS[networkId]} — one name per network, held by this
-              passkey.
-            </>
-          ) : (
-            <>
-              This is the name people send to and apps recognise you by. Passport signs and
-              submits on {signingNetworkLabel} only, so a name chosen for{' '}
-              {NETWORK_LABELS[networkId]} is queued here rather than registered — and Passport says
-              so wherever it appears.
-            </>
-          )}
-        </p>
-
+      <div className="mnid-body mnclaim-body">
+        <div className="mnclaim-copy">
+          <p className="mnid-kicker">Your Midnight name</p>
+          <h1 className="mnid-title">Choose your .night name</h1>
+          <p className="mnid-lede">
+            {registrationSupported ? (
+              <>
+                Give your Passport a name people can send to. It will be registered on{' '}
+                {NETWORK_LABELS[networkId]} and held by this passkey.
+              </>
+            ) : (
+              <>
+                This is the name people send to and apps recognise you by. Passport signs and
+                submits on {signingNetworkLabel} only, so a name chosen for{' '}
+                {NETWORK_LABELS[networkId]} is queued here rather than registered — and Passport says
+                so wherever it appears.
+              </>
+            )}
+          </p>
+        </div>
+        <NameArtwork className="mnclaim-art" />
+        <div className="mnclaim-flow">
         <div
           className={`mnid-field${field.kind === 'invalid' ? ' mnid-field-invalid' : ''}`}
         >
@@ -829,7 +832,9 @@ export default function AliasClaimScreen(props: AliasClaimProps) {
           </button>
         ) : null}
 
-        <p className="mnid-foot">
+        </div>
+
+        <p className="mnid-foot mnclaim-foot">
           <Check size={13} aria-hidden="true" />
           <span>
             Names are 1–32 characters: lowercase letters, numbers, and hyphens inside. This is a

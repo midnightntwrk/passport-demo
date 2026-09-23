@@ -171,6 +171,7 @@ import { pushToast } from './ToastStack.js'
    free of the wallet SDK — see `../lib/networks.ts`. */
 import { txReceiptLink } from '../lib/networks.js'
 import ThemeToggle from './ThemeToggle'
+import NameArtwork from './NameArtwork.js'
 import { WELCOME_BENEFITS } from './Welcome.js'
 import './welcome.css'
 import './onboarding.css'
@@ -3029,7 +3030,7 @@ export default function CustodyPassport({
 /* The steps                                                                  */
 /* -------------------------------------------------------------------------- */
 
-function Shell(props: { label: string; children: React.ReactNode }) {
+function Shell(props: { label: string; children: React.ReactNode; bodyClassName?: string }) {
   return (
     <section className="mnob-screen mndyn">
       <header className="mnob-bar">
@@ -3037,7 +3038,9 @@ function Shell(props: { label: string; children: React.ReactNode }) {
         <span className="mnob-bar-label">{props.label}</span>
         <ThemeToggle size="sm" className="mnob-theme" />
       </header>
-      <div className="mnob-body">{props.children}</div>
+      <div className={`mnob-body${props.bodyClassName ? ` ${props.bodyClassName}` : ''}`}>
+        {props.children}
+      </div>
     </section>
   )
 }
@@ -3246,19 +3249,23 @@ function NameStep(props: {
   const enabled = custodyNameFirstEnabled({ busy, available })
 
   return (
-    <Shell label="Passport">
-      <p className="mnob-kicker">{props.kicker}</p>
-      <h1 className="mnob-title">
-        <span>Choose</span>
-        <span>your .night name</span>
-      </h1>
-      <p className="mnob-lede">
-        Pick a name people can send to, instead of a long string they have to copy carefully. It is
-        part of your Passport from the moment it is made.
-      </p>
+    <Shell label="Passport" bodyClassName="mndyn-name-body">
+      <div className="mndyn-name-intro">
+        <p className="mnob-kicker">{props.kicker}</p>
+        <h1 className="mnob-title">
+          <span>Choose</span>
+          <span>your .night name</span>
+        </h1>
+        <p className="mnob-lede">
+          Pick a name people can send to, instead of a long string they have to copy carefully. It
+          is part of your Passport from the moment it is made.
+        </p>
+      </div>
+      {/* The name artwork, frameless on the page (Codex, 2026/09/23). */}
+      <NameArtwork className="mndyn-name-art" />
 
       <form
-        className="mnob-stage"
+        className="mnob-stage mndyn-name-stage"
         onSubmit={(event: FormEvent) => {
           event.preventDefault()
           if (enabled && alias !== null) props.onCreate(alias)
