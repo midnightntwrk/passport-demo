@@ -32,7 +32,6 @@ import {
   addDeviceK1,
   appendChangeToInboxK1,
   custodyAccountActivatedOnChain,
-  custodySetupDeps,
   defaultCustodyDeps,
   deployCustodyWaveOne,
   finishCustodyWaves,
@@ -1185,7 +1184,9 @@ export default function CustodyPassport({
           const signal = SETUP_SIGNAL_OF_STEP[phase.step]
           if (signal !== undefined) setSetupSignal(signal)
         }
-        const deps = custodySetupDeps()
+        /* One wallet connection per user for the tab is `defaultCustodyDeps`'s
+           own rule now, so the setup needs no seams of its own. */
+        const deps = {}
 
         /* THE NAME, FROM THE MOMENT THE DEPLOY IS SUBMITTED. Not awaited here:
            it runs beside the activation, and Home is shown with the name card
@@ -1614,7 +1615,7 @@ export default function CustodyPassport({
                   clock?.mark(`wave-${phase.detail ?? ''}`.replace(/\s+/g, '-'))
                 }
               },
-              custodySetupDeps(),
+              {},
             )
           ).record
           clock?.mark('waves-done')

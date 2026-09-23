@@ -22,6 +22,7 @@ import {
   hexToBytes,
   loadCustodyAuthorityKey,
   loadCustodyRecord,
+  saveCustodyRecord,
   type CustodyStorage,
 } from './custodyContractPlan.js';
 import {
@@ -37,7 +38,6 @@ import {
 import {
   activateK1Device,
   addDeviceK1,
-  custodySetupDeps,
   deployCustodyWaveOne,
   finishCustodyWaves,
   warmCustodySetup,
@@ -1233,6 +1233,62 @@ describe('the deploy on its own, and the waves behind Home', () => {
     expect(test.submits).toBe(after);
   });
 
+  /* The waves are custody transactions on the same account as a payment and
+     the inbox backfill, and two in flight at once is what the node refused
+     with 104. Each wave takes the account's lock — one run per wave, keyed as
+     the payments key it. */
+  it('takes the account lock for every wave, one wave at a time', async () => {
+    const test = harness();
+    const { session, device } = deviceFake();
+    const runs: string[] = [];
+    const deps: Partial<CustodyDeps> = {
+      ...test.deps,
+      accountLock: {
+        run: (account, _waitMs, work) => {
+          runs.push(account);
+          return work();
+        },
+      },
+    };
+    await deployCustodyWaveOne(session, device, undefined, deps);
+    await activateK1Device(session, device, undefined, deps);
+    await finishCustodyWaves(session, device, undefined, deps);
+    expect(runs).toEqual([`stagenet::${ADDRESS}`, `stagenet::${ADDRESS}`]);
+  });
+
+  /* THE RISK FLAGGED ON PR #92: a payment reads the record, waits for the
+     account while a wave lands, and writes its copy back. Its copy is from
+     before the wave, and must not put the wave count back. */
+  it('does not let a payment that read the record before a wave undo the wave', async () => {
+    const test = harness();
+    const { session, device } = deviceFake();
+    await deployCustodyWaveOne(session, device, undefined, test.deps);
+    await activateK1Device(session, device, undefined, test.deps);
+    const user = k1UserKey(session);
+    const before = loadCustodyRecord(test.storage, user, 'stagenet');
+    expect(before?.wavesDone).toBe(1);
+    const deps: Partial<CustodyDeps> = {
+      ...test.deps,
+      accountLock: {
+        run: async (_account, _waitMs, work) => {
+          const result = await work();
+          /* The payment that was queued behind this wave, finishing with the
+             copy it read before the wave: its own hash on, the old count. */
+          saveCustodyRecord(test.storage, {
+            ...(before as NonNullable<typeof before>),
+            txHashes: [...(before as NonNullable<typeof before>).txHashes, 'payment-hash'],
+          });
+          return result;
+        },
+      },
+    };
+    await finishCustodyWaves(session, device, undefined, deps);
+    const stored = loadCustodyRecord(test.storage, user, 'stagenet');
+    expect(stored?.wavesDone).toBe(3);
+    expect(stored?.activated).toBe(true);
+    expect(stored?.txHashes).toContain('payment-hash');
+  });
+
   it('refuses to finish a Passport that was never deployed', async () => {
     const test = harness();
     const { session, device } = deviceFake();
@@ -1296,28 +1352,6 @@ describe('the deploy on its own, and the waves behind Home', () => {
 });
 
 describe('the setup’s own seams', () => {
-  it('opens one wallet per user for the whole setup, and forgets a failed one', async () => {
-    let built = 0;
-    const wallet = vi.fn((user: string) => {
-      built += 1;
-      return user === 'broken' && built < 3
-        ? Promise.reject(new Error('no'))
-        : Promise.resolve({ user } as never);
-    });
-    const deps = custodySetupDeps({ wallet });
-    const again = custodySetupDeps({ wallet });
-    const first = await deps.wallet?.('alice');
-    expect(await again.wallet?.('alice')).toBe(first);
-    expect(wallet).toHaveBeenCalledTimes(1);
-    await expect(deps.wallet?.('broken')).rejects.toThrow('no');
-    await Promise.resolve();
-    /* The failure is not remembered: the next press builds it again. */
-    await expect(deps.wallet?.('broken')).resolves.toEqual({ user: 'broken' });
-    resetCustodySessionState();
-    await deps.wallet?.('alice');
-    expect(wallet.mock.calls.filter(([user]) => user === 'alice')).toHaveLength(2);
-  });
-
   it('warms what it can before the press, and never fails for what it cannot', async () => {
     const test = harness();
     const calls: string[] = [];

@@ -1132,7 +1132,18 @@ async function landRemainingWaves(
       continue;
     }
     onPhase?.({ step: 'waves', detail: `${wave.index} of ${waves.length}` });
-    record = await runMaintenanceWave({
+    /* ONE TRANSACTION ON THIS ACCOUNT AT A TIME (2026/09/22). Behind Home a
+       wave is a custody transaction on the same account as a payment or the
+       inbox backfill, and two in flight at once is what the node refused with
+       `Custom error: 104`. So each wave takes the account's lock — per wave,
+       not for the run, so a payment waits one wave (~25 s) at most — and
+       reads the stored record INSIDE it, after whatever held the lock last
+       has written. */
+    const address = record.address as string;
+    record = await (deps.accountLock ?? custodyAccountLock()).run(
+      k1AccountKey({ network: record.network, address }),
+      CUSTODY_WAVE_LOCK_WAIT_MS,
+      () => runMaintenanceWave({
       deps,
       /* THE STORED RECORD, NOT THE ONE THIS PLAN READ. Behind Home the
          activation lands while these waves run, and each wave writes the
@@ -1149,10 +1160,20 @@ async function landRemainingWaves(
       ledgerApi,
       providers,
       storage,
-    });
+    }),
+    );
   }
   return record;
 }
+
+/**
+ * How long a wave waits for the account behind a payment.
+ *
+ * Longer than a payment's own wait, because a wave is behind Home and nobody is
+ * watching it: a payment holds the account for at most its submit wait
+ * (`CUSTODY_SUBMIT_WAIT_MS`), and the wave simply goes after it.
+ */
+export const CUSTODY_WAVE_LOCK_WAIT_MS = 5 * 60 * 1000;
 
 /** Every circuit's verifier key, read off the staged artefacts. */
 async function readVerifierKeys(
@@ -4011,44 +4032,11 @@ export async function startCustodyAccountAgain(
 /** Reset the in-tab signing-key cache. For drills, and for a sign-out. */
 export function resetCustodySessionState(): void {
   signingKeys.clear();
-  setupWallets.clear();
 }
 
 /* -------------------------------------------------------------------------- */
-/* The setup's own seams: one wallet, warmed early                            */
+/* The setup's warm-up                                                        */
 /* -------------------------------------------------------------------------- */
-
-/**
- * The wallet the setup builds its transactions with, one per user per tab.
- *
- * `defaultCustodyDeps().wallet` builds and starts a fresh wallet facade on
- * every call, and the setup calls it once per entry point — the deploy, the
- * activation, the waves behind Home — which is the same seed opened three
- * times over. The setup path shares one instead; a failed build is forgotten
- * so the next press builds it again rather than inheriting the failure.
- */
-const setupWallets = new Map<string, Promise<LocalMidnightWallet>>();
-
-/**
- * The overrides the setup runs with: {@link defaultCustodyDeps}, with the wallet
- * shared per user. Every other seam is the default one.
- */
-export function custodySetupDeps(
-  base: Pick<CustodyDeps, 'wallet'> = defaultCustodyDeps(),
-): Partial<CustodyDeps> {
-  return {
-    wallet: (user) => {
-      const held = setupWallets.get(user);
-      if (held !== undefined) return held;
-      const built = base.wallet(user);
-      setupWallets.set(user, built);
-      built.catch(() => {
-        if (setupWallets.get(user) === built) setupWallets.delete(user);
-      });
-      return built;
-    },
-  };
-}
 
 /**
  * Fetch and build what a setup needs, BEFORE the press that needs it.
@@ -4068,8 +4056,9 @@ export async function warmCustodySetup(
   options: { readonly user: string | null; readonly arm: K1Arm },
   overrides: Partial<CustodyDeps> = {},
 ): Promise<void> {
-  const base = withDefaults(overrides);
-  const deps = { ...base, ...custodySetupDeps(base) };
+  /* The wallet is `defaultCustodyDeps`'s: one connection per user for the tab,
+     so the one warmed here is the one the press uses. */
+  const deps = withDefaults(overrides);
   const tasks: Promise<unknown>[] = [
     deps.contractModule(),
     deps.ledger(),

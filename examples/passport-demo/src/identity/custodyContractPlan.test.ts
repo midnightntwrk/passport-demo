@@ -7,6 +7,7 @@ import {
   hexToBytes,
   custodyAccountIsUsable,
   custodyOpeningBalanceDue,
+  custodyRecordMerged,
   custodyWavesPending,
   k1ArmCircuits,
   k1EnrolmentChallenges,
@@ -360,6 +361,38 @@ describe('the deploy record', () => {
       activated: true,
     };
     expect(custodyOpeningBalanceDue(legacy)).toBe(false);
+  });
+
+  /* Two writers share one record behind Home: a payment's copy read before a
+     wave must not put the wave count, the activation, or the balance flag
+     back — and a deploy that never landed must still be redone from scratch. */
+  it('never writes the facts that only move forward back over an activated account', () => {
+    const on: CustodyAccountRecord = {
+      ...base(),
+      address: 'aa'.repeat(32),
+      activated: true,
+      wavesDone: 3,
+      openingBalanceAsked: true,
+      txHashes: ['deploy', 'wave'],
+    };
+    const stale = { ...on, wavesDone: 1, activated: false, openingBalanceAsked: false, txHashes: ['deploy', 'pay'] };
+    expect(custodyRecordMerged(on, stale)).toMatchObject({
+      wavesDone: 3,
+      activated: true,
+      openingBalanceAsked: true,
+      txHashes: ['deploy', 'pay', 'wave'],
+    });
+    expect(custodyRecordMerged({ ...on, openingBalanceAsked: false }, stale).openingBalanceAsked).toBe(false);
+    /* Nothing stored, another address, no address, or not yet activated: as written. */
+    expect(custodyRecordMerged(null, stale)).toBe(stale);
+    expect(custodyRecordMerged({ ...on, address: 'bb'.repeat(32) }, stale)).toBe(stale);
+    expect(custodyRecordMerged({ ...on, address: null }, stale)).toBe(stale);
+    expect(custodyRecordMerged({ ...on, activated: false }, stale)).toBe(stale);
+    /* And through the store. */
+    const storage = STORAGE();
+    saveCustodyRecord(storage, on);
+    saveCustodyRecord(storage, stale);
+    expect(loadCustodyRecord(storage, on.user, on.network)?.wavesDone).toBe(3);
   });
 
   it('keys one account per user per network', () => {

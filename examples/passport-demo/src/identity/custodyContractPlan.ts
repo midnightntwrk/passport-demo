@@ -917,8 +917,39 @@ export function loadCustodyRecord(
  */
 export function saveCustodyRecord(storage: CustodyStorage, record: CustodyAccountRecord): void {
   const records = loadCustodyRecords(storage);
-  records[custodyRecordKey(record.user, record.network)] = record;
+  const key = custodyRecordKey(record.user, record.network);
+  records[key] = custodyRecordMerged(records[key] ?? null, record);
   writeCustodyMap(storage, CUSTODY_STORAGE_KEY, records);
+}
+
+/**
+ * What to store when `next` is written over `stored`.
+ *
+ * THE FACTS THAT ONLY EVER MOVE FORWARD ARE NEVER WRITTEN BACK (2026/09/22).
+ * Since the waves land behind Home, two writers share one record: a payment
+ * reads it, waits for the account, and writes it back with its hash on; a wave
+ * lands in between and writes one more wave on. The payment's copy is from
+ * BEFORE the wave, so writing it whole put the wave count back — and a wave the
+ * record forgets is a wave the next run pays for again, or a way back held for
+ * ever. So for an ACTIVATED account at the same address, `wavesDone`,
+ * `activated`, and `openingBalanceAsked` keep the furthest either copy has
+ * reached, and the transaction hashes keep both. Before activation nothing is
+ * merged: a deploy that never landed is legitimately redone from the start.
+ */
+export function custodyRecordMerged(
+  stored: CustodyAccountRecord | null,
+  next: CustodyAccountRecord,
+): CustodyAccountRecord {
+  if (stored === null || stored.address === null || stored.address !== next.address) return next;
+  if (!stored.activated) return next;
+  const hashes = [...next.txHashes, ...stored.txHashes.filter((hash) => !next.txHashes.includes(hash))];
+  return {
+    ...next,
+    activated: true,
+    wavesDone: Math.max(stored.wavesDone, next.wavesDone),
+    txHashes: hashes,
+    ...(stored.openingBalanceAsked === true ? { openingBalanceAsked: true } : {}),
+  };
 }
 
 /**
