@@ -101,6 +101,16 @@
  * `src/identity/passportContract.ts`, which are out for the reason every
  * module in that directory is.
  *
+ * `src/lib/nodeSubmission.ts` went IN on 2026/09/23, the day it was written.
+ * It is the wallet's submission service, and the defect it was written for is
+ * a second new Passport in one browser failing every press on staging: the
+ * SDK's node client asked its socket to close and then submitted on it before
+ * the close had finished. Every branch in it is a way a submission meets a
+ * close — the opening one, another submission's, two at once, one that never
+ * finishes — and each is drilled in `src/lib/nodeSubmission.test.ts` against a
+ * fake that closes the way polkadot-js does. The SDK glue that opens the real
+ * client stays in `src/lib/localWallet.ts`, which is out below.
+ *
  * `src/lib/sheetHistory.ts` went IN on 2026/09/04, the day it was written. It
  * decides which history entry belongs to which of Passport's sheets, and
  * whether a closing sheet still owes the stack an entry — three answers, and
@@ -807,6 +817,7 @@ export default mergeConfig(
           'src/lib/nameRecovery.ts',
           'src/lib/oneTxProbe.ts',
           'src/lib/networks.ts',
+          'src/lib/nodeSubmission.ts',
           'src/lib/notifications.ts',
           'src/lib/passkeyRecovery.ts',
           'src/lib/passportIdentity.ts',
