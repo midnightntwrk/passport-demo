@@ -552,3 +552,36 @@ describe('a stored booking that is not one', () => {
     expect(undoneK1Spends(ALICE)).toEqual([]);
   });
 });
+
+describe('a coin taken back after a spend that promoted a queued coin with guesses (#82 with #84)', () => {
+  it('sends the promoted coin back to the queue with its guesses, and clears the slot’s list', async () => {
+    const store = await import('./k1CoinStore.js');
+    putK1Coin(ALICE, held());
+    /* A delivery queued behind it, whose place is one of two. */
+    storage.set(
+      STORAGE_KEY,
+      JSON.stringify({
+        ...JSON.parse(storage.get(STORAGE_KEY) as string),
+      }),
+    );
+    const all = JSON.parse(storage.get(STORAGE_KEY) as string) as Record<string, Record<string, unknown>>;
+    all[k1AccountKey(ALICE)].queued = {
+      [MUSD]: [{ nonceHex: SECOND, colorHex: MUSD, value: '10', mtIndex: '7', mtIndexCandidates: ['7', '8'] }],
+    };
+    storage.set(STORAGE_KEY, JSON.stringify(all));
+    rememberK1ChangeCoin(ALICE, MUSD, null, TX, T0);
+    expect(heldK1Coin(ALICE, MUSD)?.nonce).toBe(SECOND);
+    expect(store.k1CoinCandidates(ALICE, MUSD)).toEqual([7n, 8n]);
+    undoK1ChangeCoin(ALICE, held(), null);
+    expect(heldK1Coin(ALICE, MUSD)).toEqual(held());
+    expect(store.k1CoinCandidates(ALICE, MUSD)).toEqual([]);
+    expect(loadK1CoinStore(ALICE).queued[MUSD]).toEqual([
+      { nonceHex: SECOND, colorHex: MUSD, value: '10', mtIndex: '7', mtIndexCandidates: ['7', '8'] },
+    ]);
+  });
+
+  it('has nothing to widen when nothing is held', async () => {
+    const store = await import('./k1CoinStore.js');
+    expect(store.widenK1CoinCandidates(ALICE, MUSD)).toBeNull();
+  });
+});

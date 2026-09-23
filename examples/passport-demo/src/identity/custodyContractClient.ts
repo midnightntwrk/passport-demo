@@ -163,6 +163,7 @@ import {
   emptyK1CoinStoreState,
   heldK1Coin,
   k1AccountKey,
+  k1CoinPositionsLeft,
   k1PrivateStateId,
   landK1Spend,
   k1PrivateStateProvider,
@@ -186,6 +187,7 @@ import {
   directSpendFromResult,
   spendFailureText,
   spendPositionMayBeWrong,
+  spendRefusalMayBePosition,
   type CustodyChangeCoin,
 } from './custodyContractSend.js';
 import { custodyEncKeyPair } from './custodyInbox.js';
@@ -2591,13 +2593,37 @@ async function spendWithAccount(
         restartK1CoinCandidates(account, colour);
         throw cause;
       }
-      /* A REFUSAL IS NOT BY ITSELF EVIDENCE ABOUT A POSITION: the service's
-         own `detail` is judged, by the same predicate the local failures are
-         judged by; a refusal that says nothing about a position is over after
-         the first attempt. */
-      const refusalMayBePosition =
-        isCustodyProofNotBuilt(cause) &&
-        spendPositionMayBeWrong(custodyProofNotBuiltDetail(cause) ?? '');
+      /* A REFUSAL IS EVIDENCE ABOUT A POSITION WHILE THERE IS A POSITION LEFT
+         (fixed 2026/09/21). `proving-failed` is the service's code for "the
+         prover ran and declined", which is the shape a wrong candidate position
+         arrives in — and is equally the shape of a verifier key that does not
+         match, a circuit that is not staged the way the transaction expects,
+         and every other verdict the proof server can reach about a
+         transaction. Rotating on the CODE alone spent up to ten approvals, one
+         per candidate, on a failure no position could fix.
+
+         Judging the service's own `detail` by the wording predicate was the
+         first answer to that and was no answer at all: the sponsor redacts the
+         proof server's text to one fixed sentence by design, so the predicate
+         was false for EVERY sponsored refusal and the retry could not fire on
+         the only route a Passport uses. A first payment out of a freshly
+         funded Passport stopped on the first refusal with `Public transcript
+         input mismatch` in the proof server's log — a position that rebuilds a
+         different root, which is precisely what this retry is for.
+
+         `spendRefusalMayBePosition` keeps the wording as the fast yes and puts
+         the bound somewhere honest: while `advance ?? widen` has a position
+         left, a verdict is worth trying it; when it has not, the run is over
+         after this attempt. Same worst case in approvals, without a rule that
+         cannot fire. `503 prover-unavailable` is not this error and is
+         untouched. */
+      const refusalMayBePosition = spendRefusalMayBePosition({
+        proofNotBuilt: isCustodyProofNotBuilt(cause),
+        detail: custodyProofNotBuiltDetail(cause),
+        /* ASKED BEFORE ANYTHING ROTATES, and it has to be: the advance below is
+           what consumes the position this is asking about. */
+        positionsLeft: k1CoinPositionsLeft(account, colour),
+      });
       if (!spendPositionMayBeWrong(message) && !refusalMayBePosition) {
         restartK1CoinCandidates(account, colour);
         throw cause;

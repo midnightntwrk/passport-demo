@@ -109,6 +109,29 @@ describe('the deliveries a walk could not place', () => {
     expect(custodyUnplacedDeliveries([outcome({ outcome: 'ambiguous', stored: true })])).toBe(0);
   });
 
+  /* THE PAYMENT INTO A PASSPORT THAT ALREADY HOLDS SOMETHING (live,
+     2026/09/21). It is queued behind the coin the colour holds, with its
+     candidate positions, so it is in the balance and it is NOT arriving — the
+     screen said "one payment is still arriving" over a figure that never moved
+     for as long as anybody watched. Held and queued read the same way here,
+     because both are money the store has. */
+  it('counts a delivery queued behind a held coin as balance, not as arriving', () => {
+    expect(
+      custodyUnplacedDeliveries([
+        outcome({ outcome: 'ambiguous', stored: true, placed: 'queued' }),
+        outcome({ outcome: 'ambiguous', stored: true, placed: 'held' }),
+      ]),
+    ).toBe(0);
+    /* And a delivery nothing could place is still arriving, whatever it says
+       about where it went. */
+    expect(
+      custodyUnplacedDeliveries([outcome({ outcome: 'ambiguous', stored: false, placed: null })]),
+    ).toBe(1);
+    expect(
+      custodyUnplacedDeliveries([outcome({ outcome: 'unavailable', placed: null })]),
+    ).toBe(1);
+  });
+
   it('counts nothing for the outcomes that are in the store or are no news', () => {
     expect(
       custodyUnplacedDeliveries([

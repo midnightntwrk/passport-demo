@@ -26,6 +26,7 @@ import {
   saveCustodyShieldedSend,
   spendFailureText,
   spendPositionMayBeWrong,
+  spendRefusalMayBePosition,
   CUSTODY_APPROVAL_WAITING,
   CUSTODY_SHIELDED_SEND_KEY,
   custodyShieldedAddressSendRefusal,
@@ -812,3 +813,90 @@ describe('the record a stopped send leaves behind', () => {
   });
 });
 
+/* -------------------------------------------------------------------------- */
+/* A SPONSORED REFUSAL, AND WHETHER IT IS WORTH ANOTHER POSITION              */
+/*                                                                            */
+/* THE DEFECT THESE ARE WRITTEN AGAINST (live, 2026/09/21). The candidate      */
+/* retry was armed by the words the refusal arrived with, and on the sponsored */
+/* route those words are one fixed sentence — the service redacts the proof    */
+/* server's own text so that a malformed transaction cannot make it publish    */
+/* its filesystem and its internal endpoints. So the predicate answered no to  */
+/* every sponsored refusal, and the first payment out of a freshly funded      */
+/* Passport stopped on the first one with `Public transcript input mismatch`   */
+/* in the proof server's log — a position that rebuilds a different root,      */
+/* which is precisely the failure the retry exists for.                        */
+/* -------------------------------------------------------------------------- */
+
+/** The body the deployed sponsor answers a refused proof with, verbatim. */
+const SPONSOR_DETAIL = 'The proof server could not prove this transaction.';
+
+describe('whether a refusal from the proving service is worth another position', () => {
+  it('retries the sponsor’s own redacted sentence while a position is left', () => {
+    /* THE LIVE CASE. Nothing in that sentence says merkle, mt_index,
+       membership, witness, unsatisfiable, or constraint — and it never will. */
+    expect(spendPositionMayBeWrong(SPONSOR_DETAIL)).toBe(false);
+    expect(
+      spendRefusalMayBePosition({
+        proofNotBuilt: true,
+        detail: SPONSOR_DETAIL,
+        positionsLeft: true,
+      }),
+    ).toBe(true);
+  });
+
+  it('is over once there is nowhere left to try', () => {
+    /* WHAT BOUNDS THE APPROVALS. A verdict no position can fix — a verifier
+       key that does not match, a circuit staged the wrong way — costs one
+       approval per remaining position and not one more. */
+    expect(
+      spendRefusalMayBePosition({
+        proofNotBuilt: true,
+        detail: SPONSOR_DETAIL,
+        positionsLeft: false,
+      }),
+    ).toBe(false);
+  });
+
+  it('retries a refusal that said nothing at all, while a position is left', () => {
+    expect(
+      spendRefusalMayBePosition({ proofNotBuilt: true, detail: null, positionsLeft: true }),
+    ).toBe(true);
+    expect(
+      spendRefusalMayBePosition({ proofNotBuilt: true, detail: null, positionsLeft: false }),
+    ).toBe(false);
+  });
+
+  it('honours a refusal that names a position on its words alone', () => {
+    /* A LOCAL PROVER, OR A FUTURE SPONSOR THAT FORWARDS THE TEXT, loses
+       nothing: the wording is still the fast yes, and it does not wait on the
+       store to agree that there is somewhere to go. */
+    expect(
+      spendRefusalMayBePosition({
+        proofNotBuilt: true,
+        detail: 'Public transcript input mismatch: the merkle path does not rebuild the root',
+        positionsLeft: false,
+      }),
+    ).toBe(true);
+  });
+
+  it('is not armed by anything that is not the service’s verdict', () => {
+    /* `503 prover-unavailable` is a DIFFERENT error and is untouched: the
+       service was restarted mid-spend, it looked at no position, and a retry
+       would cost an approval to learn nothing. Same for a refusal this build
+       never classified at all. */
+    expect(
+      spendRefusalMayBePosition({
+        proofNotBuilt: false,
+        detail: SPONSOR_DETAIL,
+        positionsLeft: true,
+      }),
+    ).toBe(false);
+    expect(
+      spendRefusalMayBePosition({
+        proofNotBuilt: false,
+        detail: 'the merkle path could not be built',
+        positionsLeft: true,
+      }),
+    ).toBe(false);
+  });
+});

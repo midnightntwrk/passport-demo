@@ -43,6 +43,7 @@ import {
   type K256DeviceIdentity,
 } from './custodyContractSigning.js';
 import {
+  CUSTODY_PROOF_NOT_BUILT,
   CUSTODY_PROVER_UNAVAILABLE,
   hexToBytes,
   saveCustodyRecord,
@@ -1752,5 +1753,155 @@ describe('a payment that cannot wait for ever', () => {
     hold();
     await send(test);
     expect(keys).toEqual([`stagenet::${ADDRESS}`]);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* THE SPONSORED REFUSAL (live, 2026/09/21)                                   */
+/*                                                                            */
+/* The drills above all fail the spend LOCALLY, where the runtime names what   */
+/* it could not build. The only route a Passport actually uses fails           */
+/* differently: the proving service answers `502 proving-failed` with one      */
+/* fixed sentence, because it redacts the proof server's own words on purpose  */
+/* — interpolating them would publish its filesystem and its internal          */
+/* endpoints to anybody who can post a malformed transaction. The retry used   */
+/* to be armed by matching those words, so it could not fire on that route at  */
+/* all: the first payment out of a freshly funded Passport stopped on the      */
+/* first refusal, with `Public transcript input mismatch` in the proof         */
+/* server's log and no "retrying the spend against candidate position" line    */
+/* anywhere. These three fix the new rule in place.                            */
+/* -------------------------------------------------------------------------- */
+
+describe('a refusal from the proving service', () => {
+  /** The deployed sponsor's answer to a proof it will not make, verbatim. */
+  const refusal = () =>
+    Promise.resolve({
+      ok: false,
+      status: 502,
+      text: () =>
+        Promise.resolve(
+          JSON.stringify({
+            error: 'proving-failed',
+            detail: 'The proof server could not prove this transaction.',
+          }),
+        ),
+    } as Response);
+
+  const proven = () =>
+    Promise.resolve({
+      ok: true,
+      status: 200,
+      text: () => Promise.resolve(JSON.stringify({ provenTx: 'ab' })),
+    } as Response);
+
+  it('retries the next candidate position, and the payment lands on it', async () => {
+    const test = harness({ circuitResult: changeResult(60n) });
+    const { session, device, signed } = deviceFake();
+    putK1CoinCandidates(ACCOUNT, { colour: COLOUR, nonce: NONCE, value: 100n }, [5n, 6n]);
+
+    /* THE FIRST POSITION IS THE WRONG GUESS, which is what the service refuses
+       and what its sentence does not say. */
+    let asked = 0;
+    proveAnswer = () => {
+      asked += 1;
+      return asked === 1 ? refusal() : proven();
+    };
+
+    await withdrawShieldedK1(
+      session,
+      device,
+      {
+        recipientCoinPublicKey: new Uint8Array(32),
+        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+        colourHex: COLOUR,
+        amount: 40n,
+      },
+      undefined,
+      test.deps,
+    );
+
+    /* TWO ATTEMPTS, ONE APPROVAL EACH, and the change coin of the one that
+       proved is what the Passport now holds. */
+    expect(asked).toBe(2);
+    expect(test.calls.filter((call) => call.circuit === 'withdraw_shielded_with_k256')).toHaveLength(
+      2,
+    );
+    expect(signed).toHaveLength(2);
+    expect(heldK1Coin(ACCOUNT, COLOUR)?.nonce).toBe(CHANGE_NONCE);
+  });
+
+  it('gives up once the window and one sweep of it have been refused', async () => {
+    const test = harness({ circuitResult: changeResult(60n) });
+    const { session, device } = deviceFake();
+    putK1CoinCandidates(ACCOUNT, { colour: COLOUR, nonce: NONCE, value: 100n }, [5n, 6n]);
+    proveAnswer = refusal;
+
+    await expect(
+      withdrawShieldedK1(
+        session,
+        device,
+        {
+          recipientCoinPublicKey: new Uint8Array(32),
+          recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+          colourHex: COLOUR,
+          amount: 40n,
+        },
+        undefined,
+        test.deps,
+      ),
+    ).rejects.toThrow(CUSTODY_PROOF_NOT_BUILT);
+
+    /* WHAT BOUNDS THE APPROVALS is the list and nothing else: the two reported
+       positions and the eight the sweep adds around them, and not one more —
+       so a refusal no position could fix costs the same as it did before. */
+    expect(test.calls.filter((call) => call.circuit === 'withdraw_shielded_with_k256')).toHaveLength(
+      10,
+    );
+    /* And the coin is left where the chain's own answer put it, with its list. */
+    expect(heldK1Coin(ACCOUNT, COLOUR)?.mtIndex).toBe(5n);
+    expect(k1CoinCandidates(ACCOUNT, COLOUR)[0]).toBe(5n);
+    expect(isK1NonceSpent(ACCOUNT, NONCE)).toBe(false);
+  });
+
+  it('still costs one approval when the service is simply not there', async () => {
+    /* `503 prover-unavailable` IS UNTOUCHED, and that is half the rule. The
+       service was restarted mid-spend; it looked at no position, so a second
+       position would ask for a second approval to learn nothing. */
+    const test = harness({ circuitResult: changeResult(60n) });
+    const { session, device, signed } = deviceFake();
+    putK1CoinCandidates(ACCOUNT, { colour: COLOUR, nonce: NONCE, value: 100n }, [5n, 6n]);
+    proveAnswer = () =>
+      Promise.resolve({
+        ok: false,
+        status: 503,
+        text: () =>
+          Promise.resolve(
+            JSON.stringify({ error: 'prover-unavailable', detail: 'It is the sponsor.' }),
+          ),
+      } as Response);
+
+    await expect(
+      withdrawShieldedK1(
+        session,
+        device,
+        {
+          recipientCoinPublicKey: new Uint8Array(32),
+          recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+          colourHex: COLOUR,
+          amount: 40n,
+        },
+        undefined,
+        test.deps,
+      ),
+    ).rejects.toThrow(CUSTODY_PROVER_UNAVAILABLE);
+
+    expect(signed).toHaveLength(1);
+    expect(test.calls.filter((call) => call.circuit === 'withdraw_shielded_with_k256')).toHaveLength(
+      1,
+    );
+    /* The guess, the list, and the coin are all exactly as they were. */
+    expect(heldK1Coin(ACCOUNT, COLOUR)?.mtIndex).toBe(5n);
+    expect(k1CoinCandidates(ACCOUNT, COLOUR)).toEqual([5n, 6n]);
+    expect(isK1NonceSpent(ACCOUNT, NONCE)).toBe(false);
   });
 });

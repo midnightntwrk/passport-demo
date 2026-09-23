@@ -648,6 +648,59 @@ export function spendPositionMayBeWrong(message: string): boolean {
   return text.includes('runtimeerror');
 }
 
+/**
+ * Whether a REFUSAL from the proving service is worth another position.
+ *
+ * WHY THE WORDING CANNOT BE THE TEST ON THE SPONSORED ROUTE (live,
+ * 2026/09/21). `spendPositionMayBeWrong` reads the service's own `detail`,
+ * which on the only route a Passport actually uses is a fixed sentence — "The
+ * proof server could not prove this transaction." — because the service
+ * redacts the proof server's text on purpose: interpolating it would publish
+ * this box's filesystem and its internal endpoints to anybody who can post a
+ * malformed transaction (`../../../passport-balancer/src/
+ * proveAccountCustody.ts`, `REFUSAL_DETAIL`). Nothing in that sentence says
+ * merkle, mt_index, membership, witness, unsatisfiable, or constraint, so the
+ * predicate answered no to every sponsored refusal and the candidate retry
+ * could not fire at all. A first payment out of a freshly funded Passport
+ * stopped on the first refusal — `Public transcript input mismatch` in the
+ * proof server's own log, which is a position that rebuilds a different root,
+ * and exactly the failure the retry exists for — with no second position ever
+ * tried and no "retrying the spend against candidate position" line to show
+ * for it.
+ *
+ * WHAT ARMS IT INSTEAD IS THE SPLIT THE SERVICE ALREADY PROMISES. Since
+ * 2026/09/18 `proving-failed` is reserved for the proof server's own 4xx — a
+ * VERDICT on this transaction — and a proof server that is unreachable,
+ * broken, or busy answers `503 prover-unavailable`, which is not this error at
+ * all and is untouched by this rule (`isCustodyProverVerdict`). So a verdict
+ * is evidence about the transaction by construction, and the question left is
+ * not what it said but whether there is anywhere to retry TO.
+ *
+ * THAT IS ALSO WHAT BOUNDS THE APPROVALS, which was the whole worry the wording
+ * test was reached for (review, 2026/09/18): a verdict no position can fix — a
+ * verifier key that does not match, a circuit staged the wrong way — still
+ * costs one approval per remaining position and no more, because
+ * `positionsLeft` is the reported window plus a single sweep of it and is false
+ * the moment those run out. A refusal that DOES name a position is still
+ * honoured on its words alone, so a local failure loses nothing.
+ *
+ * `proofNotBuilt` is `isCustodyProofNotBuilt(cause)` and `detail` is
+ * `custodyProofNotBuiltDetail(cause)`; they are passed in rather than read here
+ * so that this stays a rule about evidence and not an import of the plan.
+ */
+export function spendRefusalMayBePosition(input: {
+  /** Whether the failure is the proving service's verdict on this transaction. */
+  readonly proofNotBuilt: boolean;
+  /** The service's own words, where it gave any. */
+  readonly detail: string | null;
+  /** Whether `advance ?? widen` has a position left to offer. */
+  readonly positionsLeft: boolean;
+}): boolean {
+  if (!input.proofNotBuilt) return false;
+  if (spendPositionMayBeWrong(input.detail ?? '')) return true;
+  return input.positionsLeft;
+}
+
 /* -------------------------------------------------------------------------- */
 /* The change, written into this account's own inbox                          */
 /* -------------------------------------------------------------------------- */
