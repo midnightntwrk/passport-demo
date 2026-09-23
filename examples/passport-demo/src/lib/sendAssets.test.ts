@@ -387,3 +387,43 @@ describe('the colour NIGHT is quoted by', () => {
     expect(assets[0].available).toBe(5n);
   });
 });
+
+describe('NIGHT to a name, on a Passport that cannot move NIGHT between accounts', () => {
+  /* The account custody build: its NIGHT leaves only by `withdraw_unshielded`,
+     whose recipient is an address by type (2026/09/22). */
+  const CUSTODY: SendCapabilities = { shieldedToName: true, nightToName: false, nameAsset: 'mUSD' };
+
+  it('refuses a name in one sentence that says what to choose instead', () => {
+    const night = assetFor(fullAccount(), NIGHT_ASSET_ID);
+    expect(refusalFor(night, { kind: 'name' }, CUSTODY)).toBe(
+      'NIGHT can be sent to an address for now. To pay a name, choose mUSD.',
+    );
+    expect(refusalFor(night, { kind: 'account' }, CUSTODY)).toBe(
+      'NIGHT can be sent to an address for now. To pay a Passport, choose mUSD.',
+    );
+    expect(routeFor(night, { kind: 'name' }, CUSTODY)).toBeNull();
+  });
+
+  it('still pays an unshielded address in NIGHT, and refuses a shielded one', () => {
+    const night = assetFor(fullAccount(), NIGHT_ASSET_ID);
+    expect(routeFor(night, { kind: 'address', mode: 'unshielded' }, CUSTODY)).toBe('night-address');
+    expect(refusalFor(night, { kind: 'address', mode: 'shielded' }, CUSTODY)).toContain(
+      'unshielded (mn_addr…) address',
+    );
+  });
+
+  it('leaves mUSD to a name and to a shielded address exactly as it was', () => {
+    const musd = assetFor(fullAccount(), MUSD_COLOUR_HEX);
+    expect(routeFor(musd, { kind: 'name' }, CUSTODY)).toBe('shielded-name');
+    expect(routeFor(musd, { kind: 'address', mode: 'shielded' }, CUSTODY)).toBe('shielded-address');
+  });
+
+  it('says only what works when there is nothing to choose instead', () => {
+    const night = assetFor(fullAccount(), NIGHT_ASSET_ID);
+    const bare: SendCapabilities = { shieldedToName: false, nightToName: false };
+    expect(refusalFor(night, { kind: 'name' }, bare)).toBe('NIGHT can be sent to an address for now.');
+    expect(refusalFor(night, { kind: 'account' }, bare)).toBe(
+      'NIGHT can be sent to an address for now.',
+    );
+  });
+});

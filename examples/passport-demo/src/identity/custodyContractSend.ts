@@ -63,7 +63,12 @@
  * accident, and the screen now has the send it described.
  */
 
-import type { CustodyAccountRecord, CustodyStorage } from './custodyContractPlan.js';
+import {
+  CUSTODY_SEND_NOT_SENT,
+  CUSTODY_SUBMIT_WAIT_MS,
+  type CustodyAccountRecord,
+  type CustodyStorage,
+} from './custodyContractPlan.js';
 import type { PassportContractName } from './contractRuntime.js';
 
 /* -------------------------------------------------------------------------- */
@@ -331,7 +336,7 @@ export function custodyShieldedSendRefusal(input: CustodyShieldedSendPlanInput):
     return 'That name does not belong to a Passport that can be paid.';
   }
   if (route === 'prototype') {
-    return 'That Passport is an older kind, and this version cannot pay it this way. Ask them to set their Passport up again.';
+    return "This name belongs to a Passport on the older version, so it can't be paid from this one. Paying between the two versions isn't supported.";
   }
   if (input.heldCoin === null) {
     return 'Your Passport holds none of that to send.';
@@ -643,6 +648,59 @@ export function spendPositionMayBeWrong(message: string): boolean {
   return text.includes('runtimeerror');
 }
 
+/**
+ * Whether a REFUSAL from the proving service is worth another position.
+ *
+ * WHY THE WORDING CANNOT BE THE TEST ON THE SPONSORED ROUTE (live,
+ * 2026/09/21). `spendPositionMayBeWrong` reads the service's own `detail`,
+ * which on the only route a Passport actually uses is a fixed sentence — "The
+ * proof server could not prove this transaction." — because the service
+ * redacts the proof server's text on purpose: interpolating it would publish
+ * this box's filesystem and its internal endpoints to anybody who can post a
+ * malformed transaction (`../../../passport-balancer/src/
+ * proveAccountCustody.ts`, `REFUSAL_DETAIL`). Nothing in that sentence says
+ * merkle, mt_index, membership, witness, unsatisfiable, or constraint, so the
+ * predicate answered no to every sponsored refusal and the candidate retry
+ * could not fire at all. A first payment out of a freshly funded Passport
+ * stopped on the first refusal — `Public transcript input mismatch` in the
+ * proof server's own log, which is a position that rebuilds a different root,
+ * and exactly the failure the retry exists for — with no second position ever
+ * tried and no "retrying the spend against candidate position" line to show
+ * for it.
+ *
+ * WHAT ARMS IT INSTEAD IS THE SPLIT THE SERVICE ALREADY PROMISES. Since
+ * 2026/09/18 `proving-failed` is reserved for the proof server's own 4xx — a
+ * VERDICT on this transaction — and a proof server that is unreachable,
+ * broken, or busy answers `503 prover-unavailable`, which is not this error at
+ * all and is untouched by this rule (`isCustodyProverVerdict`). So a verdict
+ * is evidence about the transaction by construction, and the question left is
+ * not what it said but whether there is anywhere to retry TO.
+ *
+ * THAT IS ALSO WHAT BOUNDS THE APPROVALS, which was the whole worry the wording
+ * test was reached for (review, 2026/09/18): a verdict no position can fix — a
+ * verifier key that does not match, a circuit staged the wrong way — still
+ * costs one approval per remaining position and no more, because
+ * `positionsLeft` is the reported window plus a single sweep of it and is false
+ * the moment those run out. A refusal that DOES name a position is still
+ * honoured on its words alone, so a local failure loses nothing.
+ *
+ * `proofNotBuilt` is `isCustodyProofNotBuilt(cause)` and `detail` is
+ * `custodyProofNotBuiltDetail(cause)`; they are passed in rather than read here
+ * so that this stays a rule about evidence and not an import of the plan.
+ */
+export function spendRefusalMayBePosition(input: {
+  /** Whether the failure is the proving service's verdict on this transaction. */
+  readonly proofNotBuilt: boolean;
+  /** The service's own words, where it gave any. */
+  readonly detail: string | null;
+  /** Whether `advance ?? widen` has a position left to offer. */
+  readonly positionsLeft: boolean;
+}): boolean {
+  if (!input.proofNotBuilt) return false;
+  if (spendPositionMayBeWrong(input.detail ?? '')) return true;
+  return input.positionsLeft;
+}
+
 /* -------------------------------------------------------------------------- */
 /* The change, written into this account's own inbox                          */
 /* -------------------------------------------------------------------------- */
@@ -813,6 +871,25 @@ export interface CustodyShieldedSendRecord {
   /** The one transaction, once there is an id for it. */
   readonly sendTxId: string | null;
   readonly startedAt: number;
+  /** When the transaction was handed to the network, or null before that. */
+  readonly sentAt?: number | null;
+  /**
+   * What the submit wrote to the coin store, so a payment found NOT to have
+   * reached the chain after a reload is taken back exactly as the tab that
+   * sent it would have taken it back. Decimal strings for the two integers.
+   */
+  readonly undo?: CustodySendUndo | null;
+}
+
+/** The coin-store write a submit made, as it is stored. */
+export interface CustodySendUndo {
+  readonly held: {
+    readonly colour: string;
+    readonly nonce: string;
+    readonly value: string;
+    readonly mtIndex: string;
+  };
+  readonly change: { readonly colour: string; readonly nonce: string } | null;
 }
 
 /** `localStorage` key for the in-flight shielded send, one per account. */
@@ -881,7 +958,74 @@ function recordFromRow(row: unknown): CustodyShieldedSendRecord | null {
         : '',
     sendTxId: typeof candidate.sendTxId === 'string' ? candidate.sendTxId : null,
     startedAt: typeof candidate.startedAt === 'number' ? candidate.startedAt : 0,
+    /* Only where written, so a record from before these existed reads back
+       exactly as it was stored. */
+    ...(typeof candidate.sentAt === 'number' ? { sentAt: candidate.sentAt } : {}),
+    ...(undoFromRow(candidate.undo) !== null ? { undo: undoFromRow(candidate.undo) } : {}),
   };
+}
+
+const DECIMAL = /^(0|[1-9][0-9]*)$/;
+
+function undoFromRow(row: unknown): CustodySendUndo | null {
+  if (!row || typeof row !== 'object') return null;
+  const candidate = row as { held?: unknown; change?: unknown };
+  const held = candidate.held as Record<string, unknown> | undefined;
+  if (
+    !held ||
+    typeof held !== 'object' ||
+    typeof held.colour !== 'string' ||
+    typeof held.nonce !== 'string' ||
+    typeof held.value !== 'string' ||
+    !DECIMAL.test(held.value) ||
+    typeof held.mtIndex !== 'string' ||
+    !DECIMAL.test(held.mtIndex)
+  ) {
+    return null;
+  }
+  const change = candidate.change as Record<string, unknown> | null | undefined;
+  const changeRow =
+    change && typeof change === 'object' && typeof change.colour === 'string' && typeof change.nonce === 'string'
+      ? { colour: change.colour, nonce: change.nonce }
+      : null;
+  return {
+    held: { colour: held.colour, nonce: held.nonce, value: held.value, mtIndex: held.mtIndex },
+    change: changeRow,
+  };
+}
+
+/**
+ * What a stopped payment with a transaction behind it came to, from what the
+ * chain can say (2026/09/22).
+ *
+ *   `landed`      the indexer has the transaction.
+ *   `not-landed`  the indexer answered that it does not, and the wait a
+ *                 submitted payment is given has run out since it was sent.
+ *   `checking`    anything else: inside the wait, or an indexer that could not
+ *                 be asked. Never a guess either way.
+ *
+ * `onChain` is `true`, `false`, or `null` for "could not be asked".
+ */
+export function custodyStoppedSendVerdict(input: {
+  readonly record: CustodyShieldedSendRecord;
+  readonly onChain: boolean | null;
+  readonly now: number;
+}): 'landed' | 'not-landed' | 'checking' {
+  if (input.onChain === true) return 'landed';
+  const sentAt = input.record.sentAt ?? input.record.startedAt;
+  if (input.onChain === false && input.now - sentAt >= CUSTODY_SUBMIT_WAIT_MS) return 'not-landed';
+  return 'checking';
+}
+
+/** The sentence for each verdict, about the person it was paid to. */
+export function custodyStoppedSendSentence(
+  record: CustodyShieldedSendRecord,
+  verdict: 'landed' | 'not-landed' | 'checking',
+): string {
+  const who = record.recipientLabel.trim().length > 0 ? record.recipientLabel.trim() : 'them';
+  if (verdict === 'landed') return `Sent. ${who} has it.`;
+  if (verdict === 'not-landed') return CUSTODY_SEND_NOT_SENT;
+  return `Checking whether your payment to ${who} went through…`;
 }
 
 function readSends(storage: CustodyStorage): Record<string, CustodyShieldedSendRecord> {
@@ -987,5 +1131,38 @@ export function custodyShieldedSendOutcome(record: CustodyShieldedSendRecord): s
      buys a person whose tab closed half-way. The balance is the answer and it
      is on the screen this sentence is shown beside, so the sentence points at
      it rather than offering a button that would have nothing to do. */
-  return `Your payment to ${who} was sent as one payment: either it reached ${who} or nothing left your Passport. Your balance below says which.`;
+  /* A TRANSACTION EXISTS, and what it came to is asked of the chain by the
+     screen (`custodyStoppedSendVerdict`). Until that answers, the sentence says
+     it is being checked — never a hedge that leaves the reader to work it out. */
+  return custodyStoppedSendSentence(record, 'checking');
+}
+
+/* -------------------------------------------------------------------------- */
+/* Where a coin actually is                                                   */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The index a coin commitment sits at in an account's commitment tree, read
+ * off the tree's own dump — or null where the dump does not list it.
+ *
+ * WHY THE DUMP (2026/09/23). A payment spends the account's coin at a tree
+ * position, and the change coin of a transaction lands at one of several
+ * positions in an order no reader can predict (outputs are inserted sorted by
+ * commitment). Guessing cost a full proof on the droplet — about 45 s — before
+ * the proof server said "Public transcript input mismatch", on about half of
+ * all shielded sends. The ledger exposes the contract-filtered tree only as
+ * text, whose leaf lines read `<index>: (<commitment>, Some(ContractAddress(…)))`
+ * (checked against `ZswapOutput.newContractOwned(…).commitment` on ledger v8
+ * and v9). Anything this does not recognise is null, and the caller falls back
+ * to the candidate retry exactly as before.
+ */
+export function zswapLeafIndex(dump: string, commitment: string): bigint | null {
+  if (typeof dump !== 'string' || typeof commitment !== 'string') return null;
+  const wanted = commitment.toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(wanted)) return null;
+  const leaf = /^\s*(\d+):\s*\(([0-9a-f]{64})\s*,/gm;
+  for (const match of dump.matchAll(leaf)) {
+    if (match[2] === wanted) return BigInt(match[1]);
+  }
+  return null;
 }

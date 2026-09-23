@@ -380,6 +380,48 @@ export interface SendSheetProps {
    */
   sponsoredToken?: { colourHex: string; symbol: string } | null
   /**
+   * WHAT THIS PAYMENT WILL PUBLISH, said at the field that decides it.
+   *
+   * Optional, and supplied by ONE host: a Passport on the account custody
+   * contract, where paying a name and paying an address are two different
+   * transactions with two different things on the public record — both
+   * Passports named, or neither. That is the per-payment choice of MIP-0012
+   * §6.6, and it is a choice somebody is making at this field, so it is said
+   * here rather than in a footnote.
+   *
+   * It is a FUNCTION of what has been typed rather than a string, because the
+   * answer changes with every keystroke and a host that had to be told about
+   * each one would be a second copy of this sheet's own input state. Returning
+   * `null` says nothing at all, which is what an empty field is owed.
+   *
+   * A host that does not supply it — every prototype Passport — renders no such
+   * line, exactly as before.
+   */
+  recipientDisclosure?: ((input: { typed: string; shielded: boolean }) => string | null) | null
+  /**
+   * Whether a name — or a Passport account typed out — may be paid in NIGHT.
+   * Absent means yes (every prototype Passport). A Passport on the account
+   * custody build passes `false`: its NIGHT leaves only to an `mn_addr…`
+   * address, and the sheet says so at the recipient field, before Review.
+   */
+  nightToName?: boolean
+  /**
+   * Asks whether the Passport account a recipient resolved to can be paid from
+   * this one at all, and answers with the sentence to show under the field, or
+   * `null` when it can.
+   *
+   * Supplied by the account custody host, for one reason: a Passport on the
+   * older build cannot be paid from it in any asset, and that is decided HERE,
+   * when the name resolves, rather than after somebody has pressed Send.
+   * `name` says whether the recipient was a name or an account typed out, so
+   * the sentence can be about the thing the reader actually typed. A check that
+   * throws says nothing: the host backstops the refusal before any approval.
+   */
+  checkRecipientAccount?: (input: {
+    accountAddress: string
+    name: boolean
+  }) => Promise<string | null>
+  /**
    * The live phase of the account call, when the host reports one. It narrates
    * the wait rather than measuring it: the prover reports no figure, so no
    * percentage is invented.
@@ -684,6 +726,9 @@ export default function SendSheet(props: SendSheetProps) {
     onSendToName,
     onSendShieldedToName,
     sponsoredToken,
+    recipientDisclosure,
+    nightToName,
+    checkRecipientAccount,
     phase,
     nameLeg,
     nameLegAttempt,
@@ -732,10 +777,20 @@ export default function SendSheet(props: SendSheetProps) {
      one asset every Passport can send, and a picker that opened on whatever
      happened to sort first would move under the thumb of somebody who had
      opened this sheet a hundred times. */
-  const [assetId, setAssetId] = useState<string>(NIGHT_ASSET_ID)
+  /* Null until the person chooses: the default is then mUSD whenever the
+     Passport holds it (2026/09/22 — the stablecoin is what people send), and
+     NIGHT otherwise. */
+  const [assetId, setAssetId] = useState<string | null>(null)
 
   /* What the registry said about the name in the field, if there is one. */
   const [nameState, setNameState] = useState<NameState>({ status: 'idle' })
+  /* What the host said about the Passport account the recipient resolved to —
+     see `checkRecipientAccount`. Keyed by the account it answers for, so an
+     answer about a previous recipient is never read as one about this one. */
+  const [accountCheck, setAccountCheck] = useState<{
+    accountAddress: string
+    refusal: string | null
+  } | null>(null)
   /* What a SCANNED code claimed the name behind it points at, when it carried
      that claim. It is never spent to — the registry is the sole authority on
      what a name pays — and exists only so a code that disagrees with the
@@ -764,8 +819,12 @@ export default function SendSheet(props: SendSheetProps) {
   const capabilities = useMemo(
     (): SendCapabilities => ({
       shieldedToName: Boolean(shieldedSupported && resolveName && onSendShieldedToName),
+      nightToName: nightToName !== false,
+      /* What to choose instead, named in NIGHT's refusal: the sponsor's own
+         stablecoin, where there is one. */
+      nameAsset: sponsoredToken?.symbol ?? null,
     }),
-    [onSendShieldedToName, resolveName, shieldedSupported],
+    [nightToName, onSendShieldedToName, resolveName, shieldedSupported, sponsoredToken],
   )
 
   /* The fee sentence describes what will really happen, so the sponsor is
@@ -905,7 +964,7 @@ export default function SendSheet(props: SendSheetProps) {
      that holds nothing, which is `[]`, and from a read that failed. */
   const holdingsPending = shieldedSupported && holdings === null && holdingsError === null
 
-  const assets = useMemo(
+  const builtAssets = useMemo(
     () =>
       buildSendAssets({
         nightBalance: atomicFromFormatted(availableBalance),
@@ -917,16 +976,29 @@ export default function SendSheet(props: SendSheetProps) {
       }),
     [availableBalance, pickerHoldings, shieldedSupported, sponsoredToken],
   )
+  /* mUSD leads the picker and is the default; everything else keeps its order. */
+  const assets = useMemo(() => {
+    const musd = builtAssets.filter((entry) => entry.symbol === 'mUSD')
+    return musd.length === 0 ? builtAssets : [...musd, ...builtAssets.filter((entry) => entry.symbol !== 'mUSD')]
+  }, [builtAssets])
   /* The selection is DERIVED, not corrected by an effect. A colour that goes
      away between the host's mirror and the authoritative read falls back to
      NIGHT for as long as it is missing and is honoured again the moment it
      comes back — where an effect would have overwritten the choice for good.
      NIGHT is always present, so this can never be undefined. */
-  const asset: SendAsset = assets.find((entry) => entry.id === assetId) ?? assets[0]
+  const asset: SendAsset =
+    (assetId === null ? undefined : assets.find((entry) => entry.id === assetId)) ?? assets[0]
   const tokenType = asset.tokenType
   /* Which ledger is being spent from — now a consequence of the choice above,
      where until 2026/08/31 it was a consequence of the recipient. */
   const mode: Mode = asset.mode
+
+  /* WHAT THIS PAYMENT WILL PUBLISH, where the host has a rule about it. Asked
+     on every render rather than remembered, because the answer is a function of
+     the field's current contents and nothing else. */
+  const disclosure = recipientDisclosure
+    ? recipientDisclosure({ typed: recipient, shielded: mode === 'shielded' })
+    : null
 
   const verdict = useMemo(
     () =>
@@ -950,6 +1022,41 @@ export default function SendSheet(props: SendSheetProps) {
        mistaken for a disagreement. */
     normalisedAccountHex(nameState.accountAddress) !== scannedClaim.accountHex
       ? `That code does not match what ${scannedClaim.domain} points at now. Ask for a fresh code before sending anything.`
+      : null
+  /* The Passport account the field currently leads to, when it leads to one. */
+  const currentAccount =
+    typedAccount !== null
+      ? typedAccount
+      : nameMode && nameState.status === 'found'
+        ? nameState.accountAddress
+        : null
+  /* WHETHER THAT ACCOUNT CAN BE PAID FROM THIS ONE AT ALL, asked once per
+     account as soon as it is known — before Review, and before anybody is
+     asked to approve anything. */
+  useEffect(() => {
+    if (!checkRecipientAccount || currentAccount === null) return undefined
+    let live = true
+    void (async () => {
+      let refusal: string | null = null
+      try {
+        refusal = await checkRecipientAccount({ accountAddress: currentAccount, name: !accountMode })
+      } catch {
+        /* Unanswerable says nothing; the host refuses again before any approval. */
+        refusal = null
+      }
+      if (live) setAccountCheck({ accountAddress: currentAccount, refusal })
+    })()
+    return () => {
+      live = false
+    }
+  }, [accountMode, checkRecipientAccount, currentAccount])
+  const accountCheckSettled =
+    !checkRecipientAccount ||
+    currentAccount === null ||
+    accountCheck?.accountAddress === currentAccount
+  const accountRefusal =
+    checkRecipientAccount && currentAccount !== null && accountCheck?.accountAddress === currentAccount
+      ? accountCheck.refusal
       : null
   const nameError =
     typed?.kind === 'name-invalid'
@@ -979,9 +1086,9 @@ export default function SendSheet(props: SendSheetProps) {
      "that is not a Midnight address" is about the string itself and comes
      before anything can be said about where it would have gone. */
   const recipientError = nameMode
-    ? (assetRefusal ?? nameError)
+    ? (assetRefusal ?? nameError ?? accountRefusal)
     : accountMode
-      ? assetRefusal
+      ? (assetRefusal ?? accountRefusal)
       : verdict && 'error' in verdict
         ? verdict.error
         : assetRefusal
@@ -1067,6 +1174,7 @@ export default function SendSheet(props: SendSheetProps) {
   const recipientReady =
     recipient.trim().length > 0 &&
     recipientError === null &&
+    accountCheckSettled &&
     (!nameMode || resolvedName !== null)
   /* A balance Passport tried and failed to read off the account. Distinct from
      one still in flight: with no ceiling to compare against, sending stays
@@ -1111,7 +1219,9 @@ export default function SendSheet(props: SendSheetProps) {
           ? '—'
           : 'Checking with the fee sponsor…'
       : fee.mode === 'sponsored'
-        ? 'Network fee expected to be covered by the fee sponsor.'
+        ? /* Nothing said when the fee is covered (2026/09/22): the reader pays
+             nothing, so there is nothing for them to read. */
+          null
         : /* The sponsor's own refusal SENTENCE, verbatim — which since
              2026/08/25 is the sentence only. The diagnostic that used to be
              joined onto it ("0/1 wallets available (#0 dust …)") is a fact
@@ -1422,19 +1532,30 @@ export default function SendSheet(props: SendSheetProps) {
       role="presentation"
     >
       <div
-        className="mnhome-addr-modal mnhome-send"
+        className="mnhome-addr-modal mnhome-send mnhome-surface-modal"
         role="dialog"
         aria-modal="true"
         aria-labelledby="mnhome-send-title"
         onClick={(event) => event.stopPropagation()}
       >
-        <div className="mnhome-addr-head">
-          <p className="mnhome-micro" id="mnhome-send-title">
-            {/* The heading names the CHOSEN asset, because that is now the
-                first thing decided on this sheet rather than the last thing
-                inferred from it. */}
-            {step === 'review' ? 'Review this transfer' : `Send ${asset.symbol}`}
-          </p>
+        <div className="mnhome-addr-head mnhome-surface-head">
+          <div className="mnhome-surface-heading">
+            <span className="mnhome-surface-eyebrow">Your Passport</span>
+            <h2 className="mnhome-surface-title" id="mnhome-send-title">
+              {step === 'review' ? 'Review transfer' : `Send ${asset.symbol}`}
+            </h2>
+            <p className="mnhome-surface-description">
+              {step === 'review' ? 'Check the details before you confirm.' : 'Choose an asset, then tell us where it goes.'}
+            </p>
+          </div>
+          <img
+            className="mnhome-surface-art"
+            src="/passport-send.webp"
+            alt=""
+            aria-hidden="true"
+            width="1254"
+            height="1254"
+          />
           <button
             type="button"
             className="mnhome-icon-button"
@@ -1492,7 +1613,9 @@ export default function SendSheet(props: SendSheetProps) {
                   {asset.kind === 'nft'
                     ? `A one-of-a-kind item. It goes whole — there is one of it, so the amount below is fixed at one. Its colour is ${asset.name}.`
                     : asset.id === NIGHT_ASSET_ID
-                      ? 'Everything your account holds is here. NIGHT goes to a Midnight name or to an unshielded address.'
+                      ? capabilities.nightToName === false
+                        ? 'Everything your account holds is here. NIGHT goes to an unshielded address.'
+                        : 'Everything your account holds is here. NIGHT goes to a Midnight name or to an unshielded address.'
                       : capabilities.shieldedToName
                         ? /* True since the shielded name route landed. It read
                              "cannot be paid to a name" before that, which was a
@@ -1635,6 +1758,12 @@ export default function SendSheet(props: SendSheetProps) {
                   {networkId} address. Paste it — nothing is guessed from a partial one.
                 </span>
               )}
+              {/* WHAT THIS PAYMENT WILL PUBLISH — under the hint, because it is
+                  about the consequence of what has been typed rather than about
+                  what may be. Absent for every host that supplies no rule. */}
+              {disclosure ? (
+                <span className="mnhome-send-hint mnob-disclosure">{disclosure}</span>
+              ) : null}
             </label>
 
             <label className="mnhome-send-field">
@@ -1724,9 +1853,11 @@ export default function SendSheet(props: SendSheetProps) {
               )}
             </label>
 
-            <p className={`mnhome-send-fee${feeBlocksSend ? ' mnhome-send-fee-blocked' : ''}`}>
-              {feeNote}
-            </p>
+            {feeNote !== null ? (
+              <p className={`mnhome-send-fee${feeBlocksSend ? ' mnhome-send-fee-blocked' : ''}`}>
+                {feeNote}
+              </p>
+            ) : null}
 
             {/* ALWAYS RENDERED. When the fee cannot be paid this is disabled
                 and says what it is waiting for, and the row beneath it says how
@@ -1827,9 +1958,9 @@ export default function SendSheet(props: SendSheetProps) {
                       : asset.kind === 'nft'
                         ? 'There is one of it, and it goes whole.'
                         : mode === 'shielded'
-                          ? /* There is no second scale to convert to: the figure
-                               above already IS the ledger's own count. */
-                            'A shielded token has no decimal scale on the ledger.'
+                          ? /* Nothing under a shielded figure (2026/09/22): the
+                               figure already IS the ledger's own count. */
+                            ''
                           : `${amount.toString()} atomic ${amount === 1n ? 'unit' : 'units'}`}
                   </small>
                 </dd>
@@ -1845,24 +1976,10 @@ export default function SendSheet(props: SendSheetProps) {
                        exists to take away. */
                     <>
                       <strong>{resolvedName.domain}</strong>
-                      <small>
-                        {/* The tail is held together on one line. An ellipsis
-                            is a break opportunity in CSS, so "ending …" and
-                            "5263" would otherwise land on separate lines and
-                            read as two different things. An account typed out
-                            has already SAID its tail above, so it is not said
-                            twice. */}
-                        {accountMode ? (
-                          'The account you typed, paid directly.'
-                        ) : (
-                          <>
-                            Their Passport account, ending{' '}
-                            <span className="mnhome-send-tail">
-                              {accountTail(resolvedName.accountAddress)}
-                            </span>
-                          </>
-                        )}
-                      </small>
+                      {/* The name alone (2026/09/22): no descriptor of the
+                          account behind it. An account typed out still says
+                          it was typed. */}
+                      {accountMode ? <small>The account you typed, paid directly.</small> : null}
                     </>
                   ) : (
                     <button
@@ -1902,13 +2019,13 @@ export default function SendSheet(props: SendSheetProps) {
                         two-step wording below is untouched and still describes
                         exactly what the older build does. */}
                     <strong>{nameLegSteps === 1 ? 'Transferring' : 'Two steps'}</strong>
+                    {nameLegSteps === 1 ? null : (
                     <small>
-                      {nameLegSteps === 1
-                        ? 'The amount goes straight from your account into theirs, in one network transaction. Your balance keeps the rest.'
-                        : nameLegSteps === 3
+                      {nameLegSteps === 3
                           ? 'The whole of what your account holds of this comes out, then they are paid. Both are network transactions, so this takes longer than sending to an address. Your change comes back to you on its own afterwards — you do not have to wait for it.'
                           : 'The amount leaves your account, then it is paid into theirs. Both are network transactions, so this takes longer than sending to an address.'}
                     </small>
+                    )}
                   </dd>
                 </div>
               ) : null}
@@ -1916,10 +2033,12 @@ export default function SendSheet(props: SendSheetProps) {
                 <dt>Network</dt>
                 <dd>{networkId}</dd>
               </div>
-              <div className="mnhome-send-row">
-                <dt>Fee</dt>
-                <dd>{feeNote}</dd>
-              </div>
+              {feeNote !== null ? (
+                <div className="mnhome-send-row">
+                  <dt>Fee</dt>
+                  <dd>{feeNote}</dd>
+                </div>
+              ) : null}
             </dl>
 
             {feeChanged ? (

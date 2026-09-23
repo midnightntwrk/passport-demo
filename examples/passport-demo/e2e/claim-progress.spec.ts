@@ -98,7 +98,7 @@ test('the first step says what it usually costs, and counts the seconds it reall
   await expect(page.getByRole('heading', { name: /Welcome to Passport/i })).toBeVisible({
     timeout: 60_000,
   });
-  await page.getByRole('button', { name: 'Choose my name' }).click();
+  await page.getByRole('button', { name: /^Choose my (\.night )?name$/ }).click();
   await expect(page.getByText(/Choose your .night name/i)).toBeVisible({ timeout: 60_000 });
 
   await page.getByLabel('Your Midnight name').fill(NAME);

@@ -576,6 +576,7 @@ button.mnhome-support { font-family: inherit; cursor: pointer; }
   align-items: flex-end;
   justify-content: center;
   padding: 20px;
+  overflow-y: auto;
   background: var(--mn-scrim);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
@@ -584,6 +585,9 @@ button.mnhome-support { font-family: inherit; cursor: pointer; }
   width: min(100%, 420px);
   margin-bottom: max(8px, env(safe-area-inset-bottom));
   padding: 18px;
+  max-height: calc(100dvh - 40px - env(safe-area-inset-bottom));
+  overflow-y: auto;
+  overscroll-behavior: contain;
   border: var(--mn-hairline) solid var(--mn-border-hairline);
   border-radius: var(--mn-radius-lg);
   background: var(--mn-surface-raised);
@@ -1433,6 +1437,91 @@ button.mnhome-support { font-family: inherit; cursor: pointer; }
    opportunity in CSS, so "…5263" splits without this and reads as two things. */
 .mnhome-send-tail { white-space: nowrap; }
 
+/* Send and Receive: one compact visual family, with room for the real controls. */
+.mnhome-addr-modal.mnhome-surface-modal {
+  width: min(100%, 520px);
+  max-height: calc(100svh - 24px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 24px;
+  border-radius: 24px;
+}
+.mnhome-surface-modal .mnhome-surface-head {
+  position: relative;
+  align-items: flex-start;
+  min-height: 110px;
+  margin-bottom: 18px;
+}
+.mnhome-surface-heading { position: relative; z-index: 1; max-width: calc(100% - 142px); padding-top: 8px; }
+.mnhome-surface-eyebrow {
+  color: var(--mn-accent-ink);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.mnhome-surface-title {
+  margin: 8px 0 0;
+  color: var(--mn-text-primary);
+  font-family: var(--mn-font-display);
+  font-size: clamp(26px, 6vw, 34px);
+  font-weight: 750;
+  line-height: 1.1;
+  letter-spacing: -.04em;
+}
+.mnhome-surface-description {
+  margin: 10px 0 0;
+  color: var(--mn-text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.mnhome-surface-art {
+  position: absolute;
+  top: -12px;
+  right: 34px;
+  width: 112px;
+  height: 112px;
+  object-fit: contain;
+  pointer-events: none;
+}
+.mnhome-surface-modal .mnhome-addr-head > .mnhome-icon-button { position: relative; z-index: 2; }
+.mnhome-surface-modal .mnhome-send-form { gap: 20px; }
+.mnhome-surface-modal .mnhome-send-field { gap: 9px; }
+.mnhome-surface-modal .mnhome-send-input { min-height: 50px; border-radius: 12px; }
+.mnhome-surface-modal textarea.mnhome-send-input { min-height: 72px; }
+.mnhome-surface-modal .mnhome-send-hint { font-size: 12px; line-height: 1.55; }
+.mnhome-surface-modal .mnhome-send-primary { min-height: 52px; border-radius: 14px; font-size: 15px; }
+.mnhome-surface-modal .mnhome-send-fee { border-radius: 12px; }
+.mnhome-receive-modal .mnhome-recv-qr { margin-bottom: 20px; }
+.mnhome-receive-modal .mnhome-recv-qr-plate { border-radius: 18px; box-shadow: var(--mn-shadow-sm); }
+.mnhome-receive-modal .mnhome-recv-name { padding: 18px; border-radius: 16px; }
+.mnhome-receive-modal .mnhome-recv-name-value { font-size: 20px; }
+@media (max-width: 420px) {
+  .mnhome-addr-scrim { padding: 8px; }
+  .mnhome-addr-modal.mnhome-surface-modal { padding: 20px; max-height: calc(100svh - 16px); }
+  .mnhome-surface-art { width: 86px; height: 86px; top: -4px; right: 30px; }
+  .mnhome-surface-heading { max-width: calc(100% - 112px); }
+  .mnhome-surface-title { font-size: 25px; }
+  .mnhome-surface-modal .mnhome-surface-head { min-height: 96px; }
+}
+@media (max-height: 740px) {
+  .mnhome-surface-modal .mnhome-send-primary {
+    position: sticky;
+    bottom: 0;
+    z-index: 2;
+    box-shadow: 0 0 0 8px var(--mn-surface-raised), 0 -12px 22px var(--mn-surface-raised);
+  }
+  .mnhome-surface-modal .mnhome-send-primary:disabled {
+    opacity: 1;
+    color: var(--mn-text-muted);
+    background: var(--mn-surface-card);
+  }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .mnhome-surface-art { animation: mnhome-art-arrive .55s ease-out both; }
+  @keyframes mnhome-art-arrive { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+}
+
 /* The balance list's disclosure. A quiet, full-width control under the cards
    rather than a link: it is the only thing on the row, and a link that wide
    reads as a mis-styled button anyway. */
@@ -1493,3 +1582,59 @@ button.mnhome-support { font-family: inherit; cursor: pointer; }
   grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   gap: 10px;
 }
+
+/* THE WAY BACK, in one line under the account card (2026/09/22).
+   Deliberately quiet: it states a fact about a Passport that is already safe,
+   and anything louder would read as a warning about one that is not. The
+   offer for a Passport without one is a `.mnhome-support` control down on the
+   shelf beside the support link, which is where rare and deliberate things
+   live. See `src/lib/recoveryStep.ts`. */
+.mnhome-recovery {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: -4px 0 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--mn-text-secondary);
+}
+
+/* The opening balance, on its way (2026/09/22). */
+.mnhome-onway-card {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  margin: 12px 0 0;
+  padding: 12px 14px;
+  border: var(--mn-hairline) solid var(--mn-border-hairline);
+  border-radius: var(--mn-radius-md);
+  background: var(--mn-accent-soft);
+}
+.mnhome-onway-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  margin-top: 6px;
+  border-radius: 50%;
+  background: var(--mn-accent);
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--mn-accent) 45%, transparent);
+  animation: mnhome-onway-pulse 1.6s ease-out infinite;
+}
+@keyframes mnhome-onway-pulse {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--mn-accent) 45%, transparent); }
+  100% { box-shadow: 0 0 0 10px color-mix(in srgb, var(--mn-accent) 0%, transparent); }
+}
+@media (prefers-reduced-motion: reduce) { .mnhome-onway-dot { animation: none; } }
+.mnhome-onway-copy { display: grid; gap: 6px; min-width: 0; }
+.mnhome-onway-title { margin: 0; font-size: 14px; font-weight: 600; color: var(--mn-text-primary); }
+.mnhome-onway-pills { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; }
+.mnhome-onway-pill {
+  padding: 3px 10px;
+  border-radius: var(--mn-radius-pill);
+  background: var(--mn-surface-raised);
+  border: var(--mn-hairline) solid var(--mn-border-hairline);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--mn-accent-ink);
+}
+.mnhome-onway-hint { margin: 0; font-size: 12px; color: var(--mn-text-muted); }

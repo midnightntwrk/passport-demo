@@ -1,7 +1,7 @@
 @import './tokens.css';
 
 /* Apps screen and in-Passport app browser — prefix "mnapps-".
-   Base-inspired Midnight direction: one electric-blue accent, soft
+   Midnight atmospheric direction: one electric-blue accent, soft
    rounded cards on airy surfaces, diffuse vertical shadows, hairline
    borders, mobile-first at ~390px. Every colour, radius, and shadow
    comes from tokens.css.
@@ -908,4 +908,28 @@
   .mnapps-screen > * { max-width: 720px; }
   .mnapps-list { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
   .mnapps-head { text-align: left; }
+}
+
+/* The directory has one calm hero; app identities remain their own. */
+.mnapps-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 116px;
+  align-items: center;
+  gap: 8px;
+  min-height: 154px;
+  padding-bottom: 12px;
+}
+.mnapps-head-copy { min-width: 0; }
+.mnapps-hero-art { display: block; width: 116px; height: 116px; object-fit: contain; }
+.mnapps-head .mnapps-lede { max-width: 380px; }
+.mnapps-screen > .mnapps-search { margin-top: 12px; }
+.mnapps-section[aria-labelledby='mnapps-featured'] { padding: 20px; border: 1px solid var(--mn-border-hairline); }
+.mnapps-note { font-size: 12px; line-height: 1.55; }
+@media (min-width: 700px) {
+  .mnapps-head { grid-template-columns: minmax(0, 1fr) 210px; min-height: 232px; }
+  .mnapps-hero-art { width: 210px; height: 210px; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .mnapps-hero-art { animation: mnapps-art-arrive .55s ease-out both; }
+  @keyframes mnapps-art-arrive { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
 }

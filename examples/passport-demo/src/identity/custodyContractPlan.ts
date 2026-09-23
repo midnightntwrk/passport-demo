@@ -119,6 +119,18 @@ export function allCustodyCircuits(firstArm: K1Arm = 'k256'): string[] {
  * which is a rejection AFTER a sponsored fee has been booked. 25,000 leaves
  * room for the intent envelope and lands the thirty-circuit roster on three
  * waves, which is the shape stagenet accepted on 2026/09/16.
+ *
+ * NOT RAISED TO 27,000 (2026/09/22), and the reason is the evidence rather
+ * than caution. Raising it would pack a passkey's remaining twenty circuits
+ * into two waves instead of three, and was proposed on the strength of
+ * "29,484 bytes accepted on stagenet". That figure is the DEVNET one above.
+ * The largest maintenance update stagenet has taken is 24,811 bytes in and
+ * 27,998 balanced (the sponsor's journal, 2026/09/22 22:43:53), while two
+ * transactions balanced to ~31,500 bytes that same evening were never included
+ * ("not on chain 121 s after balancing"); a 27,000-verifier-byte wave balances
+ * to about 31,800. Until a drill lands one on stagenet this stays where the
+ * chain has shown it works — and since the waves after the first now run after
+ * Home ({@link custodyWavesPending}), the third wave costs nobody a second.
  */
 export const CUSTODY_VERIFIER_BYTE_BUDGET = 25_000;
 
@@ -294,6 +306,170 @@ export const CUSTODY_SEND_FAILED = 'That payment did not go through, and nothing
  */
 export const CUSTODY_SEND_UNCONFIRMED =
   'Your payment was sent and this Passport could not confirm it. Check your balance in a moment to see whether it left.';
+
+/**
+ * The payment was handed to the network and never reached the chain.
+ *
+ * Seen live 2026/09/22: a proved, balanced transaction the node took and the
+ * chain never recorded, and a Send sheet that waited on it for ever. The wait
+ * is now bounded ({@link CUSTODY_SUBMIT_WAIT_MS}); when it runs out the
+ * account itself is asked, and an account whose `auth_nonce` has not moved has
+ * not run the call — every gated call advances it — so nothing left it. The
+ * same signature can never be replayed once anything else moves the nonce.
+ */
+export const CUSTODY_SEND_NOT_SENT = "That payment didn't go through. Nothing left your Passport.";
+
+/** How long a submitted payment is waited on before the account is asked. */
+export const CUSTODY_SUBMIT_WAIT_MS = 3 * 60 * 1000;
+
+/**
+ * What a payment whose wait ran out is, from the account's own `auth_nonce`.
+ *
+ * `not-sent` only when the account was READ and its nonce is still the one
+ * the payment was signed against: the gated call advances it, so an unmoved
+ * nonce is an account that has not run the call. Anything else — a nonce that
+ * moved, or a read that failed — is `unknown`, and the hedged sentence stays.
+ */
+export function custodySubmitVerdict(input: {
+  readonly signedNonce: bigint;
+  readonly liveNonce: bigint | null;
+  /**
+   * What the indexer says of the transaction itself, when it was asked
+   * (2026/09/22): it ran, the chain refused it, it has no such transaction,
+   * or it could not be asked (null).
+   */
+  readonly onChain?: CustodyTxOutcome | null;
+}): 'landed' | 'refused' | 'not-sent' | 'unknown' {
+  /* THE CHAIN'S OWN ANSWER FIRST. A transaction the indexer holds is not a
+     question for the nonce at all. */
+  if (input.onChain === 'success') return 'landed';
+  if (input.onChain === 'failure') return 'refused';
+  /* An account whose nonce has not moved has not run the call. */
+  if (input.liveNonce !== null && input.liveNonce === input.signedNonce) return 'not-sent';
+  /* THE SIGNATURE IS BOUND TO THE NONCE IT WAS MADE AGAINST. A nonce that has
+     moved while the indexer says it has no such transaction is a nonce moved
+     by something else — and this payment can then never run at all. The same
+     answer when the account could not be read but the indexer could: a
+     transaction nobody has recorded after the whole wait is not one to leave
+     a balance at nought for. Either way the booking is only set aside, never
+     forgotten — see `k1CoinStore.ts`'s `reconcileK1Spends`. */
+  if (input.onChain === 'absent') return 'not-sent';
+  return 'unknown';
+}
+
+/**
+ * What the indexer says of one transaction: `success` it ran (wholly or in
+ * part), `failure` the chain refused it, `absent` there is no such
+ * transaction.
+ */
+export type CustodyTxOutcome = 'success' | 'failure' | 'absent';
+
+/**
+ * How long everything BEFORE a payment is handed over may take (2026/09/22).
+ *
+ * Opening the connection, reading the account, the approval, building the
+ * transaction and the recipient's claim: none of it sends anything, and none
+ * of it had a bound. Live on 2026/09/22 a Send sheet sat on "Proving and
+ * submitting" with no proof ever asked for. Past this the payment is told,
+ * definitely, that it did not go through — which is true: nothing was sent.
+ */
+export const CUSTODY_PREPARE_WAIT_MS = 2 * 60 * 1000;
+
+/**
+ * How long a payment taken back on a timeout is watched for a late landing.
+ * An hour: twice the sponsored transaction's own time to live
+ * ({@link CUSTODY_TX_TTL_MS} in the client), after which no transaction can be
+ * carrying it.
+ */
+export const CUSTODY_UNDONE_KEEP_MS = 60 * 60 * 1000;
+
+/**
+ * How many times a payment the node refused because the account changed under
+ * it is built again, and how long it waits first.
+ *
+ * `1010: Invalid Transaction: Custom error: 104` is the node refusing a call
+ * built against a state another transaction has just moved — the sponsor's own
+ * opening deposits meet it on every setup, and a payment meets it when the
+ * recipient's account is busy at the same moment. Nothing was applied, so
+ * building it again against the new state is safe; a block or two is the wait.
+ */
+export const CUSTODY_STATE_RACE_RETRIES = 2;
+export const CUSTODY_STATE_RACE_WAIT_MS = 20_000;
+
+/**
+ * Whether a failure is the node refusing the transaction outright — by the
+ * RPC's own words (`1010: Invalid Transaction`), or by the pool reporting it
+ * invalid, dropped, or usurped. In every one of these nothing was applied and
+ * nothing can be.
+ */
+export function custodyNodeRefused(cause: unknown): boolean {
+  return /Invalid Transaction|\b1010\b|Transaction(?:Invalid|Dropped|Usurped)Error/.test(
+    custodyFailureChainText(cause),
+  );
+}
+
+/** Whether the node refused because the account's state moved under the call. */
+export function custodyStateRace(cause: unknown): boolean {
+  return /Custom error:\s*104\b/.test(custodyFailureChainText(cause));
+}
+
+/** Effect's key for the cause a `FiberFailure` carries. */
+const FIBER_FAILURE_CAUSE = Symbol.for('effect/Runtime/FiberFailure/Cause');
+
+/**
+ * Every word a failure carries, down its whole chain of causes.
+ *
+ * WHY THE WHOLE CHAIN. The node's refusal reaches this app four layers deep —
+ * an Effect `FiberFailure`, around the wallet's `SubmissionError` ("Transaction
+ * submission error"), around the node client's own ("Transaction submission
+ * failed"), around the RPC error that actually says `1010: Invalid
+ * Transaction: Custom error: 104` (live, 2026/09/22). Reading the top message
+ * alone read nothing, so a refusal nothing had applied was reported as an
+ * error nobody could act on, and never built again.
+ */
+export function custodyFailureChainText(cause: unknown): string {
+  const parts: string[] = [];
+  const seen = new Set<object>();
+  const walk = (value: unknown, depth: number): void => {
+    if (typeof value === 'string') {
+      parts.push(value);
+      return;
+    }
+    if (value === null || typeof value !== 'object' || depth > 8 || seen.has(value)) return;
+    seen.add(value);
+    const view = value as Record<string | symbol, unknown>;
+    for (const key of ['_tag', 'name', 'message', 'data', 'code']) {
+      const field = view[key];
+      if (typeof field === 'string' || typeof field === 'number') parts.push(String(field));
+    }
+    for (const key of ['cause', 'error', 'failure', 'defect', 'left', 'right']) {
+      walk(view[key], depth + 1);
+    }
+    walk(view[FIBER_FAILURE_CAUSE], depth + 1);
+  };
+  walk(cause, 0);
+  return parts.join(' | ');
+}
+
+/**
+ * A piece of work, or `timeout` once `milliseconds` have passed. The work is
+ * not cancelled — nothing it waits on offers a way to — it is simply no longer
+ * waited for, and a caller that must stop it from acting LATER says so itself.
+ */
+export async function withinCustodyBound<T>(
+  work: Promise<T>,
+  milliseconds: number,
+): Promise<{ readonly kind: 'done'; readonly value: T } | { readonly kind: 'timeout' }> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<{ kind: 'timeout' }>((resolve) => {
+    timer = setTimeout(() => resolve({ kind: 'timeout' }), milliseconds);
+  });
+  try {
+    return await Promise.race([work.then((value) => ({ kind: 'done' as const, value })), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /** The `name` on the error carrying {@link CUSTODY_PROOF_NOT_BUILT}. */
 export const CUSTODY_PROOF_NOT_BUILT_NAME = 'CustodyProofNotBuilt';
@@ -553,7 +729,7 @@ export function hexToBytes(value: string): Uint8Array {
  * again. The only move from here is to start again, which is why it is a step
  * of its own rather than a flag the screens are free to ignore.
  */
-export type CustodyDeployStep = 'interrupted' | 'deploy' | 'waves' | 'activate' | 'ready';
+export type CustodyDeployStep = 'interrupted' | 'deploy' | 'activate' | 'ready';
 
 /**
  * Everything a reload needs to carry on, and nothing it does not.
@@ -591,15 +767,69 @@ export interface CustodyAccountRecord {
    * written before this field existed still parse.
    */
   readonly interrupted?: boolean;
+  /**
+   * `false` from the moment a setup starts, and `true` once the opening balance
+   * has been asked for AND answered — granted or refused, either is an answer.
+   *
+   * ABSENT IS NEITHER. Every record written before 2026/09/22 was funded inside
+   * its own setup press, so a missing field means "that was the old order, and
+   * it already happened" — and such a Passport is never asked for a second
+   * grant on open. See {@link custodyOpeningBalanceDue}.
+   */
+  readonly openingBalanceAsked?: boolean;
 }
 
-/** The step a record is waiting on. */
+/**
+ * The step a record is waiting on BEFORE the Passport can be used.
+ *
+ * THE WAVES ARE NOT A STEP OF IT ANY MORE (2026/09/22). Wave 1 — the deploy —
+ * carries the two deposits and every circuit of the device's own arm,
+ * activation included (`planCustodyWaves`), which is every circuit a Passport
+ * held by that arm ever calls. So the order is deploy, activate, use; waves 2
+ * and up install the OTHER arm and the grant circuits, and they are finished
+ * after Home, in the background, where {@link custodyWavesPending} says so.
+ * That took four dependent transactions (~70 s on stagenet) off the time to
+ * Home.
+ *
+ * `interrupted` is terminal only BEFORE activation. An account whose key is on
+ * is a working Passport whether or not its remaining waves can ever be signed,
+ * and telling its holder to start again would abandon money that is there.
+ */
 export function nextCustodyStep(record: CustodyAccountRecord): CustodyDeployStep {
-  if (record.interrupted === true) return 'interrupted';
+  if (record.interrupted === true && !record.activated) return 'interrupted';
   if (record.address === null) return 'deploy';
-  if (record.wavesDone < record.totalWaves) return 'waves';
   if (!record.activated) return 'activate';
   return 'ready';
+}
+
+/**
+ * Whether a usable Passport still has maintenance waves to land.
+ *
+ * Only after activation: before it, the waves are simply not the next thing.
+ * Never for an interrupted record, because the key that would sign them is
+ * gone and asking again would fail the same way every time.
+ */
+export function custodyWavesPending(record: CustodyAccountRecord): boolean {
+  if (record.interrupted === true) return false;
+  if (record.address === null || !record.activated) return false;
+  return record.wavesDone < record.totalWaves;
+}
+
+/**
+ * Whether the opening balance is still to be asked for.
+ *
+ * AFTER THE LAST WAVE, NOT AFTER ACTIVATION, and that is the chain's rule and
+ * not a preference. The service pays the grant in through midnight-js's
+ * `findDeployedContract`, which refuses a contract whose state does not carry
+ * EVERY circuit of the build it was handed (`verifyContractState`) — so a grant
+ * asked for between activation and the last wave is refused every time. The
+ * balance therefore arrives a wave or two after Home, and Home says so by
+ * showing it when it lands.
+ */
+export function custodyOpeningBalanceDue(record: CustodyAccountRecord): boolean {
+  if (record.address === null || !record.activated) return false;
+  if (record.openingBalanceAsked !== false) return false;
+  return record.wavesDone >= record.totalWaves;
 }
 
 /** Whether the account can take a gated call. */
@@ -687,8 +917,39 @@ export function loadCustodyRecord(
  */
 export function saveCustodyRecord(storage: CustodyStorage, record: CustodyAccountRecord): void {
   const records = loadCustodyRecords(storage);
-  records[custodyRecordKey(record.user, record.network)] = record;
+  const key = custodyRecordKey(record.user, record.network);
+  records[key] = custodyRecordMerged(records[key] ?? null, record);
   writeCustodyMap(storage, CUSTODY_STORAGE_KEY, records);
+}
+
+/**
+ * What to store when `next` is written over `stored`.
+ *
+ * THE FACTS THAT ONLY EVER MOVE FORWARD ARE NEVER WRITTEN BACK (2026/09/22).
+ * Since the waves land behind Home, two writers share one record: a payment
+ * reads it, waits for the account, and writes it back with its hash on; a wave
+ * lands in between and writes one more wave on. The payment's copy is from
+ * BEFORE the wave, so writing it whole put the wave count back — and a wave the
+ * record forgets is a wave the next run pays for again, or a way back held for
+ * ever. So for an ACTIVATED account at the same address, `wavesDone`,
+ * `activated`, and `openingBalanceAsked` keep the furthest either copy has
+ * reached, and the transaction hashes keep both. Before activation nothing is
+ * merged: a deploy that never landed is legitimately redone from the start.
+ */
+export function custodyRecordMerged(
+  stored: CustodyAccountRecord | null,
+  next: CustodyAccountRecord,
+): CustodyAccountRecord {
+  if (stored === null || stored.address === null || stored.address !== next.address) return next;
+  if (!stored.activated) return next;
+  const hashes = [...next.txHashes, ...stored.txHashes.filter((hash) => !next.txHashes.includes(hash))];
+  return {
+    ...next,
+    activated: true,
+    wavesDone: Math.max(stored.wavesDone, next.wavesDone),
+    txHashes: hashes,
+    ...(stored.openingBalanceAsked === true ? { openingBalanceAsked: true } : {}),
+  };
 }
 
 /**
@@ -783,6 +1044,7 @@ export function newCustodyRecord(options: {
     totalWaves: options.totalWaves,
     activated: false,
     txHashes: [],
+    openingBalanceAsked: false,
   };
 }
 
@@ -834,9 +1096,179 @@ export function resolveCustodyUseCounter(probe: CustodyCounterProbe, known?: big
 export const K1_ENROLMENT_UNCONFIRMED =
   'We could not confirm this sign-in can approve for a Passport. Try again.';
 
+/**
+ * The refusal for a step that needs the waves still landing behind Home.
+ *
+ * One plain sentence, none of the forbidden words, and TRUE: nothing is wrong,
+ * the Passport is finishing, and the same press works a minute later.
+ */
+export const CUSTODY_STILL_FINISHING =
+  'Your Passport is still finishing setting up. Try again in a minute.';
+
 /** The sentence a half-built Passport shows when its setup cannot be finished. */
 export const CUSTODY_SETUP_INTERRUPTED =
   'Setting up this Passport was interrupted. Start again to finish it.';
+
+/* -------------------------------------------------------------------------- */
+/* A setup whose answer was lost rather than refused                          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The sentence for a step that was sent and never answered for.
+ *
+ * IT IS NOT "SOMETHING WENT WRONG", AND THAT DISTINCTION COST SOMEBODY THEIR
+ * PASSPORT. Live, 2026/09/22: a setup's activation was proved, balanced, and
+ * INCLUDED — transaction `c01c7791…`, block 569232 — and the node's socket
+ * dropped while the tab was waiting on it (`1000:: Normal Closure`, the same
+ * intermittent as 2026/09/05 and 2026/09/07). The wait threw, the failure had
+ * no sentence of its own, and the reader was shown {@link CUSTODY_UNEXPECTED}
+ * over an account that was finished and working.
+ *
+ * A lost answer is not a failed transaction, so the sentence says the true
+ * thing — it is still being set up — and invites the one action that resolves
+ * it either way, because pressing again now READS THE CHAIN before it acts.
+ */
+export const CUSTODY_SETUP_UNCONFIRMED =
+  'Your Passport is being set up. If this takes more than a minute, press again.';
+
+/**
+ * The words the activation circuit asserts with when the account is already on.
+ *
+ * Spelled once, here, because two callers match on it and a copy in the second
+ * one is a copy that stays behind when this one is corrected.
+ */
+export const CUSTODY_ALREADY_ACTIVATED = 'already activated';
+
+/**
+ * Every message in a cause chain, lower-cased and joined.
+ *
+ * THE WHOLE CHAIN, because midnight-js re-throws what the runtime threw and the
+ * words that matter are at the bottom of it. The live failure arrived as
+ * `Unexpected error executing scoped transaction '<unnamed>': Error: failed
+ * assert: already activated`, with `ContractRuntimeError` and `CompactError`
+ * under it — the same words at every level, but nothing guarantees that, and a
+ * reader of the top message alone is one library release away from missing it.
+ *
+ * A chain that points back at itself is walked once. It is not a shape anybody
+ * writes on purpose; it is a shape a re-thrower can produce, and a loop here
+ * would hang the tab rather than fail it.
+ */
+function custodyCauseText(cause: unknown): string {
+  const seen = new Set<unknown>();
+  const parts: string[] = [];
+  let here: unknown = cause;
+  while (here instanceof Error && !seen.has(here)) {
+    seen.add(here);
+    parts.push(here.message);
+    here = (here as { cause?: unknown }).cause;
+  }
+  return parts.join(' ').toLowerCase();
+}
+
+/**
+ * Whether the circuit refused because the account is ALREADY turned on.
+ *
+ * THIS IS A SUCCESS AND NOT A FAILURE, and reading it as one is the whole of
+ * the defect above. The assert fires on `booted`, which nothing ever clears —
+ * so the account the caller is trying to activate is activated, by this very
+ * device, and the only honest thing to do with that answer is to record it and
+ * carry on to the name.
+ */
+export function custodyAlreadyActivated(cause: unknown): boolean {
+  return custodyCauseText(cause).includes(CUSTODY_ALREADY_ACTIVATED);
+}
+
+/**
+ * Whether the chain itself refused, as opposed to the answer being lost.
+ *
+ * THE DIFFERENCE DECIDES WHETHER WAITING IS WORTH ANYTHING. A refused proof or
+ * a failed assert is a verdict: the transaction will never land, and polling
+ * for two minutes only makes somebody wait two minutes for the same sentence.
+ * A dropped socket is not a verdict at all — the transaction may well be in a
+ * block — so the chain is the only thing that can settle it, and the caller
+ * asks it rather than guessing.
+ *
+ * `already activated` is excluded explicitly although it IS a failed assert:
+ * it is the one verdict that means the work is done, and it is handled by
+ * {@link custodyAlreadyActivated} before anything here is consulted. Saying so
+ * in the code as well as in the order of the callers is what keeps the two
+ * answers from ever being read as the same one.
+ */
+export function custodyChainRefused(cause: unknown): boolean {
+  if (isCustodyProofNotBuilt(cause)) return true;
+  const text = custodyCauseText(cause);
+  if (text.includes(CUSTODY_ALREADY_ACTIVATED)) return false;
+  return text.includes('failed assert');
+}
+
+/**
+ * The shapes a lost connection arrives in, as this stack has produced them.
+ *
+ * `socket` and `disconnected` are polkadot-js's, verbatim, from the outages of
+ * 2026/09/05 (`WebSocket is not connected`) and 2026/09/22 (`disconnected from
+ * wss://rpc.stagenet.shielded.tools/: 1000:: Normal Closure`); the rest are
+ * what `fetch` and an aborted request say when the indexer or the node goes
+ * away mid-question.
+ */
+const CUSTODY_LOST_ANSWER_SIGNS: readonly string[] = [
+  'socket',
+  'disconnected',
+  'network',
+  'connection',
+  'econnreset',
+  'fetch failed',
+  'failed to fetch',
+  'timed out',
+  'timeout',
+  'aborted',
+];
+
+/**
+ * Whether the ANSWER was lost, as opposed to the work having failed.
+ *
+ * A POSITIVE TEST, AND IT HAS TO BE. Treating every unrecognised failure as a
+ * lost answer would put two minutes of polling in front of every honest
+ * refusal this layer can produce — a proving service that is not deployed, a
+ * transaction that could not be built, a balance that would not cover a fee —
+ * and what a person would see is a spinner where a sentence used to be. So a
+ * lost answer must LOOK like one, and everything else is reported at once and
+ * unchanged.
+ *
+ * The cost of the choice is that a socket dropping in words nobody has seen
+ * yet falls back to the old behaviour rather than to the new one, which is the
+ * right way round: the old behaviour is a sentence, and the failure mode of the
+ * alternative is a wait nobody can explain.
+ */
+export function custodyAnswerWasLost(cause: unknown): boolean {
+  if (custodyAlreadyActivated(cause)) return false;
+  if (custodyChainRefused(cause)) return false;
+  const text = custodyCauseText(cause);
+  return CUSTODY_LOST_ANSWER_SIGNS.some((sign) => text.includes(sign));
+}
+
+/**
+ * The record for an account the chain shows is turned on.
+ *
+ * The device is optional because the two callers know different things. The
+ * setup driver holds the device it just activated with and files its point, so
+ * a later call can name the roster entry without a second ceremony; a screen
+ * healing a record on open holds no device at all — settling one costs an
+ * assertion — and must not overwrite a point that is already there with
+ * nothing.
+ */
+export function custodyActivatedRecord(
+  record: CustodyAccountRecord,
+  device: { readonly pk: { readonly x: bigint; readonly y: bigint } } | null,
+  txHash: string | null,
+): CustodyAccountRecord {
+  return {
+    ...record,
+    activated: true,
+    pkXHex: device === null ? record.pkXHex : device.pk.x.toString(16),
+    pkYHex: device === null ? record.pkYHex : device.pk.y.toString(16),
+    txHashes: txHash === null ? record.txHashes : [...record.txHashes, txHash],
+  };
+}
 
 /**
  * The two distinct messages enrolment asks a signed-in key to sign.
@@ -926,7 +1358,101 @@ const RUNTIME_ERROR_NAMES: ReadonlySet<string> = new Set([
  * and free of the vocabulary. Everything else becomes {@link CUSTODY_UNEXPECTED},
  * and the real cause goes to the console, where it is of use to somebody.
  */
+/* -------------------------------------------------------------------------- */
+/* A submission that went out on a dead connection                            */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The words a closed node socket arrives in, as this stack has produced them:
+ * the browser's own `WebSocket is already in CLOSING or CLOSED state`, and
+ * polkadot-js's `disconnected from wss://…: 1000:: Normal Closure` and
+ * `WebSocket is not connected` (2026/09/05, 2026/09/22, 2026/09/23).
+ */
+const CUSTODY_SOCKET_CLOSED_SIGNS: readonly string[] = [
+  'closing or closed state',
+  'websocket is not connected',
+  'disconnected from',
+  'normal closure',
+  'socket is closed',
+];
+
+/**
+ * Whether a submission failed because the connection to the node was closed.
+ *
+ * LIVE ON THE DEV SITE, 2026/09/23 01:53 UTC. The setup's deploy was balanced
+ * and never reached the chain; the node had closed the wallet's idle socket
+ * while the person typed their name, and the submit went out on it. A
+ * submission refused THAT way is not a verdict about the transaction, so the
+ * same balanced transaction can be offered again on a fresh connection.
+ */
+export function custodySocketClosed(cause: unknown): boolean {
+  const text = custodyCauseText(cause);
+  return CUSTODY_SOCKET_CLOSED_SIGNS.some((sign) => text.includes(sign));
+}
+
+/**
+ * Whether a failure is the wallet's submission failing rather than a verdict.
+ *
+ * midnight-js wraps a submit that failed for any reason in a `SubmissionError`
+ * whose message is "Transaction submission error" — which is what reached the
+ * screen, verbatim, on 2026/09/23. It is never painted; see
+ * {@link custodyFailureSentence}.
+ */
+export function custodySubmissionLost(cause: unknown): boolean {
+  for (let step: unknown = cause, depth = 0; step instanceof Error && depth < 8; depth += 1) {
+    if (step.name === 'SubmissionError') return true;
+    step = step.cause;
+  }
+  return custodyCauseText(cause).includes('transaction submission error') || custodySocketClosed(cause);
+}
+
+/** One route to the node: submit on it, and whether it is still open. */
+export interface CustodySubmitRoute<T> {
+  submit(tx: unknown): Promise<T>;
+  /** False only when the connection is KNOWN to be closed. */
+  isOpen(): boolean;
+}
+
+/**
+ * Submit an already-balanced transaction, on a live connection.
+ *
+ * TWO RULES, AND ONE RECONNECT BETWEEN THEM. A connection known to be closed
+ * is replaced before anything is sent on it. A submission refused because the
+ * socket closed under it is offered ONCE more, as the same bytes, on a fresh
+ * connection: a closed socket is not a verdict, the sponsor's booking for the
+ * balanced transaction lasts thirty minutes, and a transaction the node did in
+ * fact take cannot apply twice. Every other failure travels unchanged — so the
+ * send path's own rules about what a refusal means are untouched.
+ */
+export async function custodySubmitOnLiveConnection<T>(
+  tx: unknown,
+  current: CustodySubmitRoute<T>,
+  reconnect: () => Promise<CustodySubmitRoute<T>>,
+  log: (line: string) => void = () => undefined,
+): Promise<T> {
+  let route = current;
+  let reconnected = false;
+  if (!route.isOpen()) {
+    log('[account-custody] the connection to the network had closed; opening a fresh one before submitting');
+    route = await reconnect();
+    reconnected = true;
+  }
+  try {
+    return await route.submit(tx);
+  } catch (cause) {
+    if (reconnected || !custodySocketClosed(cause)) throw cause;
+    log('[account-custody] the connection closed under the submission; offering the same transaction on a fresh one');
+    const fresh = await reconnect();
+    return fresh.submit(tx);
+  }
+}
+
 export function custodyFailureSentence(cause: unknown): string {
+  /* A SUBMISSION THAT FAILED IS NOT OURS TO PAINT: "Transaction submission
+     error" reached a setup screen verbatim on 2026/09/23. The setup turns it
+     into its own resumable sentence before it gets here; anything else that
+     carries it gets the plain one. */
+  if (custodySubmissionLost(cause)) return CUSTODY_UNEXPECTED;
   const message = unwrapCustodyMessage(cause instanceof Error ? cause.message.trim() : '');
   if (message.length === 0 || message.length > 160) return CUSTODY_UNEXPECTED;
   /* A RUNTIME ERROR IS NEVER ONE OF OURS. Every refusal this layer writes is a

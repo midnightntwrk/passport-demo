@@ -33,6 +33,10 @@
   to { opacity: 1; transform: none; }
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .mnid-screen { animation: none; }
+}
+
 .mnid-bar {
   width: min(100% - 48px, 520px);
   min-height: 64px;

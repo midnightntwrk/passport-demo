@@ -129,7 +129,6 @@ export function EcosystemIdentity(props: EcosystemProps) {
     <>
       <article className={`mnid-card${embedded ? ' mnid-card-embedded' : ''}`}>
         <div className="mnid-card-head">
-          <p className="mnid-kicker">Your name on {NETWORK_LABELS[network]}</p>
           {record ? <StatusPill record={record} network={network} /> : null}
         </div>
 
@@ -267,6 +266,14 @@ function StatusPill({ record, network }: { record: AliasRecord; network: Passpor
       <span className="mnid-pill mnid-pill-registered">
         Registered on {NETWORK_LABELS[network]}
       </span>
+    )
+  }
+  if (record.status === 'queued' && record.registering === true) {
+    /* RUNNING, NOT WAITING: the claim is with the service right now, beside a
+       Passport whose key is already on. Still not "Registered" — that word is
+       kept for a name a sender can reach. */
+    return (
+      <span className="mnid-pill mnid-pill-queued">Being registered on {NETWORK_LABELS[network]}</span>
     )
   }
   if (record.status === 'queued') {

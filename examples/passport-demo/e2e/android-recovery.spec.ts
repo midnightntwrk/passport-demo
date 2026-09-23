@@ -176,7 +176,7 @@ async function enrol(h: Harness): Promise<string> {
   await expect(h.page.getByRole('heading', { name: /Welcome to Passport/i })).toBeVisible({
     timeout: 120_000,
   });
-  await h.page.getByRole('button', { name: 'Choose my name' }).click();
+  await h.page.getByRole('button', { name: /^Choose my (\.night )?name$/ }).click();
   await expect(h.page.getByText(/Choose your .night name/i)).toBeVisible({ timeout: 60_000 });
   const credentialId = await h.page.evaluate(() => localStorage.getItem('passport-last-passkey'));
   if (!credentialId) throw new Error('the enrolment recorded no credential');
@@ -334,7 +334,7 @@ test('a NEW passkey starts clean, and does not inherit the old name', async ({ b
   await expect(h.page.getByRole('heading', { name: /Welcome to Passport/i })).toBeVisible({
     timeout: 120_000,
   });
-  await h.page.getByRole('button', { name: 'Choose my name' }).click();
+  await h.page.getByRole('button', { name: /^Choose my (\.night )?name$/ }).click();
 
   /* THE FIX, ASSERTED. This is where the reviewer landed on a finished Home
      screen wearing `passportwalk` with no account behind it. A Passport that
@@ -388,7 +388,7 @@ test('"Set up a new Passport on this device" forgets this device\'s records and 
   await expect(h.page.getByRole('heading', { name: /Welcome to Passport/i })).toBeVisible({
     timeout: 120_000,
   });
-  await h.page.getByRole('button', { name: 'Choose my name' }).click();
+  await h.page.getByRole('button', { name: /^Choose my (\.night )?name$/ }).click();
   await expect(h.page.getByText(/Choose your .night name/i)).toBeVisible({ timeout: 60_000 });
 
   /* Everything this device held for the old credential is gone, and it is only
@@ -495,11 +495,10 @@ test('a name claimed before records named their passkey is given back to its own
   await expect(h.page.getByRole('button', { name: /Sign out of this Passport/i })).toBeVisible({
     timeout: 120_000,
   });
-  /* The greeting, which is the name being READ BACK by the credential that
-     just adopted it — not merely a record in storage. */
-  await expect(
-    h.page.getByRole('heading', { name: new RegExp(`${NAME}$`) }),
-  ).toBeVisible({ timeout: 30_000 });
+  /* The identity card, which is the name being READ BACK by the credential
+     that just adopted it — not merely a record in storage. Since the Home
+     redesign the greeting is the time of day and the name lives on the card. */
+  await expect(h.page.locator('.mnid-alias')).toHaveText(`${NAME}.night`, { timeout: 30_000 });
   /* AND IT COST NOTHING. The restore is silent by design, so handing a name
      back on it must not be the thing that raises a passkey prompt — least of
      all on a reload the user did not think of as a sign-in. */

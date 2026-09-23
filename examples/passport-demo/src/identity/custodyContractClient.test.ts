@@ -16,10 +16,13 @@ import {
   K1_ENROLMENT_UNCONFIRMED,
   CUSTODY_PROVER_UNAVAILABLE,
   CUSTODY_SETUP_INTERRUPTED,
+  CUSTODY_SETUP_UNCONFIRMED,
+  CUSTODY_STILL_FINISHING,
   custodyProofNotBuilt,
   hexToBytes,
   loadCustodyAuthorityKey,
   loadCustodyRecord,
+  saveCustodyRecord,
   type CustodyStorage,
 } from './custodyContractPlan.js';
 import {
@@ -34,8 +37,14 @@ import {
 } from './k1CoinStore.js';
 import {
   activateK1Device,
+  addDeviceK1,
+  custodyLiveSubmitProvider,
+  deployCustodyWaveOne,
+  finishCustodyWaves,
+  warmCustodySetup,
   appendChangeToInboxK1,
   appendInboxK1,
+  custodyAccountActivatedOnChain,
   deployCustodyAccount,
   custodyPrivateStateId,
   custodyProofProvider,
@@ -1140,6 +1149,292 @@ describe('activating the Dynamic key', () => {
   });
 });
 
+/* -------------------------------------------------------------------------- */
+/* The setup order of 2026/09/22: deploy, activate, Home — then the waves     */
+/* -------------------------------------------------------------------------- */
+
+describe('the deploy on its own, and the waves behind Home', () => {
+  it('lands the deploy alone, and says the moment the node has taken it', async () => {
+    const test = harness();
+    const { session, device } = deviceFake();
+    const submittedAt: { address: string; deployedYet: boolean }[] = [];
+    const result = await deployCustodyWaveOne(session, device, undefined, test.deps, {
+      onSubmitted: (address) => submittedAt.push({ address, deployedYet: test.submits === 1 }),
+    });
+
+    expect(test.submits).toBe(1);
+    expect(test.submitted[0].unprovenTx.deploys).toHaveLength(10);
+    expect(result.record.address).toBe(ADDRESS);
+    expect(result.record.wavesDone).toBe(1);
+    expect(result.record.totalWaves).toBe(3);
+    /* Once, with the address, straight after the submission. */
+    expect(submittedAt).toEqual([{ address: ADDRESS, deployedYet: true }]);
+  });
+
+  it('does not deploy again, or report a submission, once the deploy has landed', async () => {
+    const test = harness();
+    const { session, device } = deviceFake();
+    await deployCustodyWaveOne(session, device, undefined, test.deps);
+    const onSubmitted = vi.fn();
+    const again = await deployCustodyWaveOne(session, device, undefined, test.deps, { onSubmitted });
+    expect(test.submits).toBe(1);
+    expect(onSubmitted).not.toHaveBeenCalled();
+    expect(again.record.address).toBe(ADDRESS);
+  });
+
+  /* The name's claim is the caller's business. Its failure is not the deploy's. */
+  it('carries on when the caller cannot act on the submission', async () => {
+    const test = harness();
+    const { session, device } = deviceFake();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const result = await deployCustodyWaveOne(session, device, undefined, test.deps, {
+      onSubmitted: () => {
+        throw new Error('the caller broke');
+      },
+    });
+    expect(result.record.wavesDone).toBe(1);
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  /* THE ORDER THIS WHOLE CHANGE RESTS ON: activate after wave 1, and the waves
+     after that, without losing the activation from the record. */
+  it('activates after the deploy alone, then finishes the waves without undoing it', async () => {
+    const test = harness();
+    const { session, device } = deviceFake();
+    await deployCustodyWaveOne(session, device, undefined, test.deps);
+    const activated = await activateK1Device(session, device, undefined, test.deps);
+    expect(activated.record.activated).toBe(true);
+    expect(activated.record.wavesDone).toBe(1);
+    expect(test.calls.some((c) => c.circuit === 'activate_initial_device_with_k256')).toBe(true);
+
+    const phases: string[] = [];
+    const finished = await finishCustodyWaves(
+      session,
+      device,
+      (phase) => phases.push(`${phase.step}${phase.detail ? ` ${phase.detail}` : ''}`),
+      test.deps,
+    );
+    expect(test.submits).toBe(3);
+    expect(finished.record.wavesDone).toBe(3);
+    expect(finished.record.activated).toBe(true);
+    expect(phases).toEqual(['wallet', 'waves 2 of 3', 'waves 3 of 3']);
+    const stored = loadCustodyRecord(test.storage, k1UserKey(session), 'stagenet');
+    expect(stored?.activated).toBe(true);
+    expect(stored?.wavesDone).toBe(3);
+  });
+
+  it('finishes nothing twice: a second run finds the waves on chain', async () => {
+    const test = harness();
+    const { session, device } = deviceFake();
+    await deployCustodyWaveOne(session, device, undefined, test.deps);
+    await finishCustodyWaves(session, device, undefined, test.deps);
+    const after = test.submits;
+    await finishCustodyWaves(session, device, undefined, test.deps);
+    expect(test.submits).toBe(after);
+  });
+
+  /* The waves are custody transactions on the same account as a payment and
+     the inbox backfill, and two in flight at once is what the node refused
+     with 104. Each wave takes the account's lock — one run per wave, keyed as
+     the payments key it. */
+  it('takes the account lock for every wave, one wave at a time', async () => {
+    const test = harness();
+    const { session, device } = deviceFake();
+    const runs: string[] = [];
+    const deps: Partial<CustodyDeps> = {
+      ...test.deps,
+      accountLock: {
+        run: (account, _waitMs, work) => {
+          runs.push(account);
+          return work();
+        },
+      },
+    };
+    await deployCustodyWaveOne(session, device, undefined, deps);
+    await activateK1Device(session, device, undefined, deps);
+    await finishCustodyWaves(session, device, undefined, deps);
+    expect(runs).toEqual([`stagenet::${ADDRESS}`, `stagenet::${ADDRESS}`]);
+  });
+
+  /* THE RISK FLAGGED ON PR #92: a payment reads the record, waits for the
+     account while a wave lands, and writes its copy back. Its copy is from
+     before the wave, and must not put the wave count back. */
+  it('does not let a payment that read the record before a wave undo the wave', async () => {
+    const test = harness();
+    const { session, device } = deviceFake();
+    await deployCustodyWaveOne(session, device, undefined, test.deps);
+    await activateK1Device(session, device, undefined, test.deps);
+    const user = k1UserKey(session);
+    const before = loadCustodyRecord(test.storage, user, 'stagenet');
+    expect(before?.wavesDone).toBe(1);
+    const deps: Partial<CustodyDeps> = {
+      ...test.deps,
+      accountLock: {
+        run: async (_account, _waitMs, work) => {
+          const result = await work();
+          /* The payment that was queued behind this wave, finishing with the
+             copy it read before the wave: its own hash on, the old count. */
+          saveCustodyRecord(test.storage, {
+            ...(before as NonNullable<typeof before>),
+            txHashes: [...(before as NonNullable<typeof before>).txHashes, 'payment-hash'],
+          });
+          return result;
+        },
+      },
+    };
+    await finishCustodyWaves(session, device, undefined, deps);
+    const stored = loadCustodyRecord(test.storage, user, 'stagenet');
+    expect(stored?.wavesDone).toBe(3);
+    expect(stored?.activated).toBe(true);
+    expect(stored?.txHashes).toContain('payment-hash');
+  });
+
+  it('refuses to finish a Passport that was never deployed', async () => {
+    const test = harness();
+    const { session, device } = deviceFake();
+    await expect(finishCustodyWaves(session, device, undefined, test.deps)).rejects.toThrow(
+      'There is no Passport to finish yet.',
+    );
+  });
+
+  /* midnight-js refuses to open a contract missing ANY circuit of the build,
+     which would refuse the activation itself while the waves are behind Home.
+     The check is kept for the circuits the call uses, and only those. */
+  it('checks the keys of the circuits a call uses, and not the ones still landing', async () => {
+    const test = harness();
+    const { session, device } = deviceFake();
+    const asked: string[][] = [];
+    const base = test.deps.providers as NonNullable<CustodyDeps['providers']>;
+    const baseContracts = test.deps.contracts as NonNullable<CustodyDeps['contracts']>;
+    const deps: Partial<CustodyDeps> = {
+      ...test.deps,
+      providers: async (wallet, id, account) => ({
+        ...(await base(wallet, id, account)),
+        zkConfigProvider: {
+          getVerifierKey: (circuit: string) =>
+            Promise.resolve(allCustodyCircuits('k256').includes(circuit) ? new Uint8Array(2_400) : null),
+          getVerifierKeys(ids: readonly string[]) {
+            asked.push([...ids]);
+            return Promise.resolve(ids.map((id) => [id, new Uint8Array(1)]));
+          },
+        },
+      }),
+      contracts: async () => {
+        const api = await baseContracts();
+        return {
+          ...api,
+          findDeployedContract: async (providers: unknown, options: unknown) => {
+            /* What midnight-js does first: every circuit of the build. */
+            const zk = (providers as { zkConfigProvider: { getVerifierKeys(ids: string[]): Promise<unknown> } })
+              .zkConfigProvider;
+            await zk.getVerifierKeys(allCustodyCircuits('k256'));
+            return api.findDeployedContract(providers, options);
+          },
+        };
+      },
+    };
+    await deployCustodyWaveOne(session, device, undefined, deps);
+    await activateK1Device(session, device, undefined, deps);
+    expect(asked).toEqual([['activate_initial_device_with_k256']]);
+  });
+
+  /* A way back of the OTHER arm can approve nothing until the waves carrying
+     that arm have landed, so it is refused in words until they have. */
+  it('will not add a key of the other arm while the waves are still landing', async () => {
+    const test = harness();
+    const { session, device } = deviceFake();
+    await deployCustodyWaveOne(session, device, undefined, test.deps);
+    await activateK1Device(session, device, undefined, test.deps);
+    await expect(
+      addDeviceK1(session, device, { arm: 'jubjub', pk: device.pk }, undefined, test.deps),
+    ).rejects.toThrow(CUSTODY_STILL_FINISHING);
+  });
+});
+
+describe('the setup’s own seams', () => {
+  it('warms what it can before the press, and never fails for what it cannot', async () => {
+    const test = harness();
+    const calls: string[] = [];
+    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    await warmCustodySetup(
+      { user: 'alice', arm: 'jubjub' },
+      {
+        ...test.deps,
+        contractModule: () => {
+          calls.push('module');
+          return Promise.reject(new Error('offline'));
+        },
+        ledger: () => {
+          calls.push('ledger');
+          return (test.deps.ledger as NonNullable<CustodyDeps['ledger']>)();
+        },
+        contracts: () => {
+          calls.push('contracts');
+          return (test.deps.contracts as NonNullable<CustodyDeps['contracts']>)();
+        },
+        wallet: (user) => {
+          calls.push(`wallet:${user}`);
+          return (test.deps.wallet as NonNullable<CustodyDeps['wallet']>)(user);
+        },
+      },
+    );
+    /* NO WALLET, even with the user known (2026/09/23): an idle connection is
+       one the node closes, so it is opened at the press. */
+    expect(calls.sort()).toEqual(['contracts', 'ledger', 'module']);
+    /* No user yet — a passkey before its ceremony — and no wallet is built. */
+    calls.length = 0;
+    await warmCustodySetup(
+      { user: null, arm: 'jubjub' },
+      {
+        ...test.deps,
+        wallet: (user) => {
+          calls.push(`wallet:${user}`);
+          return (test.deps.wallet as NonNullable<CustodyDeps['wallet']>)(user);
+        },
+      },
+    );
+    expect(calls).toEqual([]);
+    info.mockRestore();
+  });
+});
+
+describe('a submission on a connection the network had closed', () => {
+  /* The provider every custody submit goes through: the deploy, the waves,
+     the activation, and a payment. The balanced transaction is offered again,
+     as the same object, on the provider a fresh connection builds. */
+  it('resubmits the same balanced transaction once on a fresh connection', async () => {
+    const tx = { balanced: 'bytes' };
+    const sent: unknown[] = [];
+    const closed = new Error('Transaction submission error', {
+      cause: new Error('WebSocket is already in CLOSING or CLOSED state'),
+    });
+    closed.name = 'SubmissionError';
+    const stale = {
+      getCoinPublicKey: () => 'coin',
+      submitTx: (next: unknown) => {
+        sent.push(next);
+        return Promise.reject(closed);
+      },
+    };
+    const reconnect = vi.fn(() =>
+      Promise.resolve({
+        submitTx: (next: unknown) => {
+          sent.push(next);
+          return Promise.resolve('tx-id');
+        },
+      }),
+    );
+    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    const live = custodyLiveSubmitProvider(stale, () => true, reconnect);
+    expect((live.getCoinPublicKey as () => string)()).toBe('coin');
+    await expect((live.submitTx as (tx: unknown) => Promise<unknown>)(tx)).resolves.toBe('tx-id');
+    expect(sent).toEqual([tx, tx]);
+    expect(reconnect).toHaveBeenCalledTimes(1);
+    info.mockRestore();
+  });
+});
+
 describe('a gated call', () => {
   async function readyPassport() {
     const test = harness();
@@ -1370,7 +1665,20 @@ describe('the private state a connection is opened with', () => {
   it('reads no result out of a call that returned none', async () => {
     const { test, session, device } = await readyPassport();
     test.chain.circuitResult = undefined;
-    const result = await appendInboxK1(session, device, new Uint8Array(192), undefined, test.deps);
+    /* Through `k1Call`'s own unbounded road, which is the one that reads a
+       circuit result — `appendInboxK1` is bounded now and reads none. */
+    const result = await k1Call(
+      session,
+      device,
+      {
+        operation: 'append_inbox',
+        args: [new Uint8Array(192)],
+        challenge: (pure, context, pk) =>
+          pure.challenge_append_inbox_with_k256({ bytes: context.contractAddress }, pk, new Uint8Array(192), context.authNonce),
+      },
+      undefined,
+      test.deps,
+    );
     expect(result.result).toBeUndefined();
   });
 });
@@ -1519,10 +1827,15 @@ describe('a setup that cannot be finished', () => {
         const real = await (deps.contracts as NonNullable<CustodyDeps['contracts']>)();
         return {
           ...real,
-          submitTx: (providers: unknown, options: unknown) => {
+          /* THE SUBMISSION, which since 2026/09/22 is `submitTxAsync`: the
+             waves submit and wait separately, so that a socket dropping under
+             the WAIT can be settled against the chain while a node that never
+             took the transaction is still reported at once. This fake is the
+             second of those, and it is the half that has to fail here. */
+          submitTxAsync: (providers: unknown, options: unknown) => {
             submits += 1;
             if (submits > 1) return Promise.reject(new Error('tab closed'));
-            return real.submitTx(providers, options);
+            return real.submitTxAsync(providers, options);
           },
         };
       },
@@ -1547,6 +1860,10 @@ describe('a setup that cannot be finished', () => {
   it('keeps the maintenance key where a reload can find it', async () => {
     const test = harness();
     const { session, device } = deviceFake();
+    /* STILL THE NODE'S OWN WORDS, AND ON THE SPOT. A submission that fails in
+       a way that is not a lost connection is reported straight away, exactly
+       as it always was: only a dropped socket is settled against the chain
+       (2026/09/22), and "tab closed" is not one. */
     await expect(
       deployCustodyAccount(session, device, undefined, oneWaveOnly(test.deps)),
     ).rejects.toThrow('tab closed');
@@ -1954,14 +2271,23 @@ describe('the shielded withdrawal', () => {
     expect(test.calls.filter((c) => c.circuit === 'withdraw_shielded_with_k256')).toHaveLength(10);
   });
 
-  /* A2, 2026/09/18. `proving-failed` is the service's code for "the prover ran
-     and declined", and a wrong candidate position is only ONE of the things
-     that reaches. A verifier key that does not match reaches it too, and
-     rotating on the code alone asked the holder to approve ten times for a
-     failure no position could fix — and then reported the same sentence it
-     would have reported after the first. The service's own words are what
-     decide it now. */
-  it('stops after one attempt when the refusal says nothing about a position', async () => {
+  /* A2, 2026/09/18, REVERSED ON 2026/09/21 — and the reversal is the point.
+     `proving-failed` is the service's code for "the prover ran and declined",
+     and a wrong candidate position is only ONE of the things that reaches it: a
+     verifier key that does not match reaches it too. The first answer to that
+     was to judge the service's own WORDS, and it could not work, because the
+     deployed sponsor redacts them to one fixed sentence on purpose — so the
+     predicate was false for every sponsored refusal and the retry could not
+     fire on the only route a Passport uses. A first payment out of a freshly
+     funded Passport stopped on the first refusal with `Public transcript input
+     mismatch` in the proof server's log, which is exactly the failure the
+     retry exists for.
+
+     So a verdict retries while there is somewhere to retry TO, and the bound
+     moves from the wording to the list: the reported window plus one sweep of
+     it, which is the same worst case the code had before the wording test was
+     reached for, and no more. The two drills below hold that bound. */
+  it('retries a verdict that says nothing about a position, and stops with the list', async () => {
     const { test, account, session, device } = await readyPassport({
       circuitResult: changeResult(60n),
       proofRefusals: 50,
@@ -1985,13 +2311,17 @@ describe('the shielded withdrawal', () => {
       ),
     ).rejects.toThrow('That payment could not be completed just now. Try again in a moment.');
 
-    expect(test.calls.filter((c) => c.circuit === 'withdraw_shielded_with_k256')).toHaveLength(1);
+    /* THE LIST IS THE BOUND: the two reported positions and the eight the
+       sweep adds around them, and not one attempt more — a verdict no position
+       could fix costs what it costs and then it is over. */
+    expect(test.calls.filter((c) => c.circuit === 'withdraw_shielded_with_k256')).toHaveLength(10);
     /* And the store is left canonical: the head is the position the chain
        offered first, and the list is intact for the next press. */
-    expect(k1CoinCandidates(account, COLOUR)).toEqual([5n, 6n]);
+    expect(k1CoinCandidates(account, COLOUR)[0]).toBe(5n);
+    expect(k1CoinCandidates(account, COLOUR)).toContain(6n);
   });
 
-  it('stops after one attempt when the refusal carried no words at all', async () => {
+  it('retries a refusal that carried no words at all, on the same bound', async () => {
     const { test, account, session, device } = await readyPassport({
       circuitResult: changeResult(60n),
       proofRefusals: 50,
@@ -2014,7 +2344,7 @@ describe('the shielded withdrawal', () => {
       ),
     ).rejects.toThrow('That payment could not be completed just now. Try again in a moment.');
 
-    expect(test.calls.filter((c) => c.circuit === 'withdraw_shielded_with_k256')).toHaveLength(1);
+    expect(test.calls.filter((c) => c.circuit === 'withdraw_shielded_with_k256')).toHaveLength(10);
   });
 
   it('gives up rather than looping when the candidates run out', async () => {
@@ -2478,5 +2808,246 @@ describe('the maintenance authority', () => {
     await deployCustodyAccount(null, signer, undefined, test.deps);
 
     expect(test.built.filter((entry) => entry[0] === 'retire')).toHaveLength(1);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* A step that landed and was never heard about                               */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * LIVE, 2026/09/22, AND EVERY CASE BELOW IS THAT ONE RUN.
+ *
+ * Somebody signed in, pressed "Create my Passport", and the setup ran the whole
+ * way: the deploy landed, the waves landed, `activate_initial_device_with_k256`
+ * was proved in 10.4 seconds, balanced, submitted, and INCLUDED — transaction
+ * `c01c7791168e0693135943fcd58afc344f452b641c02d4e29db65cb28b918e15`, block
+ * 569232. Then the node's socket closed under the wait (`1000:: Normal
+ * Closure`, the intermittent this network has had since 2026/09/05), the wait
+ * threw, and the screen said "Something went wrong. Try that again."
+ *
+ * The record was left saying `activated: false` over an account that was
+ * activated, so the next press re-ran the circuit and its dry run threw
+ * `failed assert: already activated` — the same generic sentence, for ever,
+ * about a Passport that worked. These drills hold each of the three answers
+ * that together make that unreachable: the chain is read before the circuit
+ * runs, the circuit's own refusal is read as success, and a lost answer is
+ * settled by asking the chain rather than by reporting a failure.
+ */
+
+/** The socket drop, in the node's own words. */
+const SOCKET_DROP = () =>
+  new Error('disconnected from wss://rpc.stagenet.shielded.tools/: 1000:: Normal Closure');
+
+/** A connection whose every circuit refuses with `cause`. */
+const activationThrows = (
+  deps: Partial<CustodyDeps>,
+  cause: () => Error,
+): Partial<CustodyDeps> => ({
+  ...deps,
+  contracts: async () => {
+    const real = await (deps.contracts as NonNullable<CustodyDeps['contracts']>)();
+    return {
+      ...real,
+      findDeployedContract: () =>
+        Promise.resolve({
+          callTx: new Proxy({}, { get: () => () => Promise.reject(cause()) }),
+        }),
+    };
+  },
+});
+
+/**
+ * A node that TAKES the transaction and a socket that drops under the wait.
+ *
+ * The distinction this holds is the one the split exists for: the submission
+ * itself succeeds and the chain applies what it was given — only the answer is
+ * lost. A fake that failed the submission would be drilling the other case,
+ * which is reported at once and always was.
+ */
+const answerLostUnderTheWait = (deps: Partial<CustodyDeps>): Partial<CustodyDeps> => ({
+  ...deps,
+  providers: async (...args: Parameters<NonNullable<CustodyDeps['providers']>>) => {
+    const providers = await (deps.providers as NonNullable<CustodyDeps['providers']>)(...args);
+    return {
+      ...providers,
+      publicDataProvider: {
+        ...(providers.publicDataProvider as Record<string, unknown>),
+        watchForTxData: () => Promise.reject(SOCKET_DROP()),
+      },
+    };
+  },
+});
+
+/** A deployed, un-activated Passport, with the chain showing it turned on. */
+async function alreadyOnChain(deps?: Partial<CustodyDeps>) {
+  const test = harness();
+  const { session, device } = deviceFake();
+  await deployCustodyAccount(session, device, undefined, deps ?? test.deps);
+  /* The activation landed; the answer did not. What the chain shows is a
+     device on the roster and `booted` true — which is what `moduleFake` reads
+     off `chain.devices`. */
+  test.chain.devices.add('the-device-that-landed');
+  return { test, session, device };
+}
+
+describe('an activation whose confirmation was lost', () => {
+  it('asks the chain before it acts, and never runs the circuit twice', async () => {
+    const { test, session, device } = await alreadyOnChain();
+    const before = test.calls.length;
+
+    const done = await activateK1Device(session, device, undefined, test.deps);
+
+    expect(test.calls.slice(before)).toHaveLength(0);
+    expect(done.record.activated).toBe(true);
+    expect(loadCustodyRecord(test.storage, k1UserKey(session), 'stagenet')?.activated).toBe(true);
+  });
+
+  it('reads “already activated” from the circuit as done, not as a failure', async () => {
+    const test = harness();
+    const { session, device } = deviceFake();
+    await deployCustodyAccount(session, device, undefined, test.deps);
+    /* The chain cannot be read at all — the indexer is the thing that is
+       down — so the only answer available is the circuit's own, which is the
+       exact words the live dry run threw. */
+    const deps = activationThrows(test.deps, () =>
+      new Error(
+        "Unexpected error executing scoped transaction '<unnamed>': Error: failed assert: already activated",
+      ),
+    );
+
+    const done = await activateK1Device(session, device, undefined, deps);
+    expect(done.record.activated).toBe(true);
+    expect(loadCustodyRecord(test.storage, k1UserKey(session), 'stagenet')?.activated).toBe(true);
+  });
+
+  it('settles a dropped socket against the chain rather than reporting a failure', async () => {
+    const test = harness();
+    const { session, device } = deviceFake();
+    await deployCustodyAccount(session, device, undefined, test.deps);
+    /* THE LIVE SHAPE, EXACTLY: the transaction is included and the socket then
+       closes under the wait. The chain is not booted when the call begins —
+       so the read before the circuit lets it run — and it is booted by the
+       time the answer is asked for. */
+    const deps = activationThrows(test.deps, () => {
+      test.chain.devices.add('the-device-that-landed');
+      return SOCKET_DROP();
+    });
+    const phases: string[] = [];
+
+    const done = await activateK1Device(
+      session,
+      device,
+      (phase) => phases.push(phase.step),
+      deps,
+    );
+
+    expect(done.record.activated).toBe(true);
+    expect(loadCustodyRecord(test.storage, k1UserKey(session), 'stagenet')?.activated).toBe(true);
+    /* AND THE HINT STAYED HONEST WHILE IT WAITED. "Confirming" is what is
+       happening; a failure sentence would not have been. */
+    expect(phases).toContain('confirm');
+  });
+
+  it('says the Passport is being set up when the chain never answers', async () => {
+    const test = harness();
+    const { session, device } = deviceFake();
+    await deployCustodyAccount(session, device, undefined, test.deps);
+    /* Nothing on the roster: the activation really did not land. */
+    await expect(
+      activateK1Device(session, device, undefined, activationThrows(test.deps, SOCKET_DROP)),
+    ).rejects.toThrow(CUSTODY_SETUP_UNCONFIRMED);
+    expect(loadCustodyRecord(test.storage, k1UserKey(session), 'stagenet')?.activated).toBe(false);
+  });
+
+  /* A VERDICT IS NOT WAITED ON. Two minutes of polling buys nothing against an
+     assert that will fire again, and it is two minutes somebody spends
+     watching a spinner for the sentence they were going to get anyway. */
+  it('reports a real refusal at once rather than polling for two minutes', async () => {
+    const test = harness();
+    const { session, device } = deviceFake();
+    await deployCustodyAccount(session, device, undefined, test.deps);
+    const deps = activationThrows(test.deps, () =>
+      new Error('failed assert: device key has small order'),
+    );
+    await expect(activateK1Device(session, device, undefined, deps)).rejects.toThrow(
+      /small order/,
+    );
+  });
+});
+
+describe('a wave whose confirmation was lost', () => {
+  /* ONE DRILL FOR BOTH WAVES, because the whole setup runs under a socket that
+     drops on every wait: the deploy is settled by asking whether there is a
+     contract at the address, and each maintenance update by the authority
+     counter it was built against. What comes out is a finished Passport and
+     ONE account, not two. */
+  it('finishes a setup whose every answer was lost under the wait', async () => {
+    const test = harness();
+    const { session, device } = deviceFake();
+
+    const done = await deployCustodyAccount(
+      session,
+      device,
+      undefined,
+      answerLostUnderTheWait(test.deps),
+    );
+    expect(done.record.address).not.toBeNull();
+    expect(done.record.wavesDone).toBe(3);
+    expect(loadCustodyRecord(test.storage, k1UserKey(session), 'stagenet')?.wavesDone).toBe(3);
+    expect(test.built.filter((entry) => entry[0] === 'deploy')).toHaveLength(1);
+  });
+
+  /* AND A SUBMISSION THAT NEVER LANDED IS STILL REPORTED AT ONCE. The node did
+     not take the transaction, so there is nothing for the chain to have an
+     opinion about and nothing to wait for. */
+  it('reports a failure from before the node took the transaction straight away', async () => {
+    const test = harness();
+    const { session, device } = deviceFake();
+    const deps: Partial<CustodyDeps> = {
+      ...test.deps,
+      contracts: async () => {
+        const real = await (test.deps.contracts as NonNullable<CustodyDeps['contracts']>)();
+        return { ...real, submitTxAsync: () => Promise.reject(SOCKET_DROP()) };
+      },
+    };
+    await expect(deployCustodyAccount(session, device, undefined, deps)).rejects.toThrow(
+      /Normal Closure/,
+    );
+  });
+});
+
+describe('asking the chain whether a Passport is already on', () => {
+  it('answers false before there is anything to ask about', async () => {
+    const test = harness();
+    const { session, device } = deviceFake();
+    await deployCustodyAccount(session, device, undefined, test.deps);
+    const record = loadCustodyRecord(test.storage, k1UserKey(session), 'stagenet');
+    expect(await custodyAccountActivatedOnChain({ ...record!, address: null }, test.deps)).toBe(
+      false,
+    );
+  });
+
+  it('answers what the account itself says, without any ceremony', async () => {
+    const { test, session } = await alreadyOnChain();
+    const record = loadCustodyRecord(test.storage, k1UserKey(session), 'stagenet');
+    expect(await custodyAccountActivatedOnChain(record!, test.deps)).toBe(true);
+  });
+
+  it('answers null when the chain cannot be asked', async () => {
+    const test = harness();
+    const { session, device } = deviceFake();
+    await deployCustodyAccount(session, device, undefined, test.deps);
+    const record = loadCustodyRecord(test.storage, k1UserKey(session), 'stagenet');
+    const deps: Partial<CustodyDeps> = {
+      ...test.deps,
+      providers: async (...args: Parameters<NonNullable<CustodyDeps['providers']>>) => ({
+        ...(await (test.deps.providers as NonNullable<CustodyDeps['providers']>)(...args)),
+        publicDataProvider: {
+          queryContractState: () => Promise.reject(new Error('the indexer is down')),
+        },
+      }),
+    };
+    expect(await custodyAccountActivatedOnChain(record!, deps)).toBeNull();
   });
 });

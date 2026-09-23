@@ -6,6 +6,12 @@ import {
   forgetCustodyAuthorityKey,
   hexToBytes,
   custodyAccountIsUsable,
+  custodyOpeningBalanceDue,
+  custodyRecordMerged,
+  custodySocketClosed,
+  custodySubmissionLost,
+  custodySubmitOnLiveConnection,
+  custodyWavesPending,
   k1ArmCircuits,
   k1EnrolmentChallenges,
   custodyExplorerLink,
@@ -26,7 +32,12 @@ import {
   CUSTODY_SHARED_CIRCUITS,
   CUSTODY_STORAGE_KEY,
   CUSTODY_PROOF_NOT_BUILT,
+  CUSTODY_SETUP_UNCONFIRMED,
   CUSTODY_UNEXPECTED,
+  custodyActivatedRecord,
+  custodyAlreadyActivated,
+  custodyAnswerWasLost,
+  custodyChainRefused,
   custodyProofNotBuilt,
   custodyProofNotBuiltDetail,
   isCustodyProofNotBuilt,
@@ -137,6 +148,35 @@ describe('the wave plan', () => {
     /* The property that matters: the account is activatable after wave 1. */
     expect(waves[0]?.circuits).toContain('activate_initial_device_with_k256');
     expect(waves[0]?.circuits).toContain('append_inbox_with_k256');
+  });
+
+  /* WHAT MAKES "ACTIVATE, THEN HOME, THEN THE WAVES" SAFE. Every circuit a
+     passkey Passport's own code paths call — the activation, the three
+     withdrawals, the inbox append, the key rotation, and adding or removing a
+     device — plus both permissionless deposits a payer calls into it, is in
+     wave 1. Nothing a passkey Passport does waits on waves 2 and up; they carry
+     the k256 arm (a sign-in's way back) and the grant circuits, and nothing
+     calls a grant circuit. */
+  it('puts every circuit a passkey Passport calls into the deploy', () => {
+    const waveOne = new Set(planCustodyWaves(evenSizes(), 'jubjub', false)[0]?.circuits);
+    for (const circuit of [
+      'deposit_unshielded',
+      'deposit_shielded',
+      'activate_initial_device_with_jubjub',
+      'withdraw_unshielded_with_jubjub',
+      'withdraw_shielded_with_jubjub',
+      'withdraw_shielded_to_contract_with_jubjub',
+      'append_inbox_with_jubjub',
+      'rotate_enc_key_with_jubjub',
+      'add_device_with_jubjub',
+      'remove_device_with_jubjub',
+    ]) {
+      expect(waveOne.has(circuit), circuit).toBe(true);
+    }
+    expect(waveOne.size).toBe(10);
+    /* And no k256 circuit: a sign-in added as a way back can do nothing until
+       the waves are in, which is why that step waits for them. */
+    expect([...waveOne].some((circuit) => circuit.endsWith('_k256'))).toBe(false);
   });
 
   it('plans the measured roster as three waves and covers every circuit', () => {
@@ -281,14 +321,81 @@ describe('the deploy record', () => {
     expect(custodyAccountIsUsable(record)).toBe(false);
   });
 
-  it('walks deploy → waves → activate → ready', () => {
+  /* THE ORDER OF 2026/09/22: deploy, activate, use — and the rest of the
+     roster after Home. Wave 1 carries every circuit the device's arm calls, so
+     an activated account is usable with waves still to land. */
+  it('walks deploy → activate → ready, with the waves after it', () => {
     const deployed = { ...base(), address: 'aa'.repeat(32), wavesDone: 1 };
-    expect(nextCustodyStep(deployed)).toBe('waves');
-    const wavedIn = { ...deployed, wavesDone: 3 };
-    expect(nextCustodyStep(wavedIn)).toBe('activate');
-    const ready = { ...wavedIn, activated: true };
-    expect(nextCustodyStep(ready)).toBe('ready');
-    expect(custodyAccountIsUsable(ready)).toBe(true);
+    expect(nextCustodyStep(deployed)).toBe('activate');
+    expect(custodyWavesPending(deployed)).toBe(false);
+    const activated = { ...deployed, activated: true };
+    expect(nextCustodyStep(activated)).toBe('ready');
+    expect(custodyAccountIsUsable(activated)).toBe(true);
+    expect(custodyWavesPending(activated)).toBe(true);
+    const complete = { ...activated, wavesDone: 3 };
+    expect(nextCustodyStep(complete)).toBe('ready');
+    expect(custodyWavesPending(complete)).toBe(false);
+  });
+
+  it('has no waves pending before there is an account to put them on', () => {
+    expect(custodyWavesPending(base())).toBe(false);
+    expect(custodyWavesPending({ ...base(), activated: true })).toBe(false);
+  });
+
+  it('asks for the opening balance once, after the last wave', () => {
+    const activated = { ...base(), address: 'aa'.repeat(32), wavesDone: 1, activated: true };
+    expect(base().openingBalanceAsked).toBe(false);
+    /* Before the last wave the service cannot open the account at all. */
+    expect(custodyOpeningBalanceDue(activated)).toBe(false);
+    const complete = { ...activated, wavesDone: 3 };
+    expect(custodyOpeningBalanceDue(complete)).toBe(true);
+    expect(custodyOpeningBalanceDue({ ...complete, openingBalanceAsked: true })).toBe(false);
+    expect(custodyOpeningBalanceDue({ ...complete, activated: false })).toBe(false);
+    expect(custodyOpeningBalanceDue({ ...complete, address: null })).toBe(false);
+  });
+
+  /* A record from before the reorder was funded inside its own press. Absent
+     is "already happened", so an old Passport is never asked a second time. */
+  it('never asks again for a Passport set up the old way', () => {
+    const { openingBalanceAsked: _dropped, ...legacy } = {
+      ...base(),
+      address: 'aa'.repeat(32),
+      wavesDone: 3,
+      activated: true,
+    };
+    expect(custodyOpeningBalanceDue(legacy)).toBe(false);
+  });
+
+  /* Two writers share one record behind Home: a payment's copy read before a
+     wave must not put the wave count, the activation, or the balance flag
+     back — and a deploy that never landed must still be redone from scratch. */
+  it('never writes the facts that only move forward back over an activated account', () => {
+    const on: CustodyAccountRecord = {
+      ...base(),
+      address: 'aa'.repeat(32),
+      activated: true,
+      wavesDone: 3,
+      openingBalanceAsked: true,
+      txHashes: ['deploy', 'wave'],
+    };
+    const stale = { ...on, wavesDone: 1, activated: false, openingBalanceAsked: false, txHashes: ['deploy', 'pay'] };
+    expect(custodyRecordMerged(on, stale)).toMatchObject({
+      wavesDone: 3,
+      activated: true,
+      openingBalanceAsked: true,
+      txHashes: ['deploy', 'pay', 'wave'],
+    });
+    expect(custodyRecordMerged({ ...on, openingBalanceAsked: false }, stale).openingBalanceAsked).toBe(false);
+    /* Nothing stored, another address, no address, or not yet activated: as written. */
+    expect(custodyRecordMerged(null, stale)).toBe(stale);
+    expect(custodyRecordMerged({ ...on, address: 'bb'.repeat(32) }, stale)).toBe(stale);
+    expect(custodyRecordMerged({ ...on, address: null }, stale)).toBe(stale);
+    expect(custodyRecordMerged({ ...on, activated: false }, stale)).toBe(stale);
+    /* And through the store. */
+    const storage = STORAGE();
+    saveCustodyRecord(storage, on);
+    saveCustodyRecord(storage, stale);
+    expect(loadCustodyRecord(storage, on.user, on.network)?.wavesDone).toBe(3);
   });
 
   it('keys one account per user per network', () => {
@@ -435,6 +542,22 @@ describe('the resume rule', () => {
     };
     expect(nextCustodyStep(half)).toBe('interrupted');
     expect(custodyAccountIsUsable(half)).toBe(false);
+    expect(custodyWavesPending(half)).toBe(false);
+  });
+
+  /* An account whose key is ON is a working Passport, whether or not its
+     remaining waves can ever be signed. Start-again would abandon money. */
+  it('is not terminal once the key is on, and stops asking for the waves', () => {
+    const on: CustodyAccountRecord = {
+      ...newCustodyRecord({ user: 'u', network: 'n', privateStateId: 'p', saltHex: '', totalWaves: 3 }),
+      address: 'aa'.repeat(32),
+      wavesDone: 1,
+      activated: true,
+      interrupted: true,
+    };
+    expect(nextCustodyStep(on)).toBe('ready');
+    expect(custodyAccountIsUsable(on)).toBe(true);
+    expect(custodyWavesPending(on)).toBe(false);
   });
 });
 
@@ -736,5 +859,327 @@ describe("a library's preamble around our own sentence", () => {
     expect(custodyFailureSentence(new Error('There is nothing of that kind in this Passport to send.'))).toBe(
       'There is nothing of that kind in this Passport to send.',
     );
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* A step whose answer was lost, and one the chain has already done           */
+/* -------------------------------------------------------------------------- */
+
+describe('an activation the chain has already performed', () => {
+  /** The live failure, verbatim, as midnight-js handed it to the screen. */
+  const LIVE =
+    "Unexpected error executing scoped transaction '<unnamed>': Error: failed assert: already activated";
+
+  it('reads the circuit’s own words as done rather than as broken', () => {
+    expect(custodyAlreadyActivated(new Error(LIVE))).toBe(true);
+    /* And it is emphatically NOT a verdict to give up on. */
+    expect(custodyChainRefused(new Error(LIVE))).toBe(false);
+  });
+
+  it('finds the words wherever in the cause chain they are', () => {
+    const inner = new Error('failed assert: already activated');
+    const outer = new Error('Error executing circuit', { cause: inner });
+    expect(custodyAlreadyActivated(outer)).toBe(true);
+  });
+
+  it('says nothing about a failure that is not one', () => {
+    expect(custodyAlreadyActivated(new Error('the socket closed'))).toBe(false);
+    expect(custodyAlreadyActivated('not an error at all')).toBe(false);
+  });
+
+  /* A CHAIN THAT POINTS AT ITSELF is walked once rather than for ever. It is
+     not a shape anybody writes; it is one a re-thrower can build. */
+  it('walks a cause chain that loops back on itself exactly once', () => {
+    const looped = new Error('round and round');
+    (looped as { cause?: unknown }).cause = looped;
+    expect(custodyAlreadyActivated(looped)).toBe(false);
+  });
+});
+
+describe('a verdict, as against a lost answer', () => {
+  it('calls a failed assert a verdict', () => {
+    expect(custodyChainRefused(new Error('failed assert: device key has small order'))).toBe(true);
+  });
+
+  it('calls a refused proof a verdict', () => {
+    expect(custodyChainRefused(custodyProofNotBuilt('unsatisfiable constraint system'))).toBe(true);
+  });
+
+  /* THE ONE THAT MATTERS. A dropped socket is not the chain saying no, so the
+     caller is free to go and ask the chain what actually happened. */
+  it('calls a dropped socket nothing of the kind', () => {
+    expect(
+      custodyChainRefused(
+        new Error('disconnected from wss://rpc.stagenet.shielded.tools/: 1000:: Normal Closure'),
+      ),
+    ).toBe(false);
+    expect(custodyChainRefused(undefined)).toBe(false);
+  });
+});
+
+describe('the sentence for a step that was sent and not answered for', () => {
+  it('is not the generic one, and is plain enough to be painted', () => {
+    expect(CUSTODY_SETUP_UNCONFIRMED).not.toBe(CUSTODY_UNEXPECTED);
+    expect(custodyFailureSentence(new Error(CUSTODY_SETUP_UNCONFIRMED))).toBe(
+      CUSTODY_SETUP_UNCONFIRMED,
+    );
+  });
+
+  it('says none of the words this demo keeps off a screen', () => {
+    const lower = CUSTODY_SETUP_UNCONFIRMED.toLowerCase();
+    for (const forbidden of [
+      'contract',
+      'registry',
+      'indexer',
+      'resolver',
+      'sponsor',
+      'dust',
+      'wallet address',
+      'sdk',
+      'dynamic',
+    ]) {
+      expect(lower).not.toContain(forbidden);
+    }
+  });
+});
+
+describe('the record for an account the chain shows is on', () => {
+  const half = (): CustodyAccountRecord => ({
+    ...newCustodyRecord({ user: 'u', network: 'n', privateStateId: 'p', saltHex: '', totalWaves: 3 }),
+    address: 'aa'.repeat(32),
+    wavesDone: 3,
+    txHashes: ['first'],
+  });
+
+  it('marks it done, files the device’s point, and keeps the hash', () => {
+    const next = custodyActivatedRecord(half(), { pk: { x: 0x1fn, y: 0x2an } }, 'second');
+    expect(next.activated).toBe(true);
+    expect(nextCustodyStep(next)).toBe('ready');
+    expect(next.pkXHex).toBe('1f');
+    expect(next.pkYHex).toBe('2a');
+    expect(next.txHashes).toEqual(['first', 'second']);
+  });
+
+  /* A SCREEN HEALING A RECORD HOLDS NO DEVICE. Settling one costs an
+     assertion, and a point already on the record must not be overwritten with
+     nothing merely because this caller could not be bothered to ask for one. */
+  it('leaves the point alone when the caller has no device to name', () => {
+    const before = { ...half(), pkXHex: 'ab', pkYHex: 'cd' };
+    const next = custodyActivatedRecord(before, null, null);
+    expect(next.activated).toBe(true);
+    expect(next.pkXHex).toBe('ab');
+    expect(next.pkYHex).toBe('cd');
+    expect(next.txHashes).toEqual(['first']);
+  });
+});
+
+describe('an answer that was lost, as against work that failed', () => {
+  /* THE ONE THAT HAPPENED, twice over: polkadot-js's own words on 2026/09/05
+     and on the night this was fixed. */
+  it('recognises the socket drops this network actually produces', () => {
+    expect(
+      custodyAnswerWasLost(
+        new Error('disconnected from wss://rpc.stagenet.shielded.tools/: 1000:: Normal Closure'),
+      ),
+    ).toBe(true);
+    expect(custodyAnswerWasLost(new Error('WebSocket is not connected'))).toBe(true);
+    expect(custodyAnswerWasLost(new Error('the request timed out'))).toBe(true);
+  });
+
+  /* AND IT IS A POSITIVE TEST, which is the whole of why it exists. Reading
+     every unrecognised failure as a lost answer would put two minutes of
+     polling in front of every honest refusal — a spinner where a sentence
+     used to be. */
+  it('leaves an ordinary failure to be reported at once', () => {
+    expect(custodyAnswerWasLost(new Error('tab closed'))).toBe(false);
+    expect(custodyAnswerWasLost(new Error('there was not enough to cover this'))).toBe(false);
+    expect(custodyAnswerWasLost(null)).toBe(false);
+  });
+
+  it('never waits on a verdict, whichever kind it is', () => {
+    expect(custodyAnswerWasLost(new Error('failed assert: already activated'))).toBe(false);
+    expect(custodyAnswerWasLost(new Error('failed assert: device key has small order'))).toBe(
+      false,
+    );
+    expect(custodyAnswerWasLost(custodyProofNotBuilt('the socket to the prover closed'))).toBe(
+      false,
+    );
+  });
+});
+
+describe('custodySubmitVerdict — a payment whose wait ran out', () => {
+  it('is not sent only when the account was read and its nonce has not moved', async () => {
+    const { custodySubmitVerdict, CUSTODY_SEND_NOT_SENT } = await import('./custodyContractPlan.js');
+    expect(custodySubmitVerdict({ signedNonce: 7n, liveNonce: 7n })).toBe('not-sent');
+    expect(custodySubmitVerdict({ signedNonce: 7n, liveNonce: 8n })).toBe('unknown');
+    expect(custodySubmitVerdict({ signedNonce: 7n, liveNonce: null })).toBe('unknown');
+    expect(CUSTODY_SEND_NOT_SENT).toBe("That payment didn't go through. Nothing left your Passport.");
+  });
+});
+
+describe('custodySubmitVerdict — with the indexer asked too (2026/09/22)', () => {
+  it('takes the chain’s own answer first, then the nonce, then the indexer’s silence', async () => {
+    const { custodySubmitVerdict } = await import('./custodyContractPlan.js');
+    expect(custodySubmitVerdict({ signedNonce: 7n, liveNonce: 8n, onChain: 'success' })).toBe('landed');
+    expect(custodySubmitVerdict({ signedNonce: 7n, liveNonce: 7n, onChain: 'failure' })).toBe('refused');
+    expect(custodySubmitVerdict({ signedNonce: 7n, liveNonce: 7n, onChain: null })).toBe('not-sent');
+    expect(custodySubmitVerdict({ signedNonce: 7n, liveNonce: 8n, onChain: 'absent' })).toBe('not-sent');
+    expect(custodySubmitVerdict({ signedNonce: 7n, liveNonce: null, onChain: 'absent' })).toBe('not-sent');
+    expect(custodySubmitVerdict({ signedNonce: 7n, liveNonce: 8n, onChain: null })).toBe('unknown');
+    expect(custodySubmitVerdict({ signedNonce: 7n, liveNonce: null, onChain: null })).toBe('unknown');
+  });
+});
+
+describe('a node refusal, read down the whole chain of causes', () => {
+  /** The live shape of 2026/09/22: FiberFailure → SubmissionError → SubmissionError → RpcError. */
+  function liveRefusal(data: string): Error {
+    const rpc = Object.assign(new Error('1010: Invalid Transaction'), { name: 'RpcError', code: 1010, data });
+    const client = { _tag: 'SubmissionError', message: 'Transaction submission failed', cause: rpc };
+    const wallet = { _tag: 'SubmissionError', message: 'Transaction submission error', cause: client };
+    const fiber = new Error('Transaction submission error');
+    fiber.name = '(FiberFailure) SubmissionError';
+    Object.defineProperty(fiber, Symbol.for('effect/Runtime/FiberFailure/Cause'), {
+      value: { _tag: 'Fail', error: wallet },
+    });
+    return fiber;
+  }
+
+  it('finds the node’s words four layers down', async () => {
+    const { custodyFailureChainText, custodyNodeRefused, custodyStateRace } = await import('./custodyContractPlan.js');
+    const cause = liveRefusal('Custom error: 104');
+    expect(custodyFailureChainText(cause)).toContain('Custom error: 104');
+    expect(custodyNodeRefused(cause)).toBe(true);
+    expect(custodyStateRace(cause)).toBe(true);
+    expect(custodyStateRace(liveRefusal('Custom error: 231'))).toBe(false);
+    expect(custodyNodeRefused(liveRefusal('Custom error: 231'))).toBe(true);
+  });
+
+  it('reads the pool’s own refusals, and not a socket', async () => {
+    const { custodyNodeRefused, custodyFailureChainText } = await import('./custodyContractPlan.js');
+    expect(custodyNodeRefused({ _tag: 'TransactionInvalidError', message: 'rejected' })).toBe(true);
+    expect(custodyNodeRefused({ _tag: 'TransactionDroppedError' })).toBe(true);
+    expect(custodyNodeRefused(new Error('WebSocket is not connected'))).toBe(false);
+    expect(custodyNodeRefused('1010: Invalid Transaction')).toBe(true);
+    expect(custodyFailureChainText(null)).toBe('');
+    expect(custodyFailureChainText(42)).toBe('');
+    const loop: Record<string, unknown> = { message: 'round' };
+    loop.cause = loop;
+    expect(custodyFailureChainText(loop)).toBe('round');
+    let deep: Record<string, unknown> = { message: 'bottom' };
+    for (let index = 0; index < 12; index += 1) deep = { cause: deep };
+    expect(custodyFailureChainText(deep)).toBe('');
+    expect(custodyFailureChainText({ code: 7, left: 'x', right: { message: 'y' } })).toBe('7 | x | y');
+  });
+});
+
+describe('withinCustodyBound', () => {
+  it('answers the work, or timeout, and leaves no timer behind', async () => {
+    const { withinCustodyBound } = await import('./custodyContractPlan.js');
+    await expect(withinCustodyBound(Promise.resolve(3), 1_000)).resolves.toEqual({ kind: 'done', value: 3 });
+    await expect(withinCustodyBound(new Promise(() => undefined), 5)).resolves.toEqual({ kind: 'timeout' });
+    await expect(withinCustodyBound(Promise.reject(new Error('no')), 1_000)).rejects.toThrow('no');
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* A submission on a dead connection (dev site, 2026/09/23 01:53 UTC)         */
+/* -------------------------------------------------------------------------- */
+
+/** midnight-js's own wrapper, as it reached the screen. */
+function submissionError(inner: string): Error {
+  const error = new Error('Transaction submission error', { cause: new Error(inner) });
+  error.name = 'SubmissionError';
+  return error;
+}
+
+describe('a submission whose connection to the network had closed', () => {
+  it('recognises the closed socket in every shape this stack has produced', () => {
+    for (const words of [
+      'WebSocket is already in CLOSING or CLOSED state',
+      'disconnected from wss://rpc.stagenet.shielded.tools/: 1000:: Normal Closure',
+      'WebSocket is not connected',
+      'the socket is closed',
+    ]) {
+      expect(custodySocketClosed(submissionError(words)), words).toBe(true);
+    }
+    expect(custodySocketClosed(new Error('Custom error: 104'))).toBe(false);
+    expect(custodySocketClosed('not an error')).toBe(false);
+  });
+
+  it('knows a submission that failed from a verdict, however it is wrapped', () => {
+    expect(custodySubmissionLost(submissionError('anything'))).toBe(true);
+    expect(custodySubmissionLost(new Error('Transaction submission error'))).toBe(true);
+    expect(
+      custodySubmissionLost(new Error('outer', { cause: submissionError('inner') })),
+    ).toBe(true);
+    expect(custodySubmissionLost(new Error('WebSocket is not connected'))).toBe(true);
+    expect(custodySubmissionLost(new Error('failed assert: already activated'))).toBe(false);
+  });
+
+  /* It reached a setup screen verbatim. Never again, on any surface. */
+  it('never paints the submission error', () => {
+    expect(custodyFailureSentence(submissionError('closed'))).toBe(CUSTODY_UNEXPECTED);
+    expect(custodyFailureSentence(new Error('Transaction submission error'))).toBe(CUSTODY_UNEXPECTED);
+  });
+
+  const route = (submit: (tx: unknown) => Promise<string>, open = true) => ({
+    submit,
+    isOpen: () => open,
+  });
+
+  it('offers the SAME transaction once more on a fresh connection when the socket closed under it', async () => {
+    const tx = { balanced: true };
+    const seen: unknown[] = [];
+    const stale = route((sent) => {
+      seen.push(sent);
+      return Promise.reject(submissionError('WebSocket is already in CLOSING or CLOSED state'));
+    });
+    const reconnect = vi.fn(() =>
+      Promise.resolve(
+        route((sent) => {
+          seen.push(sent);
+          return Promise.resolve('tx-id');
+        }),
+      ),
+    );
+    const lines: string[] = [];
+    await expect(custodySubmitOnLiveConnection(tx, stale, reconnect, (l) => lines.push(l))).resolves.toBe('tx-id');
+    expect(reconnect).toHaveBeenCalledTimes(1);
+    expect(seen).toEqual([tx, tx]);
+    expect(seen[1]).toBe(tx);
+    expect(lines).toHaveLength(1);
+  });
+
+  it('opens a fresh connection first when the current one is known to be closed', async () => {
+    const stale = route(() => Promise.reject(new Error('must not be used')), false);
+    const reconnect = vi.fn(() => Promise.resolve(route(() => Promise.resolve('fresh'))));
+    await expect(custodySubmitOnLiveConnection({}, stale, reconnect)).resolves.toBe('fresh');
+    expect(reconnect).toHaveBeenCalledTimes(1);
+  });
+
+  /* Bounded: one reconnect, whichever way it was reached. */
+  it('reconnects once, and only once', async () => {
+    const closed = () => Promise.reject(submissionError('WebSocket is not connected'));
+    const reconnect = vi.fn(() => Promise.resolve(route(closed)));
+    await expect(custodySubmitOnLiveConnection({}, route(closed, false), reconnect)).rejects.toThrow(
+      'Transaction submission error',
+    );
+    expect(reconnect).toHaveBeenCalledTimes(1);
+    reconnect.mockClear();
+    await expect(custodySubmitOnLiveConnection({}, route(closed), reconnect)).rejects.toThrow(
+      'Transaction submission error',
+    );
+    expect(reconnect).toHaveBeenCalledTimes(1);
+  });
+
+  /* A refusal about the transaction is the send path's to read, unchanged. */
+  it('passes every other failure through untouched, without reconnecting', async () => {
+    const refused = new Error('1010: Invalid Transaction: Custom error: 104');
+    const reconnect = vi.fn(() => Promise.resolve(route(() => Promise.resolve('x'))));
+    await expect(
+      custodySubmitOnLiveConnection({}, route(() => Promise.reject(refused)), reconnect),
+    ).rejects.toBe(refused);
+    expect(reconnect).not.toHaveBeenCalled();
   });
 });

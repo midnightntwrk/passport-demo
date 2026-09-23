@@ -1154,33 +1154,7 @@ export async function createContractProviders(
   wallet: LocalMidnightWallet,
   options: ContractProvidersOptions,
 ) {
-  const assetContract = contractAssetContract(options.contract);
-  let zkConfigProvider = zkConfigProviders.get(assetContract);
-  if (zkConfigProvider === undefined) {
-    const { FetchZkConfigProvider } = await import(
-      '@midnight-ntwrk/midnight-js-fetch-zk-config-provider'
-    );
-    zkConfigProvider = memoisingZkConfigProvider(
-      new FetchZkConfigProvider(contractAssetBase(options.contract), {
-        /* `globalThis`, not `window`: the identical call has to work under the
-           Node drill harness, which deliberately has no window.
-
-           WRAPPED IN `buildIdFetch` (2026/09/14). Every artefact url this
-           provider composes — the keys, the ZKIR, and above all
-           `compiler/contract-manifest.json` — is served
-           `max-age=31536000, immutable` and carries no content hash, so a
-           browser that fetched the manifest before a contract gained a circuit
-           kept it for a YEAR and then refused the new build's keys against it:
-           `ZKConfigurationReadError: Failed to read verifier key for
-           passport-account#transfer_shielded_to_account`, met by a reviewer
-           creating a new Passport. `buildIdFetch` puts this build's id in the
-           query, so a new deploy asks for an address no cache has an answer
-           for. See `../lib/buildId.ts`. */
-        fetchFunc: buildIdFetch(globalThis.fetch.bind(globalThis)) as never,
-      }) as unknown as ZkArtefactSource,
-    );
-    zkConfigProviders.set(assetContract, zkConfigProvider);
-  }
+  const zkConfigProvider = await contractZkConfigProvider(options.contract);
 
   const proofProvider = await createContractProofProvider(
     wallet,
@@ -1203,6 +1177,48 @@ export async function createContractProviders(
     walletProvider,
     midnightProvider: walletProvider,
   };
+}
+
+/**
+ * The tab's one ZK artefact provider for a contract, made on first use.
+ *
+ * EXPORTED FOR THE WARM-UP (2026/09/22). The same memoised provider every
+ * connection to the contract is handed, so the setup can fetch the verifier
+ * keys while the person is still typing their name — with no wallet, which on
+ * the passkey arm cannot exist before the ceremony — and the deploy that
+ * follows finds them already read.
+ */
+export async function contractZkConfigProvider(
+  contract: PassportContractName,
+): Promise<ZkArtefactSource> {
+  const assetContract = contractAssetContract(contract);
+  let zkConfigProvider = zkConfigProviders.get(assetContract);
+  if (zkConfigProvider === undefined) {
+    const { FetchZkConfigProvider } = await import(
+      '@midnight-ntwrk/midnight-js-fetch-zk-config-provider'
+    );
+    zkConfigProvider = memoisingZkConfigProvider(
+      new FetchZkConfigProvider(contractAssetBase(contract), {
+        /* `globalThis`, not `window`: the identical call has to work under the
+           Node drill harness, which deliberately has no window.
+
+           WRAPPED IN `buildIdFetch` (2026/09/14). Every artefact url this
+           provider composes — the keys, the ZKIR, and above all
+           `compiler/contract-manifest.json` — is served
+           `max-age=31536000, immutable` and carries no content hash, so a
+           browser that fetched the manifest before a contract gained a circuit
+           kept it for a YEAR and then refused the new build's keys against it:
+           `ZKConfigurationReadError: Failed to read verifier key for
+           passport-account#transfer_shielded_to_account`, met by a reviewer
+           creating a new Passport. `buildIdFetch` puts this build's id in the
+           query, so a new deploy asks for an address no cache has an answer
+           for. See `../lib/buildId.ts`. */
+        fetchFunc: buildIdFetch(globalThis.fetch.bind(globalThis)) as never,
+      }) as unknown as ZkArtefactSource,
+    );
+    zkConfigProviders.set(assetContract, zkConfigProvider);
+  }
+  return zkConfigProvider as ZkArtefactSource;
 }
 
 /**
@@ -1428,6 +1444,92 @@ export function failoverProvingProvider(
  * was still lagging — can ask again later without re-running the whole retry
  * window on a render.
  */
+/**
+ * Whether the indexer has a transaction, by midnight-js's identifier: `true`
+ * when it does, `false` when it ANSWERED and has none, and `null` when it could
+ * not be asked. Unlike {@link resolveTxHashOnce}, "no such transaction" and
+ * "no answer" are kept apart, because a stopped payment is settled as not sent
+ * on the first and never on the second.
+ */
+export async function resolveTxOnChainOnce(
+  indexerHttpUrl: string,
+  identifier: string,
+): Promise<boolean | null> {
+  /* A 64-hex name is the chain's own hash — a row renamed once the chain
+     answered — and is asked for as one; anything else is midnight-js's
+     identifier. */
+  const offset = /^[0-9a-f]{64}$/i.test(identifier)
+    ? `{ hash: "${identifier}" }`
+    : `{ identifier: "${identifier}" }`;
+  const query = `{ transactions(offset: ${offset}) { hash } }`;
+  try {
+    const response = await fetch(indexerHttpUrl, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ query }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!response.ok) return null;
+    const body = (await response.json()) as {
+      data?: { transactions?: Array<{ hash?: string }> | null };
+      errors?: unknown[];
+    };
+    if (Array.isArray(body.errors) && body.errors.length > 0) return null;
+    const rows = body.data?.transactions;
+    if (!Array.isArray(rows)) return null;
+    return rows.length > 0;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * What the chain made of one transaction, by identifier or by hash
+ * (2026/09/22): `success` it ran (wholly or in part), `failure` the chain
+ * refused it, `absent` the indexer ANSWERED and holds no such transaction —
+ * or null when it could not be asked. With the chain's hash when it has one.
+ *
+ * The one question a payment whose wait ran out can put to somebody other than
+ * the socket that lost it. Ten seconds, like every other single ask here.
+ */
+export async function resolveTxOutcomeOnce(
+  indexerHttpUrl: string,
+  txId: string,
+): Promise<{ outcome: 'success' | 'failure' | 'absent'; hash: string | null } | null> {
+  const offset = /^[0-9a-f]{64}$/i.test(txId) ? `{ hash: "${txId}" }` : `{ identifier: "${txId}" }`;
+  const query = `{ transactions(offset: ${offset}) { hash ... on RegularTransaction { transactionResult { status } } } }`;
+  try {
+    const response = await fetch(indexerHttpUrl, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ query }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!response.ok) return null;
+    const body = (await response.json()) as {
+      data?: {
+        transactions?: Array<{ hash?: string; transactionResult?: { status?: string } | null }> | null;
+      };
+      errors?: unknown[];
+    };
+    if (Array.isArray(body.errors) && body.errors.length > 0) return null;
+    const rows = body.data?.transactions;
+    if (!Array.isArray(rows)) return null;
+    const row = rows[0];
+    if (row === undefined) return { outcome: 'absent', hash: null };
+    const status = row.transactionResult?.status ?? '';
+    const hash = typeof row.hash === 'string' && row.hash.length > 0 ? row.hash : null;
+    /* ONLY A WHOLE SUCCESS IS ONE, the rule `SucceedEntirely` keeps for the
+       finalised data: a partial success is a call that did not run. No status
+       at all is no answer. */
+    if (status === 'SUCCESS') return { outcome: 'success', hash };
+    if (status.length > 0) return { outcome: 'failure', hash };
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 export async function resolveTxHashOnce(
   indexerHttpUrl: string,
   identifier: string,

@@ -166,7 +166,7 @@ test.describe('@live the account model on stagenet', () => {
     await expect(page.getByRole('heading', { name: /Welcome to Passport/i })).toBeVisible({
       timeout: 5 * 60_000,
     });
-    await page.getByRole('button', { name: /Choose my name/i }).click();
+    await page.getByRole('button', { name: /^Choose my (\.night )?name$/i }).click();
 
     /* The wallet has to open against the real indexer before the step is
        armed, so this is the slowest thing before proving starts. */
@@ -627,7 +627,7 @@ test.describe('@live the account model on stagenet', () => {
          deployed, and the class that value carries has changed inside the
          window between a deploy and a merge at least once — a term and its
          definition have not, because they are what a `dl` is. */
-      await expect(page.locator('#mnhome-send-title')).toHaveText('Review this transfer');
+      await expect(page.locator('#mnhome-send-title')).toHaveText('Review transfer');
       await expect(sheet.locator('dt:text-is("Asset") + dd strong')).toHaveText(MUSD_SYMBOL);
       await expect(sheet.locator('dt:text-is("Amount") + dd strong')).toHaveText(
         `${SEND_MUSD} ${MUSD_SYMBOL}`,

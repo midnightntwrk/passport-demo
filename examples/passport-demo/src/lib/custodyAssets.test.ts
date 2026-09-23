@@ -189,14 +189,13 @@ describe('custodyResumeOffer', () => {
   it('reports a payment nobody saw land, in the sentence that says where it is', () => {
     expect(custodyResumeOffer(sendRecord())).toEqual({
       kind: 'report',
-      sentence:
-        'Your payment to alice was sent as one payment: either it reached alice or nothing left your Passport. Your balance below says which.',
+      sentence: 'Checking whether your payment to alice went through…',
     });
   });
 
   it('names them when the record kept no name', () => {
     const offer = custodyResumeOffer(sendRecord({ recipientLabel: '  ' }));
-    expect(offer.kind === 'report' && offer.sentence).toContain('reached them');
+    expect(offer.kind === 'report' && offer.sentence).toContain('payment to them');
   });
 
   it('offers no button, because a send is one transaction', () => {

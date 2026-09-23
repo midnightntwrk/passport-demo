@@ -120,3 +120,88 @@
 .mndyn-icon:hover {
   color: var(--mn-text-strong, inherit);
 }
+
+/* -------------------------------------------------------------------- */
+/* The welcome page's four promises (2026/09/22)                         */
+/*                                                                       */
+/* The same shape `identity.css` gives the passkey road's welcome, in    */
+/* this sheet rather than imported from that one: the account custody    */
+/* screen is a lazy chunk, and pulling a stylesheet written for four     */
+/* other screens into it would ship every rule on them to every reader   */
+/* of this one.                                                          */
+/* -------------------------------------------------------------------- */
+
+.mndyn-points {
+  margin: 26px 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 18px;
+}
+.mndyn-point {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  column-gap: 14px;
+  align-items: start;
+}
+.mndyn-point-mark {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--mn-radius-md);
+  color: var(--mn-accent-ink);
+  background: var(--mn-accent-soft);
+}
+.mndyn-point-text {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding-top: 2px;
+}
+.mndyn-point-title {
+  color: var(--mn-text-primary);
+  font-size: 14.5px;
+  font-weight: 700;
+  letter-spacing: -.01em;
+  line-height: 1.35;
+}
+.mndyn-point-body {
+  color: var(--mn-text-secondary);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+/* -------------------------------------------------------------------- */
+/* The one line under the name field                                     */
+/*                                                                       */
+/* Free, taken, being asked, and could-not-ask each get their own        */
+/* colour and their own dot, so the answer is legible before the         */
+/* sentence is read. Same palette as the other road's, for the same      */
+/* four states.                                                          */
+/* -------------------------------------------------------------------- */
+
+.mndyn-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  min-height: 22px;
+  margin: 14px 2px 0;
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.mndyn-status-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  margin-top: 6px;
+  border-radius: 999px;
+  background: var(--mn-text-muted);
+}
+.mndyn-status-available { color: var(--mn-accent-ink); font-weight: 600; }
+.mndyn-status-available .mndyn-status-dot { background: var(--mn-accent); }
+.mndyn-status-taken { color: var(--mn-text-secondary); }
+.mndyn-status-taken .mndyn-status-dot { background: var(--mn-border-medium); }
+.mndyn-status-error { color: var(--mn-text-primary); }
+.mndyn-status-checking { color: var(--mn-text-muted); }

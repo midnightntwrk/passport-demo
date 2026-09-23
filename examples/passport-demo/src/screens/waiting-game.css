@@ -85,3 +85,13 @@
   transition: color .15s ease, border-color .15s ease;
 }
 .mngame-offer:hover { color: var(--mn-text-primary); border-color: var(--mn-border-strong); }
+
+/* The setup's timeline and its game offer, as one block with room around it:
+   the offer must not sit against the button that follows (2026/09/22). */
+.mnob-setup-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin: 8px 0 24px;
+}
+.mnob-setup-progress .mngame-offer { margin: 0; }

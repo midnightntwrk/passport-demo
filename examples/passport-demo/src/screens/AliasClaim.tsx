@@ -28,16 +28,16 @@ import {
   claimSteps,
   claimSubStages,
   feeWaitLine,
+  LONG_WAIT_NOTE,
   feeWaitState,
-  formatElapsed,
-  stepTimingLine,
   subscribeFeeWait,
-  type ClaimStep,
   type FeeWait,
 } from '../lib/claimSteps.js'
 import { OFFER_AFTER_MS } from '../lib/waitingGame.js'
 import { NETWORK_LABELS, type PassportNetwork } from './NetworkSwitcher.js'
 import { PasskeyWayOutActions } from './PasskeyWayOut.js'
+import ProgressTimeline, { useTimelineClock, type TimelineRow } from './ProgressTimeline.js'
+import NameArtwork from './NameArtwork.js'
 import WaitingGame from './WaitingGame.js'
 import ThemeToggle from './ThemeToggle.js'
 import './identity.css'
@@ -236,39 +236,6 @@ const PHASE_COPY: Record<AliasClaimProgress['phase'], (domain: string) => string
   confirming: () => 'Confirming your name…',
 }
 
-/**
- * What the third step says underneath itself, from the moment the claim
- * starts rather than when the wait begins.
- *
- * The reviewer's ask on 2026/08/26 was "your passport is on its way, please be
- * patient… you have to let the user know this will take time" — and a warning
- * about a wait is worth most before it starts. It names no transaction count:
- * how many proofs are involved is machinery, and "a few minutes" is the whole
- * of what a person can act on.
- */
-const LONG_WAIT_NOTE = 'Your Passport is on its way. This part takes a few minutes.'
-
-/**
- * The claim's clock: which step is being timed, when it started, and what the
- * time is now.
- *
- * `now` is state rather than a read at render time because a step whose phase
- * does not change would otherwise never re-render, and a counter that stops
- * moving is exactly the hang this whole view exists to disprove. It ticks once
- * a second from an interval that is cleared when the step changes, when the
- * claim ends, and when the screen unmounts.
- *
- * `done` keeps what each finished step actually cost, so a ticked row can say
- * so. It is measured, never estimated: a step that took eleven seconds against
- * an estimate of ten says eleven.
- */
-interface ClaimClock {
-  stepId: ClaimStep['id']
-  startedAt: number
-  now: number
-  done: Partial<Record<ClaimStep['id'], number>>
-}
-
 export default function AliasClaimScreen(props: AliasClaimProps) {
   const {
     networkId,
@@ -396,39 +363,11 @@ export default function AliasClaimScreen(props: AliasClaimProps) {
   /* about twenty seconds.                                              */
   /*                                                                    */
   /* The estimates live in `../lib/claimSteps.ts` with the copy built   */
-  /* from them; what lives here is the measuring. The interval is keyed */
-  /* on the RUNNING STEP, so it is cleared and restarted when the step  */
-  /* changes, cleared when the claim ends or fails, and cleared on      */
-  /* unmount — and, crucially, it is NOT keyed on the phase: the four   */
-  /* phases of the account step share one clock, and a phase that sits  */
-  /* still for two minutes goes on counting rather than looking stuck.  */
+  /* from them, and the measuring in `./ProgressTimeline.tsx` — which   */
+  /* is shared with the account custody setup since 2026/09/22, so the  */
+  /* two roads cannot disagree about what a second is.                  */
   /* ---------------------------------------------------------------- */
-  const activeStepId = runningStep?.id ?? null
-  const [clock, setClock] = useState<ClaimClock | null>(null)
-
-  useEffect(() => {
-    if (activeStepId === null) {
-      // The claim ended, one way or the other. The next one starts from zero.
-      setClock(null)
-      return undefined
-    }
-    const at = Date.now()
-    setClock((previous) => {
-      if (previous === null) return { stepId: activeStepId, startedAt: at, now: at, done: {} }
-      // An unchanged step keeps its start time, so the count never resets.
-      if (previous.stepId === activeStepId) return previous
-      return {
-        stepId: activeStepId,
-        startedAt: at,
-        now: at,
-        done: { ...previous.done, [previous.stepId]: at - previous.startedAt },
-      }
-    })
-    const timer = window.setInterval(() => {
-      setClock((previous) => (previous === null ? previous : { ...previous, now: Date.now() }))
-    }, 1_000)
-    return () => window.clearInterval(timer)
-  }, [activeStepId])
+  const elapsedFor = useTimelineClock(runningStep?.id ?? null)
 
   /* ---------------------------------------------------------------- */
   /* THE COUNTDOWN TO THE NEXT ATTEMPT (2026/09/05)                     */
@@ -528,15 +467,6 @@ export default function AliasClaimScreen(props: AliasClaimProps) {
       ? feeWaitLine(feeWaitNow - feeWait.since)
       : null
 
-  /** How long the step being timed has been running, in milliseconds. */
-  const elapsedFor = (step: ClaimStep): number | null => {
-    if (clock === null) return null
-    if (step.state === 'active') {
-      return clock.stepId === step.id ? clock.now - clock.startedAt : null
-    }
-    return clock.done[step.id] ?? null
-  }
-
   /**
    * What the button says while a claim runs, and why it is no longer the
    * phase's own sentence.
@@ -581,8 +511,8 @@ export default function AliasClaimScreen(props: AliasClaimProps) {
   })
 
   return (
-    <section className="mnid-screen" aria-busy={busy}>
-      <header className="mnid-bar">
+    <section className="mnid-screen mnclaim-screen" aria-busy={busy}>
+      <header className="mnid-bar mnclaim-bar">
         <img className="mnid-wordmark" src="/midnight-wordmark.svg" alt="Midnight" />
         {/* No step counter since 2026/08/06: the name is the LAST thing
             before the dashboard, not step 2 of a three-screen wizard. */}
@@ -590,26 +520,28 @@ export default function AliasClaimScreen(props: AliasClaimProps) {
         <ThemeToggle size="sm" className="mnid-theme" />
       </header>
 
-      <div className="mnid-body">
-        <p className="mnid-kicker">Your Midnight name</p>
-        <h1 className="mnid-title">Choose your .night name</h1>
-        <p className="mnid-lede">
-          {registrationSupported ? (
-            <>
-              This is the name people send to and apps recognise you by. It is a real Midnames
-              registration on {NETWORK_LABELS[networkId]} — one name per network, held by this
-              passkey.
-            </>
-          ) : (
-            <>
-              This is the name people send to and apps recognise you by. Passport signs and
-              submits on {signingNetworkLabel} only, so a name chosen for{' '}
-              {NETWORK_LABELS[networkId]} is queued here rather than registered — and Passport says
-              so wherever it appears.
-            </>
-          )}
-        </p>
-
+      <div className="mnid-body mnclaim-body">
+        <div className="mnclaim-copy">
+          <p className="mnid-kicker">Your Midnight name</p>
+          <h1 className="mnid-title">Choose your .night name</h1>
+          <p className="mnid-lede">
+            {registrationSupported ? (
+              <>
+                Give your Passport a name people can send to. It will be registered on{' '}
+                {NETWORK_LABELS[networkId]} and held by this passkey.
+              </>
+            ) : (
+              <>
+                This is the name people send to and apps recognise you by. Passport signs and
+                submits on {signingNetworkLabel} only, so a name chosen for{' '}
+                {NETWORK_LABELS[networkId]} is queued here rather than registered — and Passport says
+                so wherever it appears.
+              </>
+            )}
+          </p>
+        </div>
+        <NameArtwork className="mnclaim-art" />
+        <div className="mnclaim-flow">
         <div
           className={`mnid-field${field.kind === 'invalid' ? ' mnid-field-invalid' : ''}`}
         >
@@ -652,92 +584,36 @@ export default function AliasClaimScreen(props: AliasClaimProps) {
             progress" — and it is the half a stepper alone cannot answer, since
             a step can be correct about where a claim is and still look hung. */}
         {steps !== null && claimPhase !== null ? (
-          <div className="mnid-panel" role="status" aria-live="polite">
-            <ol className="mnid-stepper">
-              {steps.map((step) => {
-                const elapsed = elapsedFor(step)
-                /* The phase's own sentence, for the two steps that are ONE
-                   thing. The third is four things and says so beneath itself
-                   instead — a single line that read "Setting up your account…"
-                   for two minutes under a step already labelled "Setting up
-                   your account" was the whole of what the third step told you.
-                   A sentence identical to its own label is dropped rather than
-                   printed twice, which is what the passkey step used to do. */
-                const detail =
-                  step.state === 'active' && step.id !== 'account'
-                    ? PHASE_COPY[claimPhase](claimDomain ?? 'your name')
-                    : null
-                /* WHAT THE ROW SAYS ABOUT TIME. A running step says what it
-                   usually costs and what it has cost so far; a finished one
-                   says what it took, measured rather than estimated. A step
-                   that finished inside a second says nothing at all: "Took
-                   0:00" is a number about nothing, and a ticked row is already
-                   the whole of what happened. */
-                const timing =
-                  elapsed === null
-                    ? null
-                    : step.state === 'active'
-                      ? stepTimingLine(step, elapsed)
-                      : elapsed >= 1_000
-                        ? `Took ${formatElapsed(elapsed)}`
-                        : null
-                return (
-                  <li key={step.id} className="mnid-stepper-item" data-state={step.state}>
-                    {/* Both marks are always in the DOM and the state chooses
-                        which is painted, so a step never changes shape as it
-                        completes — it only fills in. */}
-                    <span className="mnid-stepper-mark" aria-hidden="true">
-                      <span className="mnid-stepper-dot" />
-                      <Check className="mnid-stepper-check" size={13} strokeWidth={3} />
-                    </span>
-                    <span className="mnid-stepper-text">
-                      <span className="mnid-stepper-label">{step.label}</span>
-                      {detail !== null && detail !== step.label ? (
-                        <span className="mnid-stepper-detail">{detail}</span>
-                      ) : null}
-                      {/* THE TIMER. `aria-live="off"` because the panel around
-                          it is polite and a value that changes every second
-                          would otherwise be read aloud every second — the
-                          number is for the eye, and the step changes it sits
-                          between are what a screen reader is told. */}
-                      {timing !== null ? (
-                        <span className="mnid-stepper-timing" aria-live="off">
-                          {timing}
-                        </span>
-                      ) : null}
-                      {/* WHAT THE CLAIM IS ACTUALLY HELD ON, when it is held
-                          on the fee sponsor. It carries the same class as the
-                          note below it — it is the same kind of quiet line —
-                          and its own, so a test can name it without also
-                          naming the timer, whose text `claim-progress.spec.ts`
-                          asserts one of per step. */}
-                      {feeWaitText !== null && step.state === 'active' ? (
-                        <span className="mnid-stepper-note mnid-stepper-wait" aria-live="off">
-                          {feeWaitText}
-                        </span>
-                      ) : null}
-                      {/* The four states of the long wait, on screen from the
-                          first frame of the claim so they FILL IN rather than
-                          appearing under the reader mid-wait. */}
-                      {step.id === 'account' ? (
-                        <ol className="mnid-substages">
-                          {claimSubStages(claimPhase, claimDomain ?? undefined).map((stage) => (
-                            <li key={stage.id} className="mnid-substage" data-state={stage.state}>
-                              <span className="mnid-substage-pip" aria-hidden="true" />
-                              <span className="mnid-substage-label">{stage.label}</span>
-                            </li>
-                          ))}
-                        </ol>
-                      ) : null}
-                      {step.id === 'account' ? (
-                        <span className="mnid-stepper-note">{LONG_WAIT_NOTE}</span>
-                      ) : null}
-                    </span>
-                  </li>
-                )
-              })}
-            </ol>
-          </div>
+          <ProgressTimeline
+            rows={steps.map((step): TimelineRow => ({
+              id: step.id,
+              label: step.label,
+              state: step.state,
+              expectedSeconds: step.expectedSeconds,
+              elapsedMs: elapsedFor(step),
+              /* The phase's own sentence, for the two steps that are ONE
+                 thing. The third is four things and says so beneath itself
+                 instead — a single line that read "Setting up your account…"
+                 for two minutes under a step already labelled "Setting up
+                 your account" was the whole of what the third step told you. */
+              detail:
+                step.state === 'active' && step.id !== 'account'
+                  ? PHASE_COPY[claimPhase](claimDomain ?? 'your name')
+                  : null,
+              /* WHAT THE CLAIM IS ACTUALLY HELD ON, when it is held on the fee
+                 sponsor — a wait with its own seconds, in the same grammar as
+                 every other line in the panel. */
+              wait: feeWaitText,
+              /* The four states of the long wait, on screen from the first
+                 frame of the claim so they FILL IN rather than appearing under
+                 the reader mid-wait. */
+              subStages:
+                step.id === 'account'
+                  ? claimSubStages(claimPhase, claimDomain ?? undefined)
+                  : null,
+              note: step.id === 'account' ? LONG_WAIT_NOTE : null,
+            }))}
+          />
         ) : null}
 
         {/* Beneath the stepper, never over it — see the block above. */}
@@ -956,7 +832,9 @@ export default function AliasClaimScreen(props: AliasClaimProps) {
           </button>
         ) : null}
 
-        <p className="mnid-foot">
+        </div>
+
+        <p className="mnid-foot mnclaim-foot">
           <Check size={13} aria-hidden="true" />
           <span>
             Names are 1–32 characters: lowercase letters, numbers, and hyphens inside. This is a

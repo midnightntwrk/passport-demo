@@ -230,6 +230,19 @@ export function buildSendAssets(input: BuildSendAssetsInput): SendAsset[] {
 export interface SendCapabilities {
   /** Whether a `.night` name can be paid in a shielded asset. */
   shieldedToName: boolean;
+  /**
+   * Whether a `.night` name — or a Passport account typed out — can be paid in
+   * NIGHT. Absent means yes, which is every prototype Passport: its account
+   * deposits NIGHT into another. A Passport on the account custody build says
+   * `false`, because that contract has no route that moves NIGHT between two
+   * accounts (2026/09/22) — its NIGHT leaves only to an `mn_addr…` address.
+   */
+  nightToName?: boolean;
+  /**
+   * The asset a name CAN be paid in when NIGHT cannot, named in the refusal so
+   * the reader is told what to pick rather than only what not to.
+   */
+  nameAsset?: string | null;
 }
 
 /** What a host that supplies no shielded-name seam can do. */
@@ -306,12 +319,21 @@ export function recipientRuleFor(
   capabilities: SendCapabilities = NO_CAPABILITIES,
 ): RecipientRule {
   if (asset.mode === 'unshielded') {
+    const acceptsName = capabilities.nightToName !== false;
+    /* SAID AT THE FIELD, BEFORE ANYTHING IS ASKED OF ANYBODY. One sentence:
+       what does work, and what to choose instead where there is something. */
+    const instead = capabilities.nameAsset ? ` To pay a name, choose ${capabilities.nameAsset}.` : '';
+    const insteadAccount = capabilities.nameAsset
+      ? ` To pay a Passport, choose ${capabilities.nameAsset}.`
+      : '';
     return {
       accepts: 'unshielded',
-      acceptsName: true,
+      acceptsName,
       addressRefusal: `${asset.symbol} goes to an unshielded (mn_addr…) address — this is a shielded one.`,
-      nameRefusal: null,
-      accountRefusal: null,
+      nameRefusal: acceptsName ? null : `${asset.symbol} can be sent to an address for now.${instead}`,
+      accountRefusal: acceptsName
+        ? null
+        : `${asset.symbol} can be sent to an address for now.${insteadAccount}`,
     };
   }
   return {

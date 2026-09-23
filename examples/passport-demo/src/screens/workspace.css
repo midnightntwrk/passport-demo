@@ -1,0 +1,448 @@
+/* Mobile-first Passport workspace. Shared surfaces deliberately exclude the
+   approved sign-in screen. Desktop expands the same content, never duplicates it. */
+:root {
+  --mn-workspace-width: 1120px;
+  --mn-workspace-gap: 24px;
+}
+
+.mnhome-name,
+.mnassets-title,
+.mnapps-title {
+  font-size: clamp(28px, 6.8vw, 38px);
+  line-height: 1.14;
+  letter-spacing: -.04em;
+  font-weight: 750;
+}
+.mnhome-name { text-wrap: balance; }
+.mnhome-kicker { display: none; }
+.mnhome-body { gap: 28px; padding-top: 30px; }
+.mnhome-overview,
+.mnhome-passport-column,
+.mnhome-discover,
+.mnhome-utilities {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+.mnhome-overview > *,
+.mnhome-discover > * { min-width: 0; }
+.mnhome-passport-column { align-content: start; }
+
+/* The name is the signature object, not a made-up portfolio total. Its blue
+   edge and symbol carry the brand without turning half the viewport cobalt. */
+.mnhome-passport-column > .mnid-card:not(.mnid-account) {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: 170px;
+  padding: 24px;
+  border: 1px solid var(--mn-border-hairline);
+  border-radius: 20px;
+  background:
+    radial-gradient(circle at 100% 0%, var(--mn-accent-soft), transparent 48%),
+    var(--mn-surface-raised);
+  color: var(--mn-text-primary);
+  box-shadow: none;
+  overflow: hidden;
+}
+.mnhome-passport-column > .mnid-card:not(.mnid-account)::after {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 4px;
+  background: var(--mn-accent);
+}
+.mnhome-passport-column > .mnid-card:not(.mnid-account)::before {
+  content: '';
+  position: absolute;
+  top: 22px;
+  right: 22px;
+  display: block;
+  width: 28px;
+  height: 28px;
+  background: var(--mn-accent);
+  -webkit-mask: url('/midnight-symbol-white.svg') center / contain no-repeat;
+  mask: url('/midnight-symbol-white.svg') center / contain no-repeat;
+}
+.mnhome-passport-column .mnid-card-head {
+  padding-right: 32px;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.mnhome-passport-column .mnid-alias {
+  font-size: clamp(22px, 4.5vw, 31px);
+  font-weight: 700;
+  line-height: 1.18;
+  letter-spacing: -.035em;
+}
+.mnhome-passport-column .mnid-pill {
+  height: auto;
+  min-height: 24px;
+  white-space: normal;
+  padding: 5px 9px;
+  font-size: 10px;
+}
+.mnhome-passport-column .mnid-pill-registered {
+  color: var(--mn-accent-ink);
+  background: var(--mn-accent-soft);
+  border: 1px solid transparent;
+}
+.mnhome-passport-column .mnid-register {
+  background: var(--mn-accent);
+  color: var(--mn-accent-text);
+}
+.mnhome-passport-column .mnid-account {
+  padding: 17px 20px;
+  border-radius: 16px;
+  box-shadow: none;
+}
+.mnid-account-icon-ready { color: var(--mn-accent-ink); }
+.mnhome-funds {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  min-width: 0;
+  padding: 22px;
+  border: 1px solid var(--mn-border-hairline);
+  border-radius: 20px;
+  background: var(--mn-surface-raised);
+}
+.mnhome-funds-heading h2 {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 650;
+  letter-spacing: -.03em;
+}
+.mnhome-funds-heading p {
+  margin: 6px 0 0;
+  font-size: 13px;
+  color: var(--mn-text-muted);
+}
+.mnhome-actions { gap: 10px; }
+.mnhome-action {
+  min-height: 48px;
+  border-radius: 12px;
+  box-shadow: none;
+}
+.mnhome-token-icon { width: 36px; height: 36px; }
+.mnhome-token-name,
+.mnhome-token-value { padding-block: 17px; }
+.mnhome-token-value { font-size: 19px; font-weight: 600; }
+.mnhome-funds .mnhome-onway { margin: 0; }
+
+.mnhome-discover { gap: 24px; align-items: start; }
+.mnhome-discover .mnapps-section-label,
+.mnhome-activity > .mnhome-micro {
+  margin: 0 0 16px;
+  color: var(--mn-text-primary);
+  font-size: 20px;
+  font-weight: 650;
+  text-transform: none;
+  letter-spacing: -.025em;
+}
+.mnhome-discover .mnapps-list { grid-template-columns: minmax(0, 1fr); }
+.mnapps-card { box-shadow: none; border-radius: 18px; padding: 20px; }
+.mnapps-card-illustrated { grid-template-columns: 78px minmax(0, 1fr) 16px; }
+.mnapps-card-art {
+  grid-column: auto;
+  width: 78px;
+  height: 88px;
+  margin: 0;
+  border-radius: 14px;
+}
+.mnapps-card-art .mnraffle-art { width: 72px; }
+.mnapps-card-copy strong { font-size: 16px; font-weight: 650; }
+.mnapps-card-copy small { line-height: 1.6; }
+.mnapps-list:has(> :only-child) { grid-template-columns: minmax(0, 1fr); }
+/* Home's featured card gets its own hierarchy; the Apps catalogue stays a
+   compact, consistent list. The existing SVG follows the active theme. */
+.mnhome-discover .mnapps-card-illustrated {
+  min-height: 0;
+  grid-template-columns: minmax(0, 1fr) 40px;
+  gap: 16px 10px;
+  padding: 16px;
+  border-radius: 20px;
+  overflow: hidden;
+}
+.mnhome-discover .mnapps-card-art {
+  grid-column: 1 / -1;
+  width: auto;
+  height: 128px;
+  margin: -16px -16px 0;
+  border-radius: 19px 19px 0 0;
+  background:
+    radial-gradient(circle at 50% 80%, var(--mn-accent-soft), transparent 65%),
+    var(--mn-surface-card);
+}
+.mnhome-discover .mnapps-card-art .mnraffle-art { width: 174px; }
+.mnhome-discover .mnapps-card-copy { gap: 8px; align-self: center; }
+.mnhome-discover .mnapps-card-copy strong { font-size: 17px; font-weight: 700; }
+.mnhome-discover .mnapps-card-copy small { font-size: 13px; line-height: 1.5; }
+.mnhome-discover .mnapps-card-arrow {
+  width: 40px;
+  height: 40px;
+  padding: 11px;
+  border: 1px solid var(--mn-border-hairline);
+  border-radius: 50%;
+  color: var(--mn-accent-ink);
+  background: var(--mn-surface-card);
+}
+.mnhome-activity-day {
+  padding: 18px 20px;
+  border: 1px solid var(--mn-border-hairline);
+  border-radius: 18px;
+  background: var(--mn-surface-raised);
+}
+.mnhome-activity-day + .mnhome-activity-day { margin-top: 12px; }
+.mnhome-activity-row { padding-block: 15px; }
+.mnhome-activity-detail { line-height: 1.6; }
+.mnhome-utilities {
+  align-items: start;
+  padding-top: 20px;
+  border-top: 1px solid var(--mn-border-hairline);
+}
+.mnhome-utilities .mnhome-support {
+  min-height: 48px;
+  margin: 0;
+  justify-content: flex-start;
+  padding-inline: 18px;
+  border-radius: 12px;
+}
+
+/* Collection pages retain real tables, with a deliberate shared panel. */
+.mnassets-shelf {
+  padding: 22px;
+  margin-top: 22px;
+  border: 1px solid var(--mn-border-hairline);
+  border-radius: 20px;
+  background: var(--mn-surface-raised);
+}
+.mnassets-shelf + .mnassets-shelf { padding-top: 22px; }
+.mnassets-lede,
+.mnapps-lede { max-width: 560px; }
+.mnapps-section[aria-labelledby='mnapps-featured'] {
+  background: var(--mn-surface-card);
+  border: 1px solid var(--mn-border-hairline);
+  padding: 22px;
+  border-radius: 20px;
+}
+.mnapps-search { border-color: var(--mn-border-hairline); border-radius: 14px; }
+
+/* Onboarding is a focused task, not a full-height empty column. */
+.mnid-body { padding-bottom: 40px; }
+.mnid-screen .mnid-title { font-weight: 700; line-height: 1.12; }
+.mnid-screen .mnid-actions { margin-top: 24px; padding-top: 8px; }
+.mnid-screen .mnid-point {
+  padding: 20px;
+  border: 1px solid var(--mn-border-hairline);
+  border-radius: 16px;
+  background: var(--mn-surface-raised);
+}
+.mnid-screen .mnid-points { gap: 12px; }
+.mnid-welcome .mnid-actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  padding: 16px 0 max(16px, env(safe-area-inset-bottom));
+  background: var(--mn-surface-page);
+}
+.mnid-primary { border-radius: 14px; min-height: 52px; box-shadow: none; }
+.mnid-field { border-radius: 16px; box-shadow: none; }
+
+/* The setup road a new Passport walks — welcome, name, progress, the way
+   back, and the road home for somebody who already has one — shares the
+   onboarding sheet with the sign-in. The sign-in alone keeps its atmosphere
+   (`.mnob-landing`); these steps take the same clean single column as the
+   other road's `.mnid-*` steps above. Styling only: every control, label, and
+   sentence is the component's own. */
+/* `.mndyn` is also the signed-in identity row on Home (`dynamic-identity.css`),
+   whose card chrome — raised fill, hairline, radius, inset — otherwise lands
+   on the whole setup screen as a framed slate panel. The screen is a page. */
+.mnob-screen.mndyn {
+  gap: 0;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left);
+  border: 0;
+  border-radius: 0;
+  background: var(--mn-surface-page);
+}
+.mnob-screen:not(.mnob-landing) .mnob-body { padding-top: clamp(28px, 5svh, 56px); padding-bottom: 40px; }
+.mnob-screen:not(.mnob-landing) .mnob-kicker { margin-bottom: 12px; }
+.mnob-screen:not(.mnob-landing) .mnob-title {
+  font-size: clamp(30px, 8.4vw, 44px);
+  font-weight: 700;
+  letter-spacing: -.03em;
+  line-height: 1.12;
+}
+.mnob-screen:not(.mnob-landing) .mnob-lede { max-width: 460px; margin-top: 16px; font-size: 14px; }
+.mnob-screen:not(.mnob-landing) .mnob-stage { margin-top: 28px; padding-top: 0; }
+.mnob-screen:not(.mnob-landing) .mnob-primary {
+  width: 100%;
+  min-width: 0;
+  min-height: 52px;
+  padding-block: 12px;
+  border-radius: 14px;
+  background: var(--mn-accent);
+  line-height: 1.3;
+  box-shadow: none;
+}
+.mnob-screen:not(.mnob-landing) .mnob-primary:hover:not(:disabled) { background: var(--mn-accent-hover); }
+.mnob-screen:not(.mnob-landing) .mnob-input {
+  min-height: 54px;
+  border-color: var(--mn-border-medium);
+  border-radius: 16px;
+  background: var(--mn-surface-raised);
+  box-shadow: none;
+}
+.mnob-screen:not(.mnob-landing) .mnob-unusable,
+.mnob-screen:not(.mnob-landing) .mnid-panel { border-radius: 16px; box-shadow: none; }
+.mndyn .mndyn-points { gap: 12px; }
+.mndyn .mndyn-point {
+  padding: 20px;
+  border: 1px solid var(--mn-border-hairline);
+  border-radius: 16px;
+  background: var(--mn-surface-raised);
+}
+.mndyn .mndyn-actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  padding: 16px 0 max(16px, env(safe-area-inset-bottom));
+  background: var(--mn-surface-page);
+}
+
+/* Transaction surfaces: crisp hierarchy, touch-sized controls, bounded scroll. */
+.mnhome-addr-modal {
+  padding: 24px;
+  border-radius: 24px;
+  width: min(100%, 480px);
+}
+.mnhome-addr-head { margin-bottom: 20px; }
+.mnhome-addr-head > .mnhome-micro {
+  color: var(--mn-text-primary);
+  font-size: 22px;
+  font-weight: 650;
+  text-transform: none;
+  letter-spacing: -.03em;
+}
+.mnhome-addr-modal .mnhome-icon-button { width: 40px; height: 40px; }
+.mnhome-send-primary,
+.mnhome-send-secondary { border-radius: 14px; min-height: 48px; }
+.mnhome-recv-name-value { font-size: clamp(16px, 4vw, 21px); }
+.mnhome-recv-name { border-radius: 16px; }
+.mnhome-recv-qr-plate { border-radius: 20px; padding: 20px; }
+
+@media (max-width: 380px) {
+  .mnhome-funds,
+  .mnassets-shelf,
+  .mnapps-section[aria-labelledby='mnapps-featured'] { padding: 16px; }
+  .mnapps-card { padding: 14px; gap: 10px; }
+  .mnapps-card-illustrated { grid-template-columns: 54px minmax(0, 1fr) 12px; }
+  .mnapps-card-art { width: 54px; height: 70px; }
+  .mnapps-card-art .mnraffle-art { width: 54px; }
+  .mnhome-addr-modal { padding: 18px; }
+  .mnhome-activity-day { padding: 14px; }
+}
+
+@media (max-width: 959px) {
+  .mnhome-passport-column .mnid-alias { font-size: 24px; }
+  .mnhome-bar .mnhome-icon-button,
+  .mnassets-bar .mnassets-icon-button { width: 40px; height: 40px; }
+  .mnhome-bar-actions .mnthemetoggle-option,
+  .mnassets-bar-actions .mnthemetoggle-option { width: 30px; min-height: 32px; }
+  .mnid-welcome .mnid-point { padding: 16px; }
+}
+
+@media (min-width: 960px) {
+  .mnhome-bar,
+  .mnhome-body,
+  .mnassets-bar,
+  .mnassets-head,
+  .mnassets-shelf,
+  .mnassets-screen > .mnassets-empty,
+  .mnid-bar {
+    width: min(100% - 80px, var(--mn-workspace-width));
+  }
+  .mnapps-screen > * { max-width: var(--mn-workspace-width); }
+  .mnhome-bar,
+  .mnassets-bar,
+  .mnapps-bar { min-height: 80px; }
+  .mnhome-bar-actions,
+  .mnassets-bar-actions,
+  .mnapps-bar-actions { align-items: center; }
+  .mnhome-wordmark,
+  .mnassets-wordmark,
+  .mnapps-wordmark { width: 112px; }
+  .mnhome-body { padding-top: 36px; padding-bottom: 40px; gap: 28px; }
+  .mnhome-overview,
+  .mnhome-discover { grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr); gap: 24px; }
+  .mnhome-passport-column > .mnid-card:not(.mnid-account) { min-height: 216px; padding: 28px; }
+  .mnhome-passport-column > .mnid-card:not(.mnid-account)::before { width: 32px; height: 32px; top: 28px; right: 28px; }
+  .mnhome-passport-column .mnid-card-head { flex-direction: column; align-items: flex-start; }
+  .mnhome-funds { padding: 28px; }
+  .mnhome-funds .mnhome-actions { order: 2; margin-top: auto; padding-top: 12px; }
+  .mnhome-funds-heading h2 { font-size: 26px; }
+  .mnhome-utilities { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .mnnav-backdrop { display: none; }
+  .mnnav {
+    top: 17px;
+    bottom: auto;
+    width: 306px;
+    height: 46px;
+    padding: 0;
+    border: 0;
+    border-radius: 12px;
+    background: var(--mn-surface-page);
+    box-shadow: none;
+  }
+  .mnnav-tab { flex-direction: row; gap: 8px; font-size: 13px; letter-spacing: 0; text-transform: none; border-radius: 10px; }
+  .mnnav-tab svg { width: 17px; height: 17px; }
+  .mnassets-head,
+  .mnapps-head { padding-top: 36px; padding-bottom: 12px; }
+  .mnassets-shelf { padding: 28px; }
+  .mnassets-shelf + .mnassets-shelf { padding-top: 28px; }
+  .mnassets-screen { padding-bottom: 48px; }
+  .mnapps-screen { padding-bottom: 48px; }
+  .mnapps-list { gap: 20px; }
+  .mnapps-card { min-height: 144px; }
+  .mnhome-discover .mnapps-card-illustrated {
+    grid-template-columns: 144px minmax(0, 1fr) 40px;
+    min-height: 176px;
+    gap: 20px;
+    padding: 16px;
+  }
+  .mnhome-discover .mnapps-card-art {
+    grid-column: auto;
+    width: 144px;
+    height: 144px;
+    margin: 0;
+    border-radius: 14px;
+  }
+  .mnhome-discover .mnapps-card-art .mnraffle-art { width: 126px; }
+  .mnid-bar { min-height: 80px; }
+  .mnid-body { width: min(100% - 80px, 680px); flex: 0 1 auto; padding-top: 48px; }
+  .mnid-screen .mnid-lede { max-width: 560px; }
+  .mnid-screen .mnid-points { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+  .mnid-screen .mnid-point { grid-template-columns: 1fr; gap: 16px; padding: 24px; }
+  .mnid-screen .mnid-point-title { font-size: 16px; }
+  .mnob-screen:not(.mnob-landing) .mnob-bar,
+  .mnob-screen:not(.mnob-landing) .mnob-body,
+  .mnob-screen:not(.mnob-landing) .mnob-foot { width: min(100% - 80px, 680px); }
+  .mnob-screen:not(.mnob-landing) .mnob-bar { min-height: 80px; }
+  .mnob-screen:not(.mnob-landing) .mnob-body { padding-top: 48px; }
+  .mnob-screen:not(.mnob-landing) .mnob-lede { max-width: 560px; }
+  .mndyn .mndyn-points { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+  .mndyn .mndyn-point { grid-template-columns: 1fr; row-gap: 16px; padding: 24px; }
+  .mndyn .mndyn-point-title { font-size: 16px; }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .mnhome-overview,
+  .mnhome-discover { animation: passport-workspace-enter .45s ease-out both; }
+  .mnhome-discover { animation-delay: .08s; }
+  @keyframes passport-workspace-enter {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+}

@@ -410,7 +410,7 @@ for (const { label, shape, alias } of WALKABLE_SHAPES) {
     expect(await recordedLargeBlobSupport(h.page)).toEqual([shape.largeBlob]);
 
     /* The name step is where a new Passport lands, on every shape. */
-    await h.page.getByRole('button', { name: 'Choose my name' }).click();
+    await h.page.getByRole('button', { name: /^Choose my (\.night )?name$/ }).click();
     await expect(h.page.getByText(/Choose your .night name/i)).toBeVisible({ timeout: 60_000 });
 
     await seedClaimedPassport(h.page, alias);
@@ -420,9 +420,8 @@ for (const { label, shape, alias } of WALKABLE_SHAPES) {
     /* THE RETURNING VISIT, WHICH COSTS NOTHING. The session is restored
        silently; a reload is not a sign-in and must not be charged as one. */
     expect(await ceremonies(h.page)).toEqual({ started: 0, done: 0 });
-    await expect(h.page.getByRole('heading', { name: new RegExp(`${alias}$`) })).toBeVisible({
-      timeout: 30_000,
-    });
+    // The name is read back on the identity card (the greeting is the time of day).
+    await expect(h.page.locator('.mnid-alias')).toHaveText(`${alias}.night`, { timeout: 30_000 });
 
     /* AND THE SIGN-IN ITSELF: ONE ASSERTION. Signed out deliberately, then
        back in through the one button on the landing screen. */
@@ -474,9 +473,9 @@ test('a passkey that cannot derive a key says so in plain words, and never loops
      next one is the same passkey. */
   await expect(h.page.getByRole('button', { name: /Create a new passkey/i })).toHaveCount(0);
 
-  /* What IS offered is the door that leads off this platform: the platform's
-     own picker, which reaches a passkey held on another device. */
-  await expect(h.page.getByRole('button', { name: /Use a different passkey/i })).toBeVisible();
+  /* What IS offered is the door that leads off this platform: "Log in", the
+     platform's own picker, which reaches a passkey held on another device. */
+  await expect(h.page.getByRole('button', { name: 'Log in', exact: true })).toBeVisible();
 
   /* PRESSED AGAIN, because a person in a dead end presses the main button
      again. It must land in the same explained state rather than degrading into
@@ -598,7 +597,7 @@ test('a claim in its long step survives the tab going away and coming back', asy
   });
 
   await enrol(h.page);
-  await h.page.getByRole('button', { name: 'Choose my name' }).click();
+  await h.page.getByRole('button', { name: /^Choose my (\.night )?name$/ }).click();
   await expect(h.page.getByText(/Choose your .night name/i)).toBeVisible({ timeout: 60_000 });
   await h.page.getByLabel('Your Midnight name').fill('shapebackground');
   await expect(h.page.getByText('shapebackground.night is available')).toBeVisible({
@@ -784,7 +783,7 @@ test('a slow circuit key is waited for once, with the wait on the screen', async
   });
 
   await enrol(h.page);
-  await h.page.getByRole('button', { name: 'Choose my name' }).click();
+  await h.page.getByRole('button', { name: /^Choose my (\.night )?name$/ }).click();
   await expect(h.page.getByText(/Choose your .night name/i)).toBeVisible({ timeout: 60_000 });
   await h.page.getByLabel('Your Midnight name').fill('shapememory');
   await expect(h.page.getByText('shapememory.night is available')).toBeVisible({ timeout: 30_000 });

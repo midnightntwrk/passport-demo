@@ -1,0 +1,37 @@
+.mn-passport-art {
+  width: min(320px, 100%);
+  flex: 0 0 auto;
+  margin: 8px auto 24px;
+  color: var(--mn-text-primary);
+}
+.mn-passport-art svg { display: block; width: 100%; height: auto; overflow: visible; }
+.mn-passport-art-backing { fill: var(--mn-surface-raised); stroke: var(--mn-border-medium); }
+.mn-passport-art-mark { filter: invert(1); }
+.mn-passport-art-float {
+  animation: mn-passport-float 8s ease-in-out infinite;
+  filter: drop-shadow(0 8px 12px rgba(0, 0, 254, .12));
+}
+.mn-passport-art-proof {
+  opacity: 1;
+  filter: drop-shadow(0 3px 6px rgba(0, 0, 0, .08));
+}
+.mn-passport-art-proof-bg { fill: var(--mn-surface-raised); stroke: var(--mn-border-medium); }
+.mn-passport-art-check-bg { fill: var(--mn-accent-soft); }
+.mn-passport-art-check { stroke: var(--mn-accent-ink); }
+.mn-passport-art-proof-text { fill: var(--mn-text-primary); }
+
+/* The card gently floats; the Verified badge stays visible and stationary. */
+@keyframes mn-passport-float {
+  0%, 100% { transform: translateY(0); }
+  45%, 65% { transform: translateY(-4px); }
+}
+@media (max-width: 600px) and (max-height: 900px) {
+  .mn-passport-art { width: 260px; margin: 0 auto 16px; }
+}
+@media (max-height: 640px) {
+  .mn-passport-art { width: 220px; margin-bottom: 12px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mn-passport-art-float,
+  .mn-passport-art-proof { animation: none; }
+}

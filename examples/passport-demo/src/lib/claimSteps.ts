@@ -203,6 +203,22 @@ export function claimSubStages(phase: ClaimPhase, domain?: string): ClaimSubStag
   }))
 }
 
+/**
+ * What the long step says underneath itself, from the moment the wait starts
+ * rather than when it begins to hurt.
+ *
+ * The reviewer's ask on 2026/08/26 was "your passport is on its way, please be
+ * patient… you have to let the user know this will take time" — and a warning
+ * about a wait is worth most before it starts. It names no transaction count:
+ * how many proofs are involved is machinery, and "a few minutes" is the whole
+ * of what a person can act on.
+ *
+ * It lives here rather than in a screen because BOTH roads say it now — the
+ * name claim and the account custody setup — and a sentence written twice is a
+ * sentence that will one day be two sentences.
+ */
+export const LONG_WAIT_NOTE = 'Your Passport is on its way. This part takes a few minutes.'
+
 /* ------------------------------------------------------------------ */
 /* The clock                                                           */
 /* ------------------------------------------------------------------ */

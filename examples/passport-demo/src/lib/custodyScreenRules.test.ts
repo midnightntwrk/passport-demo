@@ -23,7 +23,7 @@
  * screen hands in, which is all these functions take.
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   custodyArrivingCount,
@@ -363,5 +363,71 @@ describe('the sentence that says what a payment will publish', () => {
 
   it('says nothing about the account’s NIGHT, which moves a different way', () => {
     expect(custodyPaymentDisclosure({ typed: 'alice', shielded: false })).toBeNull();
+  });
+});
+
+describe('runCustodyPayment — the answer is not held up by what follows it', () => {
+  const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  it('answers when the payment is done, keeps the flag up across the tidy-up, and reads after it', async () => {
+    const { runCustodyPayment } = await import('./custodyScreenRules.js');
+    const inFlight = { current: false };
+    const order: string[] = [];
+    let finishTidy!: () => void;
+    const tidy = new Promise<void>((resolve) => {
+      finishTidy = resolve;
+    });
+    const outcome = await runCustodyPayment(
+      inFlight,
+      () => {
+        order.push(`work:${String(inFlight.current)}`);
+        return Promise.resolve(async () => {
+          order.push('tidy');
+          await tidy;
+        });
+      },
+      () => {
+        order.push(`read:${String(inFlight.current)}`);
+        return Promise.resolve();
+      },
+    );
+    expect(outcome.failure).toBeNull();
+    /* Answered with the tidy-up still running, and the flag still up. */
+    expect(inFlight.current).toBe(true);
+    finishTidy();
+    await tick();
+    expect(inFlight.current).toBe(false);
+    expect(order).toEqual(['work:true', 'tidy', 'read:false']);
+  });
+
+  it('brings the flag down at once when there is no tidy-up, and reports the failure', async () => {
+    const { runCustodyPayment } = await import('./custodyScreenRules.js');
+    const inFlight = { current: false };
+    const failure = new Error('refused');
+    const outcome = await runCustodyPayment(inFlight, () => Promise.reject(failure), () => Promise.resolve());
+    expect(outcome.failure).toBe(failure);
+    expect(inFlight.current).toBe(false);
+  });
+
+  it('survives a tidy-up and a read that fail, and never waits on them', async () => {
+    const { runCustodyPayment } = await import('./custodyScreenRules.js');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    const inFlight = { current: false };
+    const outcome = await runCustodyPayment(
+      inFlight,
+      () => Promise.resolve(() => Promise.reject(new Error('tidy failed'))),
+      () => Promise.reject(new Error('read failed')),
+    );
+    expect(outcome.failure).toBeNull();
+    await tick();
+    expect(inFlight.current).toBe(false);
+    expect(warn).toHaveBeenCalled();
+    expect(info).toHaveBeenCalled();
+    /* A read that never answers does not hold the payment's answer either. */
+    const never = await runCustodyPayment({ current: false }, () => Promise.resolve(), () => new Promise(() => undefined));
+    expect(never.failure).toBeNull();
+    warn.mockRestore();
+    info.mockRestore();
   });
 });

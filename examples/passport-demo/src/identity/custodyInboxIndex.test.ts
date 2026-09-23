@@ -253,3 +253,26 @@ describe('a history longer than one page', () => {
     expect(custodyActionRowsFrom(answer(three), 4)).toHaveLength(3);
   });
 });
+
+describe('custodyLandedSpendCount — the spends the chain holds', () => {
+  it('counts the shielded withdrawals that ran, and nothing else', async () => {
+    const { custodyLandedSpendCount } = await import('./custodyInboxIndex.js');
+    const rows = [
+      { kind: 'ContractDeploy' as const, entryPoint: null, txHash: 'a' },
+      { kind: 'ContractCall' as const, entryPoint: 'withdraw_shielded_to_contract_with_jubjub', txHash: 'b', status: 'SUCCESS' },
+      { kind: 'ContractCall' as const, entryPoint: 'withdraw_shielded_with_k256', txHash: 'c' },
+      { kind: 'ContractCall' as const, entryPoint: 'withdraw_shielded_with_k256', txHash: 'd', status: 'FAILURE' },
+      { kind: 'ContractCall' as const, entryPoint: 'withdraw_unshielded_with_jubjub', txHash: 'e' },
+      { kind: 'ContractCall' as const, entryPoint: null, txHash: 'f' },
+    ];
+    expect(custodyLandedSpendCount(rows)).toBe(2);
+  });
+
+  it('cannot say for a history it could not read, one that may be cut short, or one with a row it cannot read', async () => {
+    const { custodyLandedSpendCount } = await import('./custodyInboxIndex.js');
+    expect(custodyLandedSpendCount(null)).toBeNull();
+    const call = { kind: 'ContractCall' as const, entryPoint: 'withdraw_shielded_with_k256', txHash: 'b' };
+    expect(custodyLandedSpendCount([call, call], 2)).toBeNull();
+    expect(custodyLandedSpendCount([call, { kind: null, entryPoint: null, txHash: null }])).toBeNull();
+  });
+});

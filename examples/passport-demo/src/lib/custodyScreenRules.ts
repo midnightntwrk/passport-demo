@@ -137,6 +137,57 @@ export async function runCustodyWork(
 /* 2b. The record of what the account kept, written INSIDE the payment        */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * A PAYMENT, WHOSE ANSWER IS NOT HELD UP BY WHAT FOLLOWS IT (2026/09/22).
+ *
+ * {@link runCustodyWork} awaits its follow-up, and the Send sheet awaits the
+ * whole of it. Two things followed a payment: the tidy-up that writes the
+ * change into the account's own inbox — a gated transaction of its own, a
+ * proof and a submit and a wait — and the read that shows the new figures.
+ * Live on 2026/09/22 a payment that had landed kept its sheet on "Submitted.
+ * Waiting for the network" for the whole of the tidy-up; and a tidy-up, or a
+ * read, that never finished kept it there for ever.
+ *
+ * So the payment's own outcome is returned the moment the payment is done.
+ * `work` may hand back a tidy-up; the flag STAYS UP across it — two gated calls
+ * must never sign against one `auth_nonce`, so a second press meanwhile is
+ * refused in {@link custodyInFlightRefusal}'s one sentence — and comes down
+ * when it is over, whatever it came to. The follow-up read runs after that,
+ * and nothing waits for it.
+ */
+export async function runCustodyPayment(
+  inFlight: CustodyInFlightFlag,
+  work: () => Promise<(() => Promise<void>) | void>,
+  followUp: () => Promise<void>,
+): Promise<CustodyWorkOutcome> {
+  let failure: unknown = null;
+  let tidyUp: (() => Promise<void>) | null = null;
+  inFlight.current = true;
+  try {
+    const handed = await work();
+    if (typeof handed === 'function') tidyUp = handed;
+  } catch (cause) {
+    failure = cause;
+  }
+  const after = async (): Promise<void> => {
+    if (tidyUp !== null) {
+      try {
+        await tidyUp();
+      } catch (cause) {
+        console.warn('[account-custody] the tidy-up after a payment did not finish', cause);
+      }
+    }
+    inFlight.current = false;
+    try {
+      await followUp();
+    } catch (cause) {
+      console.info('[account-custody] the read after a payment did not finish', cause);
+    }
+  };
+  void after();
+  return { failure };
+}
+
 /** The busy line while the account's own note of the change is written. */
 export const CUSTODY_KEEP_RECORD_BUSY = 'Writing down what you kept';
 

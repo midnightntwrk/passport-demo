@@ -1,7 +1,7 @@
 @import './tokens.css';
 
 /* Onboarding screen — prefix "mnob-".
-   Base-inspired Midnight direction: white/near-black page surfaces, one
+   Midnight atmospheric direction: white/near-black page surfaces, one
    electric blue accent, generously rounded cards, and soft vertical
    shadows (see tokens.css for the full language).
 
@@ -313,9 +313,133 @@
   .mnob-primary { width: auto; min-width: 280px; }
 }
 
+/* ------------------------------------------------------------------------- */
+/* Midnight atmospheric refresh                                              */
+/* ------------------------------------------------------------------------- */
+
+.mnob-screen.mnob-landing {
+  isolation: isolate;
+  background:
+    radial-gradient(circle at 50% 18%, rgba(0, 0, 254, .10), transparent 34%),
+    var(--mn-surface-page);
+}
+.mnob-screen.mnob-landing::before {
+  content: '';
+  position: absolute;
+  z-index: -1;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(180deg, transparent 55%, rgba(101, 92, 255, .045));
+}
+.mnob-landing .mnob-bar {
+  width: min(100% - 40px, 620px);
+  min-height: 68px;
+  border-bottom-color: color-mix(in srgb, var(--mn-border-hairline) 74%, transparent);
+  animation: mnob-bar-in .55s cubic-bezier(.22, 1, .36, 1) both;
+}
+.mnob-landing .mnob-wordmark { width: 116px; }
+.mnob-landing .mnob-bar-label {
+  letter-spacing: .16em;
+  opacity: .76;
+}
+.mnob-landing .mnob-body {
+  width: min(100% - 40px, 580px);
+  align-items: center;
+  padding-top: clamp(14px, 3svh, 28px);
+  padding-bottom: 22px;
+  text-align: center;
+}
+.mnob-landing .mnob-title {
+  display: block;
+  max-width: 570px;
+  font-size: clamp(36px, 9.7vw, 58px);
+  font-weight: 700;
+  letter-spacing: -.045em;
+  line-height: .98;
+  text-wrap: balance;
+  animation: mnob-copy-in .65s .12s cubic-bezier(.22, 1, .36, 1) both;
+}
+.mnob-landing .mnob-title span { display: inline; }
+.mnob-landing .mnob-title span + span::before { content: ' '; }
+.mnob-landing .mnob-lede {
+  max-width: 430px;
+  margin-top: 18px;
+  color: var(--mn-text-secondary);
+  font-size: 15px;
+  line-height: 1.55;
+  text-wrap: balance;
+  animation: mnob-copy-in .65s .2s cubic-bezier(.22, 1, .36, 1) both;
+}
+.mnob-landing .mnob-stage {
+  width: 100%;
+  max-width: 520px;
+  margin-top: clamp(28px, 5svh, 46px);
+  padding-top: 0;
+  text-align: left;
+  animation: mnob-stage-in .55s .28s cubic-bezier(.22, 1, .36, 1) both;
+}
+.mnob-landing .mnob-primary {
+  min-height: 58px;
+  border-radius: 18px;
+  padding-inline: 21px;
+  font-family: var(--mn-font-body);
+  font-size: 15px;
+  letter-spacing: -.01em;
+}
+.mnob-landing .mnob-primary {
+  background: var(--mn-accent-gradient);
+  box-shadow: var(--mn-shadow-accent);
+}
+.mnob-landing .mnob-primary:hover:not(:disabled) {
+  background: linear-gradient(115deg, #655cff 0%, #0000d8 68%, #163be0 100%);
+  transform: translateY(-1px);
+}
+.mnob-landing .mnob-primary-copy svg { filter: drop-shadow(0 0 9px rgba(255, 255, 255, .26)); }
+
+.mnob-landing .mnob-route-hint {
+  margin-top: 12px;
+  padding-left: 33px;
+  font-size: 11px;
+}
+.mnob-landing .mnob-alt {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 12px;
+  padding-left: 33px;
+  text-decoration: none;
+}
+.mnob-landing .mnob-foot {
+  width: min(100% - 40px, 620px);
+  justify-content: center;
+  border-top-color: color-mix(in srgb, var(--mn-border-hairline) 68%, transparent);
+  letter-spacing: .03em;
+}
+
+@keyframes mnob-bar-in {
+  from { opacity: 0; transform: translateY(-10px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes mnob-copy-in {
+  from { opacity: 0; transform: translateY(15px); filter: blur(4px); }
+  to { opacity: 1; transform: none; filter: blur(0); }
+}
+
+@media (max-height: 760px) {
+  .mnob-landing .mnob-title { font-size: clamp(32px, 8.8vw, 45px); }
+  .mnob-landing .mnob-lede { margin-top: 12px; }
+  .mnob-landing .mnob-stage { margin-top: 22px; }
+  .mnob-landing .mnob-primary { min-height: 52px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mnob-landing .mnob-bar, .mnob-landing .mnob-title, .mnob-landing .mnob-lede, .mnob-landing .mnob-stage { animation: none; }
+  .mnob-landing .mnob-primary:hover:not(:disabled) { transform: none; }
+}
+
 /* The social entry, and the note it turns into once somebody is signed in.
    Present in the stylesheet unconditionally; rendered only by a build with a
-   Dynamic environment id (see `ContinueWithSocial.tsx`). Quieter than
+   Dynamic environment id. Quieter than
    `.mnob-primary` and louder than `.mnob-alt`, because it is a real second
    route rather than a variation on the first — but it is never the way this
    screen is finished. */

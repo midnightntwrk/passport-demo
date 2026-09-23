@@ -93,18 +93,25 @@ async function visibleText(): Promise<string> {
   return page.locator('body').innerText();
 }
 
-test('the landing screen offers one way in, and says what network this is', async () => {
+test('the landing screen offers Log in and Sign up, and says what network this is', async () => {
   await page.goto('/');
 
   await expect(page.getByRole('heading', { name: /Midnight\s*Passport/ })).toBeVisible();
-  await expect(page.getByRole('button', { name: SIGN_IN_BUTTON })).toBeVisible();
-  await expect(page.getByText(/Test network demo — not production/)).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Sign up', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Log in', exact: true })).toBeEnabled();
+  await expect(page.getByText(/Test network demo — not production/)).toHaveCount(0);
 
-  /* One primary action. There is no hosted route to offer and no vendor
-     sign-in to wait on, so a second primary button would be a promise this
-     demo cannot keep. */
-  const primaries = await page.getByRole('button', { name: /Continue|Create|Sign in/i }).count();
-  expect(primaries).toBe(1);
+  /* TWO DOORS, AND NOTHING ELSE THAT STARTS ANYTHING (2026/09/22). The one
+     "Continue with Passkey" is gone, and so is its quiet "Use a different
+     passkey": "Log in" is that picker now. This build has no provider sign-in
+     behind it, so the recovery link is absent too — `provider-recovery.spec.ts`
+     walks the build that has one. */
+  await expect(page.locator('.mnob-auth-button')).toHaveCount(2);
+  await expect(page.getByRole('button', { name: /Continue with/i })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: /Use a different passkey/i })).toHaveCount(0);
+  await expect(page.getByTestId('recover-lost-device')).toHaveCount(0);
+  const primaries = await page.getByRole('button', { name: /Continue|Create|Sign in|Sign up|Log in/i }).count();
+  expect(primaries).toBe(2);
 
   // Nothing about a wallet, a seed phrase, or a fee before anything has happened.
   const text = await visibleText();
@@ -125,9 +132,9 @@ test('a passkey is welcomed, and the welcome leads to the name step', async () =
     timeout: 60_000,
   });
   await expect(page.getByText('An identity you hold')).toBeVisible();
-  await expect(page.getByText('A name, not an address')).toBeVisible();
-  await expect(page.getByText('Fees are covered for you')).toBeVisible();
-  await expect(page.getByText('Prove things privately')).toBeVisible();
+  await expect(page.getByText('A name people know')).toBeVisible();
+  await expect(page.getByText('Start without tokens')).toBeVisible();
+  await expect(page.getByText('Share on your terms')).toBeVisible();
 
   /* ONE control and no more, and it says where it goes.
      A "Skip" sat under it until 2026/08/30 and led to the same place — the
@@ -136,7 +143,7 @@ test('a passkey is welcomed, and the welcome leads to the name step', async () =
      app's words are approximate, so it is asserted GONE, and as an absence of
      anything that would read as a way out rather than of one word. */
   const welcomeButtons = await page.getByRole('button').allInnerTexts();
-  expect(welcomeButtons.filter((label) => label.trim().length > 0)).toEqual(['Choose my name']);
+  expect(welcomeButtons.filter((label) => label.trim().length > 0)).toEqual(['Choose my .night name']);
   await expect(page.getByRole('button', { name: /skip|later|not now|maybe/i })).toHaveCount(0);
 
   /* And nothing on it claims anything the build does not do — no wallet, no
@@ -146,7 +153,7 @@ test('a passkey is welcomed, and the welcome leads to the name step', async () =
   expect(welcomeText).not.toMatch(/\bDUST\b/);
   expect(welcomeText).not.toMatch(/\bNIGHT\b/);
 
-  await page.getByRole('button', { name: 'Choose my name' }).click();
+  await page.getByRole('button', { name: /^Choose my (\.night )?name$/ }).click();
 
   await expect(page.getByText(/Choose your .night name/i)).toBeVisible({ timeout: 60_000 });
   await expect(page.getByText(/^LAST STEP$/i)).toBeVisible();
@@ -515,7 +522,7 @@ test('a claim that failed keeps the name, and the reload lands on Home with a re
 
   // Home, not the naming screen — the name step is resolved, it just is not
   // on chain.
-  await expect(page.getByRole('heading', { name: new RegExp(NAME, 'i') })).toBeVisible({
+  await expect(page.locator('.mnid-alias').filter({ hasText: new RegExp(NAME, 'i') }).first()).toBeVisible({
     timeout: 60_000,
   });
   await expect(page.getByText(/Choose your .night name/i)).toHaveCount(0);
@@ -866,9 +873,8 @@ test('the Send sheet is a withdrawal from the account, and never mentions DUST',
      internal reason are the wallet's business and do not appear here. */
   const sheet = await visibleText();
   expect(sheet).not.toMatch(/dust/i);
-  // What it DOES say about the fee: who is expected to pay it, and nothing
-  // about which token that costs them.
-  await expect(page.getByText(/Network fee expected to be covered by the fee sponsor/i)).toBeVisible();
+  // A covered fee is not narrated at all (2026/09/22): the reader pays nothing.
+  await expect(page.getByText(/Network fee expected to be covered by the fee sponsor/i)).toHaveCount(0);
 
   /* `mn_addr…` appears once, as the shape of the RECIPIENT's address — that is
      someone else's, and naming its format is how a paste is validated. What
@@ -879,9 +885,20 @@ test('the Send sheet is a withdrawal from the account, and never mentions DUST',
      it — the name is the thing Passport is for; the address formats are the
      fallback. Since 2026/08/31 it names only the ONE address form the CHOSEN
      asset can go to, rather than listing both and leaving the refusal to do
-     the teaching: the sheet opens on NIGHT, so this is NIGHT's. */
+     the teaching. Since the Home redesign (PR #91) the sheet opens on mUSD,
+     so this is mUSD's: a name, or a shielded address. */
+  await expect(page.getByRole('heading', { name: 'Send mUSD' })).toBeVisible();
   await expect(
-    page.getByText(/A Midnight name, or an unshielded \(mn_addr…\) stagenet address/),
+    page.getByText(/A Midnight name, or a shielded \(mn_shield-addr…\) stagenet address/).first(),
+  ).toBeVisible();
+  /* And the hint follows the choice: on NIGHT it names the unshielded form.
+     The walks after this one pay NIGHT, so the sheet is left on it. */
+  const picker = page.getByRole('combobox', { name: /^Asset/ });
+  const night = await picker.locator('option', { hasText: /^NIGHT/ }).getAttribute('value');
+  await picker.selectOption(night!);
+  await expect(page.getByRole('heading', { name: 'Send NIGHT' })).toBeVisible();
+  await expect(
+    page.getByText(/A Midnight name, or an unshielded \(mn_addr…\) stagenet address/).first(),
   ).toBeVisible();
   expect(sheet).not.toMatch(/mn_addr_stagenet1[a-z0-9]{10,}/);
   expect(sheet).not.toMatch(/mn_shield-addr_stagenet1[a-z0-9]{10,}/);
@@ -928,7 +945,7 @@ test('a `.night` name is a recipient, and the review step shows the name', async
   await page.getByRole('textbox').nth(1).fill('0.000001');
   await page.getByRole('button', { name: /^Review$/ }).click();
 
-  await expect(page.getByText('Review this transfer')).toBeVisible();
+  await expect(page.getByText('Review transfer')).toBeVisible();
   const review = await page.locator('.mnhome-send-rows').innerText();
   expect(review).toContain(`${RESOLVABLE_NAME}.night`);
   /* NO HEX. Not the account, not any part of it beyond the four characters the
@@ -1032,7 +1049,7 @@ test('a busy fee sponsor disables the Send control rather than removing it', asy
   await expect(page.getByText(/The fee sponsor is busy/)).toHaveCount(0);
   await expect(
     page.getByText(/Network fee expected to be covered by the fee sponsor/i),
-  ).toBeVisible();
+  ).toHaveCount(0);
 });
 
 test('a send whose passkey will not answer offers a retry and a way out, in the sheet', async () => {
@@ -1071,7 +1088,7 @@ test('a send whose passkey will not answer offers a retry and a way out, in the 
      in the way. */
   await page.getByPlaceholder('0.0').fill('0.000001');
   await page.getByRole('button', { name: /^Review$/ }).click();
-  await expect(page.getByText('Review this transfer')).toBeVisible();
+  await expect(page.getByText('Review transfer')).toBeVisible();
 
   await page.evaluate(() => {
     (window as unknown as { __refuseNextAssertion?: boolean }).__refuseNextAssertion = true;
@@ -1205,7 +1222,7 @@ test('a passkey this browser does not know about never blocks the way in', async
     await expect(fresh.getByRole('heading', { name: /Welcome to Passport/i })).toBeVisible({
       timeout: 90_000,
     });
-    await fresh.getByRole('button', { name: 'Choose my name' }).click();
+    await fresh.getByRole('button', { name: /^Choose my (\.night )?name$/ }).click();
 
     /* The name step is only reachable once PRF derived a seed and the wallet
        opened, so arriving here is proof the enrolment genuinely worked rather
@@ -1356,7 +1373,7 @@ test('a Passport whose passkey this device cannot produce is offered a new one',
     await expect(stranded.getByRole('heading', { name: /Welcome to Passport/i })).toBeVisible({
       timeout: 120_000,
     });
-    await stranded.getByRole('button', { name: 'Choose my name' }).click();
+    await stranded.getByRole('button', { name: /^Choose my (\.night )?name$/ }).click();
     await expect(stranded.getByText(/Choose your .night name/i)).toBeVisible({ timeout: 60_000 });
 
     /* THE OLD RECORDS ARE STILL THERE. The new Passport keys its profile and
@@ -1376,7 +1393,7 @@ test('a Passport whose passkey this device cannot produce is offered a new one',
 test('a picker with nothing in it offers a new passkey too, not just an apology', async ({
   browser,
 }) => {
-  /* The other half. "Use a different passkey" runs a DISCOVERABLE assertion,
+  /* The other half. "Log in" runs a DISCOVERABLE assertion,
      so the platform shows its own picker — and for this user it is empty, or
      they close it, which WebAuthn reports identically. This path used to end
      in a sentence, which was the worse failure of the two: it is where the
@@ -1393,7 +1410,7 @@ test('a picker with nothing in it offers a new passkey too, not just an apology'
     await seedStrandedProfile(stranded, STRANDED_CREDENTIAL_ID);
     await stranded.reload();
 
-    await stranded.getByRole('button', { name: /Use a different passkey/i }).click();
+    await stranded.getByRole('button', { name: 'Log in', exact: true }).click();
 
     await expect(stranded.getByText(/Could not load your passkey/i)).toBeVisible({
       timeout: 60_000,
@@ -1405,7 +1422,7 @@ test('a picker with nothing in it offers a new passkey too, not just an apology'
     await expect(stranded.getByRole('heading', { name: /Welcome to Passport/i })).toBeVisible({
       timeout: 120_000,
     });
-    await stranded.getByRole('button', { name: 'Choose my name' }).click();
+    await stranded.getByRole('button', { name: /^Choose my (\.night )?name$/ }).click();
     await expect(stranded.getByText(/Choose your .night name/i)).toBeVisible({ timeout: 60_000 });
   } finally {
     await authenticator.remove().catch(() => {});
@@ -1614,7 +1631,7 @@ test('a claim whose passkey will not answer offers a retry, a way out, and a way
     await expect(stalled.getByRole('heading', { name: /Welcome to Passport/i })).toBeVisible({
       timeout: 120_000,
     });
-    await stalled.getByRole('button', { name: 'Choose my name' }).click();
+    await stalled.getByRole('button', { name: /^Choose my (\.night )?name$/ }).click();
     await expect(stalled.getByText(/Choose your .night name/i)).toBeVisible({ timeout: 60_000 });
 
     /* A name this run has not asked about, so the claim's own pre-checks run
@@ -1689,7 +1706,7 @@ test('a claim whose passkey will not answer offers a retry, a way out, and a way
        its owner picked, offered for another attempt. Before that record
        existed this landed on an empty naming screen, which was the same
        Passport but could not be told apart from a new one. */
-    await expect(stalled.getByRole('heading', { name: new RegExp(claimName, 'i') })).toBeVisible({
+    await expect(stalled.locator('.mnid-alias').filter({ hasText: new RegExp(claimName, 'i') }).first()).toBeVisible({
       timeout: 180_000,
     });
     await expect(stalled.getByRole('heading', { name: /Welcome to Passport/i })).toHaveCount(0);

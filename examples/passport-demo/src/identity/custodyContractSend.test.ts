@@ -18,12 +18,16 @@ import {
   changeCoinFromResult,
   clearCustodyShieldedSend,
   custodyShieldedSendOutcome,
+  custodyStoppedSendSentence,
+  custodyStoppedSendVerdict,
   loadCustodyShieldedSend,
   newCustodyShieldedSend,
   nextCustodyShieldedSendStep,
   saveCustodyShieldedSend,
   spendFailureText,
   spendPositionMayBeWrong,
+  zswapLeafIndex,
+  spendRefusalMayBePosition,
   CUSTODY_APPROVAL_WAITING,
   CUSTODY_SHIELDED_SEND_KEY,
   custodyShieldedAddressSendRefusal,
@@ -290,7 +294,7 @@ describe('custodyShieldedSendRefusal', () => {
        each — and the only other route is through a wallet the ruling forbids. */
     for (const module of ['account', 'account-v1'] as const) {
       expect(custodyShieldedSendRefusal(shieldedInput({ recipientModule: module }))).toMatch(
-        /older kind/,
+        /on the older version, so it can't be paid from this one/,
       );
     }
   });
@@ -710,8 +714,8 @@ describe('the record a stopped send leaves behind', () => {
   it('says where the value is, and never claims more than it can see', () => {
     expect(custodyShieldedSendOutcome(send({ stage: 'done' }))).toMatch(/alice\.night has it/);
     const inFlight = custodyShieldedSendOutcome(send({ sendTxId: 'cc'.repeat(32) }));
-    expect(inFlight).toMatch(/one payment/);
-    expect(inFlight).toMatch(/either it reached alice\.night or nothing left your Passport/);
+    /* ASKED OF THE CHAIN, and until it answers the line says so (2026/09/22). */
+    expect(inFlight).toBe('Checking whether your payment to alice.night went through…');
     /* AND IT PROMISES NOTHING NOBODY WROTE: no resume, no button, no wait. */
     expect(inFlight).not.toMatch(/by itself|on its own|Finish/);
     /* With no name to use, the sentence still has to work. */
@@ -720,7 +724,7 @@ describe('the record a stopped send leaves behind', () => {
     );
     expect(
       custodyShieldedSendOutcome(send({ recipientLabel: '', sendTxId: 'cc'.repeat(32) })),
-    ).toMatch(/reached them/);
+    ).toMatch(/payment to them went through/);
   });
 
   /* THE STRONGER SENTENCE, AND WHEN IT IS EARNED (defect 18, fixed
@@ -738,11 +742,192 @@ describe('the record a stopped send leaves behind', () => {
     expect(untouched).not.toMatch(/either it reached|one payment|Finish|by itself/);
   });
 
-  it('hedges only once there is a transaction that could have landed', () => {
+  it('checks only once there is a transaction that could have landed', () => {
     /* The SAME stage, the only difference being that a transaction exists. */
     const away = custodyShieldedSendOutcome(send({ sendTxId: 'cc'.repeat(32) }));
-    expect(away).toMatch(/either it reached alice\.night or nothing left your Passport/);
-    expect(away).not.toMatch(/Nothing was sent/);
+    expect(away).toMatch(/Checking whether your payment to alice\.night went through/);
+    expect(away).not.toMatch(/Nothing was sent|either it reached|says which/);
+  });
+
+  it('answers a stopped payment from the chain: sent, not sent, or still checking', () => {
+    const now = 1_800_000_000_000;
+    const away = send({ sendTxId: 'cc'.repeat(32), startedAt: now - 60_000 });
+    /* The indexer has it: sent, whenever it is asked. */
+    expect(custodyStoppedSendVerdict({ record: away, onChain: true, now })).toBe('landed');
+    expect(custodyStoppedSendSentence(away, 'landed')).toBe('Sent. alice.night has it.');
+    /* Answered and absent, but still inside the wait: not yet a verdict. */
+    expect(custodyStoppedSendVerdict({ record: away, onChain: false, now })).toBe('checking');
+    /* Answered and absent, and the wait has passed since it was SENT. */
+    const late = { ...away, sentAt: now - 3 * 60 * 1000 };
+    expect(custodyStoppedSendVerdict({ record: late, onChain: false, now })).toBe('not-landed');
+    expect(custodyStoppedSendSentence(late, 'not-landed')).toBe(
+      "That payment didn't go through. Nothing left your Passport.",
+    );
+    /* An indexer that could not be asked is never a verdict, however late. */
+    expect(custodyStoppedSendVerdict({ record: late, onChain: null, now })).toBe('checking');
+    expect(custodyStoppedSendSentence(late, 'checking')).toBe(
+      'Checking whether your payment to alice.night went through…',
+    );
+  });
+
+  it('keeps what a submit wrote, so a payment that never landed can be taken back', () => {
+    const storage = new Map<string, string>();
+    const store = {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => void storage.set(key, value),
+      removeItem: (key: string) => void storage.delete(key),
+    };
+    const undo = {
+      held: { colour: 'aa'.repeat(32), nonce: 'bb'.repeat(32), value: '100', mtIndex: '12' },
+      change: { colour: 'aa'.repeat(32), nonce: 'cc'.repeat(32) },
+    };
+    const record = { ...send({ sendTxId: 'dd'.repeat(32) }), sentAt: 5, undo };
+    saveCustodyShieldedSend(store, record);
+    const read = loadCustodyShieldedSend(store, {
+      network: record.network,
+      accountAddress: record.accountAddress,
+    });
+    expect(read?.sentAt).toBe(5);
+    expect(read?.undo).toEqual(undo);
+    /* No change coin is a real answer, kept as null. */
+    saveCustodyShieldedSend(store, { ...record, undo: { ...undo, change: null } });
+    expect(
+      loadCustodyShieldedSend(store, { network: record.network, accountAddress: record.accountAddress })
+        ?.undo?.change,
+    ).toBeNull();
+    /* A malformed undo is dropped, never half-read. */
+    for (const broken of [
+      'nope',
+      { held: null },
+      { held: { ...undo.held, value: '-1' } },
+      { held: { ...undo.held, mtIndex: 7 } },
+      { held: { ...undo.held, colour: 1 } },
+      { held: { ...undo.held, nonce: 1 } },
+      { held: { ...undo.held, value: 1 } },
+    ]) {
+      saveCustodyShieldedSend(store, { ...record, undo: broken as never });
+      expect(
+        loadCustodyShieldedSend(store, { network: record.network, accountAddress: record.accountAddress })
+          ?.undo,
+      ).toBeUndefined();
+    }
   });
 });
 
+/* -------------------------------------------------------------------------- */
+/* A SPONSORED REFUSAL, AND WHETHER IT IS WORTH ANOTHER POSITION              */
+/*                                                                            */
+/* THE DEFECT THESE ARE WRITTEN AGAINST (live, 2026/09/21). The candidate      */
+/* retry was armed by the words the refusal arrived with, and on the sponsored */
+/* route those words are one fixed sentence — the service redacts the proof    */
+/* server's own text so that a malformed transaction cannot make it publish    */
+/* its filesystem and its internal endpoints. So the predicate answered no to  */
+/* every sponsored refusal, and the first payment out of a freshly funded      */
+/* Passport stopped on the first one with `Public transcript input mismatch`   */
+/* in the proof server's log — a position that rebuilds a different root,      */
+/* which is precisely the failure the retry exists for.                        */
+/* -------------------------------------------------------------------------- */
+
+/** The body the deployed sponsor answers a refused proof with, verbatim. */
+const SPONSOR_DETAIL = 'The proof server could not prove this transaction.';
+
+describe('whether a refusal from the proving service is worth another position', () => {
+  it('retries the sponsor’s own redacted sentence while a position is left', () => {
+    /* THE LIVE CASE. Nothing in that sentence says merkle, mt_index,
+       membership, witness, unsatisfiable, or constraint — and it never will. */
+    expect(spendPositionMayBeWrong(SPONSOR_DETAIL)).toBe(false);
+    expect(
+      spendRefusalMayBePosition({
+        proofNotBuilt: true,
+        detail: SPONSOR_DETAIL,
+        positionsLeft: true,
+      }),
+    ).toBe(true);
+  });
+
+  it('is over once there is nowhere left to try', () => {
+    /* WHAT BOUNDS THE APPROVALS. A verdict no position can fix — a verifier
+       key that does not match, a circuit staged the wrong way — costs one
+       approval per remaining position and not one more. */
+    expect(
+      spendRefusalMayBePosition({
+        proofNotBuilt: true,
+        detail: SPONSOR_DETAIL,
+        positionsLeft: false,
+      }),
+    ).toBe(false);
+  });
+
+  it('retries a refusal that said nothing at all, while a position is left', () => {
+    expect(
+      spendRefusalMayBePosition({ proofNotBuilt: true, detail: null, positionsLeft: true }),
+    ).toBe(true);
+    expect(
+      spendRefusalMayBePosition({ proofNotBuilt: true, detail: null, positionsLeft: false }),
+    ).toBe(false);
+  });
+
+  it('honours a refusal that names a position on its words alone', () => {
+    /* A LOCAL PROVER, OR A FUTURE SPONSOR THAT FORWARDS THE TEXT, loses
+       nothing: the wording is still the fast yes, and it does not wait on the
+       store to agree that there is somewhere to go. */
+    expect(
+      spendRefusalMayBePosition({
+        proofNotBuilt: true,
+        detail: 'Public transcript input mismatch: the merkle path does not rebuild the root',
+        positionsLeft: false,
+      }),
+    ).toBe(true);
+  });
+
+  it('is not armed by anything that is not the service’s verdict', () => {
+    /* `503 prover-unavailable` is a DIFFERENT error and is untouched: the
+       service was restarted mid-spend, it looked at no position, and a retry
+       would cost an approval to learn nothing. Same for a refusal this build
+       never classified at all. */
+    expect(
+      spendRefusalMayBePosition({
+        proofNotBuilt: false,
+        detail: SPONSOR_DETAIL,
+        positionsLeft: true,
+      }),
+    ).toBe(false);
+    expect(
+      spendRefusalMayBePosition({
+        proofNotBuilt: false,
+        detail: 'the merkle path could not be built',
+        positionsLeft: true,
+      }),
+    ).toBe(false);
+  });
+});
+
+describe('zswapLeafIndex', () => {
+  const A = 'ab'.repeat(32);
+  const dump = [
+    'State {',
+    `    coin_coms: MerkleTree(root = Some(${'00'.repeat(32)})) {`,
+    '        0..=4212: <collapsed>,',
+    `        4213: (${'03'.repeat(32)}, Some(ContractAddress(${A}))),`,
+    '        4214..=4218: <collapsed>,',
+    `        4219: (${'06'.repeat(32)}, Some(ContractAddress(${A}))),`,
+    '    },',
+    '}',
+  ].join('\n');
+
+  it('reads the index a commitment is listed at', () => {
+    expect(zswapLeafIndex(dump, '06'.repeat(32))).toBe(4219n);
+    expect(zswapLeafIndex(dump, '03'.repeat(32).toUpperCase())).toBe(4213n);
+  });
+
+  it('is null for a commitment the tree does not list, or the root', () => {
+    expect(zswapLeafIndex(dump, '07'.repeat(32))).toBeNull();
+    expect(zswapLeafIndex(dump, '00'.repeat(32))).toBeNull();
+  });
+
+  it('is null for anything that is not a commitment or a dump', () => {
+    expect(zswapLeafIndex(dump, 'not hex')).toBeNull();
+    expect(zswapLeafIndex(undefined as unknown as string, '06'.repeat(32))).toBeNull();
+    expect(zswapLeafIndex(dump, 6 as unknown as string)).toBeNull();
+  });
+});

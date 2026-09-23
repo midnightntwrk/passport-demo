@@ -33,6 +33,11 @@ import {
   dynamicStage,
   dynamicUserKey,
   custodyNameKey,
+  CUSTODY_CHOSEN_NAME_KEY,
+  forgetCustodyChosenName,
+  loadCustodyChosenName,
+  loadCustodyChosenNames,
+  saveCustodyChosenName,
   k1PrivateStateId,
   custodyRecoveryOutcome,
   loadCustodyName,
@@ -174,7 +179,11 @@ describe('dynamicStage', () => {
 
   it('resumes a setup that has an address and is unfinished', () => {
     expect(
-      dynamicStage({ identity: 'dynamic', record: { ...RECORD, wavesDone: 1 }, name: null }),
+      dynamicStage({
+        identity: 'dynamic',
+        record: { ...RECORD, wavesDone: 1, activated: false },
+        name: null,
+      }),
     ).toBe('resume');
     expect(
       dynamicStage({ identity: 'dynamic', record: { ...RECORD, activated: false }, name: null }),
@@ -185,34 +194,43 @@ describe('dynamicStage', () => {
     expect(dynamicStage({ identity: 'dynamic', record: RECORD, name: null })).toBe('name');
     expect(dynamicStage({ identity: 'dynamic', record: RECORD, name: 'alice' })).toBe('home');
   });
+
+  /* Usable is ACTIVATED, not every wave in: the rest land behind Home. */
+  it('goes home with waves still to land once the key is on', () => {
+    expect(
+      dynamicStage({ identity: 'dynamic', record: { ...RECORD, wavesDone: 1 }, name: 'alice' }),
+    ).toBe('home');
+  });
 });
 
 describe('the setup copy', () => {
   it('counts three steps, whatever the wave plan does', () => {
     expect(DYNAMIC_SETUP_STEPS).toBe(3);
     expect(dynamicSetupCopy('create')).toBe('Setting up your Passport, step 1 of 3');
-    expect(dynamicSetupCopy('finish')).toBe('Setting up your Passport, step 2 of 3');
-    expect(dynamicSetupCopy('activate')).toBe('Setting up your Passport, step 3 of 3');
+    expect(dynamicSetupCopy('activate')).toBe('Setting up your Passport, step 2 of 3');
+    expect(dynamicSetupCopy('finish')).toBe('Setting up your Passport, step 3 of 3');
     expect(dynamicSetupCopy('done')).toBe('Your Passport is ready.');
   });
 
   it('reads the phase off the record', () => {
     expect(dynamicSetupPhase(null)).toBe('create');
     expect(dynamicSetupPhase({ ...RECORD, address: null })).toBe('create');
+    /* Activated with waves still to land: the finishing is the LAST step now. */
     expect(dynamicSetupPhase({ ...RECORD, wavesDone: 1 })).toBe('finish');
     expect(dynamicSetupPhase({ ...RECORD, activated: false })).toBe('activate');
+    expect(dynamicSetupPhase({ ...RECORD, wavesDone: 1, activated: false })).toBe('activate');
     expect(dynamicSetupPhase(RECORD)).toBe('done');
     /* A setup that cannot be finished is back at the beginning, not `done`,
        which is what it would otherwise fall through to — and "Your Passport is
        ready" over a Passport that can never work is the worst sentence on the
        screen. */
-    expect(dynamicSetupPhase({ ...RECORD, interrupted: true })).toBe('create');
+    expect(dynamicSetupPhase({ ...RECORD, activated: false, interrupted: true })).toBe('create');
   });
 
   it('numbers the phases, and puts done past the last one', () => {
     expect(dynamicSetupStep('create')).toBe(1);
-    expect(dynamicSetupStep('finish')).toBe(2);
-    expect(dynamicSetupStep('activate')).toBe(3);
+    expect(dynamicSetupStep('activate')).toBe(2);
+    expect(dynamicSetupStep('finish')).toBe(3);
     expect(dynamicSetupStep('done')).toBe(3);
   });
 
@@ -237,11 +255,20 @@ describe('the setup copy', () => {
     expect(dynamicSetupInterrupted(null)).toBe(false);
     expect(dynamicSetupInterrupted(RECORD)).toBe(false);
     expect(dynamicSetupInterrupted({ ...RECORD, wavesDone: 1 })).toBe(false);
-    expect(dynamicSetupInterrupted({ ...RECORD, wavesDone: 1, interrupted: true })).toBe(true);
+    expect(
+      dynamicSetupInterrupted({ ...RECORD, wavesDone: 1, activated: false, interrupted: true }),
+    ).toBe(true);
+    /* And an interrupted record whose key is ON is a working Passport. */
+    expect(dynamicSetupInterrupted({ ...RECORD, wavesDone: 1, interrupted: true })).toBe(false);
   });
 
   it('answers for a sign-in whose network is not to hand, and for nobody else', () => {
-    const halted: CustodyAccountRecord = { ...RECORD, wavesDone: 1, interrupted: true };
+    const halted: CustodyAccountRecord = {
+      ...RECORD,
+      wavesDone: 1,
+      activated: false,
+      interrupted: true,
+    };
     const other = '0x00000000000000000000000000000000000000ff';
     const storage = memoryStorage({
       [CUSTODY_STORAGE_KEY]: JSON.stringify({
@@ -318,7 +345,99 @@ describe('the name store', () => {
   });
 });
 
+describe('the name a Passport CHOSE and has not claimed', () => {
+  it('is kept in its own key, apart from the one it holds', () => {
+    const storage = memoryStorage();
+    saveCustodyChosenName(storage, '0xA', 'stagenet', 'alice');
+    /* The claimed store is untouched: a typed name is not a registration, and
+       everything downstream of `CUSTODY_NAME_KEY` treats what is in it as one. */
+    expect(storage.getItem(CUSTODY_NAME_KEY)).toBeNull();
+    expect(loadCustodyChosenName(storage, '0xa', 'stagenet')).toBe('alice');
+  });
+
+  it('is per user and per network, like everything else this Passport owns', () => {
+    const storage = memoryStorage();
+    saveCustodyChosenName(storage, '0xa', 'stagenet', 'alice');
+    saveCustodyChosenName(storage, '0xb', 'stagenet', 'bob');
+    expect(loadCustodyChosenName(storage, '0xa', 'stagenet')).toBe('alice');
+    expect(loadCustodyChosenName(storage, '0xb', 'stagenet')).toBe('bob');
+    expect(loadCustodyChosenName(storage, '0xa', 'preview')).toBeNull();
+  });
+
+  it('is forgotten when the claim settles, either way', () => {
+    const storage = memoryStorage();
+    saveCustodyChosenName(storage, '0xa', 'stagenet', 'alice');
+    saveCustodyChosenName(storage, '0xb', 'stagenet', 'bob');
+    forgetCustodyChosenName(storage, '0xa', 'stagenet');
+    expect(loadCustodyChosenName(storage, '0xa', 'stagenet')).toBeNull();
+    /* And nobody else's is taken with it. */
+    expect(loadCustodyChosenName(storage, '0xb', 'stagenet')).toBe('bob');
+  });
+
+  it('reads a store that is not a map of names as empty', () => {
+    /* Not JSON at all, and JSON that is not an object of strings. Both are a
+       store somebody else wrote, and neither is a reason to refuse a setup. */
+    expect(loadCustodyChosenNames(memoryStorage({ [CUSTODY_CHOSEN_NAME_KEY]: '{' }))).toEqual({});
+    expect(loadCustodyChosenNames(memoryStorage({ [CUSTODY_CHOSEN_NAME_KEY]: '[]' }))).toEqual({});
+    expect(
+      loadCustodyChosenNames(memoryStorage({ [CUSTODY_CHOSEN_NAME_KEY]: '{"a|b":7,"c|d":""}' })),
+    ).toEqual({});
+  });
+
+  it('says so in the console when the forgetting itself is refused', () => {
+    /* A store that reads and will not be written — which is where a name that
+       has been claimed would otherwise sit forever, offering to claim it
+       again. The console is told; the screen is not, because the claim
+       succeeded. */
+    const readable = memoryStorage();
+    saveCustodyChosenName(readable, '0xa', 'stagenet', 'alice');
+    const storage: CustodyStorage = {
+      getItem: (key) => readable.getItem(key),
+      setItem: () => {
+        throw new Error('denied');
+      },
+      removeItem: () => {
+        throw new Error('denied');
+      },
+    };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    forgetCustodyChosenName(storage, '0xa', 'stagenet');
+    expect(warn).toHaveBeenCalledOnce();
+    warn.mockRestore();
+  });
+
+  it('forgets nothing it was not holding', () => {
+    const storage = memoryStorage();
+    forgetCustodyChosenName(storage, '0xa', 'stagenet');
+    expect(loadCustodyChosenNames(storage)).toEqual({});
+  });
+
+  it('reads a storage that throws as empty rather than refusing the setup', () => {
+    expect(loadCustodyChosenNames(refusingStorage())).toEqual({});
+    expect(loadCustodyChosenName(refusingStorage(), '0xa', 'stagenet')).toBeNull();
+  });
+
+  it('says so in the console rather than on screen when a write is refused', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    saveCustodyChosenName(refusingStorage(), '0xa', 'stagenet', 'alice');
+    expect(warn).toHaveBeenCalledOnce();
+    warn.mockRestore();
+  });
+});
+
 describe('readDynamicPassport', () => {
+  it('carries the chosen name beside the claimed one, never merged into it', () => {
+    const storage = memoryStorage({
+      [CUSTODY_STORAGE_KEY]: JSON.stringify({ [custodyRecordKey(RECORD.user, 'stagenet')]: RECORD }),
+    });
+    saveCustodyChosenName(storage, RECORD.user, 'stagenet', 'alice');
+    const view = readDynamicPassport({ storage, user: RECORD.user, network: 'stagenet' });
+    expect(view.chosenName).toBe('alice');
+    /* A Passport with a name it has only TYPED has not got a name. */
+    expect(view.name).toBeNull();
+    expect(view.stage).toBe('name');
+  });
+
   it('assembles the record, the name, and the stage in one read', () => {
     const storage = memoryStorage({
       [CUSTODY_STORAGE_KEY]: JSON.stringify({ [custodyRecordKey(RECORD.user, 'stagenet')]: RECORD }),
@@ -329,6 +448,7 @@ describe('readDynamicPassport', () => {
       network: 'stagenet',
       record: RECORD,
       name: 'alice',
+      chosenName: null,
       address: RECORD.address,
       stage: 'home',
     });

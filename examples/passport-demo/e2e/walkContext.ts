@@ -28,21 +28,26 @@ import { test, type BrowserContextOptions } from '@playwright/test';
 /**
  * THE BUTTON EVERY WALK STARTS BY PRESSING, matched under either of its names.
  *
- * It said "Continue with Passport" until 2026/09/16 and says "Continue with
- * Passkey" now. The rename is harmless for the mocked tiers, which serve the
- * page they then press — but the live walk presses a button on a DEPLOYED
- * build, and the deployed build is whatever staging or production is serving.
- * A walk pinned to the new label fails against production today, and fails
- * again the moment a rollback puts the old build back: it would report a broken
- * deployment when the only thing that had changed was a word.
+ * It said "Continue with Passport" until 2026/09/16, "Continue with Passkey"
+ * until 2026/09/22, and is "Sign up" now: the landing has two buttons, "Log in"
+ * (the platform's passkey picker) and "Sign up" (discover, then enrol only if
+ * nothing answers), and "Sign up" is the one that behaves as the old single
+ * button did. Walks that mean the picker press "Log in" by its exact name.
  *
- * So the locator accepts both, and ONE constant does it everywhere — a name
- * spelled out in nineteen files is a name that gets half-renamed. There is one
- * such button on the page, so accepting the retired label costs no precision
- * and buys a live gate that goes on working across a deploy in either
- * direction.
+ * The rename is harmless for the mocked tiers, which serve the page they then
+ * press — but the live walk presses a button on a DEPLOYED build, and the
+ * deployed build is whatever staging or production is serving. A walk pinned
+ * to the new label alone fails against production until the promotion, and
+ * again the moment a rollback puts the old build back.
+ *
+ * So the locator accepts the retired labels too, anchored at both ends so it
+ * can never match "Log in", the recovery link, or anything else on the new
+ * landing. ONE constant does it everywhere — a name spelled out in nineteen
+ * files is a name that gets half-renamed. The landing walk in
+ * `onboarding.spec.ts` separately asserts that no "Continue with …" button is
+ * on the new build, so the tolerance costs the mocked tiers no precision.
  */
-export const SIGN_IN_BUTTON = /Continue with Pass(?:port|key)/i;
+export const SIGN_IN_BUTTON = /^(?:Sign up|Continue with Pass(?:port|key))$/i;
 
 /** The context options that describe a DEVICE rather than a behaviour. */
 const EMULATION = [

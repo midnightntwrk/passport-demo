@@ -52,6 +52,14 @@ import { defineConfig, devices } from '@playwright/test';
 /** True when this run is pointed at the deployed site and a real chain. */
 const live = process.env.RUN_LIVE === '1';
 
+// Separate worktrees can run their own previews without reusing another
+// agent's build. The default remains unchanged for existing CI and scripts.
+const previewPort = Number(process.env.PASSPORT_PREVIEW_PORT ?? '4173');
+if (!Number.isInteger(previewPort) || previewPort < 1024 || previewPort > 65535) {
+  throw new Error('PASSPORT_PREVIEW_PORT must be an integer from 1024 to 65535');
+}
+const previewUrl = `http://localhost:${previewPort}`;
+
 /**
  * WEBKIT CANNOT BE LAUNCHED ON macOS 26, and this is where that is admitted.
  *
@@ -145,7 +153,7 @@ export default defineConfig({
   timeout: live ? 25 * 60 * 1000 : 90 * 1000,
   expect: { timeout: live ? 5 * 60 * 1000 : 15 * 1000 },
   use: {
-    baseURL: live ? (process.env.LIVE_URL ?? 'https://midnightpassport.com') : 'http://localhost:4173',
+    baseURL: live ? (process.env.LIVE_URL ?? 'https://midnightpassport.com') : previewUrl,
     /* No action may wait for ever. Without this a click on a control that has
        gone — inside a poll, say — blocks the worker rather than the test, and
        the run hangs past its own test timeout with nothing to show for it.
@@ -228,8 +236,8 @@ export default defineConfig({
     ? {}
     : {
         webServer: {
-          command: 'npm run build && npm run preview -- --port 4173 --strictPort',
-          url: 'http://localhost:4173',
+          command: `npm run build && npm run preview -- --port ${previewPort} --strictPort`,
+          url: previewUrl,
           reuseExistingServer: !process.env.CI,
           timeout: 6 * 60 * 1000,
           env: previewEnv,

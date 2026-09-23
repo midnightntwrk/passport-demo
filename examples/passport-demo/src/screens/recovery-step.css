@@ -1,0 +1,83 @@
+/* One open composition; all recovery behaviour remains in CustodyPassport. */
+.mnrecovery {
+  min-height: 100svh;
+  background: var(--mn-surface-page);
+  color: var(--mn-text-primary);
+}
+.mnrecovery .mnrecovery-bar {
+  width: min(calc(100% - 40px), 1040px);
+  min-height: 76px;
+  margin-inline: auto;
+}
+.mnrecovery-layout {
+  width: min(calc(100% - 40px), 1040px);
+  margin-inline: auto;
+  padding-block: 24px 40px;
+  display: grid;
+  gap: 24px;
+}
+.mnrecovery-art { width: 180px; justify-self: center; }
+.mnrecovery-art img { width: 100%; height: auto; display: block; }
+.mnrecovery-content { min-width: 0; max-width: 460px; width: 100%; margin-inline: auto; }
+.mnrecovery-content h1 {
+  margin: 0;
+  font-family: var(--mn-font-display);
+  font-size: clamp(30px, 7vw, 42px);
+  font-weight: 700;
+  line-height: 1.12;
+  letter-spacing: -.045em;
+  text-wrap: balance;
+}
+.mnrecovery-lede { margin: 16px 0 0; font-size: 16px; line-height: 1.65; color: var(--mn-text-secondary); }
+.mnrecovery-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-top: 24px;
+  padding: 18px;
+  border: 1px solid var(--mn-border-hairline);
+  border-radius: 14px;
+  background: var(--mn-surface-card);
+}
+.mnrecovery-notice svg { flex-shrink: 0; margin-top: 2px; color: var(--mn-accent-ink); }
+.mnrecovery-notice .mnob-unusable-copy { margin: 0; font-size: 14px; line-height: 1.6; color: var(--mn-text-secondary); }
+.mnrecovery-actions { margin-top: 32px; }
+.mnrecovery-providers { margin: 0 0 12px; font-size: 13px; line-height: 1.6; color: var(--mn-text-secondary); }
+.mnrecovery-primary, .mnrecovery-secondary { font-family: inherit; font-size: 16px; font-weight: 600; cursor: pointer; }
+.mnrecovery-primary {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) 20px;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 56px;
+  padding: 16px 20px;
+  border: 1px solid var(--mn-accent);
+  border-radius: 14px;
+  background: var(--mn-accent);
+  color: #fff;
+  line-height: 1.4;
+}
+.mnrecovery-primary:hover:not(:disabled) { background: var(--mn-accent-hover); }
+.mnrecovery-primary span { overflow-wrap: anywhere; }
+.mnrecovery-hint { margin: 12px 0 0; text-align: center; color: var(--mn-text-muted); font-size: 13px; line-height: 1.5; }
+.mnrecovery-secondary { display: block; width: 100%; min-height: 48px; padding: 12px; margin-top: 20px; border: 0; border-radius: 12px; background: transparent; color: var(--mn-text-secondary); line-height: 1.5; }
+.mnrecovery-secondary:hover:not(:disabled) { color: var(--mn-text-primary); background: var(--mn-surface-card); }
+.mnrecovery button:focus-visible { outline: 2px solid var(--mn-accent-ink); outline-offset: 4px; }
+.mnrecovery button:disabled { opacity: .55; cursor: wait; }
+@media (max-width: 379px) {
+  .mnrecovery-bar .mnob-bar-label { display: none; }
+  .mnrecovery-bar .mnob-theme { margin-left: auto; }
+}
+@media (min-width: 800px) {
+  .mnrecovery-layout { grid-template-columns: minmax(0, 1fr) minmax(0, 1.12fr); gap: 64px; align-items: center; padding-block: 96px 72px; min-height: min(720px, calc(100svh - 76px)); }
+  .mnrecovery-art { width: min(100%, 360px); }
+  .mnrecovery-lede { font-size: 17px; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .mnrecovery-art { animation: recovery-arrive .65s ease-out both; }
+  .mnrecovery-spinner { animation: recovery-spin 1s linear infinite; }
+  .mnrecovery-primary, .mnrecovery-secondary { transition: background .18s ease, color .18s ease; }
+  @keyframes recovery-arrive { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes recovery-spin { to { transform: rotate(360deg); } }
+}

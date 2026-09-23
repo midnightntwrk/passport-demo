@@ -23,6 +23,7 @@ import ActivityFeed, { type ActivityFeedItem } from './ActivityFeed.js'
 /* What has been announced but has not landed yet, derived from the same trail
    this screen already renders below. Pure — see `assetsOnTheWay.ts`. */
 import { assetsOnTheWay, assetsOnTheWayLine } from './assetsOnTheWay.js'
+import { OPENING_BALANCE_ON_THE_WAY_DETAIL, OPENING_MUSD, OPENING_NIGHT } from '../lib/activation.js'
 /* Whether the opening balance is still coming. Pure — see `lib/activation.ts`. */
 import { openingBalanceOnTheWay } from '../lib/activation.js'
 /* The figure a row should paint while the ledger's own is momentarily not the
@@ -60,6 +61,7 @@ import InstallPassport from './InstallPassport.js'
 import { type PassportNetwork } from './NetworkSwitcher.js'
 import NotificationToggle from './NotificationToggle.js'
 import PassportContractCard, { type PassportContractCardProps } from './PassportContract.js'
+import { RECOVERY_COPY, type RecoveryHomeEntry } from '../lib/recoveryStep.js'
 import SendSheet, { type SendSheetHolding, type SendSheetProps } from './SendSheet.js'
 import ThemeToggle from './ThemeToggle.js'
 /* The colour's own mark, where this build has one. Falls back to the glyph
@@ -83,9 +85,9 @@ import './home.css'
 export interface HomeScreenProps {
   displayName: string | null
   /**
-   * The `.night` name held on the active network, without its suffix. When set
-   * the greeting reads "Good morning, alice"; when null it falls back to the
-   * previous greeting-plus-displayName behaviour.
+   * The `.night` name held on the active network, without its suffix. Home
+   * presents the name in its identity card rather than repeating it in the
+   * greeting; this still suppresses the fallback display-name line.
    */
   aliasLabel?: string | null
   /**
@@ -318,6 +320,30 @@ export interface HomeScreenProps {
      * quietly routed to the other one.
      */
     onSendShieldedToName?: SendSheetProps['onSendShieldedToName']
+    /**
+     * Which build of the account contract holds this Passport's money, for the
+     * one rule on that sheet that has to know: a PARTIAL shielded amount to a
+     * pasted address is refused on the prototype build, whose
+     * `withdraw_shielded` burns the change it re-registers, and allowed on the
+     * build that fixed it. See `lib/addressSendPolicy.ts`.
+     *
+     * FORWARDED SINCE 2026/09/22, and it was not before: the host has passed it
+     * since the rule was written and this screen dropped it, so every sender
+     * reached the sheet as "not asked" — which the rule reads as the prototype,
+     * the safe answer for every Passport that existed then and the WRONG one
+     * for a Passport on the account custody build, which can divide a coin.
+     */
+    senderAccountBuild?: SendSheetProps['senderAccountBuild']
+    /**
+     * What this payment will publish, said at the recipient field. Supplied by
+     * a host that has a rule about it and omitted by every other — see
+     * {@link SendSheetProps.recipientDisclosure}.
+     */
+    recipientDisclosure?: SendSheetProps['recipientDisclosure']
+    /** Whether a name may be paid in NIGHT — see {@link SendSheetProps.nightToName}. */
+    nightToName?: SendSheetProps['nightToName']
+    /** Whether a resolved Passport can be paid at all — see {@link SendSheetProps.checkRecipientAccount}. */
+    checkRecipientAccount?: SendSheetProps['checkRecipientAccount']
     /** The live phase of the account call, narrated by the sheet. */
     phase?: 'checking' | 'connecting' | 'submitting' | 'confirming' | null
     /** Which of a name transfer's two legs is running. See the Send sheet. */
@@ -382,6 +408,39 @@ export interface HomeScreenProps {
    * appears.
    */
   onOpenBackup?: () => void
+  /**
+   * THE WAY BACK, SAID IN ONE LINE — and offered in one small control where
+   * there is not one yet.
+   *
+   * `on` is a statement beside the name and nothing more: there is nothing to
+   * press about a thing that is done, and a control there would invite a
+   * second one. `add` is the entry for a Passport that skipped the step after
+   * its name or was made before the step existed, and it sits exactly where
+   * "Back up or restore" sat — the rarely-and-deliberately shelf beside the
+   * support link, not the everyday surface. `hidden`, or omitting the prop
+   * altogether, renders neither, which is every build with no sign-in behind
+   * it. See `../lib/recoveryStep.ts`.
+   */
+  recovery?: {
+    state: RecoveryHomeEntry
+    onAdd?: () => void
+  } | null
+  /**
+   * Whether the signed-in identity panel belongs on this Home.
+   *
+   * IT IS A DEVELOPER PANEL and it says so: an Ethereum address, a "Sign a test
+   * message" button, and the sentence "nothing in your Passport is held by this
+   * key". All three are true of a PROTOTYPE Passport, where a sign-in is beside
+   * the passkey and holds nothing.
+   *
+   * None of them is true of a Passport on the account custody contract held by
+   * that same sign-in: the key IS the device that approves for it, so the
+   * sentence is false, and the address and the test button are machinery a
+   * person who chose Google never asked to meet. Hidden there rather than
+   * reworded — see `lib/custodyHome.ts`. Defaults to shown, so every existing
+   * caller is unchanged.
+   */
+  showSignedInIdentity?: boolean
   onSignOut: () => void
 }
 
@@ -423,6 +482,8 @@ export default function HomeScreen(props: HomeScreenProps) {
     onIncentiveRedeemed,
     supportUrl,
     onOpenBackup,
+    recovery,
+    showSignedInIdentity,
     onSignOut,
   } = props
 
@@ -706,7 +767,11 @@ export default function HomeScreen(props: HomeScreenProps) {
     () => encodeReceivePayload({ domain: nightName, accountAddress }),
     [accountAddress, nightName],
   )
-  const [receiveCode, setReceiveCode] = useState<{ size: number; path: string } | null>(null)
+  const [receiveCode, setReceiveCode] = useState<{
+    size: number
+    path: string
+    eyes: { x: number; y: number }[]
+  } | null>(null)
   useEffect(() => {
     setReceiveCode(null)
     if (!receiveOpen || !receivePayload) return undefined
@@ -723,13 +788,38 @@ export default function HomeScreen(props: HomeScreenProps) {
            INTO the matrix rather than left to a stylesheet — a camera reads
            the image, not the CSS around it. */
         const matrix = encode(receivePayload, { ecc: 'M', border: 4 })
+        /* THE LOOK (2026/09/22): rounded dots and rounded finder eyes in
+           Midnight Blue on the white plate, drawn from the same matrix. The
+           three 7x7 finder patterns sit 4 modules in from the corners (the
+           border); their cells are skipped here and painted as eyes below. */
+        const border = 4
+        const eyeAt = (row: number, column: number): boolean => {
+          const inside = (r: number, c: number) => row >= r && row < r + 7 && column >= c && column < c + 7
+          const far = matrix.size - border - 7
+          return inside(border, border) || inside(border, far) || inside(far, border)
+        }
         let path = ''
+        /* Softly rounded squares that nearly touch: the round look without
+           shrinking the modules below what a phone camera resolves. */
+        const inset = 0.04
+        const side = 1 - inset * 2
+        const r = 0.3
+        const straight = side - r * 2
         for (let row = 0; row < matrix.size; row += 1) {
           for (let column = 0; column < matrix.size; column += 1) {
-            if (matrix.data[row]?.[column]) path += `M${column} ${row}h1v1h-1z`
+            if (!matrix.data[row]?.[column] || eyeAt(row, column)) continue
+            const x = column + inset
+            const y = row + inset
+            path += `M${x + r} ${y}h${straight}a${r} ${r} 0 0 1 ${r} ${r}v${straight}a${r} ${r} 0 0 1 ${-r} ${r}h${-straight}a${r} ${r} 0 0 1 ${-r} ${-r}v${-straight}a${r} ${r} 0 0 1 ${r} ${-r}z`
           }
         }
-        setReceiveCode({ size: matrix.size, path })
+        const far = matrix.size - border - 7
+        const eyes = [
+          [border, border],
+          [border, far],
+          [far, border],
+        ].map(([row, column]) => ({ x: column, y: row }))
+        setReceiveCode({ size: matrix.size, path, eyes })
       })
       .catch((cause: unknown) => {
         // The address row below still works; nothing here claims otherwise.
@@ -810,12 +900,7 @@ export default function HomeScreen(props: HomeScreenProps) {
       <div className="mnhome-body">
         <div className="mnhome-identity">
           <p className="mnhome-kicker">Passport</p>
-          {/* The greeting carries the user's own name once they hold one: the
-              alias IS their identity here, so it leads. Without an alias the
-              screen keeps its previous greeting-plus-displayName shape. */}
-          <h1 className="mnhome-name">
-            {aliasLabel ? `${timeOfDayGreeting()}, ${aliasLabel}` : timeOfDayGreeting()}
-          </h1>
+          <h1 className="mnhome-name">{timeOfDayGreeting()}.</h1>
           {!aliasLabel && displayName ? <p className="mnhome-person">{displayName}</p> : null}
         </div>
 
@@ -836,6 +921,37 @@ export default function HomeScreen(props: HomeScreenProps) {
           </p>
         ) : null}
 
+        <div className="mnhome-overview">
+          <div className="mnhome-passport-column">
+            {identity ? (
+              <EcosystemIdentity
+                network={network}
+                record={identity.record}
+                incentives={identity.incentives}
+                variant="card"
+                onClaimName={identity.onClaimName}
+                onFindExisting={identity.onFindExisting}
+                onRegisterNow={identity.onRegisterNow}
+                registerNowDisabledReason={identity.registerNowDisabledReason}
+                registerNowBusy={identity.registerNowBusy}
+                registerNowPhase={identity.registerNowPhase}
+              />
+            ) : null}
+            {passportContract ? <PassportContractCard {...passportContract} /> : null}
+            {/* And whether this Passport can be opened anywhere else, in one line
+                under the account it belongs to. */}
+            {recovery?.state === 'on' ? (
+              <p className="mnhome-recovery" data-testid="recovery-state">
+                <ShieldCheck size={13} aria-hidden="true" />
+                <span>{RECOVERY_COPY.homeOn}</span>
+              </p>
+            ) : null}
+          </div>
+          <section className="mnhome-funds" aria-labelledby="passport-balances-title">
+            <div className="mnhome-funds-heading">
+              <h2 id="passport-balances-title">Your assets</h2>
+              <p>Token balances</p>
+            </div>
         {/* The money row. Send is present only when there is an account to
             withdraw from — see the `send` prop. Receive opens the sheet below:
             the `.night` name to be paid at, and the address beneath it. */}
@@ -882,9 +998,8 @@ export default function HomeScreen(props: HomeScreenProps) {
                 on one tab and a row on the other would read as two different
                 facts about the same money.
 
-                The column headings are for assistive technology only: this
-                strip has never had a visible heading of its own, and giving it
-                one now to label two columns would be furniture. */}
+                The panel supplies the visible heading; the table's column
+                headings remain available to assistive technology. */}
             <table className="mnhome-assets">
               <caption className="mnhome-sr">
                 What your Passport holds, and how much of each.
@@ -926,7 +1041,23 @@ export default function HomeScreen(props: HomeScreenProps) {
                 the trail already on this screen, and it is gone the moment the
                 balance itself says it. */}
             {onTheWayLine ? (
-              <p className="mnhome-onway">{onTheWayLine}</p>
+              onTheWayLine.includes(OPENING_BALANCE_ON_THE_WAY_DETAIL) ? (
+                /* The opening balance gets a card of its own (2026/09/22): the
+                   two amounts as pills, a live dot, and when to expect them. */
+                <div className="mnhome-onway-card" role="status">
+                  <span className="mnhome-onway-dot" aria-hidden="true" />
+                  <div className="mnhome-onway-copy">
+                    <p className="mnhome-onway-title">Your opening balance is on its way</p>
+                    <p className="mnhome-onway-pills">
+                      <span className="mnhome-onway-pill">{OPENING_MUSD} mUSD</span>
+                      <span className="mnhome-onway-pill">{OPENING_NIGHT} NIGHT</span>
+                    </p>
+                    <p className="mnhome-onway-hint">Usually lands within a couple of minutes.</p>
+                  </div>
+                </div>
+              ) : (
+                <p className="mnhome-onway">{onTheWayLine}</p>
+              )
             ) : null}
             {/* THE SENDER'S OWN CHANGE, COMING BACK (2026/09/07). The transfer
                 that produced it is finished — the recipient was paid — and the
@@ -948,6 +1079,9 @@ export default function HomeScreen(props: HomeScreenProps) {
             ) : null}
           </>
         ) : null}
+
+          </section>
+        </div>
 
         {account?.status === 'unavailable' ? (
           /* FIXED PROSE. The reader's own words go to the console — see
@@ -1029,28 +1163,7 @@ export default function HomeScreen(props: HomeScreenProps) {
           </article>
         ))}
 
-        {/* Identity: the name held on this network, its real registration
-            transactions or the reason it is only queued, and what has been
-            redeemed across the ecosystem. */}
-        {identity ? (
-          <EcosystemIdentity
-            network={network}
-            record={identity.record}
-            incentives={identity.incentives}
-            variant="card"
-            onClaimName={identity.onClaimName}
-            onFindExisting={identity.onFindExisting}
-            onRegisterNow={identity.onRegisterNow}
-            registerNowDisabledReason={identity.registerNowDisabledReason}
-            registerNowBusy={identity.registerNowBusy}
-            registerNowPhase={identity.registerNowPhase}
-          />
-        ) : null}
-
-        {/* Whether the account behind the name is ready — one line, directly
-            beneath the name it belongs to. */}
-        {passportContract ? <PassportContractCard {...passportContract} /> : null}
-
+        <div className="mnhome-discover">
         {/* The applications, directly below the wallet summary — the same
             registry, cards, and in-Passport browser as the Apps tab. */}
         <FeaturedApps
@@ -1066,6 +1179,7 @@ export default function HomeScreen(props: HomeScreenProps) {
             them: the grid is what a person came to Home to USE, and the trail
             is what they come back to check. */}
         {activity ? <ActivityFeed entries={activity} /> : null}
+        </div>
 
         {sendOpen && send ? (
           <SendSheet
@@ -1093,6 +1207,16 @@ export default function HomeScreen(props: HomeScreenProps) {
             /* The sponsor's own name for its colour, so the picker and the
                balance list call the same colour the same thing. */
             sponsoredToken={sponsoredToken}
+            {...(send.senderAccountBuild
+              ? { senderAccountBuild: send.senderAccountBuild }
+              : {})}
+            {...(send.recipientDisclosure
+              ? { recipientDisclosure: send.recipientDisclosure }
+              : {})}
+            {...(send.nightToName === false ? { nightToName: false } : {})}
+            {...(send.checkRecipientAccount
+              ? { checkRecipientAccount: send.checkRecipientAccount }
+              : {})}
             phase={send.phase ?? null}
             nameLeg={send.nameLeg ?? null}
             nameLegAttempt={send.nameLegAttempt ?? null}
@@ -1119,14 +1243,26 @@ export default function HomeScreen(props: HomeScreenProps) {
                 role="presentation"
               >
                 <div
-                  className="mnhome-addr-modal"
+                  className="mnhome-addr-modal mnhome-surface-modal mnhome-receive-modal"
                   role="dialog"
                   aria-modal="true"
                   aria-label="Receive to your Passport"
                   onClick={(event) => event.stopPropagation()}
                 >
-                  <div className="mnhome-addr-head">
-                    <p className="mnhome-micro">Receive</p>
+                  <div className="mnhome-addr-head mnhome-surface-head">
+                    <div className="mnhome-surface-heading">
+                      <span className="mnhome-surface-eyebrow">Your Passport</span>
+                      <h2 className="mnhome-surface-title">Receive</h2>
+                      <p className="mnhome-surface-description">Share your name or scan the code.</p>
+                    </div>
+                    <img
+                      className="mnhome-surface-art"
+                      src="/passport-receive.webp"
+                      alt=""
+                      aria-hidden="true"
+                      width="1254"
+                      height="1254"
+                    />
                     <button
                       type="button"
                       className="mnhome-icon-button"
@@ -1147,11 +1283,16 @@ export default function HomeScreen(props: HomeScreenProps) {
                           <svg
                             className="mnhome-recv-qr-code"
                             viewBox={`0 0 ${receiveCode.size} ${receiveCode.size}`}
-                            shapeRendering="crispEdges"
                             role="img"
                             aria-label={`QR code for ${nightName ?? 'your Passport'}`}
                           >
-                            <path d={receiveCode.path} fill="#000000" />
+                            <path d={receiveCode.path} fill="#0000FE" />
+                            {receiveCode.eyes.map((eye) => (
+                              <g key={`${eye.x}-${eye.y}`}>
+                                <rect x={eye.x + 0.5} y={eye.y + 0.5} width={6} height={6} rx={1.8} fill="none" stroke="#0000FE" strokeWidth={1} />
+                                <rect x={eye.x + 2} y={eye.y + 2} width={3} height={3} rx={0.9} fill="#0000FE" />
+                              </g>
+                            ))}
                           </svg>
                         ) : (
                           <div className="mnhome-recv-qr-wait" aria-hidden="true" />
@@ -1230,10 +1371,21 @@ export default function HomeScreen(props: HomeScreenProps) {
             )
           : null}
 
+        <div className="mnhome-utilities">
         {onOpenBackup ? (
           <button type="button" className="mnhome-support" onClick={onOpenBackup}>
             <ShieldCheck size={14} aria-hidden="true" />
             <span>Back up or restore</span>
+          </button>
+        ) : null}
+
+        {/* The same shelf, for the Passport that has no way back yet. Never
+            beside "Recovery: on" — `recoveryHomeEntry` answers one or the
+            other, never both. */}
+        {recovery?.state === 'add' && recovery.onAdd ? (
+          <button type="button" className="mnhome-support" onClick={recovery.onAdd}>
+            <ShieldCheck size={14} aria-hidden="true" />
+            <span>{RECOVERY_COPY.homeAdd}</span>
           </button>
         ) : null}
 
@@ -1252,7 +1404,8 @@ export default function HomeScreen(props: HomeScreenProps) {
             environment id AND somebody signed in with a provider — so in every
             build shipped today this footer is unchanged. Same reason as
             above: the condition belongs inside the component that knows it. */}
-        <DynamicIdentity />
+        {showSignedInIdentity === false ? null : <DynamicIdentity />}
+        </div>
 
       </div>
     </section>

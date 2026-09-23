@@ -61,9 +61,9 @@ function getSnapshot(): ResolvedTheme {
   return getResolvedTheme()
 }
 
-/** Light, matching `DEFAULT_THEME` — see `lib/theme.ts`. */
+/** Dark, matching `DEFAULT_THEME` — see `lib/theme.ts`. */
 function getServerSnapshot(): ResolvedTheme {
-  return 'light'
+  return 'dark'
 }
 
 export default function TokenMark(props: TokenMarkProps) {

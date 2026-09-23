@@ -1173,6 +1173,11 @@ export function sendFailureNotice(notice: SendFailureNotice): string {
       `Step 2 did not finish: ${notice.message} Continue from Home.`
     );
   }
+  /* A SENTENCE THAT ALREADY SAYS IT is not said twice (2026/09/22): the
+     custody payment's own "That payment didn't go through. Nothing left your
+     Passport." is the whole answer, and a prefix in front of it reads as a
+     stutter. */
+  if (/\bNothing (?:left|was sent)\b/.test(notice.message)) return notice.message;
   const nothing = notice.item
     ? 'the item is still in your account'
     : `no ${notice.assetSymbol} moved from your account`;
