@@ -193,8 +193,11 @@ import RecoverByNameScreen from './screens/RecoverByName.js';
  * identities, and the screen's own header for why the whole path is one screen
  * rather than a second set of branches through this file.
  */
-const CustodyPassport = lazy(() => import('./screens/CustodyPassport.js'));
+/* Behind the two WASM runtimes, loaded one at a time — Safari evaluated the
+   compiled contract before its runtime when they raced (`./lib/runtimeGate.ts`). */
+const CustodyPassport = lazy(() => runtimesReady().then(() => import('./screens/CustodyPassport.js')));
 import { choosePassportIdentity } from './lib/dynamicSession.js';
+import { runtimesReady } from './lib/runtimeGate.js';
 import { useDynamicSession } from './lib/dynamic.js';
 import { useDynamicCustodyArm, usePasskeyCustodyArm } from './lib/custodyArms.js';
 /* The way-back hand-off, and what Home may say about a way back. Nothing at run
@@ -204,7 +207,9 @@ import { adoptionStage, clearAdoption, loadAdoption } from './lib/custodyAdoptio
 import { RECOVERY_COPY } from './lib/recoveryStep.js';
 /* A TYPE, which is erased: naming it here pulls nothing into the entry chunk. */
 import type { K256DeviceIdentity } from './identity/custodyContractSigning.js';
-const RecoverWithProvider = lazy(() => import('./screens/RecoverWithProvider.js'));
+const RecoverWithProvider = lazy(() =>
+  runtimesReady().then(() => import('./screens/RecoverWithProvider.js')),
+);
 import {
   accountCustodyEnabled,
   custodyOtherKeyNotice,
@@ -687,12 +692,16 @@ async function aliasSponsorshipLikely(network: string | null | undefined): Promi
  */
 let claimModulePrefetch: Promise<unknown> | null = null;
 function warmClaimModules(): void {
-  claimModulePrefetch ??= Promise.all([
-    import('./identity/midnames.js'),
-    import('./identity/passportContract.js'),
-    import('./lib/localWallet.js'),
-    import('./identity/sponsoredAlias.js'),
-  ]).catch(() => undefined);
+  claimModulePrefetch ??= runtimesReady()
+    .then(() =>
+      Promise.all([
+        import('./identity/midnames.js'),
+        import('./identity/passportContract.js'),
+        import('./lib/localWallet.js'),
+        import('./identity/sponsoredAlias.js'),
+      ]),
+    )
+    .catch(() => undefined);
   void claimModulePrefetch;
 }
 
@@ -4570,6 +4579,7 @@ export default function PassportDemo() {
          it IS the real import: the prefetch is an optimisation the claim does
          not depend on, and a chunk that genuinely cannot be fetched throws
          here with its own message. */
+      await runtimesReady();
       const [
         { AliasClaimError, deriveMidnamesOwnerKey },
         { submitPassportContract },
@@ -5528,6 +5538,7 @@ export default function PassportDemo() {
        all, is genuinely this call's own and is recorded as usual. */
     let joinedDeploy = false;
     try {
+      await runtimesReady();
       const [{ submitPassportContract, checkPassportContractFunds }, { deriveWalletSeed }] =
         await Promise.all([
           import('./identity/passportContract.js'),
@@ -9305,6 +9316,7 @@ export default function PassportDemo() {
          user verification for the length of the question and zeroed after,
          exactly as every other gated account call derives it. */
       const provesOwnership = async (network: string, address: string): Promise<boolean> => {
+        await runtimesReady();
         const [{ accountHoldsDevice }, { MIDNAMES_INDEXER_URLS }] = await Promise.all([
           import('./identity/accountCustody.js'),
           import('./identity/midnames.js'),
