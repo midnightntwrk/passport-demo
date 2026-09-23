@@ -41,7 +41,14 @@ import {
 } from './custodyInbox.js';
 import { bytesToHex } from './custodyContractSigning.js';
 import { hexToBytes } from './custodyContractPlan.js';
-import { heldK1Coin, type K1Account, type K1CommitmentWindow } from './k1CoinStore.js';
+import {
+  heldK1Coin,
+  k1ColourBalance,
+  putK1Coin,
+  type K1Account,
+  type K1CommitmentWindow,
+} from './k1CoinStore.js';
+import { custodyUnplacedDeliveries } from '../lib/custodyScreenRules.js';
 
 import fixtures from './fixtures/inbox-v1.json' with { type: 'json' };
 
@@ -486,6 +493,48 @@ describe('the inbox walk', () => {
     });
   });
 
+  /* THE FIRST PAYMENT ANYBODY IS SENT (live, 2026/09/21). The Passport is
+     already holding its opening grant, so the delivery lands in a colour with
+     a held coin, and the payer's transaction has two shielded outputs — the
+     recipient's note and the payer's change. It is QUEUED with its candidate
+     positions rather than reported and dropped, which is what left 10 mUSD
+     unspendable behind a figure that never moved. */
+  it('queues a two-output delivery behind the coin the colour already holds', async () => {
+    const keys = generateCustodyEncKeyPair();
+    putK1Coin(ALICE, { colour: COLOUR, nonce: 'c3'.repeat(32), value: 100n, mtIndex: 3n });
+    const entry = await sealCustodyInboxEntry(keys.publicKeyHex, coin({ value: 10n }));
+
+    const result = await readInboxCustody(ALICE, keys.secretKeyHex, reader([entry]), {
+      txIdFor: () => 'tx-paid',
+      windows: () => Promise.resolve({ startIndex: 20, endIndex: 22 }),
+      candidates: 'store',
+    });
+
+    expect(result.outcomes[0].reconciliation).toEqual({
+      outcome: 'ambiguous',
+      candidates: [20n, 21n],
+      stored: true,
+      placed: 'queued',
+    });
+    /* The grant is untouched and the payment is money, not a rumour. */
+    expect(heldK1Coin(ALICE, COLOUR)?.value).toBe(100n);
+    expect(k1ColourBalance(ALICE, COLOUR)).toBe(110n);
+    /* And nothing on the screen calls it still arriving. */
+    expect(custodyUnplacedDeliveries(result.outcomes)).toBe(0);
+
+    /* A SECOND WALK, WHICH IS WHAT EVERY READ OF HOME IS. The same delivery is
+       not queued twice, and the chain is not asked about it again. */
+    const ask = vi.fn(() => Promise.resolve({ startIndex: 20, endIndex: 22 }));
+    const again = await readInboxCustody(ALICE, keys.secretKeyHex, reader([entry]), {
+      txIdFor: () => 'tx-paid',
+      windows: ask,
+      candidates: 'store',
+    });
+    expect(again.outcomes[0].reconciliation).toEqual({ outcome: 'known', nonce: NONCE });
+    expect(ask).not.toHaveBeenCalled();
+    expect(k1ColourBalance(ALICE, COLOUR)).toBe(110n);
+  });
+
   it('walks past entries addressed to somebody else', async () => {
     const keys = generateCustodyEncKeyPair();
     const stranger = generateCustodyEncKeyPair();
@@ -534,6 +583,7 @@ describe('the inbox walk', () => {
       outcome: 'ambiguous',
       candidates: [4n, 5n, 6n],
       stored: false,
+      placed: null,
     });
     expect(heldK1Coin(ALICE, COLOUR)).toBeNull();
   });

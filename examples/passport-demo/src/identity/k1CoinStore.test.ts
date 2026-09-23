@@ -495,9 +495,11 @@ describe('learning a position from the chain', () => {
     expect(k1ColourBalance(ALICE, NIGHT)).toBe(125n);
   });
 
-  /* Candidates go in the held slot or nowhere: a two-output delivery into a
-     colour that already holds something is reported, never written over it. */
-  it('does not write candidates over a colour that already holds a coin', async () => {
+  /* THE PAYMENT INTO A PASSPORT THAT IS ALREADY HOLDING SOMETHING, which is
+     every first payment anybody is sent (live, 2026/09/21). The delivery is
+     queued behind the coin the colour holds and keeps its candidates; the held
+     coin is untouched, and the balance is both of them. */
+  it('queues candidates behind a colour that already holds a coin, and keeps that coin', async () => {
     putK1Coin(ALICE, coin({ value: 100n, mtIndex: 3n }));
     const result = await reconcileK1CoinFromChain(
       ALICE,
@@ -505,9 +507,65 @@ describe('learning a position from the chain', () => {
       vi.fn<K1CommitmentWindowReader>().mockResolvedValue({ startIndex: 9, endIndex: 11 }),
       { candidates: 'store' },
     );
-    expect(result).toEqual({ outcome: 'ambiguous', candidates: [9n, 10n], stored: false });
+    expect(result).toEqual({
+      outcome: 'ambiguous',
+      candidates: [9n, 10n],
+      stored: true,
+      placed: 'queued',
+    });
     expect(heldK1Coin(ALICE, NIGHT)?.nonce).toBe(NONCE);
     expect(heldK1Coin(ALICE, NIGHT)?.value).toBe(100n);
+    /* The colour's own list still describes the HELD coin, which has a settled
+       position: the delivery's guesses are on the queued row, not here. */
+    expect(k1CoinCandidates(ALICE, NIGHT)).toEqual([]);
+    expect(queuedK1Coins(ALICE, NIGHT)).toEqual([
+      { colour: NIGHT, nonce: OTHER_NONCE, value: 25n, mtIndex: 9n },
+    ]);
+    expect(k1ColourBalance(ALICE, NIGHT)).toBe(125n);
+
+    /* AND THE GUESSES COME WITH IT. The held coin is spent, the delivery is
+       promoted, and the spend's own retry has both positions to try. */
+    dropK1Coin(ALICE, NIGHT);
+    expect(heldK1Coin(ALICE, NIGHT)?.nonce).toBe(OTHER_NONCE);
+    expect(heldK1Coin(ALICE, NIGHT)?.mtIndex).toBe(9n);
+    expect(k1CoinCandidates(ALICE, NIGHT)).toEqual([9n, 10n]);
+    expect(advanceK1CoinCandidate(ALICE, NIGHT)?.mtIndex).toBe(10n);
+  });
+
+  /* IDEMPOTENT, because the walk runs on every read. The same delivery offered
+     a second time is already in the queue and is not queued twice. */
+  it('does not queue the same ambiguous delivery twice', async () => {
+    putK1Coin(ALICE, coin({ value: 100n, mtIndex: 3n }));
+    const ask = vi
+      .fn<K1CommitmentWindowReader>()
+      .mockResolvedValue({ startIndex: 9, endIndex: 11 });
+    const pending = { colour: NIGHT, nonce: OTHER_NONCE, value: 25n, txId: TX };
+    await reconcileK1CoinFromChain(ALICE, pending, ask, { candidates: 'store' });
+    const again = await reconcileK1CoinFromChain(ALICE, pending, ask, { candidates: 'store' });
+
+    expect(again).toEqual({ outcome: 'known', nonce: OTHER_NONCE });
+    expect(queuedK1Coins(ALICE, NIGHT)).toHaveLength(1);
+    expect(k1ColourBalance(ALICE, NIGHT)).toBe(125n);
+    /* The second read never even asked the chain. */
+    expect(ask).toHaveBeenCalledTimes(1);
+  });
+
+  /* A COIN THIS ACCOUNT HAS SPENT DOES NOT COME BACK AS A QUEUED DELIVERY. The
+     entry that announced it is still in the inbox and is re-read every time. */
+  it('refuses an ambiguous delivery whose nonce this account has already spent', async () => {
+    putK1Coin(ALICE, coin({ value: 100n, mtIndex: 3n }));
+    dropK1Coin(ALICE, NIGHT);
+    putK1Coin(ALICE, coin({ nonce: OTHER_NONCE, value: 25n, mtIndex: 4n }));
+
+    const result = await reconcileK1CoinFromChain(
+      ALICE,
+      { colour: NIGHT, nonce: NONCE, value: 100n, txId: TX },
+      vi.fn<K1CommitmentWindowReader>().mockResolvedValue({ startIndex: 9, endIndex: 11 }),
+      { candidates: 'store' },
+    );
+    expect(result).toEqual({ outcome: 'spent', nonce: NONCE });
+    expect(queuedK1Coins(ALICE, NIGHT)).toEqual([]);
+    expect(k1ColourBalance(ALICE, NIGHT)).toBe(25n);
   });
 
   it('stores NOTHING when the transaction had several outputs, and hands back every candidate', async () => {
@@ -516,7 +574,12 @@ describe('learning a position from the chain', () => {
       { colour: NIGHT, nonce: NONCE, value: 100n, txId: TX },
       reader({ startIndex: 4, endIndex: 7 }),
     );
-    expect(result).toEqual({ outcome: 'ambiguous', candidates: [4n, 5n, 6n], stored: false });
+    expect(result).toEqual({
+      outcome: 'ambiguous',
+      candidates: [4n, 5n, 6n],
+      stored: false,
+      placed: null,
+    });
     expect(heldK1Coin(ALICE, NIGHT)).toBeNull();
   });
 
@@ -712,6 +775,48 @@ describe('a second coin of the same colour', () => {
 
   it('lists nothing for an account that has never held a coin', () => {
     expect(k1ColourHoldings(ALICE)).toEqual([]);
+  });
+
+  /* A COIN MAY QUEUE WITH ITS POSITION STILL A GUESS (2026/09/21). The first
+     coin of a colour takes the held slot and the colour's candidate list with
+     it; every later one carries its own, and they travel together into the
+     held slot when the coin in front is gone. */
+  it('carries a queued coin\'s candidate positions with it, in both places it can land', () => {
+    expect(enqueueK1Coin(ALICE, coin({ value: 100n, mtIndex: 5n }), [5n, 6n])).toBe('held');
+    expect(k1CoinCandidates(ALICE, NIGHT)).toEqual([5n, 6n]);
+
+    expect(
+      enqueueK1Coin(ALICE, coin({ nonce: OTHER_NONCE, value: 40n, mtIndex: 8n }), [8n, 9n]),
+    ).toBe('queued');
+    /* The colour's list still belongs to the HELD coin. */
+    expect(k1CoinCandidates(ALICE, NIGHT)).toEqual([5n, 6n]);
+    expect(k1ColourBalance(ALICE, NIGHT)).toBe(140n);
+
+    dropK1Coin(ALICE, NIGHT);
+    expect(heldK1Coin(ALICE, NIGHT)?.nonce).toBe(OTHER_NONCE);
+    expect(k1CoinCandidates(ALICE, NIGHT)).toEqual([8n, 9n]);
+  });
+
+  /* A coin that queues with no guesses clears the colour's list when it is
+     promoted: whatever was in it described the coin that has just gone. */
+  it('leaves no stale positions behind when a settled coin is promoted', () => {
+    enqueueK1Coin(ALICE, coin({ value: 100n, mtIndex: 5n }), [5n, 6n]);
+    enqueueK1Coin(ALICE, coin({ nonce: OTHER_NONCE, value: 40n, mtIndex: 8n }));
+
+    dropK1Coin(ALICE, NIGHT);
+    expect(heldK1Coin(ALICE, NIGHT)?.mtIndex).toBe(8n);
+    expect(k1CoinCandidates(ALICE, NIGHT)).toEqual([]);
+  });
+
+  it('refuses a candidate list that decides nothing, before anything is queued', () => {
+    enqueueK1Coin(ALICE, coin({ value: 100n, mtIndex: 5n }));
+    expect(() =>
+      enqueueK1Coin(ALICE, coin({ nonce: OTHER_NONCE, value: 40n, mtIndex: 8n }), []),
+    ).toThrow(/at least one candidate/);
+    expect(() =>
+      enqueueK1Coin(ALICE, coin({ nonce: OTHER_NONCE, value: 40n, mtIndex: 8n }), [8n, -1n]),
+    ).toThrow(/zero or more/);
+    expect(queuedK1Coins(ALICE, NIGHT)).toEqual([]);
   });
 
   it('does not store the same coin twice, held or queued', () => {
@@ -1005,7 +1110,12 @@ describe('a coin whose position the chain gave two answers for', () => {
       { colour: NIGHT, nonce: NONCE, value: 60n, txId: 'tx-1' },
       reader,
     );
-    expect(reported).toEqual({ outcome: 'ambiguous', candidates: [10n, 11n], stored: false });
+    expect(reported).toEqual({
+      outcome: 'ambiguous',
+      candidates: [10n, 11n],
+      stored: false,
+      placed: null,
+    });
     expect(heldK1Coin(ALICE, NIGHT)).toBeNull();
 
     const stored = await reconcileK1CoinFromChain(
@@ -1014,7 +1124,12 @@ describe('a coin whose position the chain gave two answers for', () => {
       reader,
       { candidates: 'store' },
     );
-    expect(stored).toEqual({ outcome: 'ambiguous', candidates: [10n, 11n], stored: true });
+    expect(stored).toEqual({
+      outcome: 'ambiguous',
+      candidates: [10n, 11n],
+      stored: true,
+      placed: 'held',
+    });
     expect(heldK1Coin(ALICE, NIGHT)?.mtIndex).toBe(10n);
     expect(k1CoinCandidates(ALICE, NIGHT)).toEqual([10n, 11n]);
   });
@@ -1126,6 +1241,63 @@ describe('the new fields, read out of a blob somebody else wrote', () => {
     expect(k1CoinCandidates(ALICE, NIGHT)).toEqual([10n, 11n]);
     expect(Object.keys(state.mtIndexCandidates)).toEqual([NIGHT]);
   });
+
+  /* THE ROW THE BUILD BEFORE 2026/09/21 WROTE. A queued coin had no candidate
+     positions of its own, and one written that way is a coin whose position is
+     settled — which is what it was. Nothing is repaired and nothing is lost. */
+  it('reads a queued row with no candidates as a coin with a settled position', () => {
+    seed({
+      [k1AccountKey(ALICE)]: {
+        ...EMPTY_STORE,
+        coins: { [NIGHT]: { nonceHex: NONCE, colorHex: NIGHT, value: '100', mtIndex: '42' } },
+        queued: {
+          [NIGHT]: [{ nonceHex: OTHER_NONCE, colorHex: NIGHT, value: '250', mtIndex: '43' }],
+        },
+      },
+    });
+    expect(loadK1CoinStore(ALICE).queued[NIGHT]).toEqual([
+      { nonceHex: OTHER_NONCE, colorHex: NIGHT, value: '250', mtIndex: '43' },
+    ]);
+
+    dropK1Coin(ALICE, NIGHT);
+    expect(heldK1Coin(ALICE, NIGHT)?.mtIndex).toBe(43n);
+    expect(k1CoinCandidates(ALICE, NIGHT)).toEqual([]);
+  });
+
+  /* And a row that DOES carry them keeps the ones that are positions, in
+     order, exactly as the held slot's list is filtered. */
+  it('keeps a queued row\'s candidate positions, and drops the entries that are not', () => {
+    seed({
+      [k1AccountKey(ALICE)]: {
+        ...EMPTY_STORE,
+        coins: { [NIGHT]: { nonceHex: NONCE, colorHex: NIGHT, value: '100', mtIndex: '42' } },
+        queued: {
+          [NIGHT]: [
+            {
+              nonceHex: OTHER_NONCE,
+              colorHex: NIGHT,
+              value: '250',
+              mtIndex: '43',
+              mtIndexCandidates: ['43', '43', '44', 'x', 45, []],
+            },
+          ],
+        },
+      },
+    });
+    expect(loadK1CoinStore(ALICE).queued[NIGHT]).toEqual([
+      {
+        nonceHex: OTHER_NONCE,
+        colorHex: NIGHT,
+        value: '250',
+        mtIndex: '43',
+        mtIndexCandidates: ['43', '44'],
+      },
+    ]);
+
+    dropK1Coin(ALICE, NIGHT);
+    expect(heldK1Coin(ALICE, NIGHT)?.mtIndex).toBe(43n);
+    expect(k1CoinCandidates(ALICE, NIGHT)).toEqual([43n, 44n]);
+  });
 });
 
 /* -------------------------------------------------------------------------- */
@@ -1211,6 +1383,7 @@ describe('a change coin waiting for its position', () => {
       outcome: 'ambiguous',
       candidates: [8n, 9n],
       stored: true,
+      placed: 'held',
     });
     expect(heldK1Coin(ALICE, NIGHT)?.mtIndex).toBe(8n);
     expect(k1CoinCandidates(ALICE, NIGHT)).toEqual([8n, 9n]);
@@ -1336,11 +1509,12 @@ describe('a change coin waiting for its position', () => {
       expect(awaitingK1Coins(ALICE)).toHaveLength(1);
     });
 
-    /* Candidates go into a colour's held slot or nowhere, so a colour that is
-       already holding something has nowhere to put them. The row WAITS for the
-       slot: dropping it would drop the only description of the coin, which is
-       the whole defect above in a second costume. */
-    it('keeps a row whose candidates could not be stored', async () => {
+    /* A COLOUR THAT FILLED UP WHILE THE CHANGE WAS IN FLIGHT. The candidates
+       cannot go in the held slot, because something else is in it — so the
+       coin is queued WITH them and the waiting row goes, rather than the row
+       waiting for a slot that may never empty. Leaving the row beside a stored
+       coin would count the same 60 twice: once as balance, once as arriving. */
+    it('queues a coin whose candidates the held slot had no room for', async () => {
       putK1Coin(ALICE, coin({ nonce: 'a4'.repeat(32), value: 40n, mtIndex: 6n }));
       rememberK1ChangeCoin(ALICE, MUSD, { colour: MUSD, nonce: OTHER_NONCE, value: 60n }, 'tx-m');
       enqueueK1Coin(ALICE, { colour: MUSD, nonce: 'b7'.repeat(32), value: 5n, mtIndex: 2n });
@@ -1351,11 +1525,20 @@ describe('a change coin waiting for its position', () => {
       expect(await settleK1AwaitingCoin(ALICE, MUSD, 'tx-m', reader)).toEqual({
         outcome: 'ambiguous',
         candidates: [8n, 9n],
-        stored: false,
+        stored: true,
+        placed: 'queued',
       });
-      expect(awaitingK1Coins(ALICE)).toEqual([
-        { colour: MUSD, nonce: OTHER_NONCE, value: 60n, txId: 'tx-m' },
+      expect(awaitingK1Coins(ALICE)).toEqual([]);
+      expect(heldK1Coin(ALICE, MUSD)?.nonce).toBe('b7'.repeat(32));
+      expect(queuedK1Coins(ALICE, MUSD)).toEqual([
+        { colour: MUSD, nonce: OTHER_NONCE, value: 60n, mtIndex: 8n },
       ]);
+      expect(k1ColourBalance(ALICE, MUSD)).toBe(65n);
+
+      /* And when the coin in front of it goes, the guesses go with it. */
+      dropK1Coin(ALICE, MUSD);
+      expect(heldK1Coin(ALICE, MUSD)?.nonce).toBe(OTHER_NONCE);
+      expect(k1CoinCandidates(ALICE, MUSD)).toEqual([8n, 9n]);
     });
   });
 
@@ -1486,6 +1669,30 @@ describe('taking a spend back when the chain refused the transaction', () => {
       coin({ nonce: OTHER_NONCE, value: 40n, mtIndex: 4n }),
     ]);
     expect(isK1NonceSpent(ALICE, NONCE)).toBe(false);
+  });
+
+  /* A DEMOTED COIN TAKES ITS GUESSES WITH IT. The colour's candidate list
+     describes whatever is in the held slot; at this moment that is the
+     promoted delivery, not the coin being restored. Leaving the list behind
+     would hand the restored coin another coin's positions and take the
+     delivery's own away for ever. */
+  it('demotes the promoted delivery with the candidates that belong to it', () => {
+    enqueueK1Coin(ALICE, coin({ value: 100n, mtIndex: 3n }));
+    enqueueK1Coin(ALICE, coin({ nonce: OTHER_NONCE, value: 40n, mtIndex: 8n }), [8n, 9n]);
+    rememberK1ChangeCoin(ALICE, NIGHT, null, 'tx-1');
+    expect(heldK1Coin(ALICE, NIGHT)?.nonce).toBe(OTHER_NONCE);
+    expect(k1CoinCandidates(ALICE, NIGHT)).toEqual([8n, 9n]);
+
+    undoK1ChangeCoin(ALICE, coin({ value: 100n, mtIndex: 3n }), null);
+
+    expect(heldK1Coin(ALICE, NIGHT)).toEqual(coin({ value: 100n, mtIndex: 3n }));
+    /* The restored coin is not handed the delivery's positions. */
+    expect(k1CoinCandidates(ALICE, NIGHT)).toEqual([]);
+
+    /* And they are still the delivery's when it is promoted again. */
+    dropK1Coin(ALICE, NIGHT);
+    expect(heldK1Coin(ALICE, NIGHT)?.nonce).toBe(OTHER_NONCE);
+    expect(k1CoinCandidates(ALICE, NIGHT)).toEqual([8n, 9n]);
   });
 
   it('demotes it in front of the coins still queued behind it', () => {

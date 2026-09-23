@@ -120,6 +120,26 @@
  *      written as a fact: a coin with candidates outstanding says so, in the
  *      store, until the chain has been asked the only question that decides it
  *      — can this position be proved.
+ *
+ * WHAT THE FIRST PAYMENT INTO A FUNDED PASSPORT ADDED (2026/09/21)
+ * ----------------------------------------------------------------
+ * Points 2 and 4 above were built a day apart and did not meet. The candidate
+ * list is keyed by COLOUR, so it can only ever describe the held coin; a
+ * delivery whose transaction had two outputs — which is every payment of part
+ * of what somebody holds — arriving into a colour that already held a coin
+ * therefore had nowhere to put its positions, and was reported rather than
+ * stored. Every Passport opens holding a grant, so that was the first payment
+ * anybody was ever sent: it read as "one payment is still arriving" on a
+ * balance that never moved, for ever, and the money could not be spent (twice
+ * on stagenet, blocks 562508 and 562697).
+ *
+ * The repair is that the guesses travel with the coin instead of being tied to
+ * the slot: a queued row may carry its own candidate list ({@link
+ * QueuedK1Coin}), and {@link promoteQueued} moves list and coin into the held
+ * slot together, where the spend's existing retry decides between them exactly
+ * as it does for a change coin. Nothing about a position is written as a fact
+ * any earlier than it was before — the queue simply stops being a place a
+ * description goes to die.
  */
 
 import { normalisedColourHex } from '../lib/colour.js';
@@ -156,6 +176,40 @@ export interface StoredK1Coin {
 }
 
 /**
+ * A QUEUED coin as it is stored — a held coin's row, plus the other positions
+ * it might occupy when the chain gave more than one.
+ *
+ * WHY THE QUEUE CARRIES ITS OWN GUESSES (live, 2026/09/21). `mtIndexCandidates`
+ * is keyed by colour because the witness names one coin per colour, so it can
+ * only ever describe the HELD coin. A delivery into a colour that already holds
+ * something therefore had nowhere to put its candidates, and was dropped with
+ * its description — a Passport paid 10 while holding its opening 100 showed the
+ * 100 and "one payment is still arriving" for ever, and could never spend the
+ * 10 (block 562697 on stagenet, twice in a day). The guesses ride with the coin
+ * instead, and {@link promoteQueued} moves them into the colour's list in the
+ * same write that moves the coin into the held slot, so the spend's existing
+ * retry resolves the position exactly as it does for a change coin.
+ *
+ * OPTIONAL, AND BOTH DIRECTIONS OF THE UPGRADE ARE SAFE. A row written by the
+ * build before this one carries no `mtIndexCandidates` and reads as a coin with
+ * a settled position, which is what it was; a row written by this build is read
+ * by the older one through `coinFromRow`, which keeps the four fields it knows
+ * and ignores this one — the coin survives a downgrade, only its alternatives
+ * do not.
+ */
+export interface QueuedK1Coin extends StoredK1Coin {
+  /**
+   * Decimal positions, in the order they are to be tried, with the head equal
+   * to this row's own `mtIndex` — the same arrangement
+   * {@link K1CoinStoreState.mtIndexCandidates} keeps for a held coin, for the
+   * same reason: one fact, so a coin and its current guess cannot disagree.
+   *
+   * Absent, or empty, means the position is settled and needs no retry.
+   */
+  readonly mtIndexCandidates?: readonly string[];
+}
+
+/**
  * The private state a k1 account's `held_coin` witness reads, exactly as the
  * reference's `CoinStorePrivateState` defines it.
  *
@@ -181,8 +235,12 @@ export interface K1CoinStoreState {
    * The witness never reads this. A private state carrying a field the
    * contract's witness does not name costs nothing — the witness reads
    * `coins` — and losing the coins would cost everything.
+   *
+   * A queued row may carry its own candidate positions — see
+   * {@link QueuedK1Coin}. The colour's `mtIndexCandidates` list belongs to the
+   * held coin alone and cannot describe a second one.
    */
-  readonly queued: Record<string, readonly StoredK1Coin[]>;
+  readonly queued: Record<string, readonly QueuedK1Coin[]>;
   /**
    * Every coin nonce a withdrawal has consumed, newest last.
    *
@@ -357,17 +415,29 @@ function rowFromCoin(coin: K1HeldCoin): StoredK1Coin {
  * The queued rows of one colour, filtered the way {@link readAll} filters the
  * held ones — the key has to agree with the row, and a row that is not a coin
  * is dropped rather than repaired.
+ *
+ * The candidate positions are kept where a row carries them, and their absence
+ * is a coin with a settled position rather than an unreadable row: that is the
+ * whole of the backward compatibility {@link QueuedK1Coin} promises, and it is
+ * here, in the read, exactly as the awaiting list's migration is.
  */
-function queuedRowsFrom(colourKey: string, rows: unknown): StoredK1Coin[] {
+function queuedRowsFrom(colourKey: string, rows: unknown): QueuedK1Coin[] {
   if (!Array.isArray(rows)) return [];
   const wanted = normalisedColourHex(colourKey);
-  const kept: StoredK1Coin[] = [];
+  const kept: QueuedK1Coin[] = [];
   for (const row of rows as unknown[]) {
     const coin = coinFromRow(row);
     if (coin === null || coin.colour !== wanted) continue;
-    kept.push(rowFromCoin(coin));
+    const candidates = candidateListFrom((row as Partial<QueuedK1Coin>).mtIndexCandidates);
+    kept.push(queuedRowFromCoin(coin, candidates));
   }
   return kept;
+}
+
+/** A queued row, with its candidate list only where there is one to keep. */
+function queuedRowFromCoin(coin: K1HeldCoin, candidates: readonly string[]): QueuedK1Coin {
+  const row = rowFromCoin(coin);
+  return candidates.length === 0 ? row : { ...row, mtIndexCandidates: [...candidates] };
 }
 
 /** A stored list of 64-hex nonces, deduplicated, oldest first. */
@@ -629,7 +699,7 @@ function saveK1CoinStore(account: K1Account, state: K1CoinStoreState): void {
 interface K1StoreDraft {
   encSecretKeyHex: string | null;
   coins: Record<string, StoredK1Coin>;
-  queued: Record<string, StoredK1Coin[]>;
+  queued: Record<string, QueuedK1Coin[]>;
   spentNonces: string[];
   mtIndexCandidates: Record<string, string[]>;
   awaiting: Record<string, AwaitingK1CoinRow[]>;
@@ -639,7 +709,7 @@ interface K1StoreDraft {
 function draftOf(state: K1CoinStoreState): K1StoreDraft {
   const coins = emptyMap<StoredK1Coin>();
   Object.assign(coins, state.coins);
-  const queued = emptyMap<StoredK1Coin[]>();
+  const queued = emptyMap<QueuedK1Coin[]>();
   for (const [colour, rows] of Object.entries(state.queued)) queued[colour] = [...rows];
   const mtIndexCandidates = emptyMap<string[]>();
   for (const [colour, list] of Object.entries(state.mtIndexCandidates)) {
@@ -691,13 +761,30 @@ function rememberSpentNonce(draft: K1StoreDraft, nonce: string): void {
  * A colour with a queue and no held coin is a balance nobody can spend: the
  * witness reads `coins[colour]` and finds nothing while the store plainly
  * holds something. Every write that can empty the slot ends here.
+ *
+ * THE COIN'S GUESSES COME WITH IT. A queued coin may have arrived from a
+ * transaction with two shielded outputs and so have candidate positions of its
+ * own ({@link QueuedK1Coin}); those become the COLOUR's candidate list in this
+ * same write, because that list is what the spend's retry reads. Promoting the
+ * coin and leaving its alternatives behind would put a guess in the held slot
+ * with nothing to advance to — a coin that fails to prove once and then has no
+ * second position to try, which is the same dead end as never storing it.
+ *
+ * A coin promoted WITHOUT candidates clears the colour's list rather than
+ * leaving it: whatever was in it described the coin that has just left.
  */
 function promoteQueued(draft: K1StoreDraft, colour: string): void {
   if (Object.hasOwn(draft.coins, colour)) return;
   const queue = Object.hasOwn(draft.queued, colour) ? draft.queued[colour] : [];
   const next = queue.shift();
   if (next === undefined) return;
-  draft.coins[colour] = next;
+  const { mtIndexCandidates, ...row } = next;
+  draft.coins[colour] = row;
+  if (mtIndexCandidates !== undefined && mtIndexCandidates.length > 0) {
+    draft.mtIndexCandidates[colour] = [...mtIndexCandidates];
+  } else {
+    delete draft.mtIndexCandidates[colour];
+  }
   if (queue.length === 0) delete draft.queued[colour];
 }
 
@@ -891,13 +978,26 @@ export function isK1NonceSpent(account: K1Account, nonce: string): boolean {
  * Returns where the coin went, because the caller's next sentence depends on
  * it: `'held'` is spendable now, `'queued'` is arriving behind something, and
  * `'spent'` or `'known'` are nothing happening at all.
+ *
+ * `candidates` is the positions the coin MIGHT occupy, current guess first,
+ * for a coin whose transaction carried more than one shielded output. The head
+ * is taken as the coin's position wherever it lands — the held slot's
+ * candidate list when the colour was empty, the queued row's own when it was
+ * not ({@link QueuedK1Coin}) — so a delivery is placed and spendable in its
+ * turn whatever the colour was holding when it arrived. Absent is a coin whose
+ * position is settled, which is what a single-output transaction gives.
  */
 export function enqueueK1Coin(
   account: K1Account,
   coin: K1HeldCoin,
+  candidates?: readonly bigint[],
 ): 'held' | 'queued' | 'known' | 'spent' {
   const target = requireAccount(account);
   const normalised = requireCoin(coin);
+  /* CHECKED BEFORE ANYTHING IS WRITTEN, for {@link putK1CoinCandidates}'s
+     reason: a list with a bad entry in the middle must not leave the store
+     holding half of it. */
+  const positions = candidates === undefined ? null : requireCandidatePositions(candidates);
   const state = loadK1CoinStore(target);
   if (state.spentNonces.includes(normalised.nonce)) return 'spent';
   const held = Object.hasOwn(state.coins, normalised.colour)
@@ -911,12 +1011,16 @@ export function enqueueK1Coin(
   editStore(target, (draft) => {
     if (held === null) {
       draft.coins[normalised.colour] = rowFromCoin(normalised);
+      /* The colour's list describes the HELD coin, and the held coin is now
+         this one — so it is this coin's guesses or none at all. */
+      if (positions === null) delete draft.mtIndexCandidates[normalised.colour];
+      else draft.mtIndexCandidates[normalised.colour] = positions;
       return;
     }
     const existing = Object.hasOwn(draft.queued, normalised.colour)
       ? draft.queued[normalised.colour]
       : [];
-    existing.push(rowFromCoin(normalised));
+    existing.push(queuedRowFromCoin(normalised, positions ?? []));
     draft.queued[normalised.colour] = existing;
   });
   return held === null ? 'held' : 'queued';
@@ -1067,9 +1171,18 @@ export function undoK1ChangeCoin(
       const queue = Object.hasOwn(draft.queued, restored.colour)
         ? draft.queued[restored.colour]
         : [];
-      queue.unshift(occupant);
+      /* AND ITS GUESSES GO BACK WITH IT. The colour's candidate list describes
+         whatever is in the held slot, which at this moment is the promoted
+         coin and not the one being restored; leaving it behind would hand the
+         restored coin a list of positions belonging to another coin, and take
+         the promoted coin's own alternatives away from it for ever. */
+      const guesses = Object.hasOwn(draft.mtIndexCandidates, restored.colour)
+        ? draft.mtIndexCandidates[restored.colour]
+        : [];
+      queue.unshift(queuedRowFromCoin(coinFromStoredRow(occupant), guesses));
       draft.queued[restored.colour] = queue;
     }
+    delete draft.mtIndexCandidates[restored.colour];
     draft.coins[restored.colour] = rowFromCoin(restored);
   });
 }
@@ -1106,16 +1219,22 @@ export function awaitingK1Coins(account: K1Account): K1AwaitingCoin[] {
  * ({@link K1CoinStoreState.awaiting}), so a settle addressed at the colour
  * alone would file one coin and silently drop the others.
  *
- * `'unavailable'` LEAVES THE ROW WHERE IT IS, which is the whole reason the
- * awaiting slot exists: an indexer that has not caught up yet is a question to
- * ask again in a moment, or after a reload, or tomorrow, and none of those
- * cost the coin. So does an `'ambiguous'` the store did not take — candidates
- * go into a colour's held slot or nowhere, and a colour already holding
- * something has nowhere to put them, so the row waits for the slot rather than
- * being dropped with its description. `'learned'`, a stored `'ambiguous'`,
- * `'spent'`, and `'refused'` all remove the row: the coin is in `coins` now,
- * or it is one this store has already accounted for, or it is one this store
- * will not hold and will not start being able to.
+ * `'unavailable'` LEAVES THE ROW WHERE IT IS, and it is the only outcome that
+ * does — which is the whole reason the awaiting slot exists: an indexer that
+ * has not caught up yet is a question to ask again in a moment, or after a
+ * reload, or tomorrow, and none of those cost the coin.
+ *
+ * `'ambiguous'` used to leave the row too, because candidates went into a
+ * colour's held slot or nowhere and a colour already holding something had
+ * nowhere to put them. They now ride with the coin into the queue
+ * ({@link QueuedK1Coin}), so the coin is in the store either way and the row
+ * has to go: a row left beside a stored coin is the same value counted twice,
+ * once as balance and once as still arriving.
+ *
+ * `'learned'`, `'ambiguous'`, `'spent'`, and `'refused'` therefore all remove
+ * the row: the coin is in the store now, or it is one this store has already
+ * accounted for, or it is one this store will not hold and will not start
+ * being able to.
  */
 export async function settleK1AwaitingCoin(
   account: K1Account,
@@ -1141,7 +1260,6 @@ export async function settleK1AwaitingCoin(
     { candidates: 'store' },
   );
   if (outcome.outcome === 'unavailable') return outcome;
-  if (outcome.outcome === 'ambiguous' && !outcome.stored) return outcome;
   editStore(target, (draft) => {
     dropAwaitingRow(draft, wanted, row.nonceHex);
   });
@@ -1262,6 +1380,26 @@ export function k1UnreadChanges(account: K1Account): { colour: string; txId: str
 /* -------------------------------------------------------------------------- */
 
 /**
+ * A candidate list as it is STORED, or a throw carrying the refusal.
+ *
+ * One function rather than one per caller: a list that decides nothing and a
+ * position that is not a position are the same two refusals wherever the
+ * candidates are going, and a second copy of them is how the held slot and the
+ * queue start disagreeing about what a position is.
+ */
+function requireCandidatePositions(candidates: readonly bigint[]): string[] {
+  if (candidates.length === 0) {
+    throw new Error('A coin whose position is not known needs at least one candidate position.');
+  }
+  return candidates.map((index) => {
+    if (typeof index !== 'bigint' || index < 0n) {
+      throw new Error('A held coin needs a commitment-tree position of zero or more.');
+    }
+    return index.toString();
+  });
+}
+
+/**
  * Stores a coin whose position the chain gave more than one answer for.
  *
  * The first candidate becomes the coin's `mtIndex` and the rest wait beside
@@ -1280,18 +1418,10 @@ export function putK1CoinCandidates(
   candidates: readonly bigint[],
 ): void {
   const target = requireAccount(account);
-  if (candidates.length === 0) {
-    throw new Error('A coin whose position is not known needs at least one candidate position.');
-  }
-  const normalised = requireCoin({ ...coin, mtIndex: candidates[0] });
   /* Every candidate is checked BEFORE anything is written, so a list with a
      bad entry in the middle cannot leave the store holding half of it. */
-  const positions = candidates.map((index) => {
-    if (typeof index !== 'bigint' || index < 0n) {
-      throw new Error('A held coin needs a commitment-tree position of zero or more.');
-    }
-    return index.toString();
-  });
+  const positions = requireCandidatePositions(candidates);
+  const normalised = requireCoin({ ...coin, mtIndex: candidates[0] });
   editStore(target, (draft) => {
     draft.coins[normalised.colour] = rowFromCoin(normalised);
     draft.mtIndexCandidates[normalised.colour] = positions;
@@ -1607,13 +1737,17 @@ export interface K1PendingCoin {
 /**
  * What a reconciliation learned.
  *
- * `'ambiguous'` stores NOTHING, deliberately. A multi-output transaction gives
- * every candidate position and no way to tell them apart from here; the
- * reference resolves it by retrying the spend across candidates, which is safe
- * because an incorrect qualified description is an unsatisfiable witness at
- * proving time and no transaction is submitted (MIP-0012 INV-5). Writing the
- * first candidate and calling it the coin would replace that safe retry with a
- * store that confidently holds the wrong answer.
+ * `'ambiguous'` under the default rule stores NOTHING, deliberately. A
+ * multi-output transaction gives every candidate position and no way to tell
+ * them apart from here; the reference resolves it by retrying the spend across
+ * candidates, which is safe because an incorrect qualified description is an
+ * unsatisfiable witness at proving time and no transaction is submitted
+ * (MIP-0012 INV-5). Writing the first candidate and calling it the coin, with
+ * nothing beside it to try, would replace that safe retry with a store that
+ * confidently holds the wrong answer.
+ *
+ * Under `candidates: 'store'` the list IS kept, and `placed` says where — the
+ * held slot, or the queue behind a coin the colour already held.
  */
 export type K1Reconciliation =
   | { readonly outcome: 'learned'; readonly coin: K1HeldCoin; readonly placed: 'held' | 'queued' }
@@ -1622,6 +1756,17 @@ export type K1Reconciliation =
       readonly candidates: readonly bigint[];
       /** Whether the candidates were written down, or only reported. */
       readonly stored: boolean;
+      /**
+       * Where the coin went when they were written down, and null when they
+       * were not.
+       *
+       * EXPLICIT RATHER THAN INFERRED, because the two stored cases read
+       * differently to somebody looking at a screen: `'held'` is spendable
+       * now, `'queued'` is spendable when what is in front of it has gone, and
+       * neither is "still arriving". `stored` alone said only that something
+       * had happened.
+       */
+      readonly placed: 'held' | 'queued' | null;
     }
   /** The nonce is one this account has already spent. Nothing was written. */
   | { readonly outcome: 'spent'; readonly nonce: string }
@@ -1729,15 +1874,34 @@ export async function reconcileK1CoinFromChain(
   if (end - start > 1) {
     const candidates: bigint[] = [];
     for (let index = start; index < end; index += 1) candidates.push(BigInt(index));
-    /* CANDIDATES GO IN THE HELD SLOT OR NOWHERE. `putK1CoinCandidates` writes
-       that slot, so storing them over a coin of the same colour would be the
-       overwrite this function was just taught not to make. A colour that is
-       already holding something keeps it and this one is reported — the
-       difference is `stored`, so the caller can say "arriving" rather than
-       claiming a position nothing wrote. */
-    const stored = options.candidates === 'store' && heldRow === null;
-    if (stored) putK1CoinCandidates(target, { colour, nonce, value }, candidates);
-    return { outcome: 'ambiguous', candidates, stored };
+    /* CANDIDATES GO WHERE THE COIN GOES — the held slot when the colour is
+       empty, and the QUEUE behind whatever is in it when it is not (live,
+       2026/09/21).
+
+       They used to go in the held slot or nowhere, on the reasoning that
+       `putK1CoinCandidates` writes that slot and writing it over a coin of the
+       same colour would be the overwrite this function had just been taught
+       not to make. The conclusion did not follow: the coin did not have to go
+       in the held slot at all. Every Passport opens holding its grant, so the
+       first payment anybody was ever sent arrived into an occupied colour,
+       landed here, and was dropped with its description — 100 mUSD on screen,
+       10 mUSD on the chain, "one payment is still arriving" for ever, and no
+       way to spend it (blocks 562508 and 562697 on stagenet, twice in one
+       day). The queue is where a second coin of a colour belongs, it has been
+       since 2026/09/17, and {@link QueuedK1Coin} is what lets the guesses
+       travel with it until a promotion makes it the held coin and the spend's
+       own retry decides between them. */
+    if (options.candidates !== 'store') {
+      return { outcome: 'ambiguous', candidates, stored: false, placed: null };
+    }
+    /* `'spent'` and `'known'` cannot come back from the enqueue: both were
+       asked about above, before the indexer was, and returned there. */
+    const placed = enqueueK1Coin(
+      target,
+      { colour, nonce, value, mtIndex: candidates[0] },
+      candidates,
+    ) as 'held' | 'queued';
+    return { outcome: 'ambiguous', candidates, stored: true, placed };
   }
   const coin: K1HeldCoin = { colour, nonce, value, mtIndex: BigInt(start) };
   /* THE ENQUEUE RULE, not a write of the held slot: first coin of a colour is
