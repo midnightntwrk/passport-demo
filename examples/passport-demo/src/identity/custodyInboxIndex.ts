@@ -356,3 +356,29 @@ export function custodyTxIdForInboxIndex(
   return (index: bigint) =>
     index < 0n || index >= BigInt(transactions.length) ? null : transactions[Number(index)];
 }
+
+/**
+ * How many of an account's shielded coins the chain has seen it spend: its
+ * `withdraw_shielded*` calls that ran (2026/09/22).
+ *
+ * The one number the coin store's legacy repair is allowed to trust
+ * (`./k1CoinStore.ts`, `reconcileK1Spends`, rule 4): every spend the store
+ * records consumes one coin, so a store that remembers more spent coins than
+ * the chain holds spends has booked spends that never happened. Null —
+ * "cannot say" — for a history that could not be read, one that may have been
+ * cut off at the query's limit, or one with a row this build cannot read,
+ * because a count that is short would give back a coin that WAS spent.
+ */
+export function custodyLandedSpendCount(
+  rows: readonly CustodyActionRow[] | null,
+  limit: number = CUSTODY_ACTION_HISTORY_LIMIT,
+): number | null {
+  if (rows === null || rows.length >= limit) return null;
+  if (rows.some((row) => row.kind === null)) return null;
+  return rows.filter(
+    (row) =>
+      row.kind === 'ContractCall' &&
+      (row.entryPoint ?? '').startsWith('withdraw_shielded') &&
+      (row.status === undefined || row.status === 'SUCCESS'),
+  ).length;
+}

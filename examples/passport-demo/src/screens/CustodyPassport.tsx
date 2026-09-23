@@ -41,6 +41,7 @@ import {
   withdrawShieldedK1,
   withdrawShieldedToContractK1,
   withdrawUnshieldedK1,
+  custodyPrepareWaitMs,
   type CustodyCallDevice,
   type CustodyPhase,
 } from '../identity/custodyContractClient.js'
@@ -56,6 +57,9 @@ import {
   resolveCustodyUseCounter,
   saveCustodyRecord,
   CUSTODY_SETUP_INTERRUPTED,
+  CUSTODY_SUBMIT_WAIT_MS,
+  CUSTODY_UNDONE_KEEP_MS,
+  withinCustodyBound,
   type CustodyAccountRecord,
 } from '../identity/custodyContractPlan.js'
 import {
@@ -89,6 +93,7 @@ import {
 import {
   custodyActionHistoryQuery,
   custodyActionRowsFrom,
+  custodyLandedSpendCount,
   custodyTxIdForInboxIndex,
 } from '../identity/custodyInboxIndex.js'
 import {
@@ -120,8 +125,8 @@ import {
   custodyArrivingCount,
   custodyInFlightRefusal,
   custodyMayReadHoldings,
-  runCustodyKeepRecord,
   custodyUnplacedDeliveries,
+  runCustodyPayment,
   runCustodyWork,
 } from '../lib/custodyScreenRules.js'
 import {
@@ -1313,13 +1318,15 @@ export default function CustodyPassport({
            part of what it held, which is the ordinary case — so the window
            gives two positions and reporting them would leave every such payment
            permanently unshowable. They are kept as candidates, in order, in the
-           same way a spend's change is; `stored` says whether that happened,
-           because candidates go in a colour's held slot or nowhere. */
+           same way a spend's change is, and they go WHERE THE COIN GOES: into
+           the held slot when the colour was empty, into the queue behind what
+           was there when it was not. That second case is every first payment
+           into a Passport still holding its opening grant, and until
+           2026/09/21 it was where the description was dropped. */
         candidates: 'store',
       })
       /* WHAT THE CHAIN COULD NOT PLACE IS STILL HERE. A coin whose position the
-         indexer has not answered for, or answered ambiguously into a colour
-         already holding something, is demonstrably delivered and not yet
+         indexer has not answered for is demonstrably delivered and not yet
          spendable — which is what "arriving" means. Counting only the store's
          own awaiting rows made those coins vanish off the screen entirely. */
       const unplaced = custodyUnplacedDeliveries(walked.outcomes)
@@ -1331,8 +1338,39 @@ export default function CustodyPassport({
     [],
   )
 
+  /**
+   * The figures, redrawn from the coin store alone — no chain, no wallet, no
+   * wait. What a payment that has just been booked shows at once, before the
+   * read that follows it has asked the chain anything.
+   */
+  const showStoreHoldings = useCallback(async (): Promise<void> => {
+    const record = view?.record ?? null
+    if (record?.address == null) return
+    const account = { network: record.network, address: record.address }
+    const { awaitingK1Coins, k1ColourHoldings } = await import('../identity/k1CoinStore.js')
+    setTokens(
+      k1ColourHoldings(account).map((holding) => ({ colourHex: holding.colour, amount: holding.value })),
+    )
+    setArriving(custodyArrivingCount({ awaitingRows: awaitingK1Coins(account).length, unplaced: null }))
+  }, [view])
+
+  /* ONE READ AT A TIME. Home's effect, the Send sheet opening, a refresh, and
+     the read after a payment all ask; the second of two overlapping asks waits
+     for the first rather than opening the same questions again beside it. */
+  const holdingsInFlight = useRef<Promise<void> | null>(null)
+
   /** What the Passport holds, in NIGHT and in every token it has been paid. */
-  const readHoldings = useCallback(async (): Promise<void> => {
+  const readHoldings = useCallback((): Promise<void> => {
+    if (holdingsInFlight.current !== null) return holdingsInFlight.current
+    const reading = readHoldingsOnce().finally(() => {
+      holdingsInFlight.current = null
+    })
+    holdingsInFlight.current = reading
+    return reading
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user, view, walkDeliveries])
+
+  const readHoldingsOnce = async (): Promise<void> => {
     const record = view?.record ?? null
     if (user === null || record?.address == null) return
     /* A payment is running and it owns the store until it is finished. What is
@@ -1344,10 +1382,14 @@ export default function CustodyPassport({
     let opened: Awaited<ReturnType<typeof deps.wallet>> | null = null
     setBalanceFailed(false)
     try {
-      const [wallet, contractModule] = await Promise.all([
-        deps.wallet(user),
-        deps.contractModule(),
-      ])
+      /* BOUNDED: a read that cannot open its connection says so and shows
+         what the store holds, rather than holding every caller behind it. */
+      const openedPair = await withinCustodyBound(
+        Promise.all([deps.wallet(user), deps.contractModule()]),
+        HOLDINGS_READ_WAIT_MS,
+      )
+      if (openedPair.kind === 'timeout') throw new Error('the connection did not open in time')
+      const [wallet, contractModule] = openedPair.value
       opened = wallet
       /* THE SYNC BAR, SUBSCRIBED ONCE. Home paints a hairline strip while the
          wallet walks the chain, and it is the one thing about the wallet a
@@ -1364,7 +1406,11 @@ export default function CustodyPassport({
       const reader = providers.publicDataProvider as {
         queryContractState(address: string): Promise<{ data: unknown } | null>
       }
-      const state = await reader.queryContractState(record.address)
+      const answered = await withinCustodyBound(
+        reader.queryContractState(record.address),
+        HOLDINGS_READ_WAIT_MS,
+      )
+      const state = answered.kind === 'done' ? answered.value : null
       if (!state) throw new Error('unreadable')
       const { nightColourBytes } = await import('../identity/accountCustody.js')
       /* `.data`, not the whole state. A compiled build's `ledger()` takes the
@@ -1382,6 +1428,19 @@ export default function CustodyPassport({
        made says nothing about whether a delivery is waiting, and the count then
        falls back to the store's own rows rather than claiming none. */
     let unplaced: number | null = null
+    /* THE STORE IS MADE TO AGREE WITH THE CHAIN FIRST (2026/09/22): a payment
+       booked and never recorded is taken back, one the chain holds after all
+       is put back, and a change coin that never existed stops reading as
+       arriving. Only the indexer is asked, so it runs whether or not the
+       connection above opened. See `reconcileCustodySpends`. */
+    try {
+      const indexerHttpUrl =
+        opened?.network.indexerHttpUrl ??
+        (await import('../lib/localWallet.js')).localWalletNetworkConfig().indexerHttpUrl
+      await reconcileCustodySpends(account, indexerHttpUrl)
+    } catch (cause) {
+      console.info('[account-custody] the payments in flight could not be checked this time', cause)
+    }
     if (opened !== null) {
       /* EVERY AWAITING COIN IS ASKED ABOUT AGAIN, on every read. A spend files
          its change with a description and no position, and the one question
@@ -1467,7 +1526,7 @@ export default function CustodyPassport({
         accountAddress: record.address,
       }),
     )
-  }, [user, view, walkDeliveries])
+  }
 
   useEffect(() => {
     if (screen !== 'home') return
@@ -1645,18 +1704,15 @@ export default function CustodyPassport({
         timer = setTimeout(() => void check(), 15_000)
         return
       }
-      if (verdict === 'not-landed' && record.undo) {
+      if (verdict === 'not-landed') {
+        /* TAKEN BACK BY THE STORE, ON THE CHAIN'S WORD — the same reconciliation
+           every read runs, so a booking is set aside (and put back if it lands
+           after all) rather than forgotten, and a record from an older build
+           with nothing to take back by is answered by the store's own rules. */
         try {
-          const { undoK1ChangeCoin } = await import('../identity/k1CoinStore.js')
-          undoK1ChangeCoin(
+          await reconcileCustodySpends(
             { network: record.network, address: record.accountAddress },
-            {
-              colour: record.undo.held.colour,
-              nonce: record.undo.held.nonce,
-              value: BigInt(record.undo.held.value),
-              mtIndex: BigInt(record.undo.held.mtIndex),
-            },
-            record.undo.change,
+            localWalletNetworkConfig().indexerHttpUrl,
           )
         } catch (cause) {
           console.warn('[account-custody] the payment that did not land could not be taken back', cause)
@@ -1839,7 +1895,7 @@ export default function CustodyPassport({
       amount: bigint
       recipientAccountAddress: string
       recipientModule: PassportContractName
-    }): Promise<void> => {
+    }): Promise<() => Promise<void>> => {
       const { account, amount, asset, label, record, wallet } = params
       const [store, accountModule] = await Promise.all([
         import('../identity/k1CoinStore.js'),
@@ -1861,7 +1917,9 @@ export default function CustodyPassport({
         (await accountModule.readCustodyAccountView({ indexerHttpUrl }, params.recipientAccountAddress))
           .encKeyHex
       const recipientEncKeyHex =
-        params.recipientModule === 'account-custody' ? await readRecipientEncKey() : null
+        params.recipientModule === 'account-custody'
+          ? await beforePayment(readRecipientEncKey(), 'reading the recipient')
+          : null
       const input = {
         record,
         colourHex: asset.colourHex,
@@ -1924,14 +1982,11 @@ export default function CustodyPassport({
       })
       setStopped(null)
       setNotice(custodyShieldedSendOutcome({ ...stoppedRecord, stage: 'done' }))
-      /* THE TIDY-UP RUNS HERE, INSIDE THE PAYMENT. It is a gated call of its
-         own, so starting it detached let it overlap whatever came next — the
-         follow-up read, or a second Send — and two gated calls against one
-         account sign against the same `auth_nonce`. See
-         `../lib/custodyScreenRules.ts`. */
-      await runCustodyKeepRecord(setBusy, () =>
-        backfillChange({ wallet, record, identity, change: sent.change }),
-      )
+      /* THE TIDY-UP IS HANDED BACK, NOT AWAITED. It is a gated call of its own,
+         so it still runs under the payment's flag — two gated calls against one
+         account must never sign against the same `auth_nonce` — but the sheet
+         is not held on it. See `runCustodyPayment`. */
+      return () => backfillChange({ wallet, record, identity, change: sent.change })
     },
     [arm, backfillChange, ensureIdentity, sendPhase, settleNotSent],
   )
@@ -1952,7 +2007,7 @@ export default function CustodyPassport({
       asset: CustodyAssetRow
       amount: bigint
       shieldedAddress: string
-    }): Promise<void> => {
+    }): Promise<() => Promise<void>> => {
       const { account, amount, asset, record, wallet } = params
       const [store, accountModule] = await Promise.all([
         import('../identity/k1CoinStore.js'),
@@ -2021,10 +2076,8 @@ export default function CustodyPassport({
       })
       setStopped(null)
       setNotice(custodyShieldedSendOutcome({ ...stoppedRecord, stage: 'done' }))
-      /* As above: inside the payment, and last. */
-      await runCustodyKeepRecord(setBusy, () =>
-        backfillChange({ wallet, record, identity, change: sent.change }),
-      )
+      /* As above: under the payment's flag, and not holding the sheet. */
+      return () => backfillChange({ wallet, record, identity, change: sent.change })
     },
     [arm, backfillChange, ensureIdentity, sendPhase, settleNotSent],
   )
@@ -2068,11 +2121,16 @@ export default function CustodyPassport({
    * from before it.
    */
   const runPayment = useCallback(
-    async (work: () => Promise<void>): Promise<void> => {
+    async (work: () => Promise<(() => Promise<void>) | void>): Promise<void> => {
       const refusal = custodyInFlightRefusal(inFlight.current)
       if (refusal !== null) throw new Error(refusal)
       setError(null)
-      const { failure } = await runCustodyWork(inFlight, work, readHoldings)
+      /* THE SHEET HAS ITS ANSWER THE MOMENT THE PAYMENT HAS ONE (2026/09/22):
+         the tidy-up and the read that follow run on without it — see
+         `runCustodyPayment` — and the figures are redrawn from the store at
+         once, so "Sent" never sits over the balance from before. */
+      const { failure } = await runCustodyPayment(inFlight, work, readHoldings)
+      void showStoreHoldings()
       setBusy(null)
       setSendStep(null)
       if (failure === null) return
@@ -2083,7 +2141,7 @@ export default function CustodyPassport({
          its screens. */
       throw new Error(custodyFailureSentence(failure))
     },
-    [readHoldings],
+    [readHoldings, showStoreHoldings],
   )
 
   /**
@@ -2140,16 +2198,16 @@ export default function CustodyPassport({
     }): Promise<void> => {
       await runPayment(async () => {
         setNotice(null)
-        const { account, record, wallet } = await custodyContext()
+        const { account, record, wallet } = await beforePayment(custodyContext(), 'opening this Passport')
         const asset = custodyAssetRow(assetRows, params.tokenType)
         if (asset === null) throw new Error('This Passport does not hold that token.')
         const { accountModuleFor } = await import('../identity/accountCustody.js')
-        const recipientModule = await accountModuleFor(
-          { indexerHttpUrl: wallet.network.indexerHttpUrl },
-          params.accountAddress,
+        const recipientModule = await beforePayment(
+          accountModuleFor({ indexerHttpUrl: wallet.network.indexerHttpUrl }, params.accountAddress),
+          'reading the recipient',
         )
         const label = normaliseNameForRecovery(params.domain)
-        await sendShielded({
+        const tidyUp = await sendShielded({
           wallet,
           record,
           account,
@@ -2165,6 +2223,7 @@ export default function CustodyPassport({
           recipientLabel: params.domain,
           network: record.network,
         })
+        return tidyUp
       })
     },
     [assetRows, custodyContext, reportSent, runPayment, sendShielded],
@@ -2183,7 +2242,7 @@ export default function CustodyPassport({
     async (params: { recipientAddress: string; amount: bigint }): Promise<void> => {
       await runPayment(async () => {
         setNotice(null)
-        const { record, wallet } = await custodyContext()
+        const { record, wallet } = await beforePayment(custodyContext(), 'opening this Passport')
         if (!record.activated) {
           throw new Error('Your Passport is still being set up. Try again once it is ready.')
         }
@@ -2250,10 +2309,10 @@ export default function CustodyPassport({
     }): Promise<void> => {
       await runPayment(async () => {
         setNotice(null)
-        const { account, record, wallet } = await custodyContext()
+        const { account, record, wallet } = await beforePayment(custodyContext(), 'opening this Passport')
         const asset = custodyAssetRow(assetRows, params.tokenType)
         if (asset === null) throw new Error('This Passport does not hold that token.')
-        await sendShieldedToAddress({
+        const tidyUp = await sendShieldedToAddress({
           wallet,
           record,
           account,
@@ -2267,6 +2326,7 @@ export default function CustodyPassport({
           recipientLabel: shortHex(params.recipientAddress.trim()),
           network: record.network,
         })
+        return tidyUp
       })
     },
     [assetRows, custodyContext, reportSent, runPayment, sendShieldedToAddress],
@@ -2283,7 +2343,9 @@ export default function CustodyPassport({
   const readShieldedHoldings = useCallback(async (): Promise<
     { tokenType: string; amount: bigint }[]
   > => {
-    await readHoldings()
+    /* Bounded: the picker opens on what is known rather than waiting on a
+       read that may not come back. */
+    await withinCustodyBound(readHoldings(), HOLDINGS_READ_WAIT_MS)
     return custodyHomeSendableHoldings({
       night: balance,
       shielded: tokens,
@@ -3486,6 +3548,80 @@ function shortHex(value: string): string {
  * null, which the walk reads as "nothing here knows which transaction wrote
  * that entry" and files no coin on.
  */
+/**
+ * A step in front of a payment that sends nothing, given the same bound the
+ * payment's own preparation has (2026/09/22). The screen opens the connection
+ * and reads the recipient before it hands anything to the client, and neither
+ * read had an end: past the bound the payment is told, definitely, that it did
+ * not go through — which is true.
+ */
+async function beforePayment<T>(work: Promise<T>, what: string): Promise<T> {
+  const outcome = await withinCustodyBound(work, custodyPrepareWaitMs())
+  if (outcome.kind === 'timeout') {
+    console.warn(`[account-custody] ${what} did not finish in time; nothing was sent`)
+    throw new Error(CUSTODY_SEND_NOT_SENT)
+  }
+  return outcome.value
+}
+
+/** How long one read behind the Home figures may take before it gives up. */
+const HOLDINGS_READ_WAIT_MS = 30_000
+
+/**
+ * THE COIN STORE, MADE TO AGREE WITH THE CHAIN — run on every read of the
+ * holdings, and by the stopped-payment check (2026/09/22).
+ *
+ * First a booking the SCREEN's stopped-payment record holds and the store does
+ * not — written by a build from before the store kept its own — is handed to
+ * the store. Then `reconcileK1Spends` asks the chain about every booking, every
+ * booking set aside, and every change coin whose parent it cannot name, and
+ * takes back, puts back, or drops accordingly. Its rules are its own and are
+ * drilled in `../identity/k1CoinStore.test.ts`; what is here is the wiring:
+ * the indexer, the clock, the bound, and the account's history for the count.
+ */
+async function reconcileCustodySpends(
+  account: { network: string; address: string },
+  indexerHttpUrl: string,
+) {
+  const [store, runtime] = await Promise.all([
+    import('../identity/k1CoinStore.js'),
+    import('../identity/contractRuntime.js'),
+  ])
+  const record = loadCustodyShieldedSend(window.localStorage, {
+    network: account.network,
+    accountAddress: account.address,
+  })
+  if (record !== null && record.sendTxId !== null && record.undo) {
+    try {
+      store.adoptK1PendingSpend(account, {
+        txId: record.sendTxId,
+        at: record.sentAt ?? record.startedAt,
+        parent: {
+          colour: record.undo.held.colour,
+          nonce: record.undo.held.nonce,
+          value: BigInt(record.undo.held.value),
+          mtIndex: BigInt(record.undo.held.mtIndex),
+        },
+        change: record.undo.change,
+      })
+    } catch (cause) {
+      console.info('[account-custody] a stopped payment’s record could not be read', cause)
+    }
+  }
+  const result = await store.reconcileK1Spends(account, {
+    onChain: (txId) => runtime.resolveTxOnChainOnce(indexerHttpUrl, txId),
+    now: Date.now(),
+    boundMs: CUSTODY_SUBMIT_WAIT_MS,
+    keepUndoneMs: CUSTODY_UNDONE_KEEP_MS,
+    landedSpendCount: async () =>
+      custodyLandedSpendCount(await readCustodyActions(indexerHttpUrl, account.address)),
+  })
+  const moved =
+    result.landed.length + result.undone.length + result.reapplied.length + result.orphansDropped.length
+  if (moved > 0) console.info('[account-custody] payments in flight, answered from the chain', result)
+  return result
+}
+
 async function readCustodyActions(indexerHttpUrl: string, address: string) {
   try {
     const response = await fetch(indexerHttpUrl, {

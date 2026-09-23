@@ -789,6 +789,7 @@ export default mergeConfig(
           'src/lib/companionLink.ts',
           'src/lib/colour.ts',
           'src/lib/custodyAdoption.ts',
+          'src/lib/custodyAccountLock.ts',
           'src/lib/custodyAssets.ts',
           'src/lib/custodyDelivery.ts',
           'src/lib/custodyRoute.ts',

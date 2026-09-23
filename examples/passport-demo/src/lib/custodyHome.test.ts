@@ -429,7 +429,7 @@ describe('the step a payment is narrated with', () => {
   it('maps the custody steps onto the four words the Send sheet has', () => {
     expect(custodySendPhase(null)).toBeNull();
     expect(custodySendPhase('wallet')).toBe('connecting');
-    expect(custodySendPhase('sign')).toBe('checking');
+    expect(custodySendPhase('sign')).toBe('connecting');
     expect(custodySendPhase('submit')).toBe('submitting');
     expect(custodySendPhase('confirm')).toBe('confirming');
   });

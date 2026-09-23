@@ -165,7 +165,8 @@ function recipient() {
  * it is drilled where it is decided, in `src/lib/sendAssets.test.ts`.
  */
 async function chooseShielded(): Promise<void> {
-  await picker().selectOption({ index: 1 });
+  /* mUSD leads the picker since 2026/09/22, so it is index 0. */
+  await picker().selectOption({ index: 0 });
 }
 
 /** The refusal under the recipient field, when there is one. */
@@ -173,14 +174,13 @@ function refusal() {
   return page.locator('#mnhome-send-recipient-error');
 }
 
-test('the asset is the first field, and the sheet opens on NIGHT', async () => {
+test('the asset is the first field, and the sheet opens on mUSD', async () => {
   /* FIRST. Not "present somewhere" — the order is the whole point of the
      inversion: what is being sent is decided before where it is going. */
   const firstLabel = await page.locator('.mnhome-send-form > * >> nth=0').innerText();
   expect(firstLabel).toMatch(/^ASSET/i);
 
-  await expect(page.getByText('Send NIGHT', { exact: true })).toBeVisible();
-  await expect(picker()).toHaveValue('night');
+  await expect(page.getByText('Send mUSD', { exact: true })).toBeVisible();
 
   /* Two options, from what this account really holds: 0.002 NIGHT and 100 of a
      stablecoin colour, both recorded from stagenet. The sponsor's own colour
@@ -188,12 +188,11 @@ test('the asset is the first field, and the sheet opens on NIGHT', async () => {
      in the account is not a thing to send. */
   const options = await picker().locator('option').allInnerTexts();
   expect(options).toHaveLength(2);
-  expect(options[0]).toMatch(/^NIGHT — 0\.002 available/);
-  expect(options[1]).toMatch(/^mUSD — 100 available/);
+  expect(options[0]).toMatch(/^mUSD — 100 available/);
+  expect(options[1]).toMatch(/^NIGHT — 0\.002 available/);
 
-  // NIGHT's own units and ceiling, before anything is chosen.
-  await expect(page.locator('.mnhome-send-unit')).toHaveText('NIGHT');
-  await expect(page.getByPlaceholder('0.0')).toBeVisible();
+  // mUSD's own unit, before anything is chosen.
+  await expect(page.locator('.mnhome-send-unit')).toHaveText('mUSD');
 });
 
 test('choosing an asset re-quotes the amount and re-writes the recipient hint', async () => {
@@ -503,7 +502,7 @@ test('a balance on its way is a figure with a word on it, never a zero', async (
   /* The shielded asset's own colour, taken from the picker rather than
      hard-coded: the option's value IS the colour — see `sendAssets.ts` — so the
      record below names a colour this build really shows a row for. */
-  const colourHex = await picker().locator('option').nth(1).getAttribute('value');
+  const colourHex = await picker().locator('option', { hasText: /^mUSD/ }).first().getAttribute('value');
   expect(colourHex).toBeTruthy();
 
   await page.reload();
@@ -660,7 +659,7 @@ test('a sender whose account can pay in one transaction is reviewed as one trans
   await page.getByRole('button', { name: /^Send$/ }).first().click();
   await expect(page.locator('.mnhome-send')).toBeVisible();
 
-  await picker().selectOption({ index: 1 });
+  await chooseShielded();
   await recipient().fill(`${RESOLVABLE_NAME}.night`);
   await expect(page.locator('.mnhome-send-resolved')).toBeVisible({ timeout: 30_000 });
   await page.getByPlaceholder('0', { exact: true }).fill('1');

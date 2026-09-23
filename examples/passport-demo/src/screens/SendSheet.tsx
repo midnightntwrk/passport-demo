@@ -777,7 +777,10 @@ export default function SendSheet(props: SendSheetProps) {
      one asset every Passport can send, and a picker that opened on whatever
      happened to sort first would move under the thumb of somebody who had
      opened this sheet a hundred times. */
-  const [assetId, setAssetId] = useState<string>(NIGHT_ASSET_ID)
+  /* Null until the person chooses: the default is then mUSD whenever the
+     Passport holds it (2026/09/22 — the stablecoin is what people send), and
+     NIGHT otherwise. */
+  const [assetId, setAssetId] = useState<string | null>(null)
 
   /* What the registry said about the name in the field, if there is one. */
   const [nameState, setNameState] = useState<NameState>({ status: 'idle' })
@@ -961,7 +964,7 @@ export default function SendSheet(props: SendSheetProps) {
      that holds nothing, which is `[]`, and from a read that failed. */
   const holdingsPending = shieldedSupported && holdings === null && holdingsError === null
 
-  const assets = useMemo(
+  const builtAssets = useMemo(
     () =>
       buildSendAssets({
         nightBalance: atomicFromFormatted(availableBalance),
@@ -973,12 +976,18 @@ export default function SendSheet(props: SendSheetProps) {
       }),
     [availableBalance, pickerHoldings, shieldedSupported, sponsoredToken],
   )
+  /* mUSD leads the picker and is the default; everything else keeps its order. */
+  const assets = useMemo(() => {
+    const musd = builtAssets.filter((entry) => entry.symbol === 'mUSD')
+    return musd.length === 0 ? builtAssets : [...musd, ...builtAssets.filter((entry) => entry.symbol !== 'mUSD')]
+  }, [builtAssets])
   /* The selection is DERIVED, not corrected by an effect. A colour that goes
      away between the host's mirror and the authoritative read falls back to
      NIGHT for as long as it is missing and is honoured again the moment it
      comes back — where an effect would have overwritten the choice for good.
      NIGHT is always present, so this can never be undefined. */
-  const asset: SendAsset = assets.find((entry) => entry.id === assetId) ?? assets[0]
+  const asset: SendAsset =
+    (assetId === null ? undefined : assets.find((entry) => entry.id === assetId)) ?? assets[0]
   const tokenType = asset.tokenType
   /* Which ledger is being spent from — now a consequence of the choice above,
      where until 2026/08/31 it was a consequence of the recipient. */

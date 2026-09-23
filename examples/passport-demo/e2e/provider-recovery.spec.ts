@@ -736,7 +736,7 @@ test.describe('a Passport that has been paid', () => {
     /* WHAT THIS PAYMENT WILL PUBLISH, said at the field that decides it — the
        per-payment choice of MIP-0012 §6.6, which moved onto this sheet with the
        rest of the send. */
-    await sendPicker(page).selectOption({ index: 1 });
+    await chooseAsset(page, 'mUSD');
     await sendRecipient(page).fill(RESOLVABLE_NAME);
     await expect(
       page.getByText('Both Passports are named on chain for this payment.'),
@@ -793,7 +793,7 @@ test.describe('a Passport that has been paid', () => {
     await expect(greeting(page)).toBeVisible({ timeout: 60_000 });
 
     await openSend(page);
-    await sendPicker(page).selectOption({ index: 0 });
+    await chooseAsset(page, 'NIGHT');
     await sendRecipient(page).fill(RESOLVABLE_NAME);
     await sendAmount(page).fill('0.001');
 
@@ -973,3 +973,14 @@ test.describe('a Passport opened again after a payment', () => {
     await context.close();
   });
 });
+
+/**
+ * Chooses an asset in the Send sheet's picker by its label, whatever order the
+ * picker offers them in (the order is the sheet's to change).
+ */
+async function chooseAsset(page: Page, symbol: string): Promise<void> {
+  /* Waited for, as an index-based choice waits: the picker fills from a read. */
+  const option = sendPicker(page).locator('option').filter({ hasText: new RegExp(`^\\s*${symbol}\\b`) });
+  await expect(option.first()).toBeAttached({ timeout: 30_000 });
+  await sendPicker(page).selectOption({ label: ((await option.first().textContent()) ?? '').trim() });
+}

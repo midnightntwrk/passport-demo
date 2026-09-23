@@ -137,6 +137,57 @@ export async function runCustodyWork(
 /* 2b. The record of what the account kept, written INSIDE the payment        */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * A PAYMENT, WHOSE ANSWER IS NOT HELD UP BY WHAT FOLLOWS IT (2026/09/22).
+ *
+ * {@link runCustodyWork} awaits its follow-up, and the Send sheet awaits the
+ * whole of it. Two things followed a payment: the tidy-up that writes the
+ * change into the account's own inbox — a gated transaction of its own, a
+ * proof and a submit and a wait — and the read that shows the new figures.
+ * Live on 2026/09/22 a payment that had landed kept its sheet on "Submitted.
+ * Waiting for the network" for the whole of the tidy-up; and a tidy-up, or a
+ * read, that never finished kept it there for ever.
+ *
+ * So the payment's own outcome is returned the moment the payment is done.
+ * `work` may hand back a tidy-up; the flag STAYS UP across it — two gated calls
+ * must never sign against one `auth_nonce`, so a second press meanwhile is
+ * refused in {@link custodyInFlightRefusal}'s one sentence — and comes down
+ * when it is over, whatever it came to. The follow-up read runs after that,
+ * and nothing waits for it.
+ */
+export async function runCustodyPayment(
+  inFlight: CustodyInFlightFlag,
+  work: () => Promise<(() => Promise<void>) | void>,
+  followUp: () => Promise<void>,
+): Promise<CustodyWorkOutcome> {
+  let failure: unknown = null;
+  let tidyUp: (() => Promise<void>) | null = null;
+  inFlight.current = true;
+  try {
+    const handed = await work();
+    if (typeof handed === 'function') tidyUp = handed;
+  } catch (cause) {
+    failure = cause;
+  }
+  const after = async (): Promise<void> => {
+    if (tidyUp !== null) {
+      try {
+        await tidyUp();
+      } catch (cause) {
+        console.warn('[account-custody] the tidy-up after a payment did not finish', cause);
+      }
+    }
+    inFlight.current = false;
+    try {
+      await followUp();
+    } catch (cause) {
+      console.info('[account-custody] the read after a payment did not finish', cause);
+    }
+  };
+  void after();
+  return { failure };
+}
+
 /** The busy line while the account's own note of the change is written. */
 export const CUSTODY_KEEP_RECORD_BUSY = 'Writing down what you kept';
 
@@ -186,20 +237,38 @@ export interface CustodyWalkOutcome {
     readonly outcome: string;
     /** Whether an ambiguous position was written down, or only reported. */
     readonly stored?: boolean;
+    /**
+     * Where a stored coin went — `'held'` is spendable now, `'queued'` is
+     * spendable once what is in front of it has gone, and null is a coin that
+     * was not stored.
+     *
+     * Read by nothing in this arithmetic and named here because it is what
+     * `stored` MEANS, and a figure that can be got right by accident is one
+     * that will be got wrong later.
+     */
+    readonly placed?: 'held' | 'queued' | null;
   };
 }
 
 /**
  * How many of a walk's deliveries are here and not spendable yet.
  *
- * TWO OUTCOMES COUNT AND THE REST DO NOT. `'unavailable'` is the indexer not
- * having answered where the coin landed; an `'ambiguous'` the store did not
- * take is a two-output transaction whose candidates had nowhere to go, because
- * candidates live in a colour's held slot and that slot was occupied. Both are
- * coins the account demonstrably holds and cannot put in a proof — which is
- * what "arriving" means. `'learned'` and a stored `'ambiguous'` are in the
- * store and counted in the balance; `'spent'` and `'known'` are nothing
- * happening at all; `'refused'` is a row this store will not hold.
+ * ONE OUTCOME COUNTS AND THE REST DO NOT. `'unavailable'` is the indexer not
+ * having answered where the coin landed: a coin the account demonstrably holds
+ * and cannot put in a proof, which is what "arriving" means. `'learned'` and a
+ * stored `'ambiguous'` are in the store and counted in the balance, whether
+ * they went into the colour's held slot or into the queue behind a coin it
+ * already held; `'spent'` and `'known'` are nothing happening at all;
+ * `'refused'` is a row this store will not hold.
+ *
+ * AN `'ambiguous'` THE STORE DID NOT TAKE still counts, and there is one rule
+ * left that produces it: a walk asking only to be told
+ * (`readInboxCustody`'s `'report'`). It used to be the ordinary case — a
+ * two-output transaction paying a colour that already held a coin had nowhere
+ * to put its candidate positions — and that was a payment showing as arriving
+ * for ever, on stagenet, twice on 2026/09/21. The store now queues those with
+ * their candidates, so a delivery reported as `stored` is money in the figure
+ * rather than money on its way.
  *
  * Counting only the store's own awaiting rows made these coins vanish off the
  * screen entirely, which is the defect this exists to have fixed.
