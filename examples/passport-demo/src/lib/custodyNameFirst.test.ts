@@ -8,7 +8,6 @@ import {
   custodyNameFirstAction,
   custodyNameFirstEnabled,
   custodyNameFirstStage,
-  custodyNextScreen,
   custodyNameRaceOutcome,
   custodyNameTakenSentence,
   custodyNameWasTaken,
@@ -67,9 +66,22 @@ describe('which screen a Passport being made is on', () => {
         setupFinished: true,
         chosenName: 'alice',
         nameRegistering: true,
-        recoveryDue: true,
+        recoveryDue: false,
       }),
     ).toBe('home');
+  });
+
+  it('offers the way back before Home even while the name is registering', () => {
+    expect(
+      custodyNameFirstStage({
+        ...FRESH,
+        setupStarted: true,
+        setupFinished: true,
+        chosenName: 'alice',
+        nameRegistering: true,
+        recoveryDue: true,
+      }),
+    ).toBe('recovery');
   });
 
   it('keeps it on the name step when the claim is not running, and before the key is on', () => {
@@ -272,16 +284,3 @@ describe('somebody else got the name first', () => {
   });
 });
 
-describe('custodyNextScreen', () => {
-  it('keeps Home when the way back becomes due behind it', () => {
-    expect(custodyNextScreen('home', 'recovery')).toBe('home');
-  });
-  it('shows the way back when it is due before Home', () => {
-    expect(custodyNextScreen('name', 'recovery')).toBe('recovery');
-    expect(custodyNextScreen(null, 'recovery')).toBe('recovery');
-  });
-  it('otherwise follows the read', () => {
-    expect(custodyNextScreen('recovery', 'home')).toBe('home');
-    expect(custodyNextScreen('home', 'name')).toBe('name');
-  });
-});

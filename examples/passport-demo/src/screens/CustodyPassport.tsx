@@ -153,7 +153,6 @@ import {
   custodyNameFirstAction,
   custodyNameFirstEnabled,
   custodyNameFirstStage,
-  custodyNextScreen,
   custodyNameRaceOutcome,
   custodyNameTakenSentence,
   custodyNameWasTaken,
@@ -645,12 +644,10 @@ export default function CustodyPassport({
           socialAvailable: socialAvailableRef.current,
           heldBySocial: heldBySocialRef.current,
           record,
-          /* The way back is a k256 key, and the k256 circuits land in the
-             waves behind Home — so the step waits for them. */
-          accountComplete: next.record === null || !custodyWavesPending(next.record),
+          nameRegistering: nameClaimRef.current === 'running',
         }),
       })
-    setScreen((shown) => custodyNextScreen(shown, decided))
+    setScreen(decided)
     return next
   }, [network])
 
@@ -2867,7 +2864,7 @@ export default function CustodyPassport({
                       socialAvailable,
                       heldBySocial,
                       record: recoveryRecord,
-                      accountComplete: view?.record == null || !custodyWavesPending(view.record),
+                      nameRegistering: nameClaim === 'running',
                     }),
                   }),
                 )

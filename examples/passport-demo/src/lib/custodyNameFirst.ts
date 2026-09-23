@@ -115,7 +115,9 @@ export function custodyNameFirstStage(input: CustodyNameFirstInput): CustodyName
   /* HOME WHILE THE NAME IS STILL BEING REGISTERED, and never the way back: the
      way back is offered after the name, so it waits for the name to land. */
   if (input.setupFinished && input.claimedName === null && input.nameRegistering === true) {
-    return 'home';
+    /* The way back is offered here too: it is part of onboarding and comes
+       before Home, whether or not the name has landed yet. */
+    return input.recoveryDue === true ? 'recovery' : 'home';
   }
   if (input.setupFinished && input.claimedName !== null) {
     /* THE STEP IS RESUMABLE BECAUSE IT IS DECIDED HERE. Nothing remembers that
@@ -126,19 +128,6 @@ export function custodyNameFirstStage(input: CustodyNameFirstInput): CustodyName
   }
   if (input.setupStarted || input.chosenName !== null) return 'name';
   return input.welcomeRead ? 'name' : 'welcome';
-}
-
-/**
- * The screen to show after a fresh read, given the one already on show.
- *
- * NEVER TAKE SOMEBODY OFF HOME FOR THE WAY BACK (live, 2026/09/22). The way
- * back waits for the waves that finish behind Home, so the read that makes it
- * due lands a minute after the person reached Home, possibly mid-send. Once on
- * Home they keep it; Home carries the "Add recovery" entry, and the full step
- * is offered again on the next visit, before Home.
- */
-export function custodyNextScreen<S extends string>(shown: S | null, next: S): S {
-  return shown === 'home' && next === 'recovery' ? shown : next;
 }
 
 /* -------------------------------------------------------------------------- */

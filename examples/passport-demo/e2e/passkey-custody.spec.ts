@@ -1293,13 +1293,12 @@ test.describe('a passkey Passport that has just been named', () => {
     await close();
   });
 
-  /* THE ORDER OF 2026/09/22. A new Passport reaches Home with its key on and
-     the rest of its circuits still landing behind it. The way back is a key of
-     the OTHER arm, which can do nothing until those land — so the step is held
-     back, Home is shown, and nothing asks for a fingerprint to finish them: the
-     waves resume the next time the key is settled for something the reader
-     asked for. */
-  test('goes Home while the rest is still landing, and holds the way back until it has', async ({
+  /* THE ORDER OF 2026/09/22. A new Passport's key is on and the rest of its
+     circuits are still landing behind it. The way back is still part of
+     onboarding: it is offered straight away, before Home, and pressing it
+     finishes the rest first. "Not now" goes Home, where nothing asks for a
+     fingerprint to finish them. */
+  test('offers the way back before Home while the rest is still landing', async ({
     browser,
   }) => {
     const { page, close } = await passkeyPassportAfterTheName(browser, { wavesDone: 1 });
@@ -1308,8 +1307,9 @@ test.describe('a passkey Passport that has just been named', () => {
       if (request.url().includes('/fund-account')) funding.push(request.url());
     });
 
+    await expect(page.getByRole('heading', { name: /Add a way\s*back/ })).toBeVisible({ timeout: 60_000 });
+    await page.getByTestId('skip-recovery').click();
     await expect(greeting(page)).toBeVisible({ timeout: 60_000 });
-    await expect(page.getByRole('heading', { name: /Add a way\s*back/ })).toHaveCount(0);
     /* The Passport is usable: the money row is there. */
     await expect(page.getByRole('button', { name: /^Send$/ }).first()).toBeVisible();
     /* No ceremony was asked for on open. */

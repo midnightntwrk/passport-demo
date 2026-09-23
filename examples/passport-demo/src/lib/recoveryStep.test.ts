@@ -65,12 +65,13 @@ describe('whether the way back is offered after the name', () => {
     expect(recoveryStepDue({ ...JUST_NAMED, record: {} })).toBe(true);
   });
 
-  /* The way back is a k256 key, and every k256 circuit arrives in the waves
-     that now land after Home (2026/09/22). Offered before them, it would put a
-     key on the account that can do nothing. */
-  it('waits for the last wave, and is offered once it has landed', () => {
-    expect(recoveryStepDue({ ...JUST_NAMED, accountComplete: false })).toBe(false);
-    expect(recoveryStepDue({ ...JUST_NAMED, accountComplete: true })).toBe(true);
+  /* Part of onboarding, before Home (2026/09/22): it waits neither for the
+     name to land nor for the maintenance waves. */
+  it('is offered while the name is still registering, but not before setup is done', () => {
+    const registering = { ...JUST_NAMED, claimedName: null, nameRegistering: true };
+    expect(recoveryStepDue(registering)).toBe(true);
+    expect(recoveryStepDue({ ...registering, setupFinished: false })).toBe(false);
+    expect(recoveryStepDue({ ...JUST_NAMED, claimedName: null })).toBe(false);
   });
 });
 

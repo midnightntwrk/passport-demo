@@ -51,18 +51,14 @@ export interface RecoveryStepInput {
   /** What this Passport's record says, or null where there is none. */
   readonly record: BackupRecord | null;
   /**
-   * Whether EVERY circuit is on the account — the last maintenance wave landed.
+   * Whether the name is still being registered.
    *
-   * THE WAY BACK NEEDS THE WAVES, and since 2026/09/22 they land after Home.
-   * The provider key added as the way back is a secp256k1 key, and everything
-   * such a key can do on this account — approve, add a device, move money — is
-   * a `_with_k256` circuit, none of which is in the deploy a passkey Passport
-   * leads with (`planCustodyWaves`). A way back added before those land is a
-   * key on the account that can do nothing, so the step is not offered until
-   * they have. Optional, and true when omitted, so a caller that has no waves
-   * to wait on reads exactly as it did.
+   * THE STEP IS PART OF ONBOARDING, BEFORE HOME (reviewer, 2026/09/22). The
+   * name lands within seconds of the key, so the step does not wait for it; it
+   * does not wait for the maintenance waves either, because the add finishes
+   * them itself before enrolling the key (`runRecoveryAdd`).
    */
-  readonly accountComplete?: boolean;
+  readonly nameRegistering?: boolean;
 }
 
 /**
@@ -82,8 +78,7 @@ export function recoveryStepDue(input: RecoveryStepInput): boolean {
   if (input.record?.doneAt !== undefined) return false;
   if (input.record?.dismissedAt !== undefined) return false;
   if (!input.socialAvailable || input.heldBySocial) return false;
-  if (input.accountComplete === false) return false;
-  return input.setupFinished && input.claimedName !== null;
+  return input.setupFinished && (input.claimedName !== null || input.nameRegistering === true);
 }
 
 /** Whether this Passport has a way back on it. */
