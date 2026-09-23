@@ -23,6 +23,7 @@ import ActivityFeed, { type ActivityFeedItem } from './ActivityFeed.js'
 /* What has been announced but has not landed yet, derived from the same trail
    this screen already renders below. Pure — see `assetsOnTheWay.ts`. */
 import { assetsOnTheWay, assetsOnTheWayLine } from './assetsOnTheWay.js'
+import { OPENING_BALANCE_ON_THE_WAY_DETAIL, OPENING_MUSD, OPENING_NIGHT } from '../lib/activation.js'
 /* Whether the opening balance is still coming. Pure — see `lib/activation.ts`. */
 import { openingBalanceOnTheWay } from '../lib/activation.js'
 /* The figure a row should paint while the ledger's own is momentarily not the
@@ -1040,7 +1041,23 @@ export default function HomeScreen(props: HomeScreenProps) {
                 the trail already on this screen, and it is gone the moment the
                 balance itself says it. */}
             {onTheWayLine ? (
-              <p className="mnhome-onway">{onTheWayLine}</p>
+              onTheWayLine.includes(OPENING_BALANCE_ON_THE_WAY_DETAIL) ? (
+                /* The opening balance gets a card of its own (2026/09/22): the
+                   two amounts as pills, a live dot, and when to expect them. */
+                <div className="mnhome-onway-card" role="status">
+                  <span className="mnhome-onway-dot" aria-hidden="true" />
+                  <div className="mnhome-onway-copy">
+                    <p className="mnhome-onway-title">Your opening balance is on its way</p>
+                    <p className="mnhome-onway-pills">
+                      <span className="mnhome-onway-pill">{OPENING_MUSD} mUSD</span>
+                      <span className="mnhome-onway-pill">{OPENING_NIGHT} NIGHT</span>
+                    </p>
+                    <p className="mnhome-onway-hint">Usually lands within a couple of minutes.</p>
+                  </div>
+                </div>
+              ) : (
+                <p className="mnhome-onway">{onTheWayLine}</p>
+              )
             ) : null}
             {/* THE SENDER'S OWN CHANGE, COMING BACK (2026/09/07). The transfer
                 that produced it is finished — the recipient was paid — and the

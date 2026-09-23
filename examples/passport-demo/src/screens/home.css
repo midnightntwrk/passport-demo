@@ -1598,3 +1598,43 @@ button.mnhome-support { font-family: inherit; cursor: pointer; }
   line-height: 1.4;
   color: var(--mn-text-secondary);
 }
+
+/* The opening balance, on its way (2026/09/22). */
+.mnhome-onway-card {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  margin: 12px 0 0;
+  padding: 12px 14px;
+  border: var(--mn-hairline) solid var(--mn-border-hairline);
+  border-radius: var(--mn-radius-md);
+  background: var(--mn-accent-soft);
+}
+.mnhome-onway-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  margin-top: 6px;
+  border-radius: 50%;
+  background: var(--mn-accent);
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--mn-accent) 45%, transparent);
+  animation: mnhome-onway-pulse 1.6s ease-out infinite;
+}
+@keyframes mnhome-onway-pulse {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--mn-accent) 45%, transparent); }
+  100% { box-shadow: 0 0 0 10px color-mix(in srgb, var(--mn-accent) 0%, transparent); }
+}
+@media (prefers-reduced-motion: reduce) { .mnhome-onway-dot { animation: none; } }
+.mnhome-onway-copy { display: grid; gap: 6px; min-width: 0; }
+.mnhome-onway-title { margin: 0; font-size: 14px; font-weight: 600; color: var(--mn-text-primary); }
+.mnhome-onway-pills { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; }
+.mnhome-onway-pill {
+  padding: 3px 10px;
+  border-radius: var(--mn-radius-pill);
+  background: var(--mn-surface-raised);
+  border: var(--mn-hairline) solid var(--mn-border-hairline);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--mn-accent-ink);
+}
+.mnhome-onway-hint { margin: 0; font-size: 12px; color: var(--mn-text-muted); }
