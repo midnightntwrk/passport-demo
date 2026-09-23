@@ -824,6 +824,11 @@ async function passkeyPassportOnHome(
     night?: boolean;
     /** `iamtester` (and the typed-out recipient) lead to an OLDER Passport. */
     recipientIsOlder?: boolean;
+    /**
+     * Seeds more state after the Passport itself and before the app opens it
+     * — a payment a previous session left behind (2026/09/22).
+     */
+    beforeOpen?: (page: Page, identity: { credentialId: string; userKey: string }) => Promise<void>;
   } = {},
 ): Promise<{
   page: Page;
@@ -884,6 +889,7 @@ async function passkeyPassportOnHome(
     name: 'walker',
     musd: '250',
   });
+  await options.beforeOpen?.(page, identity);
   await page.goto(WALK);
   await expect(greeting(page)).toBeVisible({ timeout: 60_000 });
   return {
@@ -900,7 +906,7 @@ test.describe('a passkey Passport paying somebody', () => {
     const { page, close } = await passkeyPassportOnHome(browser);
 
     await openSend(page);
-    await sendPicker(page).selectOption({ index: 1 });
+    await chooseAsset(page, 'mUSD');
 
     /* NOTHING TO SAY YET. The field decides which transaction gets built, so
        there is nothing to disclose until somebody has typed into it. */
@@ -923,7 +929,7 @@ test.describe('a passkey Passport paying somebody', () => {
 
     /* And it is about the shielded route only: the account's NIGHT moves by a
        different pair of legs and this sentence would describe the wrong one. */
-    await sendPicker(page).selectOption({ index: 0 });
+    await chooseAsset(page, 'NIGHT');
     await expect(page.locator('.mnob-disclosure')).toHaveCount(0);
 
     await close();
@@ -933,7 +939,7 @@ test.describe('a passkey Passport paying somebody', () => {
     const { page, close } = await passkeyPassportOnHome(browser);
 
     await openSend(page);
-    await sendPicker(page).selectOption({ index: 1 });
+    await chooseAsset(page, 'mUSD');
     await sendRecipient(page).fill(RESOLVABLE_NAME);
     await sendAmount(page).fill('10');
     await expect(page.getByRole('button', { name: /^Review$/ })).toBeEnabled({ timeout: 30_000 });
@@ -968,7 +974,7 @@ test.describe('a passkey Passport paying somebody', () => {
     const { page, close } = await passkeyPassportOnHome(browser);
 
     await openSend(page);
-    await sendPicker(page).selectOption({ index: 1 });
+    await chooseAsset(page, 'mUSD');
     await sendRecipient(page).fill(THROWAWAY_ADDRESS);
     await sendAmount(page).fill('5');
     await expect(page.getByRole('button', { name: /^Review$/ })).toBeEnabled({ timeout: 30_000 });
@@ -998,7 +1004,7 @@ test.describe('a passkey Passport paying somebody', () => {
     const { page, close } = await passkeyPassportOnHome(browser);
 
     await openSend(page);
-    await sendPicker(page).selectOption({ index: 1 });
+    await chooseAsset(page, 'mUSD');
     /* Shaped like an address the field will take the address door for, and not
        one this Passport can pay. */
     await sendRecipient(page).fill('mn_shield-addr_stagenet1qqqqqqqqqqqqqqqqqqq');
@@ -1027,7 +1033,7 @@ test.describe('a passkey Passport paying somebody', () => {
     const { page, close } = await passkeyPassportOnHome(browser, { night: true });
 
     await openSend(page);
-    await sendPicker(page).selectOption({ index: 0 });
+    await chooseAsset(page, 'NIGHT');
     await sendRecipient(page).fill(RESOLVABLE_NAME);
     await sendAmount(page).fill('1');
 
@@ -1049,7 +1055,7 @@ test.describe('a passkey Passport paying somebody', () => {
     await expect(assetRow(page, 'NIGHT')).toContainText('5', { timeout: 30_000 });
 
     await openSend(page);
-    await sendPicker(page).selectOption({ index: 0 });
+    await chooseAsset(page, 'NIGHT');
     await sendRecipient(page).fill(NIGHT_ADDRESS);
     await sendAmount(page).fill('1.5');
 
@@ -1072,7 +1078,7 @@ test.describe('a passkey Passport paying somebody', () => {
     const { page, close } = await passkeyPassportOnHome(browser, { night: true });
 
     await openSend(page);
-    await sendPicker(page).selectOption({ index: 0 });
+    await chooseAsset(page, 'NIGHT');
     await sendRecipient(page).fill(THROWAWAY_ADDRESS);
     await sendAmount(page).fill('1');
 
@@ -1093,7 +1099,7 @@ test.describe('a passkey Passport paying somebody', () => {
     const { page, close } = await passkeyPassportOnHome(browser, { recipientIsOlder: true });
 
     await openSend(page);
-    await sendPicker(page).selectOption({ index: 1 });
+    await chooseAsset(page, 'mUSD');
     await sendRecipient(page).fill(RESOLVABLE_NAME);
     await sendAmount(page).fill('10');
 
@@ -1330,3 +1336,162 @@ test.describe('a passkey Passport that has just been named', () => {
     await close();
   });
 });
+
+
+/* -------------------------------------------------------------------------- */
+/* A payment never waits for ever, and a reload shows the chain's truth       */
+/* (2026/09/22)                                                               */
+/* -------------------------------------------------------------------------- */
+
+const NOT_SENT = "That payment didn't go through. Nothing left your Passport.";
+
+/** midnight-js's identifier for a payment a previous session submitted. */
+const LOST_TX = `00${'d1'.repeat(32)}`;
+
+/**
+ * The store and the stopped-payment record as a tab closed mid-payment leaves
+ * them: 10 of 250 mUSD sent, the coin booked as spent, 240 of change filed as
+ * arriving — and the chain never recorded the transaction.
+ */
+function lostPaymentSeed(options: { storeBooking: boolean }) {
+  const sentAt = Date.now() - 10 * 60_000;
+  const parent = { nonceHex: 'cd'.repeat(32), colorHex: MUSD_COLOUR, value: '250', mtIndex: '12' };
+  const change = { nonceHex: 'c4'.repeat(32), colorHex: MUSD_COLOUR, value: '240' };
+  const store = {
+    [`${WALK_NETWORK}::${ACCOUNT_CUSTODY_ADDRESS}`]: {
+      encSecretKeyHex: 'ab'.repeat(32),
+      coins: {},
+      queued: {},
+      spentNonces: [parent.nonceHex],
+      mtIndexCandidates: {},
+      awaiting: { [MUSD_COLOUR]: [{ ...change, txId: LOST_TX }] },
+      unreadChange: {},
+      ...(options.storeBooking ? { pendingSpends: [{ txId: LOST_TX, at: sentAt, parent, change }] } : {}),
+    },
+  };
+  const record = {
+    [`${WALK_NETWORK}::${ACCOUNT_CUSTODY_ADDRESS}`]: {
+      network: WALK_NETWORK,
+      accountAddress: ACCOUNT_CUSTODY_ADDRESS,
+      stage: 'sending',
+      colourHex: MUSD_COLOUR,
+      amount: '10',
+      recipientLabel: 'iamtester',
+      recipientAccountAddress: PASSPORT_ACCOUNT_ADDRESS,
+      sendTxId: LOST_TX,
+      startedAt: sentAt - 60_000,
+      sentAt,
+      undo: {
+        held: { colour: MUSD_COLOUR, nonce: parent.nonceHex, value: '250', mtIndex: '12' },
+        change: { colour: MUSD_COLOUR, nonce: change.nonceHex },
+      },
+    },
+  };
+  return async (page: Page): Promise<void> => {
+    await page.addInitScript(
+      ([seededStore, seededRecord]) => {
+        window.localStorage.setItem('passport-k1-coins:v1', JSON.stringify(seededStore));
+        window.localStorage.setItem('passport-account-custody-shielded-send:v1', JSON.stringify(seededRecord));
+      },
+      [store, record] as const,
+    );
+    /* The chain's answer: no such transaction. */
+    await page.route('**/indexer.stagenet.shielded.tools/**', async (route) => {
+      const body = route.request().postData() ?? '';
+      if (body.includes(LOST_TX)) {
+        return route.fulfill({ json: { data: { transactions: [] } } });
+      }
+      return route.fallback();
+    });
+  };
+}
+
+test.describe('a payment that cannot wait for ever (2026/09/22)', () => {
+  test('is answered within the bound when it hangs before anything is proved, and nothing is sent', async ({
+    browser,
+  }) => {
+    const { page, close } = await passkeyPassportOnHome(browser, {
+      beforeOpen: async (opening) => {
+        await opening.addInitScript(() => {
+          (window as unknown as { __passportCustodyBounds?: unknown }).__passportCustodyBounds = {
+            prepareWaitMs: 4_000,
+            handoverWaitMs: 4_000,
+          };
+        });
+      },
+    });
+    const proofs: string[] = [];
+    page.on('request', (request) => {
+      if (request.url().includes('prove-account-custody')) proofs.push(request.url());
+    });
+
+    await openSend(page);
+    await chooseAsset(page, 'mUSD');
+    await sendRecipient(page).fill(RESOLVABLE_NAME);
+    await sendAmount(page).fill('10');
+    await expect(page.getByRole('button', { name: /^Review$/ })).toBeEnabled({ timeout: 30_000 });
+    await page.getByRole('button', { name: /^Review$/ }).click();
+
+    /* FROM HERE ON THIS PASSPORT'S OWN ACCOUNT NEVER ANSWERS — the shape of
+       the live defect: "Proving and submitting…" with no proof ever asked for. */
+    await page.route('**/indexer.stagenet.shielded.tools/**', async (route) => {
+      const body = route.request().postData() ?? '';
+      if (body.includes('CONTRACT_STATE_QUERY') && body.toLowerCase().includes(ACCOUNT_CUSTODY_ADDRESS)) {
+        return new Promise<void>(() => undefined);
+      }
+      return route.fallback();
+    });
+    await page.locator('.mnhome-send-primary').click();
+
+    await expect(sendFailure(page).first()).toContainText(NOT_SENT, { timeout: 30_000 });
+    expect(proofs).toEqual([]);
+    await expect(page.locator('.mnhome-send-primary')).toBeEnabled();
+
+    /* The coin never left the store, and Home says so. */
+    await page.locator('.mnhome-send').getByRole('button', { name: 'Close' }).click();
+    await expect(assetRow(page, 'mUSD')).toContainText('250');
+    const held = await page.evaluate(() => window.localStorage.getItem('passport-k1-coins:v1'));
+    expect(held).toContain('"value":"250"');
+    expect(held).not.toContain('"spentNonces":["cd');
+
+    await close();
+  });
+
+  test('shows the coin back after a reload when the payment it booked never reached the chain', async ({
+    browser,
+  }) => {
+    const { page, close } = await passkeyPassportOnHome(browser, {
+      beforeOpen: lostPaymentSeed({ storeBooking: true }),
+    });
+    await expect(assetRow(page, 'mUSD')).toContainText('250', { timeout: 30_000 });
+    await expect(assetRow(page, 'mUSD')).not.toContainText(/Arriving/i);
+    await expect(page.getByText(NOT_SENT)).toBeVisible({ timeout: 30_000 });
+    await close();
+  });
+
+  test('does the same for a payment an earlier build wrote down only on the screen’s record', async ({
+    browser,
+  }) => {
+    const { page, close } = await passkeyPassportOnHome(browser, {
+      beforeOpen: lostPaymentSeed({ storeBooking: false }),
+    });
+    await expect(assetRow(page, 'mUSD')).toContainText('250', { timeout: 30_000 });
+    await expect(assetRow(page, 'mUSD')).not.toContainText(/Arriving/i);
+    await close();
+  });
+});
+
+/**
+ * Chooses an asset in the Send sheet's picker by its label, whatever order the
+ * picker offers them in (the order is the sheet's to change).
+ */
+async function chooseAsset(page: Page, symbol: string): Promise<void> {
+  const offered = await sendPicker(page)
+    .locator('option')
+    .evaluateAll((nodes) =>
+      (nodes as HTMLOptionElement[]).map((node) => ({ value: node.value, label: node.textContent ?? '' })),
+    );
+  const wanted = offered.find((option) => option.label.trim().startsWith(symbol));
+  expect(wanted, `the picker offers ${symbol}`).toBeDefined();
+  await sendPicker(page).selectOption(wanted!.value);
+}
