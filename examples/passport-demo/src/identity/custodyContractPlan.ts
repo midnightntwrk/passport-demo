@@ -321,9 +321,142 @@ export const CUSTODY_SUBMIT_WAIT_MS = 3 * 60 * 1000;
 export function custodySubmitVerdict(input: {
   readonly signedNonce: bigint;
   readonly liveNonce: bigint | null;
-}): 'not-sent' | 'unknown' {
-  if (input.liveNonce === null) return 'unknown';
-  return input.liveNonce === input.signedNonce ? 'not-sent' : 'unknown';
+  /**
+   * What the indexer says of the transaction itself, when it was asked
+   * (2026/09/22): it ran, the chain refused it, it has no such transaction,
+   * or it could not be asked (null).
+   */
+  readonly onChain?: CustodyTxOutcome | null;
+}): 'landed' | 'refused' | 'not-sent' | 'unknown' {
+  /* THE CHAIN'S OWN ANSWER FIRST. A transaction the indexer holds is not a
+     question for the nonce at all. */
+  if (input.onChain === 'success') return 'landed';
+  if (input.onChain === 'failure') return 'refused';
+  /* An account whose nonce has not moved has not run the call. */
+  if (input.liveNonce !== null && input.liveNonce === input.signedNonce) return 'not-sent';
+  /* THE SIGNATURE IS BOUND TO THE NONCE IT WAS MADE AGAINST. A nonce that has
+     moved while the indexer says it has no such transaction is a nonce moved
+     by something else — and this payment can then never run at all. The same
+     answer when the account could not be read but the indexer could: a
+     transaction nobody has recorded after the whole wait is not one to leave
+     a balance at nought for. Either way the booking is only set aside, never
+     forgotten — see `k1CoinStore.ts`'s `reconcileK1Spends`. */
+  if (input.onChain === 'absent') return 'not-sent';
+  return 'unknown';
+}
+
+/**
+ * What the indexer says of one transaction: `success` it ran (wholly or in
+ * part), `failure` the chain refused it, `absent` there is no such
+ * transaction.
+ */
+export type CustodyTxOutcome = 'success' | 'failure' | 'absent';
+
+/**
+ * How long everything BEFORE a payment is handed over may take (2026/09/22).
+ *
+ * Opening the connection, reading the account, the approval, building the
+ * transaction and the recipient's claim: none of it sends anything, and none
+ * of it had a bound. Live on 2026/09/22 a Send sheet sat on "Proving and
+ * submitting" with no proof ever asked for. Past this the payment is told,
+ * definitely, that it did not go through — which is true: nothing was sent.
+ */
+export const CUSTODY_PREPARE_WAIT_MS = 2 * 60 * 1000;
+
+/**
+ * How long a payment taken back on a timeout is watched for a late landing.
+ * An hour: twice the sponsored transaction's own time to live
+ * ({@link CUSTODY_TX_TTL_MS} in the client), after which no transaction can be
+ * carrying it.
+ */
+export const CUSTODY_UNDONE_KEEP_MS = 60 * 60 * 1000;
+
+/**
+ * How many times a payment the node refused because the account changed under
+ * it is built again, and how long it waits first.
+ *
+ * `1010: Invalid Transaction: Custom error: 104` is the node refusing a call
+ * built against a state another transaction has just moved — the sponsor's own
+ * opening deposits meet it on every setup, and a payment meets it when the
+ * recipient's account is busy at the same moment. Nothing was applied, so
+ * building it again against the new state is safe; a block or two is the wait.
+ */
+export const CUSTODY_STATE_RACE_RETRIES = 2;
+export const CUSTODY_STATE_RACE_WAIT_MS = 20_000;
+
+/**
+ * Whether a failure is the node refusing the transaction outright — by the
+ * RPC's own words (`1010: Invalid Transaction`), or by the pool reporting it
+ * invalid, dropped, or usurped. In every one of these nothing was applied and
+ * nothing can be.
+ */
+export function custodyNodeRefused(cause: unknown): boolean {
+  return /Invalid Transaction|\b1010\b|Transaction(?:Invalid|Dropped|Usurped)Error/.test(
+    custodyFailureChainText(cause),
+  );
+}
+
+/** Whether the node refused because the account's state moved under the call. */
+export function custodyStateRace(cause: unknown): boolean {
+  return /Custom error:\s*104\b/.test(custodyFailureChainText(cause));
+}
+
+/** Effect's key for the cause a `FiberFailure` carries. */
+const FIBER_FAILURE_CAUSE = Symbol.for('effect/Runtime/FiberFailure/Cause');
+
+/**
+ * Every word a failure carries, down its whole chain of causes.
+ *
+ * WHY THE WHOLE CHAIN. The node's refusal reaches this app four layers deep —
+ * an Effect `FiberFailure`, around the wallet's `SubmissionError` ("Transaction
+ * submission error"), around the node client's own ("Transaction submission
+ * failed"), around the RPC error that actually says `1010: Invalid
+ * Transaction: Custom error: 104` (live, 2026/09/22). Reading the top message
+ * alone read nothing, so a refusal nothing had applied was reported as an
+ * error nobody could act on, and never built again.
+ */
+export function custodyFailureChainText(cause: unknown): string {
+  const parts: string[] = [];
+  const seen = new Set<object>();
+  const walk = (value: unknown, depth: number): void => {
+    if (typeof value === 'string') {
+      parts.push(value);
+      return;
+    }
+    if (value === null || typeof value !== 'object' || depth > 8 || seen.has(value)) return;
+    seen.add(value);
+    const view = value as Record<string | symbol, unknown>;
+    for (const key of ['_tag', 'name', 'message', 'data', 'code']) {
+      const field = view[key];
+      if (typeof field === 'string' || typeof field === 'number') parts.push(String(field));
+    }
+    for (const key of ['cause', 'error', 'failure', 'defect', 'left', 'right']) {
+      walk(view[key], depth + 1);
+    }
+    walk(view[FIBER_FAILURE_CAUSE], depth + 1);
+  };
+  walk(cause, 0);
+  return parts.join(' | ');
+}
+
+/**
+ * A piece of work, or `timeout` once `milliseconds` have passed. The work is
+ * not cancelled — nothing it waits on offers a way to — it is simply no longer
+ * waited for, and a caller that must stop it from acting LATER says so itself.
+ */
+export async function withinCustodyBound<T>(
+  work: Promise<T>,
+  milliseconds: number,
+): Promise<{ readonly kind: 'done'; readonly value: T } | { readonly kind: 'timeout' }> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<{ kind: 'timeout' }>((resolve) => {
+    timer = setTimeout(() => resolve({ kind: 'timeout' }), milliseconds);
+  });
+  try {
+    return await Promise.race([work.then((value) => ({ kind: 'done' as const, value })), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** The `name` on the error carrying {@link CUSTODY_PROOF_NOT_BUILT}. */

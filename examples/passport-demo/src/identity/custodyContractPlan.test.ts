@@ -899,3 +899,67 @@ describe('custodySubmitVerdict — a payment whose wait ran out', () => {
     expect(CUSTODY_SEND_NOT_SENT).toBe("That payment didn't go through. Nothing left your Passport.");
   });
 });
+
+describe('custodySubmitVerdict — with the indexer asked too (2026/09/22)', () => {
+  it('takes the chain’s own answer first, then the nonce, then the indexer’s silence', async () => {
+    const { custodySubmitVerdict } = await import('./custodyContractPlan.js');
+    expect(custodySubmitVerdict({ signedNonce: 7n, liveNonce: 8n, onChain: 'success' })).toBe('landed');
+    expect(custodySubmitVerdict({ signedNonce: 7n, liveNonce: 7n, onChain: 'failure' })).toBe('refused');
+    expect(custodySubmitVerdict({ signedNonce: 7n, liveNonce: 7n, onChain: null })).toBe('not-sent');
+    expect(custodySubmitVerdict({ signedNonce: 7n, liveNonce: 8n, onChain: 'absent' })).toBe('not-sent');
+    expect(custodySubmitVerdict({ signedNonce: 7n, liveNonce: null, onChain: 'absent' })).toBe('not-sent');
+    expect(custodySubmitVerdict({ signedNonce: 7n, liveNonce: 8n, onChain: null })).toBe('unknown');
+    expect(custodySubmitVerdict({ signedNonce: 7n, liveNonce: null, onChain: null })).toBe('unknown');
+  });
+});
+
+describe('a node refusal, read down the whole chain of causes', () => {
+  /** The live shape of 2026/09/22: FiberFailure → SubmissionError → SubmissionError → RpcError. */
+  function liveRefusal(data: string): Error {
+    const rpc = Object.assign(new Error('1010: Invalid Transaction'), { name: 'RpcError', code: 1010, data });
+    const client = { _tag: 'SubmissionError', message: 'Transaction submission failed', cause: rpc };
+    const wallet = { _tag: 'SubmissionError', message: 'Transaction submission error', cause: client };
+    const fiber = new Error('Transaction submission error');
+    fiber.name = '(FiberFailure) SubmissionError';
+    Object.defineProperty(fiber, Symbol.for('effect/Runtime/FiberFailure/Cause'), {
+      value: { _tag: 'Fail', error: wallet },
+    });
+    return fiber;
+  }
+
+  it('finds the node’s words four layers down', async () => {
+    const { custodyFailureChainText, custodyNodeRefused, custodyStateRace } = await import('./custodyContractPlan.js');
+    const cause = liveRefusal('Custom error: 104');
+    expect(custodyFailureChainText(cause)).toContain('Custom error: 104');
+    expect(custodyNodeRefused(cause)).toBe(true);
+    expect(custodyStateRace(cause)).toBe(true);
+    expect(custodyStateRace(liveRefusal('Custom error: 231'))).toBe(false);
+    expect(custodyNodeRefused(liveRefusal('Custom error: 231'))).toBe(true);
+  });
+
+  it('reads the pool’s own refusals, and not a socket', async () => {
+    const { custodyNodeRefused, custodyFailureChainText } = await import('./custodyContractPlan.js');
+    expect(custodyNodeRefused({ _tag: 'TransactionInvalidError', message: 'rejected' })).toBe(true);
+    expect(custodyNodeRefused({ _tag: 'TransactionDroppedError' })).toBe(true);
+    expect(custodyNodeRefused(new Error('WebSocket is not connected'))).toBe(false);
+    expect(custodyNodeRefused('1010: Invalid Transaction')).toBe(true);
+    expect(custodyFailureChainText(null)).toBe('');
+    expect(custodyFailureChainText(42)).toBe('');
+    const loop: Record<string, unknown> = { message: 'round' };
+    loop.cause = loop;
+    expect(custodyFailureChainText(loop)).toBe('round');
+    let deep: Record<string, unknown> = { message: 'bottom' };
+    for (let index = 0; index < 12; index += 1) deep = { cause: deep };
+    expect(custodyFailureChainText(deep)).toBe('');
+    expect(custodyFailureChainText({ code: 7, left: 'x', right: { message: 'y' } })).toBe('7 | x | y');
+  });
+});
+
+describe('withinCustodyBound', () => {
+  it('answers the work, or timeout, and leaves no timer behind', async () => {
+    const { withinCustodyBound } = await import('./custodyContractPlan.js');
+    await expect(withinCustodyBound(Promise.resolve(3), 1_000)).resolves.toEqual({ kind: 'done', value: 3 });
+    await expect(withinCustodyBound(new Promise(() => undefined), 5)).resolves.toEqual({ kind: 'timeout' });
+    await expect(withinCustodyBound(Promise.reject(new Error('no')), 1_000)).rejects.toThrow('no');
+  });
+});

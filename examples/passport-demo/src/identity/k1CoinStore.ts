@@ -249,6 +249,49 @@ export interface K1CoinStoreState {
    * leaves somebody a hash to go and look with. Colour → transaction.
    */
   readonly unreadChange: Record<string, string>;
+  /**
+   * Every spend this store has booked and the chain has not yet answered for,
+   * oldest first (2026/09/22).
+   *
+   * THE STORE'S OWN MEMORY OF WHAT A SPEND TOOK. A spend is booked before its
+   * transaction is known to have landed — the change coin's description exists
+   * nowhere else, so it cannot wait — and until 2026/09/22 the only thing that
+   * could take a booking back was a record the SCREEN kept beside the store.
+   * A tab closed at the wrong moment, a build that wrote no such record, or a
+   * second payment that replaced it, left the store saying a coin had been
+   * spent that the chain still held: the balance read nought, "Arriving" for a
+   * change coin that never existed, for good (live, `nagger.night`). A row here
+   * names the transaction, when it was booked, the coin it consumed, and the
+   * change it filed, which is everything {@link reconcileK1Spends} needs to
+   * take the booking back — or to keep it — on the chain's word alone.
+   */
+  readonly pendingSpends: readonly PendingK1SpendRow[];
+  /**
+   * Spends that were taken back because the chain had not recorded them within
+   * the bound, kept for a while in case it records them after all.
+   *
+   * A transaction the node has lost is gone; one it is merely slow with can
+   * still land, and a booking taken back on a guess must be able to come back
+   * on the facts. {@link reconcileK1Spends} re-applies one of these the moment
+   * the chain shows its transaction, and forgets it once no transaction could
+   * still be carrying it.
+   */
+  readonly undoneSpends: readonly PendingK1SpendRow[];
+}
+
+/**
+ * One booked spend, as it is STORED.
+ *
+ * `txId` is whatever the spend was submitted under — midnight-js's identifier,
+ * which the indexer answers to — and `at` is when it was booked, in
+ * milliseconds. `parent` is the coin the spend consumed, exactly as it was
+ * held; `change` is the coin it filed as awaiting, or null for an exact spend.
+ */
+export interface PendingK1SpendRow {
+  readonly txId: string;
+  readonly at: number;
+  readonly parent: StoredK1Coin;
+  readonly change: { readonly nonceHex: string; readonly colorHex: string; readonly value: string } | null;
 }
 
 /** An awaiting coin as it is STORED. Strings, for the module header's reason. */
@@ -444,6 +487,33 @@ function candidateListFrom(value: unknown): string[] {
   return kept;
 }
 
+/**
+ * A stored list of booked spends, each checked the way every other row is: a
+ * row that cannot be read is dropped rather than repaired, because the only
+ * thing done with one is to put a coin back or take one away.
+ */
+function spendRowsFrom(value: unknown): PendingK1SpendRow[] {
+  if (!Array.isArray(value)) return [];
+  const kept: PendingK1SpendRow[] = [];
+  for (const entry of value as unknown[]) {
+    if (!entry || typeof entry !== 'object') continue;
+    const candidate = entry as Partial<PendingK1SpendRow>;
+    const txId = typeof candidate.txId === 'string' ? candidate.txId.trim() : '';
+    const at = candidate.at;
+    const parent = coinFromRow(candidate.parent);
+    if (txId === '' || typeof at !== 'number' || !Number.isFinite(at) || parent === null) continue;
+    let change: PendingK1SpendRow['change'] = null;
+    if (candidate.change !== null && candidate.change !== undefined) {
+      const row = awaitingRowFrom({ ...(candidate.change as object), txId });
+      if (row === null) continue;
+      change = { nonceHex: row.nonceHex, colorHex: row.colorHex, value: row.value };
+    }
+    if (kept.some((held) => held.txId === txId)) continue;
+    kept.push({ txId, at, parent: rowFromCoin(parent), change });
+  }
+  return kept;
+}
+
 /** Every account's state, with unreadable accounts and rows filtered out. */
 function readAll(): Record<string, K1CoinStoreState> {
   try {
@@ -522,6 +592,8 @@ function readAll(): Record<string, K1CoinStoreState> {
         mtIndexCandidates,
         awaiting,
         unreadChange,
+        pendingSpends: spendRowsFrom(entry.pendingSpends),
+        undoneSpends: spendRowsFrom(entry.undoneSpends),
       };
     }
     return accounts;
@@ -596,6 +668,8 @@ export function emptyK1CoinStoreState(): K1CoinStoreState {
     mtIndexCandidates: emptyMap(),
     awaiting: emptyMap(),
     unreadChange: emptyMap(),
+    pendingSpends: [],
+    undoneSpends: [],
   };
 }
 
@@ -634,6 +708,8 @@ interface K1StoreDraft {
   mtIndexCandidates: Record<string, string[]>;
   awaiting: Record<string, AwaitingK1CoinRow[]>;
   unreadChange: Record<string, string>;
+  pendingSpends: PendingK1SpendRow[];
+  undoneSpends: PendingK1SpendRow[];
 }
 
 function draftOf(state: K1CoinStoreState): K1StoreDraft {
@@ -660,6 +736,8 @@ function draftOf(state: K1CoinStoreState): K1StoreDraft {
     mtIndexCandidates,
     awaiting,
     unreadChange,
+    pendingSpends: [...state.pendingSpends],
+    undoneSpends: [...state.undoneSpends],
   };
 }
 
@@ -710,6 +788,8 @@ function saveDraft(account: K1Account, draft: K1StoreDraft): void {
     spentNonces: draft.spentNonces,
     mtIndexCandidates: draft.mtIndexCandidates,
     awaiting: draft.awaiting,
+    pendingSpends: draft.pendingSpends,
+    undoneSpends: draft.undoneSpends,
   });
 }
 
@@ -946,6 +1026,7 @@ export function rememberK1ChangeCoin(
   spentColour: string,
   change: { colour: string; nonce: string; value: bigint } | null | 'unreadable',
   txId: string,
+  at: number = Date.now(),
 ): void {
   const target = requireAccount(account);
   const spent = requireColour(spentColour);
@@ -968,6 +1049,21 @@ export function rememberK1ChangeCoin(
     throw new Error('A change coin needs a 64-hex nonce, a 64-hex colour, a value, and the transaction that produced it.');
   }
   editStore(target, (draft) => {
+    /* THE BOOKING, IN THE SAME WRITE AS WHAT IT BOOKS (2026/09/22). The coin
+       being consumed is read here, before it is deleted, so the row can put it
+       back exactly — position and all — if the chain never records the spend.
+       See {@link K1CoinStoreState.pendingSpends}. */
+    if (Object.hasOwn(draft.coins, spent)) {
+      const parent = draft.coins[spent];
+      draft.pendingSpends = draft.pendingSpends.filter((pending) => pending.txId !== txId);
+      draft.pendingSpends.push({
+        txId,
+        at,
+        parent,
+        change:
+          row === null ? null : { nonceHex: row.nonceHex, colorHex: row.colorHex, value: row.value },
+      });
+    }
     if (Object.hasOwn(draft.coins, spent)) rememberSpentNonce(draft, draft.coins[spent].nonceHex);
     delete draft.coins[spent];
     delete draft.mtIndexCandidates[spent];
@@ -1047,31 +1143,345 @@ export function undoK1ChangeCoin(
   account: K1Account,
   coin: K1HeldCoin,
   change: { readonly colour: string; readonly nonce: string } | null,
+  options: {
+    /**
+     * True when the transaction may still land — the chain simply has not
+     * recorded it within the bound — so the booking is kept aside and put back
+     * if it does ({@link K1CoinStoreState.undoneSpends}). False (the default)
+     * for a transaction the chain REFUSED, which can never land.
+     */
+    readonly mayStillLand?: boolean;
+    /** When it was taken back, for how long it is kept aside. */
+    readonly now?: number;
+  } = {},
 ): void {
   const target = requireAccount(account);
   const restored = requireCoin(coin);
   editStore(target, (draft) => {
-    if (change !== null) {
-      dropAwaitingRow(draft, requireColour(change.colour), requireColour(change.nonce));
+    undoSpendInDraft(draft, restored, change, options);
+  });
+}
+
+/**
+ * The inverse of one booking, on a draft — shared by {@link undoK1ChangeCoin}
+ * and {@link reconcileK1Spends}, so the two can never take a spend back in two
+ * different ways.
+ */
+function undoSpendInDraft(
+  draft: K1StoreDraft,
+  restored: K1HeldCoin,
+  change: { readonly colour: string; readonly nonce: string } | null,
+  options: { readonly mayStillLand?: boolean; readonly now?: number },
+): void {
+  /* The booking goes with what it booked. Kept aside when the transaction
+     might yet land, so a late landing puts it back rather than leaving the
+     account spending a coin the chain has already spent. */
+  const booked = draft.pendingSpends.filter((pending) => pending.parent.nonceHex === restored.nonce);
+  draft.pendingSpends = draft.pendingSpends.filter(
+    (pending) => pending.parent.nonceHex !== restored.nonce,
+  );
+  if (options.mayStillLand === true) {
+    for (const pending of booked) {
+      draft.undoneSpends = draft.undoneSpends.filter((kept) => kept.txId !== pending.txId);
+      draft.undoneSpends.push({ ...pending, at: options.now ?? pending.at });
     }
-    draft.spentNonces = draft.spentNonces.filter((nonce) => nonce !== restored.nonce);
-    /* WHATEVER TOOK THE SLOT GOES BACK WHERE IT CAME FROM. A spend that left no
-       change promotes the next queued coin of the colour into the held slot;
-       the coin being restored is the one that was there before it, so the
-       promoted coin returns to the front of the queue rather than being
-       overwritten by the restore. */
-    const occupant = Object.hasOwn(draft.coins, restored.colour)
-      ? draft.coins[restored.colour]
-      : null;
-    if (occupant !== null) {
-      const queue = Object.hasOwn(draft.queued, restored.colour)
-        ? draft.queued[restored.colour]
-        : [];
+  }
+  if (change !== null) {
+    dropAwaitingRow(draft, requireColour(change.colour), requireColour(change.nonce));
+  }
+  draft.spentNonces = draft.spentNonces.filter((nonce) => nonce !== restored.nonce);
+  /* WHATEVER TOOK THE SLOT GOES BACK WHERE IT CAME FROM. A spend that left no
+     change promotes the next queued coin of the colour into the held slot;
+     the coin being restored is the one that was there before it, so the
+     promoted coin returns to the front of the queue rather than being
+     overwritten by the restore. */
+  const occupant = Object.hasOwn(draft.coins, restored.colour)
+    ? draft.coins[restored.colour]
+    : null;
+  if (occupant !== null) {
+    const queue = Object.hasOwn(draft.queued, restored.colour)
+      ? draft.queued[restored.colour]
+      : [];
+    /* Unless the occupant IS the coin being restored — a second take-back of
+       the same booking, from the screen's record after the store's own. */
+    if (occupant.nonceHex !== restored.nonce) {
       queue.unshift(occupant);
       draft.queued[restored.colour] = queue;
     }
-    draft.coins[restored.colour] = rowFromCoin(restored);
+  }
+  /* And out of the queue, if a walk filed it there meanwhile: one coin is
+     never counted twice. */
+  if (Object.hasOwn(draft.queued, restored.colour)) {
+    const rest = draft.queued[restored.colour].filter((row) => row.nonceHex !== restored.nonce);
+    if (rest.length === 0) delete draft.queued[restored.colour];
+    else draft.queued[restored.colour] = rest;
+  }
+  draft.coins[restored.colour] = rowFromCoin(restored);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Booked spends, answered from the chain                                     */
+/* -------------------------------------------------------------------------- */
+
+/** The spends this store has booked and the chain has not yet answered for. */
+export function pendingK1Spends(account: K1Account): PendingK1SpendRow[] {
+  return [...loadK1CoinStore(account).pendingSpends];
+}
+
+/** The spends taken back on a timeout and kept aside in case they land. */
+export function undoneK1Spends(account: K1Account): PendingK1SpendRow[] {
+  return [...loadK1CoinStore(account).undoneSpends];
+}
+
+/**
+ * The chain recorded this spend: its booking is a fact now, not a guess, and
+ * there is nothing left to take back. Silent when there was no such booking.
+ */
+export function landK1Spend(account: K1Account, txId: string): void {
+  const target = requireAccount(account);
+  editStore(target, (draft) => {
+    draft.pendingSpends = draft.pendingSpends.filter((pending) => pending.txId !== txId);
+    draft.undoneSpends = draft.undoneSpends.filter((kept) => kept.txId !== txId);
   });
+}
+
+/**
+ * Takes on a booking the SCREEN wrote down and this store did not.
+ *
+ * Builds from before 2026/09/22 kept the only record of what a spend took in
+ * the screen's stopped-payment record: the coin it consumed, and the nonce of
+ * the change it filed. A booking is adopted only where it is still true of
+ * the store — the consumed coin is marked spent and is not held, and the
+ * change, if there was one, is still waiting — so adopting one twice, or one
+ * the store has already settled or taken back, changes nothing.
+ */
+export function adoptK1PendingSpend(
+  account: K1Account,
+  booking: {
+    readonly txId: string;
+    readonly at: number;
+    readonly parent: K1HeldCoin;
+    readonly change: { readonly colour: string; readonly nonce: string } | null;
+  },
+): void {
+  const target = requireAccount(account);
+  const parent = requireCoin(booking.parent);
+  const txId = typeof booking.txId === 'string' ? booking.txId.trim() : '';
+  if (txId === '' || !Number.isFinite(booking.at)) {
+    throw new Error('A booked spend needs the transaction it went out in and when.');
+  }
+  const changeColour = booking.change === null ? null : requireColour(booking.change.colour);
+  const changeNonce = booking.change === null ? null : requireColour(booking.change.nonce);
+  editStore(target, (draft) => {
+    if (draft.pendingSpends.some((pending) => pending.txId === txId)) return;
+    if (draft.undoneSpends.some((kept) => kept.txId === txId)) return;
+    if (!draft.spentNonces.includes(parent.nonce)) return;
+    const held = Object.hasOwn(draft.coins, parent.colour) ? draft.coins[parent.colour] : null;
+    if (held?.nonceHex === parent.nonce) return;
+    let change: PendingK1SpendRow['change'] = null;
+    if (changeColour !== null) {
+      const rows = Object.hasOwn(draft.awaiting, changeColour) ? draft.awaiting[changeColour] : [];
+      const waiting = rows.find((row) => row.nonceHex === changeNonce);
+      if (waiting === undefined) return;
+      change = { nonceHex: waiting.nonceHex, colorHex: waiting.colorHex, value: waiting.value };
+    }
+    draft.pendingSpends.push({ txId, at: booking.at, parent: rowFromCoin(parent), change });
+  });
+}
+
+/** What {@link reconcileK1Spends} is handed: the chain's answers, and the clock. */
+export interface K1SpendReconcileOptions {
+  /**
+   * Whether the chain holds a transaction: `true` it does, `false` the indexer
+   * ANSWERED and has none, `null` it could not be asked. Only `false` ever
+   * takes a booking back.
+   */
+  readonly onChain: (txId: string) => Promise<boolean | null>;
+  readonly now: number;
+  /** How long a booked spend is given to appear before it is taken back. */
+  readonly boundMs: number;
+  /** How long a taken-back spend is watched for a late landing. */
+  readonly keepUndoneMs: number;
+  /**
+   * How many spends of this account's shielded coins the chain holds, or null
+   * when it could not be asked. Consulted only for awaiting rows written by
+   * builds that kept no booking — see {@link reconcileK1Spends}.
+   */
+  readonly landedSpendCount?: () => Promise<number | null>;
+}
+
+/** What one reconciliation did, by transaction. */
+export interface K1SpendReconciliation {
+  readonly landed: readonly string[];
+  readonly undone: readonly string[];
+  readonly reapplied: readonly string[];
+  readonly expired: readonly string[];
+  /** Awaiting rows from before bookings were kept, dropped as never having existed. */
+  readonly orphansDropped: readonly string[];
+  /** Spent nonces given back because the chain holds fewer spends than the store. */
+  readonly noncesRestored: number;
+}
+
+async function askOnChain(
+  onChain: K1SpendReconcileOptions['onChain'],
+  txId: string,
+): Promise<boolean | null> {
+  try {
+    return await onChain(txId);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * THE STORE, MADE TO AGREE WITH THE CHAIN (2026/09/22).
+ *
+ * Run on every read of a Passport's holdings — a reload, Home opening, a
+ * refresh — so that whatever a closed tab, a lost socket, or an older build
+ * left behind, what the screen shows is what the chain holds. Four rules, each
+ * decided by the chain's own answer and never by a guess:
+ *
+ *   1. A booked spend the chain HOLDS has landed: its booking is dropped and
+ *      the change it filed stays, to be placed by the usual settle.
+ *   2. A booked spend the chain has NOT recorded, once `boundMs` has passed
+ *      since it was booked, is taken back exactly — the coin it consumed
+ *      returns to the held slot at its position, the change it filed is
+ *      dropped, the nonce is no longer spent — and kept aside for rule 3.
+ *   3. A spend taken back that the chain turns out to hold after all is put
+ *      back, so the store never offers a coin the chain has already spent; one
+ *      older than `keepUndoneMs` is forgotten, because no transaction could be
+ *      carrying it any more.
+ *   4. An awaiting row written by a build that kept no booking, filed under a
+ *      transaction the chain answers it has never seen, describes a change
+ *      coin that does not exist: it is dropped. The coin that spend consumed
+ *      was written nowhere but the spent list, so it is given back only where
+ *      the chain can say how many spends there really were — the store's
+ *      surplus of spent nonces over the account's recorded spends, newest
+ *      first — and the next walk of the account's deliveries files it again
+ *      with the chain's own position. An indexer that cannot be asked leaves
+ *      everything as it is.
+ *
+ * Nothing is written unless something changed, and everything is written in
+ * one write.
+ */
+export async function reconcileK1Spends(
+  account: K1Account,
+  options: K1SpendReconcileOptions,
+): Promise<K1SpendReconciliation> {
+  const target = requireAccount(account);
+  const state = loadK1CoinStore(target);
+  const landed: string[] = [];
+  const undone: string[] = [];
+  const reapplied: string[] = [];
+  const expired: string[] = [];
+  const orphans: { colour: string; nonce: string; txId: string }[] = [];
+
+  for (const pending of state.pendingSpends) {
+    const answer = await askOnChain(options.onChain, pending.txId);
+    if (answer === true) landed.push(pending.txId);
+    else if (answer === false && options.now - pending.at >= options.boundMs) undone.push(pending.txId);
+  }
+  for (const kept of state.undoneSpends) {
+    if (options.now - kept.at >= options.keepUndoneMs) {
+      expired.push(kept.txId);
+      continue;
+    }
+    if ((await askOnChain(options.onChain, kept.txId)) === true) reapplied.push(kept.txId);
+  }
+  const booked = new Set(
+    [...state.pendingSpends, ...state.undoneSpends].flatMap((row) =>
+      row.change === null ? [] : [row.change.nonceHex],
+    ),
+  );
+  for (const rows of Object.values(state.awaiting)) {
+    for (const row of rows) {
+      if (booked.has(row.nonceHex) || !k1AwaitingTxNeedsChainHash(row.txId)) continue;
+      if ((await askOnChain(options.onChain, row.txId)) === false) {
+        orphans.push({ colour: row.colorHex, nonce: row.nonceHex, txId: row.txId });
+      }
+    }
+  }
+  let restoreNewest = 0;
+  let orphansDropped: string[] = [];
+  if (orphans.length > 0 && options.landedSpendCount !== undefined) {
+    let count: number | null;
+    try {
+      count = await options.landedSpendCount();
+    } catch {
+      count = null;
+    }
+    if (count !== null && Number.isSafeInteger(count) && count >= 0) {
+      orphansDropped = orphans.map((orphan) => orphan.txId);
+      /* THE SPENT LIST IS BOUNDED, and a list that has dropped its oldest
+         entries can no longer be counted against the chain. */
+      const surplus = state.spentNonces.length - count;
+      if (state.spentNonces.length < SPENT_NONCE_MEMORY && surplus > 0) {
+        restoreNewest = Math.min(surplus, orphans.length);
+      }
+    }
+  }
+
+  const changed =
+    landed.length + undone.length + reapplied.length + expired.length + orphansDropped.length > 0;
+  if (changed) {
+    editStore(target, (draft) => {
+      draft.pendingSpends = draft.pendingSpends.filter((pending) => !landed.includes(pending.txId));
+      for (const txId of undone) {
+        const pending = draft.pendingSpends.find((row) => row.txId === txId);
+        if (pending === undefined) continue;
+        undoSpendInDraft(
+          draft,
+          coinFromStoredRow(pending.parent),
+          pending.change === null
+            ? null
+            : { colour: pending.change.colorHex, nonce: pending.change.nonceHex },
+          { mayStillLand: true, now: options.now },
+        );
+      }
+      for (const txId of reapplied) {
+        const kept = draft.undoneSpends.find((row) => row.txId === txId);
+        if (kept === undefined) continue;
+        reapplyInDraft(draft, kept);
+      }
+      draft.undoneSpends = draft.undoneSpends.filter(
+        (kept) => !expired.includes(kept.txId) && !reapplied.includes(kept.txId),
+      );
+      for (const orphan of orphans) {
+        if (orphansDropped.includes(orphan.txId)) dropAwaitingRow(draft, orphan.colour, orphan.nonce);
+      }
+      if (restoreNewest > 0) draft.spentNonces = draft.spentNonces.slice(0, -restoreNewest);
+    });
+  }
+  return {
+    landed,
+    undone,
+    reapplied,
+    expired,
+    orphansDropped,
+    noncesRestored: restoreNewest,
+  };
+}
+
+/**
+ * A spend the chain holds after all, put back on a draft: the coin it consumed
+ * leaves wherever it was put back to, its nonce is spent again, and its change
+ * is filed as awaiting under the transaction that made it.
+ */
+function reapplyInDraft(draft: K1StoreDraft, kept: PendingK1SpendRow): void {
+  const colour = kept.parent.colorHex;
+  const nonce = kept.parent.nonceHex;
+  if (Object.hasOwn(draft.coins, colour) && draft.coins[colour].nonceHex === nonce) {
+    delete draft.coins[colour];
+    delete draft.mtIndexCandidates[colour];
+  }
+  if (Object.hasOwn(draft.queued, colour)) {
+    const rest = draft.queued[colour].filter((row) => row.nonceHex !== nonce);
+    if (rest.length === 0) delete draft.queued[colour];
+    else draft.queued[colour] = rest;
+  }
+  rememberSpentNonce(draft, nonce);
+  if (kept.change !== null) addAwaitingRow(draft, { ...kept.change, txId: kept.txId });
+  else promoteQueued(draft, colour);
 }
 
 /**
