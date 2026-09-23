@@ -89,7 +89,7 @@ for (const theme of ['Light', 'Dark'] as const) {
         await capture(page, info, 'login');
 
         await page.getByRole('button', { name: SIGN_IN_BUTTON }).click();
-        await expect(page.locator('.mnid-title')).toHaveText('Welcome to Passport', { timeout: 60_000 });
+        await expect(page.locator('.mnid-title')).toHaveText('Welcome to Passport.', { timeout: 60_000 });
         await expect(page.locator('.mnid-screen')).toHaveCSS('background-image', 'none');
         await expect(page.locator('.mnid-title')).toHaveCSS('font-weight', '700');
         await capture(page, info, 'welcome');

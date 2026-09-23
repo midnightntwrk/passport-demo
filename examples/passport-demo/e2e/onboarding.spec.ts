@@ -885,9 +885,20 @@ test('the Send sheet is a withdrawal from the account, and never mentions DUST',
      it — the name is the thing Passport is for; the address formats are the
      fallback. Since 2026/08/31 it names only the ONE address form the CHOSEN
      asset can go to, rather than listing both and leaving the refusal to do
-     the teaching: the sheet opens on NIGHT, so this is NIGHT's. */
+     the teaching. Since the Home redesign (PR #91) the sheet opens on mUSD,
+     so this is mUSD's: a name, or a shielded address. */
+  await expect(page.getByRole('heading', { name: 'Send mUSD' })).toBeVisible();
   await expect(
-    page.getByText(/A Midnight name, or an unshielded \(mn_addr…\) stagenet address/),
+    page.getByText(/A Midnight name, or a shielded \(mn_shield-addr…\) stagenet address/).first(),
+  ).toBeVisible();
+  /* And the hint follows the choice: on NIGHT it names the unshielded form.
+     The walks after this one pay NIGHT, so the sheet is left on it. */
+  const picker = page.getByRole('combobox', { name: /^Asset/ });
+  const night = await picker.locator('option', { hasText: /^NIGHT/ }).getAttribute('value');
+  await picker.selectOption(night!);
+  await expect(page.getByRole('heading', { name: 'Send NIGHT' })).toBeVisible();
+  await expect(
+    page.getByText(/A Midnight name, or an unshielded \(mn_addr…\) stagenet address/).first(),
   ).toBeVisible();
   expect(sheet).not.toMatch(/mn_addr_stagenet1[a-z0-9]{10,}/);
   expect(sheet).not.toMatch(/mn_shield-addr_stagenet1[a-z0-9]{10,}/);

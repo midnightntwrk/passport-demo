@@ -420,9 +420,8 @@ for (const { label, shape, alias } of WALKABLE_SHAPES) {
     /* THE RETURNING VISIT, WHICH COSTS NOTHING. The session is restored
        silently; a reload is not a sign-in and must not be charged as one. */
     expect(await ceremonies(h.page)).toEqual({ started: 0, done: 0 });
-    await expect(h.page.getByRole('heading', { name: new RegExp(`${alias}$`) })).toBeVisible({
-      timeout: 30_000,
-    });
+    // The name is read back on the identity card (the greeting is the time of day).
+    await expect(h.page.locator('.mnid-alias')).toHaveText(`${alias}.night`, { timeout: 30_000 });
 
     /* AND THE SIGN-IN ITSELF: ONE ASSERTION. Signed out deliberately, then
        back in through the one button on the landing screen. */

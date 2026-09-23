@@ -495,11 +495,10 @@ test('a name claimed before records named their passkey is given back to its own
   await expect(h.page.getByRole('button', { name: /Sign out of this Passport/i })).toBeVisible({
     timeout: 120_000,
   });
-  /* The greeting, which is the name being READ BACK by the credential that
-     just adopted it — not merely a record in storage. */
-  await expect(
-    h.page.getByRole('heading', { name: new RegExp(`${NAME}$`) }),
-  ).toBeVisible({ timeout: 30_000 });
+  /* The identity card, which is the name being READ BACK by the credential
+     that just adopted it — not merely a record in storage. Since the Home
+     redesign the greeting is the time of day and the name lives on the card. */
+  await expect(h.page.locator('.mnid-alias')).toHaveText(`${NAME}.night`, { timeout: 30_000 });
   /* AND IT COST NOTHING. The restore is silent by design, so handing a name
      back on it must not be the thing that raises a passkey prompt — least of
      all on a reload the user did not think of as a sign-in. */
