@@ -115,7 +115,7 @@ async function enrol(h: Harness): Promise<string> {
   await expect(h.page.getByRole('heading', { name: /Welcome to Passport/i })).toBeVisible({
     timeout: 120_000,
   });
-  await h.page.getByRole('button', { name: 'Choose my name' }).click();
+  await h.page.getByRole('button', { name: /^Choose my (\.night )?name$/ }).click();
   await expect(h.page.getByText(/Choose your .night name/i)).toBeVisible({ timeout: 60_000 });
   const credentialId = await h.page.evaluate(() =>
     localStorage.getItem('passport-last-passkey'),
@@ -312,7 +312,7 @@ test('a passkey found on a forgetful browser is signed in to, and the name is a 
     await expect(h.page.getByRole('heading', { name: /Welcome to Passport/i })).toBeVisible({
       timeout: 120_000,
     });
-    await h.page.getByRole('button', { name: 'Choose my name' }).click();
+    await h.page.getByRole('button', { name: /^Choose my (\.night )?name$/ }).click();
     await expect(h.page.getByText(/Choose your .night name/i)).toBeVisible({ timeout: 60_000 });
 
     /* THE DOOR, and the reason a name step here is not a dead end. */
@@ -359,7 +359,7 @@ test('a blob naming an account the chain will not answer for holds nothing up', 
     await expect(h.page.getByRole('heading', { name: /Welcome to Passport/i })).toBeVisible({
       timeout: 120_000,
     });
-    await h.page.getByRole('button', { name: 'Choose my name' }).click();
+    await h.page.getByRole('button', { name: /^Choose my (\.night )?name$/ }).click();
     await expect(h.page.getByText(/Choose your .night name/i)).toBeVisible({ timeout: 60_000 });
     await expect(h.page.getByRole('button', { name: /find my Passport/i })).toBeVisible();
 

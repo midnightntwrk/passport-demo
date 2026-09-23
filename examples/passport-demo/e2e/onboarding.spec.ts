@@ -132,9 +132,9 @@ test('a passkey is welcomed, and the welcome leads to the name step', async () =
     timeout: 60_000,
   });
   await expect(page.getByText('An identity you hold')).toBeVisible();
-  await expect(page.getByText('A name, not an address')).toBeVisible();
-  await expect(page.getByText('Fees are covered for you')).toBeVisible();
-  await expect(page.getByText('Prove things privately')).toBeVisible();
+  await expect(page.getByText('A name people know')).toBeVisible();
+  await expect(page.getByText('Start without tokens')).toBeVisible();
+  await expect(page.getByText('Share on your terms')).toBeVisible();
 
   /* ONE control and no more, and it says where it goes.
      A "Skip" sat under it until 2026/08/30 and led to the same place — the
@@ -143,7 +143,7 @@ test('a passkey is welcomed, and the welcome leads to the name step', async () =
      app's words are approximate, so it is asserted GONE, and as an absence of
      anything that would read as a way out rather than of one word. */
   const welcomeButtons = await page.getByRole('button').allInnerTexts();
-  expect(welcomeButtons.filter((label) => label.trim().length > 0)).toEqual(['Choose my name']);
+  expect(welcomeButtons.filter((label) => label.trim().length > 0)).toEqual(['Choose my .night name']);
   await expect(page.getByRole('button', { name: /skip|later|not now|maybe/i })).toHaveCount(0);
 
   /* And nothing on it claims anything the build does not do — no wallet, no
@@ -153,7 +153,7 @@ test('a passkey is welcomed, and the welcome leads to the name step', async () =
   expect(welcomeText).not.toMatch(/\bDUST\b/);
   expect(welcomeText).not.toMatch(/\bNIGHT\b/);
 
-  await page.getByRole('button', { name: 'Choose my name' }).click();
+  await page.getByRole('button', { name: /^Choose my (\.night )?name$/ }).click();
 
   await expect(page.getByText(/Choose your .night name/i)).toBeVisible({ timeout: 60_000 });
   await expect(page.getByText(/^LAST STEP$/i)).toBeVisible();
@@ -1211,7 +1211,7 @@ test('a passkey this browser does not know about never blocks the way in', async
     await expect(fresh.getByRole('heading', { name: /Welcome to Passport/i })).toBeVisible({
       timeout: 90_000,
     });
-    await fresh.getByRole('button', { name: 'Choose my name' }).click();
+    await fresh.getByRole('button', { name: /^Choose my (\.night )?name$/ }).click();
 
     /* The name step is only reachable once PRF derived a seed and the wallet
        opened, so arriving here is proof the enrolment genuinely worked rather
@@ -1362,7 +1362,7 @@ test('a Passport whose passkey this device cannot produce is offered a new one',
     await expect(stranded.getByRole('heading', { name: /Welcome to Passport/i })).toBeVisible({
       timeout: 120_000,
     });
-    await stranded.getByRole('button', { name: 'Choose my name' }).click();
+    await stranded.getByRole('button', { name: /^Choose my (\.night )?name$/ }).click();
     await expect(stranded.getByText(/Choose your .night name/i)).toBeVisible({ timeout: 60_000 });
 
     /* THE OLD RECORDS ARE STILL THERE. The new Passport keys its profile and
@@ -1411,7 +1411,7 @@ test('a picker with nothing in it offers a new passkey too, not just an apology'
     await expect(stranded.getByRole('heading', { name: /Welcome to Passport/i })).toBeVisible({
       timeout: 120_000,
     });
-    await stranded.getByRole('button', { name: 'Choose my name' }).click();
+    await stranded.getByRole('button', { name: /^Choose my (\.night )?name$/ }).click();
     await expect(stranded.getByText(/Choose your .night name/i)).toBeVisible({ timeout: 60_000 });
   } finally {
     await authenticator.remove().catch(() => {});
@@ -1620,7 +1620,7 @@ test('a claim whose passkey will not answer offers a retry, a way out, and a way
     await expect(stalled.getByRole('heading', { name: /Welcome to Passport/i })).toBeVisible({
       timeout: 120_000,
     });
-    await stalled.getByRole('button', { name: 'Choose my name' }).click();
+    await stalled.getByRole('button', { name: /^Choose my (\.night )?name$/ }).click();
     await expect(stalled.getByText(/Choose your .night name/i)).toBeVisible({ timeout: 60_000 });
 
     /* A name this run has not asked about, so the claim's own pre-checks run

@@ -282,7 +282,7 @@ test.describe('a passkey with no Passport yet', () => {
       timeout: 60_000,
     });
     await expect(page.getByRole('heading', { name: /Set up\s*your Passport/ })).toHaveCount(0);
-    await expect(page.getByRole('button', { name: 'Choose my name' })).toBeEnabled();
+    await expect(page.getByRole('button', { name: /^Choose my (\.night )?name$/ })).toBeEnabled();
 
     /* NOTHING ON IT NAMES A VENDOR OR A SIGN-IN, because there was neither:
        this reader touched an authenticator. The first render of this screen
@@ -319,7 +319,7 @@ test.describe('a passkey with no Passport yet', () => {
        that step makes the whole Passport, so it stays off until the registry
        has said the name is free — "Checking…" is not yes, and an empty field
        is certainly not. */
-    await page.getByRole('button', { name: 'Choose my name' }).click();
+    await page.getByRole('button', { name: /^Choose my (\.night )?name$/ }).click();
     await expect(page.getByRole('heading', { name: /Choose\s*your \.night name/ })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Create my Passport' })).toBeDisabled();
     /* THERE IS NO WAY PAST IT, and that is the point of asking here: the name
@@ -339,10 +339,10 @@ test.describe('a passkey with no Passport yet', () => {
     await installVirtualAuthenticator(context, page);
     await page.goto(WALK);
     await page.getByRole('button', { name: SIGN_IN_BUTTON }).click();
-    await expect(page.getByRole('button', { name: 'Choose my name' })).toBeEnabled({
+    await expect(page.getByRole('button', { name: /^Choose my (\.night )?name$/ })).toBeEnabled({
       timeout: 60_000,
     });
-    await page.getByRole('button', { name: 'Choose my name' }).click();
+    await page.getByRole('button', { name: /^Choose my (\.night )?name$/ }).click();
 
     /* A NAME THAT IS REALLY TAKEN, read by the shipped Midnames module out of
        the stagenet `.night` TLD's own recorded state — the same two reads a
@@ -392,13 +392,13 @@ test.describe('a passkey with no Passport yet', () => {
     await installVirtualAuthenticator(context, page);
     await page.goto(WALK);
     await page.getByRole('button', { name: SIGN_IN_BUTTON }).click();
-    await expect(page.getByRole('button', { name: 'Choose my name' })).toBeEnabled({
+    await expect(page.getByRole('button', { name: /^Choose my (\.night )?name$/ })).toBeEnabled({
       timeout: 60_000,
     });
     /* The welcome, then the name, and then the one press. Since 2026/09/22 the
        press that starts the setup is the press that chose the name, so the
        walk has to choose one before it can start anything. */
-    await page.getByRole('button', { name: 'Choose my name' }).click();
+    await page.getByRole('button', { name: /^Choose my (\.night )?name$/ }).click();
     await page.getByLabel('Your name').fill('walker');
     await expect(page.getByRole('button', { name: 'Create my Passport' })).toBeEnabled({
       timeout: 120_000,
@@ -496,10 +496,10 @@ test.describe('a passkey with no Passport yet', () => {
     await installVirtualAuthenticator(context, page);
     await page.goto(WALK);
     await page.getByRole('button', { name: SIGN_IN_BUTTON }).click();
-    await expect(page.getByRole('button', { name: 'Choose my name' })).toBeEnabled({
+    await expect(page.getByRole('button', { name: /^Choose my (\.night )?name$/ })).toBeEnabled({
       timeout: 60_000,
     });
-    await page.getByRole('button', { name: 'Choose my name' }).click();
+    await page.getByRole('button', { name: /^Choose my (\.night )?name$/ }).click();
     await page.getByLabel('Your name').fill('walker');
     await expect(page.getByRole('button', { name: 'Create my Passport' })).toBeEnabled({
       timeout: 120_000,
@@ -804,7 +804,7 @@ test.describe('a passkey that already holds one', () => {
     /* Back to where they came from, which is now the welcome page rather than
        an offer: nothing has been chosen and nothing has been built. */
     await page.getByRole('button', { name: 'Go back' }).click();
-    await expect(page.getByRole('button', { name: 'Choose my name' })).toBeVisible();
+    await expect(page.getByRole('button', { name: /^Choose my (\.night )?name$/ })).toBeVisible();
 
     await context.close();
   });
@@ -876,7 +876,7 @@ async function passkeyPassportOnHome(
      Since 2026/09/22 that press lives on the name step, behind a name the
      registry has called free, so the walk goes through the welcome page and
      chooses one — the same three taps a person makes. */
-  await page.getByRole('button', { name: 'Choose my name' }).click();
+  await page.getByRole('button', { name: /^Choose my (\.night )?name$/ }).click();
   await page.getByLabel('Your name').fill('walker');
   await expect(page.getByRole('button', { name: 'Create my Passport' })).toBeEnabled({
     timeout: 120_000,
@@ -1169,7 +1169,7 @@ async function passkeyPassportAfterTheName(
   await expect(page.getByRole('heading', { name: /Welcome to\s*Passport/ })).toBeVisible({
     timeout: 60_000,
   });
-  await page.getByRole('button', { name: 'Choose my name' }).click();
+  await page.getByRole('button', { name: /^Choose my (\.night )?name$/ }).click();
   await page.getByLabel('Your name').fill('walker');
   await expect(page.getByRole('button', { name: 'Create my Passport' })).toBeEnabled({
     timeout: 120_000,

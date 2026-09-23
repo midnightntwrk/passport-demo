@@ -205,7 +205,7 @@ test.describe('the landing of a build with a provider sign-in behind it', () => 
       await expect(page.getByRole('heading', { name: /Welcome to\s*Passport/i })).toBeVisible({
         timeout: 120_000,
       });
-      await expect(page.getByRole('button', { name: 'Choose my name' })).toBeVisible();
+      await expect(page.getByRole('button', { name: /^Choose my (\.night )?name$/ })).toBeVisible();
     } finally {
       await authenticator.remove().catch(() => {});
       await context.close();
@@ -287,7 +287,7 @@ test.describe('a provider sign-in on a device with no Passport', () => {
       timeout: 60_000,
     });
     await expect(page.getByRole('heading', { name: /Welcome to\s*Passport/ })).toHaveCount(0);
-    await expect(page.getByRole('button', { name: 'Choose my name' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: /^Choose my (\.night )?name$/ })).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Create my Passport' })).toHaveCount(0);
 
     /* NONE OF THE WORDS A READER HAS NO USE FOR. The rule this demo keeps

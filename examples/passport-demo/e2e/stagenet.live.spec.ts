@@ -166,7 +166,7 @@ test.describe('@live the account model on stagenet', () => {
     await expect(page.getByRole('heading', { name: /Welcome to Passport/i })).toBeVisible({
       timeout: 5 * 60_000,
     });
-    await page.getByRole('button', { name: /Choose my name/i }).click();
+    await page.getByRole('button', { name: /^Choose my (\.night )?name$/i }).click();
 
     /* The wallet has to open against the real indexer before the step is
        armed, so this is the slowest thing before proving starts. */

@@ -410,7 +410,7 @@ for (const { label, shape, alias } of WALKABLE_SHAPES) {
     expect(await recordedLargeBlobSupport(h.page)).toEqual([shape.largeBlob]);
 
     /* The name step is where a new Passport lands, on every shape. */
-    await h.page.getByRole('button', { name: 'Choose my name' }).click();
+    await h.page.getByRole('button', { name: /^Choose my (\.night )?name$/ }).click();
     await expect(h.page.getByText(/Choose your .night name/i)).toBeVisible({ timeout: 60_000 });
 
     await seedClaimedPassport(h.page, alias);
@@ -598,7 +598,7 @@ test('a claim in its long step survives the tab going away and coming back', asy
   });
 
   await enrol(h.page);
-  await h.page.getByRole('button', { name: 'Choose my name' }).click();
+  await h.page.getByRole('button', { name: /^Choose my (\.night )?name$/ }).click();
   await expect(h.page.getByText(/Choose your .night name/i)).toBeVisible({ timeout: 60_000 });
   await h.page.getByLabel('Your Midnight name').fill('shapebackground');
   await expect(h.page.getByText('shapebackground.night is available')).toBeVisible({
@@ -784,7 +784,7 @@ test('a slow circuit key is waited for once, with the wait on the screen', async
   });
 
   await enrol(h.page);
-  await h.page.getByRole('button', { name: 'Choose my name' }).click();
+  await h.page.getByRole('button', { name: /^Choose my (\.night )?name$/ }).click();
   await expect(h.page.getByText(/Choose your .night name/i)).toBeVisible({ timeout: 60_000 });
   await h.page.getByLabel('Your Midnight name').fill('shapememory');
   await expect(h.page.getByText('shapememory.night is available')).toBeVisible({ timeout: 30_000 });

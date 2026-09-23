@@ -8,7 +8,8 @@ export interface WelcomeProps {
   onChooseName: () => void
 }
 
-const BENEFITS = [
+/** The four benefits, shared with the custody road's welcome step. */
+export const WELCOME_BENEFITS = [
   {
     image: '/welcome-art/identity.webp',
     title: 'An identity you hold',
@@ -50,7 +51,7 @@ export default function WelcomeScreen({ onChooseName }: WelcomeProps) {
         </div>
 
         <ul className="mnwl-grid" aria-label="What your Passport gives you">
-          {BENEFITS.map((benefit, index) => (
+          {WELCOME_BENEFITS.map((benefit, index) => (
             <li key={benefit.title} className="mnwl-card">
               <div className="mnwl-art" aria-hidden="true">
                 <img src={benefit.image} alt="" loading={index < 2 ? 'eager' : 'lazy'} />

@@ -1,14 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import {
   ArrowRight,
-  BadgeCheck,
-  Fingerprint,
   Gamepad2,
   Loader2,
   Search,
   ShieldCheck,
-  Sparkles,
-  Tag,
 } from 'lucide-react'
 
 import { normaliseNameForRecovery, type NameRecoveryOutcome } from '../lib/nameRecovery.js'
@@ -175,6 +171,8 @@ import { pushToast } from './ToastStack.js'
    free of the wallet SDK — see `../lib/networks.ts`. */
 import { txReceiptLink } from '../lib/networks.js'
 import ThemeToggle from './ThemeToggle'
+import { WELCOME_BENEFITS } from './Welcome.js'
+import './welcome.css'
 import './onboarding.css'
 import './dynamic-passport.css'
 
@@ -3049,42 +3047,6 @@ function Shell(props: { label: string; children: React.ReactNode }) {
 /* -------------------------------------------------------------------------- */
 
 /**
- * THE FOUR PROMISES, and every one of them is a thing this build does today.
- *
- * Adapted from `Welcome.tsx`, which has said them to passkey holders since
- * 2026/08/26 — "an intro page… what is this, what am I getting" (Hector,
- * 09:47) — and is now said to BOTH arms in the same words. The first point is
- * the only one that had to change: the passkey road could say "behind the
- * passkey you just made", and this one cannot, because half its readers signed
- * in with Google. What is true of both is that nobody issued it to them.
- *
- * An intro screen is the worst possible place to over-claim: it is read before
- * anything can contradict it. Nothing here describes a feature that is coming.
- */
-const WELCOME_POINTS = [
-  {
-    icon: Fingerprint,
-    title: 'An identity you hold',
-    body: 'Your Passport is yours. Nobody issues it to you, nobody holds it for you, and nobody can take it back.',
-  },
-  {
-    icon: Tag,
-    title: 'A name, not an address',
-    body: 'Pick a name people can actually send to and apps can recognise you by, instead of a long string you have to copy carefully.',
-  },
-  {
-    icon: Sparkles,
-    title: 'Fees are covered for you',
-    body: 'You hold nothing and spend nothing to get started. Setting your Passport up is paid for on your behalf.',
-  },
-  {
-    icon: BadgeCheck,
-    title: 'Prove things privately',
-    body: 'Share what an app genuinely needs to know about you — and nothing else. You are asked every time, and you can say no.',
-  },
-] as const
-
-/**
  * The first thing a new Passport sees, on either arm.
  *
  * ONE SCREEN, ONE ACTION, AND NO SKIP. There was a skip on the passkey road
@@ -3104,54 +3066,58 @@ function WelcomeStep(props: {
   onChooseName: () => void
   onRecover: () => void
 }) {
+  /* THE FOUR ILLUSTRATED BENEFITS (2026/09/23), the same cards and words as
+     `Welcome.tsx`: four across on desktop, two by two on a phone. */
   return (
-    <Shell label="Welcome">
-      <p className="mnob-kicker">{props.kicker}</p>
-      <h1 className="mnob-title">
-        <span>Welcome to</span>
-        <span>Passport</span>
-      </h1>
-      <p className="mnob-lede">{props.lede}</p>
+    <section className="mnob-screen mndyn mnwl-screen">
+      <header className="mnob-bar mnwl-bar">
+        <img className="mnob-wordmark" src="/midnight-wordmark.svg" alt="Midnight" />
+        <span className="mnob-bar-label">Welcome</span>
+        <ThemeToggle size="sm" className="mnob-theme" />
+      </header>
+      <div className="mnob-body mnwl-body">
+        <div className="mnwl-intro">
+          <p className="mnob-kicker">{props.kicker}</p>
+          <h1 className="mnob-title mnwl-title">Welcome to Passport.</h1>
+          <p className="mnob-lede mnwl-lede">{props.lede}</p>
+        </div>
 
-      {/* WHAT THIS BROWSER ALREADY HOLDS, said before the offer rather than
-          discovered afterwards as a second Passport with a second name to
-          claim. See `../lib/custodyRoute.ts`. */}
-      {props.browserNotice !== null ? (
-        <p className="mnob-hint mndyn-browser-notice" role="status">
-          {props.browserNotice}
-        </p>
-      ) : null}
+        {/* WHAT THIS BROWSER ALREADY HOLDS, said before the offer rather than
+            discovered afterwards as a second Passport with a second name to
+            claim. See `../lib/custodyRoute.ts`. */}
+        {props.browserNotice !== null ? (
+          <p className="mnob-hint mndyn-browser-notice" role="status">
+            {props.browserNotice}
+          </p>
+        ) : null}
 
-      <ul className="mndyn-points">
-        {WELCOME_POINTS.map((point) => (
-          <li key={point.title} className="mndyn-point">
-            <span className="mndyn-point-mark" aria-hidden="true">
-              <point.icon size={16} strokeWidth={2} />
-            </span>
-            <span className="mndyn-point-text">
-              <span className="mndyn-point-title">{point.title}</span>
-              <span className="mndyn-point-body">{point.body}</span>
-            </span>
-          </li>
-        ))}
-      </ul>
+        <ul className="mnwl-grid" aria-label="What your Passport gives you">
+          {WELCOME_BENEFITS.map((benefit, index) => (
+            <li key={benefit.title} className="mnwl-card">
+              <div className="mnwl-art" aria-hidden="true">
+                <img src={benefit.image} alt="" loading={index < 2 ? 'eager' : 'lazy'} />
+              </div>
+              <div className="mnwl-card-copy">
+                <h2>{benefit.title}</h2>
+                <p>{benefit.body}</p>
+              </div>
+            </li>
+          ))}
+        </ul>
 
-      <div className="mndyn-actions">
-        <button type="button" className="mnob-primary" onClick={props.onChooseName}>
-          <span className="mnob-primary-copy">
-            <Tag size={17} strokeWidth={2} aria-hidden="true" />
-            Choose my name
-          </span>
-          <ArrowRight size={17} strokeWidth={2.2} aria-hidden="true" />
-        </button>
-        {/* The way in for somebody who is not new. It is quiet, and under the
-            primary action, because the common reader of this screen genuinely
-            is making their first Passport. */}
-        <button type="button" className="mnob-alt" onClick={props.onRecover}>
-          I already have a Passport
-        </button>
+        <div className="mnwl-actions" data-toast-clear>
+          <button type="button" className="mnwl-primary" onClick={props.onChooseName}>
+            <span>Choose my .night name</span>
+            <ArrowRight size={19} strokeWidth={2.2} aria-hidden="true" />
+          </button>
+          {/* The way in for somebody who is not new: quiet, and under the
+              primary action, because most readers are making their first. */}
+          <button type="button" className="mnob-alt" onClick={props.onRecover}>
+            I already have a Passport
+          </button>
+        </div>
       </div>
-    </Shell>
+    </section>
   )
 }
 

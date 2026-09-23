@@ -176,7 +176,7 @@ async function enrol(h: Harness): Promise<string> {
   await expect(h.page.getByRole('heading', { name: /Welcome to Passport/i })).toBeVisible({
     timeout: 120_000,
   });
-  await h.page.getByRole('button', { name: 'Choose my name' }).click();
+  await h.page.getByRole('button', { name: /^Choose my (\.night )?name$/ }).click();
   await expect(h.page.getByText(/Choose your .night name/i)).toBeVisible({ timeout: 60_000 });
   const credentialId = await h.page.evaluate(() => localStorage.getItem('passport-last-passkey'));
   if (!credentialId) throw new Error('the enrolment recorded no credential');
@@ -334,7 +334,7 @@ test('a NEW passkey starts clean, and does not inherit the old name', async ({ b
   await expect(h.page.getByRole('heading', { name: /Welcome to Passport/i })).toBeVisible({
     timeout: 120_000,
   });
-  await h.page.getByRole('button', { name: 'Choose my name' }).click();
+  await h.page.getByRole('button', { name: /^Choose my (\.night )?name$/ }).click();
 
   /* THE FIX, ASSERTED. This is where the reviewer landed on a finished Home
      screen wearing `passportwalk` with no account behind it. A Passport that
@@ -388,7 +388,7 @@ test('"Set up a new Passport on this device" forgets this device\'s records and 
   await expect(h.page.getByRole('heading', { name: /Welcome to Passport/i })).toBeVisible({
     timeout: 120_000,
   });
-  await h.page.getByRole('button', { name: 'Choose my name' }).click();
+  await h.page.getByRole('button', { name: /^Choose my (\.night )?name$/ }).click();
   await expect(h.page.getByText(/Choose your .night name/i)).toBeVisible({ timeout: 60_000 });
 
   /* Everything this device held for the old credential is gone, and it is only

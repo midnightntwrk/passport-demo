@@ -93,7 +93,7 @@ for (const theme of ['Light', 'Dark'] as const) {
         await expect(page.locator('.mnid-screen')).toHaveCSS('background-image', 'none');
         await expect(page.locator('.mnid-title')).toHaveCSS('font-weight', '700');
         await capture(page, info, 'welcome');
-        await page.getByRole('button', { name: 'Choose my name' }).click();
+        await page.getByRole('button', { name: /^Choose my (\.night )?name$/ }).click();
         await page.getByLabel('Your Midnight name').fill(NAME);
         await expect(page.getByText(`${NAME}.night is available`)).toBeVisible();
         await expect(page.locator('.mnid-primary')).toHaveCSS('background-image', 'none');
@@ -198,7 +198,7 @@ for (const theme of ['Light', 'Dark'] as const) {
         await expect(page.locator('.mnob-title')).toHaveCSS('font-weight', '700');
         await capture(page, info, 'road-welcome');
 
-        await page.getByRole('button', { name: 'Choose my name' }).click();
+        await page.getByRole('button', { name: /^Choose my (\.night )?name$/ }).click();
         await page.getByLabel('Your name').fill(NAME);
         await expect(page.getByText(`${NAME}.night is available`)).toBeVisible({ timeout: 60_000 });
         const create = page.getByRole('button', { name: 'Create my Passport' });

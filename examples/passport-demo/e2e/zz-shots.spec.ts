@@ -85,7 +85,7 @@ for (const theme of ['light', 'dark']) {
       await page.getByRole('button', { name: SIGN_IN_BUTTON }).click();
       await expect(page.getByRole('heading', { name: /Welcome to\s*Passport/ })).toBeVisible({ timeout: 60_000 });
       await shot(page, `2-welcome-${tag}`);
-      await page.getByRole('button', { name: 'Choose my name' }).click();
+      await page.getByRole('button', { name: /^Choose my (\.night )?name$/ }).click();
       await page.getByLabel('Your name').fill('walker');
       await expect(page.getByText('walker.night is available')).toBeVisible({ timeout: 60_000 });
       await shot(page, `3-name-${tag}`);
@@ -105,7 +105,7 @@ for (const theme of ['light', 'dark']) {
       const { context, page, auth } = await ctx(browser, width, theme);
       await page.goto(WALK);
       await page.getByRole('button', { name: SIGN_IN_BUTTON }).click();
-      await page.getByRole('button', { name: 'Choose my name' }).click({ timeout: 60_000 });
+      await page.getByRole('button', { name: /^Choose my (\.night )?name$/ }).click({ timeout: 60_000 });
       await page.getByLabel('Your name').fill('walker');
       await expect(page.getByRole('button', { name: 'Create my Passport' })).toBeEnabled({ timeout: 120_000 });
       await page.getByRole('button', { name: 'Create my Passport' }).click();
