@@ -26,6 +26,7 @@ import {
   saveCustodyShieldedSend,
   spendFailureText,
   spendPositionMayBeWrong,
+  zswapLeafIndex,
   spendRefusalMayBePosition,
   CUSTODY_APPROVAL_WAITING,
   CUSTODY_SHIELDED_SEND_KEY,
@@ -898,5 +899,35 @@ describe('whether a refusal from the proving service is worth another position',
         positionsLeft: true,
       }),
     ).toBe(false);
+  });
+});
+
+describe('zswapLeafIndex', () => {
+  const A = 'ab'.repeat(32);
+  const dump = [
+    'State {',
+    `    coin_coms: MerkleTree(root = Some(${'00'.repeat(32)})) {`,
+    '        0..=4212: <collapsed>,',
+    `        4213: (${'03'.repeat(32)}, Some(ContractAddress(${A}))),`,
+    '        4214..=4218: <collapsed>,',
+    `        4219: (${'06'.repeat(32)}, Some(ContractAddress(${A}))),`,
+    '    },',
+    '}',
+  ].join('\n');
+
+  it('reads the index a commitment is listed at', () => {
+    expect(zswapLeafIndex(dump, '06'.repeat(32))).toBe(4219n);
+    expect(zswapLeafIndex(dump, '03'.repeat(32).toUpperCase())).toBe(4213n);
+  });
+
+  it('is null for a commitment the tree does not list, or the root', () => {
+    expect(zswapLeafIndex(dump, '07'.repeat(32))).toBeNull();
+    expect(zswapLeafIndex(dump, '00'.repeat(32))).toBeNull();
+  });
+
+  it('is null for anything that is not a commitment or a dump', () => {
+    expect(zswapLeafIndex(dump, 'not hex')).toBeNull();
+    expect(zswapLeafIndex(undefined as unknown as string, '06'.repeat(32))).toBeNull();
+    expect(zswapLeafIndex(dump, 6 as unknown as string)).toBeNull();
   });
 });

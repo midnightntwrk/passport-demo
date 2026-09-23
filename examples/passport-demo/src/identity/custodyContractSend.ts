@@ -1136,3 +1136,33 @@ export function custodyShieldedSendOutcome(record: CustodyShieldedSendRecord): s
      it is being checked — never a hedge that leaves the reader to work it out. */
   return custodyStoppedSendSentence(record, 'checking');
 }
+
+/* -------------------------------------------------------------------------- */
+/* Where a coin actually is                                                   */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The index a coin commitment sits at in an account's commitment tree, read
+ * off the tree's own dump — or null where the dump does not list it.
+ *
+ * WHY THE DUMP (2026/09/23). A payment spends the account's coin at a tree
+ * position, and the change coin of a transaction lands at one of several
+ * positions in an order no reader can predict (outputs are inserted sorted by
+ * commitment). Guessing cost a full proof on the droplet — about 45 s — before
+ * the proof server said "Public transcript input mismatch", on about half of
+ * all shielded sends. The ledger exposes the contract-filtered tree only as
+ * text, whose leaf lines read `<index>: (<commitment>, Some(ContractAddress(…)))`
+ * (checked against `ZswapOutput.newContractOwned(…).commitment` on ledger v8
+ * and v9). Anything this does not recognise is null, and the caller falls back
+ * to the candidate retry exactly as before.
+ */
+export function zswapLeafIndex(dump: string, commitment: string): bigint | null {
+  if (typeof dump !== 'string' || typeof commitment !== 'string') return null;
+  const wanted = commitment.toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(wanted)) return null;
+  const leaf = /^\s*(\d+):\s*\(([0-9a-f]{64})\s*,/gm;
+  for (const match of dump.matchAll(leaf)) {
+    if (match[2] === wanted) return BigInt(match[1]);
+  }
+  return null;
+}

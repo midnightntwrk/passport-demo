@@ -236,6 +236,13 @@ interface ChainFake {
   circuitResult?: unknown;
   /** How many spends fail the way a wrong position fails, before one lands. */
   positionFailures?: number;
+  /**
+   * Where the chain really has the coin: a spend at any other position fails
+   * as a wrong position does, and the account's tree dump lists the coin here.
+   */
+  truePosition?: bigint;
+  /** The account's commitment-tree dump, as the indexer serves it. */
+  zswapDump?: string;
   /** A failure a different position could not fix. */
   otherFailure?: string;
   /**
@@ -396,6 +403,9 @@ function harness(
     calls.push({ circuit: circuitId, args, options: callOptions });
     opened.push(contractAddress);
     if (circuitId.startsWith('withdraw_shielded')) {
+      if (chain.truePosition !== undefined && heldK1Coin(ACCOUNT, COLOUR)?.mtIndex !== chain.truePosition) {
+        return Promise.reject(new Error('could not build the merkle path for this coin'));
+      }
       if ((chain.positionFailures ?? 0) > 0) {
         chain.positionFailures = (chain.positionFailures ?? 0) - 1;
         return Promise.reject(
@@ -482,6 +492,9 @@ function harness(
           ? new Promise(() => undefined)
           : Promise.resolve({ data: 'state', serialize: () => new Uint8Array([1]) }),
       watchForTxData,
+      ...(chain.zswapDump === undefined
+        ? {}
+        : { queryZSwapAndContractState: () => Promise.resolve([{ toString: () => chain.zswapDump }]) }),
     },
     privateStateProvider: {
       setContractAddress: () => undefined,
@@ -1044,6 +1057,87 @@ describe('a spend against a position that may be the wrong one', () => {
     /* The winner is the coin's position from here, with no list beside it. */
     expect(k1CoinCandidates(ACCOUNT, COLOUR)).toEqual([]);
     expect(heldK1Coin(ACCOUNT, COLOUR)?.nonce).toBe(CHANGE_NONCE);
+  });
+
+  /* LIVE, 2026/09/23: half of all shielded sends paid a whole proof on the
+     droplet for a wrong guess. The chain's own tree says where the coin is. */
+  it('spends at the position the chain lists the coin at, first time', async () => {
+    const commitment = 'c0'.repeat(32);
+    const test = harness({
+      circuitResult: changeResult(60n),
+      truePosition: 6n,
+      zswapDump: `State {\n    coin_coms: MerkleTree(root = Some(${'00'.repeat(32)})) {\n        0..=4: <collapsed>,\n        5: (${'d1'.repeat(32)}, Some(ContractAddress(${ADDRESS}))),\n        6: (${commitment}, Some(ContractAddress(${ADDRESS}))),\n    },\n}`,
+    });
+    const { session, device, signed } = deviceFake();
+    putK1CoinCandidates(ACCOUNT, { colour: COLOUR, nonce: NONCE, value: 100n }, [5n, 6n]);
+    const asked: unknown[] = [];
+    const ledger = {
+      ZswapOutput: {
+        newContractOwned: (coin: unknown, segment: number, contract: string) => {
+          asked.push({ coin, segment, contract });
+          return { commitment };
+        },
+      },
+    };
+
+    await withdrawShieldedK1(
+      session,
+      device,
+      {
+        recipientCoinPublicKey: new Uint8Array(32),
+        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+        colourHex: COLOUR, amount: 40n },
+      undefined,
+      { ...test.deps, ledger: () => Promise.resolve(ledger as never) },
+    );
+
+    /* ONE CALL, ONE SIGNATURE: no proof was spent on the wrong position. */
+    expect(test.calls.filter((call) => call.circuit === 'withdraw_shielded_with_k256')).toHaveLength(1);
+    expect(signed).toHaveLength(1);
+    expect(asked).toEqual([{ coin: { type: COLOUR, nonce: NONCE, value: 100n }, segment: 0, contract: ADDRESS }]);
+  });
+
+  it('falls back to the candidate retry when the chain does not list the coin', async () => {
+    const test = harness({
+      circuitResult: changeResult(60n),
+      truePosition: 6n,
+      zswapDump: 'State { coin_coms: MerkleTree(root = None) { } }',
+    });
+    const { session, device } = deviceFake();
+    putK1CoinCandidates(ACCOUNT, { colour: COLOUR, nonce: NONCE, value: 100n }, [5n, 6n]);
+    const ledger = { ZswapOutput: { newContractOwned: () => ({ commitment: 'c0'.repeat(32) }) } };
+
+    await withdrawShieldedK1(
+      session,
+      device,
+      {
+        recipientCoinPublicKey: new Uint8Array(32),
+        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+        colourHex: COLOUR, amount: 40n },
+      undefined,
+      { ...test.deps, ledger: () => Promise.resolve(ledger as never) },
+    );
+
+    expect(test.calls.filter((call) => call.circuit === 'withdraw_shielded_with_k256')).toHaveLength(2);
+  });
+
+  it('falls back to the candidate retry when the lookup itself fails', async () => {
+    const test = harness({ circuitResult: changeResult(60n), truePosition: 6n, zswapDump: 'unused' });
+    const { session, device } = deviceFake();
+    putK1CoinCandidates(ACCOUNT, { colour: COLOUR, nonce: NONCE, value: 100n }, [5n, 6n]);
+
+    await withdrawShieldedK1(
+      session,
+      device,
+      {
+        recipientCoinPublicKey: new Uint8Array(32),
+        recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+        colourHex: COLOUR, amount: 40n },
+      undefined,
+      { ...test.deps, ledger: () => Promise.reject(new Error('the ledger did not load')) },
+    );
+
+    expect(test.calls.filter((call) => call.circuit === 'withdraw_shielded_with_k256')).toHaveLength(2);
   });
 
   it('does not retry a failure a different position could not fix', async () => {

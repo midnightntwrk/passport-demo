@@ -178,6 +178,7 @@ import {
   rememberK1EncSecretKey,
   renameK1AwaitingTx,
   restartK1CoinCandidates,
+  pinK1CoinPosition,
   settleK1AwaitingCoinByChainHash,
   settleK1Coin,
   undoK1ChangeCoin,
@@ -194,6 +195,7 @@ import {
   spendFailureText,
   spendPositionMayBeWrong,
   spendRefusalMayBePosition,
+  zswapLeafIndex,
   type CustodyChangeCoin,
 } from './custodyContractSend.js';
 import { custodyEncKeyPair } from './custodyInbox.js';
@@ -2550,6 +2552,9 @@ async function spendWithAccount(
   for (;;) {
     phase = 'building';
     proved = false;
+    /* THE CHAIN SAYS WHERE THE COIN IS, before anything is proved (2026/09/23).
+       Only on a first attempt: a retry is already walking the candidates. */
+    if (attempt === 0) await locateHeldCoin(deps, providers, account, colour, address);
     const held = heldK1Coin(account, colour);
     if (held === null) {
       throw new Error('There is nothing of that kind in this Passport to send.');
@@ -2824,6 +2829,74 @@ async function spendWithAccount(
         `[account-custody] retrying the spend against candidate position ${attempt} of this coin`,
       );
     }
+  }
+}
+
+/** How long the position lookup may take before the spend goes ahead without it. */
+export const CUSTODY_LOCATE_WAIT_MS = 8_000;
+
+/**
+ * Move the held coin to the tree position the chain has it at, where the chain
+ * can say.
+ *
+ * WHY (live, 2026/09/23). The change coin of a payment lands at one of two or
+ * more positions and the order is not predictable, so the stored position was
+ * a guess, and a wrong guess cost a whole proof on the droplet (about 45 s)
+ * before the proof server declined it with "Public transcript input mismatch".
+ * That was half of all shielded sends. The account's commitment tree, as the
+ * indexer serves it, lists each of the account's coins by commitment and
+ * index, and the coin's commitment is computable here.
+ *
+ * NEVER A NEW FAILURE. Any error, a slow answer, or a coin not yet listed
+ * leaves the store exactly as it was, and the candidate retry does what it
+ * always did.
+ */
+async function locateHeldCoin(
+  deps: CustodyDeps,
+  providers: unknown,
+  account: K1Account,
+  colour: string,
+  address: string,
+): Promise<void> {
+  try {
+    const held = heldK1Coin(account, colour);
+    if (held === null) return;
+    const reader = (providers as { publicDataProvider?: unknown }).publicDataProvider as
+      | { queryZSwapAndContractState?(address: string): Promise<readonly unknown[] | null> }
+      | undefined;
+    if (typeof reader?.queryZSwapAndContractState !== 'function') return;
+    const query = reader.queryZSwapAndContractState.bind(reader);
+    const lookup = (async (): Promise<bigint | null> => {
+      const ledger = (await deps.ledger()) as unknown as {
+        ZswapOutput?: {
+          newContractOwned(
+            coin: { type: string; nonce: string; value: bigint },
+            segment: number,
+            contract: string,
+          ): { commitment: string };
+        };
+      };
+      if (ledger.ZswapOutput === undefined) return null;
+      const states = await query(address);
+      const zswap = states?.[0] as { toString(compact?: boolean): string } | undefined;
+      if (zswap === undefined || zswap === null) return null;
+      const commitment = ledger.ZswapOutput.newContractOwned(
+        { type: held.colour, nonce: held.nonce, value: held.value },
+        0,
+        address,
+      ).commitment;
+      return zswapLeafIndex(zswap.toString(false), commitment);
+    })();
+    const waited = await withinCustodyBound(lookup, CUSTODY_LOCATE_WAIT_MS);
+    if (waited.kind === 'timeout' || waited.value === null) return;
+    const found = waited.value;
+    if (found === held.mtIndex) return;
+    console.info(
+      `[account-custody] the chain has this coin at position ${found}, not ${held.mtIndex}; using that`,
+    );
+    pinK1CoinPosition(account, colour, found);
+  } catch (cause) {
+    console.warn('[account-custody] could not read where this coin is; trying the stored position', cause);
   }
 }
 

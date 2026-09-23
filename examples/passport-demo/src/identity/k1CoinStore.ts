@@ -1898,6 +1898,32 @@ export function advanceK1CoinCandidate(account: K1Account, colour: string): K1He
   return coinFromStoredRow(draft.coins[wanted]);
 }
 
+/**
+ * Put the coin at the position the chain says it is at (2026/09/23).
+ *
+ * The found position becomes the head, and any other candidates stay behind
+ * it, so a retry still has somewhere to go if the reading was ever wrong.
+ * Returns the coin as it now stands, or null where there is no such coin.
+ */
+export function pinK1CoinPosition(
+  account: K1Account,
+  colour: string,
+  mtIndex: bigint,
+): K1HeldCoin | null {
+  const target = requireAccount(account);
+  const wanted = requireColour(colour);
+  const draft = draftOf(loadK1CoinStore(target));
+  if (!Object.hasOwn(draft.coins, wanted)) return null;
+  const found = mtIndex.toString();
+  const list = candidateListOf(draft, wanted);
+  draft.coins[wanted] = { ...draft.coins[wanted], mtIndex: found };
+  if (list.length > 0) {
+    draft.mtIndexCandidates[wanted] = [found, ...list.filter((position) => position !== found)];
+  }
+  saveDraft(target, draft);
+  return coinFromStoredRow(draft.coins[wanted]);
+}
+
 /* -------------------------------------------------------------------------- */
 /* What is still worth trying, asked WITHOUT writing anything                 */
 /* -------------------------------------------------------------------------- */

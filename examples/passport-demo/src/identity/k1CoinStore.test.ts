@@ -35,6 +35,7 @@ import {
   loadK1CoinStore,
   putK1Coin,
   putK1CoinCandidates,
+  pinK1CoinPosition,
   queuedK1Coins,
   k1UnreadChanges,
   renameK1AwaitingTx,
@@ -1990,4 +1991,23 @@ describe('whether a colour has a position left to try', () => {
     expect(k1CoinPositionsLeft({ network: '', address: '' }, MUSD)).toBe(false);
   });
 
+});
+
+describe('pinK1CoinPosition', () => {
+  it('puts the coin at the found position, with the other candidates behind it', () => {
+    putK1CoinCandidates(ALICE, { colour: MUSD, nonce: NONCE, value: 60n }, [5n, 6n]);
+    expect(pinK1CoinPosition(ALICE, MUSD, 6n)?.mtIndex).toBe(6n);
+    expect(heldK1Coin(ALICE, MUSD)?.mtIndex).toBe(6n);
+    expect(k1CoinCandidates(ALICE, MUSD)).toEqual([6n, 5n]);
+  });
+
+  it('moves a settled coin with no list, and leaves it with none', () => {
+    putK1Coin(ALICE, coin({ colour: MUSD, mtIndex: 3n }));
+    expect(pinK1CoinPosition(ALICE, MUSD, 4n)?.mtIndex).toBe(4n);
+    expect(k1CoinCandidates(ALICE, MUSD)).toEqual([]);
+  });
+
+  it('is null for a colour the account holds nothing of', () => {
+    expect(pinK1CoinPosition(ALICE, MUSD, 4n)).toBeNull();
+  });
 });
