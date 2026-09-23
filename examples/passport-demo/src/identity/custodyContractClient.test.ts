@@ -1372,7 +1372,20 @@ describe('the private state a connection is opened with', () => {
   it('reads no result out of a call that returned none', async () => {
     const { test, session, device } = await readyPassport();
     test.chain.circuitResult = undefined;
-    const result = await appendInboxK1(session, device, new Uint8Array(192), undefined, test.deps);
+    /* Through `k1Call`'s own unbounded road, which is the one that reads a
+       circuit result — `appendInboxK1` is bounded now and reads none. */
+    const result = await k1Call(
+      session,
+      device,
+      {
+        operation: 'append_inbox',
+        args: [new Uint8Array(192)],
+        challenge: (pure, context, pk) =>
+          pure.challenge_append_inbox_with_k256({ bytes: context.contractAddress }, pk, new Uint8Array(192), context.authNonce),
+      },
+      undefined,
+      test.deps,
+    );
     expect(result.result).toBeUndefined();
   });
 });

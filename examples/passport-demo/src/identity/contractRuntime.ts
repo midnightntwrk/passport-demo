@@ -1439,7 +1439,13 @@ export async function resolveTxOnChainOnce(
   indexerHttpUrl: string,
   identifier: string,
 ): Promise<boolean | null> {
-  const query = `{ transactions(offset: { identifier: "${identifier}" }) { hash } }`;
+  /* A 64-hex name is the chain's own hash — a row renamed once the chain
+     answered — and is asked for as one; anything else is midnight-js's
+     identifier. */
+  const offset = /^[0-9a-f]{64}$/i.test(identifier)
+    ? `{ hash: "${identifier}" }`
+    : `{ identifier: "${identifier}" }`;
+  const query = `{ transactions(offset: ${offset}) { hash } }`;
   try {
     const response = await fetch(indexerHttpUrl, {
       method: 'POST',
@@ -1456,6 +1462,53 @@ export async function resolveTxOnChainOnce(
     const rows = body.data?.transactions;
     if (!Array.isArray(rows)) return null;
     return rows.length > 0;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * What the chain made of one transaction, by identifier or by hash
+ * (2026/09/22): `success` it ran (wholly or in part), `failure` the chain
+ * refused it, `absent` the indexer ANSWERED and holds no such transaction —
+ * or null when it could not be asked. With the chain's hash when it has one.
+ *
+ * The one question a payment whose wait ran out can put to somebody other than
+ * the socket that lost it. Ten seconds, like every other single ask here.
+ */
+export async function resolveTxOutcomeOnce(
+  indexerHttpUrl: string,
+  txId: string,
+): Promise<{ outcome: 'success' | 'failure' | 'absent'; hash: string | null } | null> {
+  const offset = /^[0-9a-f]{64}$/i.test(txId) ? `{ hash: "${txId}" }` : `{ identifier: "${txId}" }`;
+  const query = `{ transactions(offset: ${offset}) { hash ... on RegularTransaction { transactionResult { status } } } }`;
+  try {
+    const response = await fetch(indexerHttpUrl, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ query }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!response.ok) return null;
+    const body = (await response.json()) as {
+      data?: {
+        transactions?: Array<{ hash?: string; transactionResult?: { status?: string } | null }> | null;
+      };
+      errors?: unknown[];
+    };
+    if (Array.isArray(body.errors) && body.errors.length > 0) return null;
+    const rows = body.data?.transactions;
+    if (!Array.isArray(rows)) return null;
+    const row = rows[0];
+    if (row === undefined) return { outcome: 'absent', hash: null };
+    const status = row.transactionResult?.status ?? '';
+    const hash = typeof row.hash === 'string' && row.hash.length > 0 ? row.hash : null;
+    /* ONLY A WHOLE SUCCESS IS ONE, the rule `SucceedEntirely` keeps for the
+       finalised data: a partial success is a call that did not run. No status
+       at all is no answer. */
+    if (status === 'SUCCESS') return { outcome: 'success', hash };
+    if (status.length > 0) return { outcome: 'failure', hash };
+    return null;
   } catch {
     return null;
   }

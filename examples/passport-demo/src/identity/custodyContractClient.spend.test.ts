@@ -58,7 +58,9 @@ import {
   loadK1CoinStore,
   putK1Coin,
   putK1CoinCandidates,
+  pendingK1Spends,
   rememberK1ChangeCoin,
+  undoneK1Spends,
   type K1Account,
 } from './k1CoinStore.js';
 import {
@@ -268,6 +270,32 @@ interface ChainFake {
    * asked about again — `settleK1AwaitingCoinByChainHash`'s second chance.
    */
   chainHashLater?: (txId: string) => string | null;
+  /* 2026/09/22 — the bounds, the booking at balance, and the node's refusals. */
+  /** A wallet provider is in the set, so the booking happens at balance. */
+  withWallet?: boolean;
+  /** Thrown by the submit as it is, rather than as an `Error` from `submitFailure`. */
+  submitError?: unknown;
+  /** The first N submits are refused because the account moved (`Custom error: 104`). */
+  races?: number;
+  /** The submit never answers, after balancing. */
+  submitHangs?: boolean;
+  /** Balancing waits on this before it answers. */
+  balanceGate?: Promise<void>;
+  /** Reading the account never answers. */
+  stateHangs?: boolean;
+  /** What the indexer says of the transaction when asked after the wait. */
+  outcome?: { outcome: 'success' | 'failure' | 'absent'; hash: string | null } | null;
+}
+
+/** The node's refusal as it really arrives: four layers deep (live, 2026/09/22). */
+function nodeRefusal(code: string): Error {
+  const rpc = Object.assign(new Error('1010: Invalid Transaction'), { name: 'RpcError', data: `Custom error: ${code}` });
+  const fiber = new Error('Transaction submission error');
+  fiber.name = '(FiberFailure) SubmissionError';
+  Object.defineProperty(fiber, Symbol.for('effect/Runtime/FiberFailure/Cause'), {
+    value: { _tag: 'Fail', error: { _tag: 'SubmissionError', message: 'Transaction submission error', cause: rpc } },
+  });
+  return fiber;
 }
 
 /** An unproven CALL, as the fake `createUnprovenCallTx` hands it back. */
@@ -398,11 +426,24 @@ function harness(
       proofProvider?: { proveTx(tx: unknown): Promise<unknown> };
     }).proofProvider;
     if (prover) await prover.proveTx(unprovenTx);
+    /* BALANCED, WHEN THERE IS A WALLET: the step the booking now hangs on. */
+    const wallet = (submitProviders as {
+      walletProvider?: { balanceTx(tx: unknown): Promise<unknown> };
+    }).walletProvider;
+    let balancedId: string | null = null;
+    if (wallet) balancedId = ((await wallet.balanceTx(unprovenTx)) as { id: string }).id;
     grafts.push(unprovenTx.grafted.length);
     submitted += 1;
+    if ((chain.races ?? 0) > 0) {
+      chain.races = (chain.races ?? 0) - 1;
+      throw nodeRefusal('104');
+    }
+    if (chain.submitError !== undefined) throw chain.submitError as Error;
     if (chain.submitFailure !== undefined) throw new Error(chain.submitFailure);
-    return `id-${submitted}`;
+    if (chain.submitHangs === true) return new Promise<string>(() => undefined);
+    return balancedId ?? `id-${submitted}`;
   };
+  let balanced = 0;
 
   /* THE CHAIN'S ANSWER, ASKED FOR SEPARATELY. The status is part of it, and the
      real one carries it whether the chain took the transaction or refused it: a
@@ -423,9 +464,22 @@ function harness(
     watchForTxData(await submitTxAsync(submitProviders, submitOptions));
 
   const providers: Record<string, unknown> = {
+    ...(chain.withWallet === true
+      ? {
+          walletProvider: {
+            balanceTx: async (tx: unknown) => {
+              if (chain.balanceGate) await chain.balanceGate;
+              balanced += 1;
+              return { id: `bal-${balanced}`, tx };
+            },
+          },
+        }
+      : {}),
     publicDataProvider: {
       queryContractState: () =>
-        Promise.resolve({ data: 'state', serialize: () => new Uint8Array([1]) }),
+        chain.stateHangs === true
+          ? new Promise(() => undefined)
+          : Promise.resolve({ data: 'state', serialize: () => new Uint8Array([1]) }),
       watchForTxData,
     },
     privateStateProvider: {
@@ -496,6 +550,8 @@ function harness(
       now: () => 1_700_000_000_000,
       sleep: () => Promise.resolve(undefined),
       submitWaitMs: 5,
+      identifierOf: (balancedTx: unknown) => (balancedTx as { id?: string }).id ?? null,
+      txOutcome: () => Promise.resolve(chain.outcome ?? null),
     },
   };
 }
@@ -1465,3 +1521,236 @@ describe('held_coin, read out of the private state the connection serves', () =>
   });
 });
 
+
+
+/* -------------------------------------------------------------------------- */
+/* 2026/09/22 — never an unbounded wait, and a booking the chain can undo      */
+/* -------------------------------------------------------------------------- */
+
+describe('a payment that cannot wait for ever', () => {
+  const NOT_SENT = "That payment didn't go through. Nothing left your Passport.";
+  const request = {
+    recipientCoinPublicKey: new Uint8Array(32).fill(0x11),
+    recipientEncryptionPublicKey: new Uint8Array(32).fill(0xee),
+    colourHex: COLOUR,
+    amount: 40n,
+  };
+
+  function hold(): void {
+    putK1Coin(ACCOUNT, { colour: COLOUR, nonce: NONCE, value: 100n, mtIndex: 5n });
+  }
+
+  function send(test: SpendHarness, onPhase?: Parameters<typeof withdrawShieldedK1>[3]) {
+    const { session, device } = deviceFake();
+    return withdrawShieldedK1(session, device, request, onPhase, test.deps);
+  }
+
+  it('books the payment the moment it is balanced, before the node is asked anything', async () => {
+    const test = harness({ circuitResult: changeResult(60n), withWallet: true });
+    hold();
+    const phases: { step: string; txId?: string }[] = [];
+    const result = await send(test, (phase) => phases.push({ step: phase.step, txId: phase.txId }));
+    /* The record names the transaction at `submit`, while it is still being
+       handed over — a tab closed then still knows which one it is owed. */
+    expect(phases).toContainEqual({ step: 'submit', txId: 'bal-1' });
+    expect(phases).toContainEqual({ step: 'confirm', txId: 'bal-1' });
+    expect(test.watched).toEqual(['bal-1']);
+    /* Landed: the booking is a fact, and nothing is left to take back. */
+    expect(pendingK1Spends(ACCOUNT)).toEqual([]);
+    expect(result.change).toEqual(expect.objectContaining({ outcome: 'change', value: 60n }));
+  });
+
+  it('is answered within the bound when reading the account never comes back — and nothing was sent', async () => {
+    const test = harness({ circuitResult: changeResult(60n), withWallet: true, stateHangs: true });
+    test.deps.prepareWaitMs = 5;
+    hold();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    await expect(send(test)).rejects.toThrow(NOT_SENT);
+    expect(test.grafts).toEqual([]);
+    expect(heldK1Coin(ACCOUNT, COLOUR)?.nonce).toBe(NONCE);
+    expect(pendingK1Spends(ACCOUNT)).toEqual([]);
+    warn.mockRestore();
+  });
+
+  it('is answered within the bound when the connection never opens', async () => {
+    const test = harness({ circuitResult: changeResult(60n) });
+    test.deps.prepareWaitMs = 5;
+    test.deps.wallet = () => new Promise(() => undefined);
+    hold();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    await expect(send(test)).rejects.toThrow(NOT_SENT);
+    warn.mockRestore();
+  });
+
+  it('abandons an attempt not balanced within the bound, and can never hand it over afterwards', async () => {
+    const gate = hanging<void>();
+    const test = harness({ circuitResult: changeResult(60n), withWallet: true, balanceGate: gate.promise });
+    test.deps.handoverWaitMs = 5;
+    hold();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    await expect(send(test)).rejects.toThrow(NOT_SENT);
+    /* The balance answers late; the hook refuses it, so nothing is submitted. */
+    gate.release(undefined);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(test.grafts).toEqual([]);
+    expect(heldK1Coin(ACCOUNT, COLOUR)?.nonce).toBe(NONCE);
+    expect(pendingK1Spends(ACCOUNT)).toEqual([]);
+    warn.mockRestore();
+  });
+
+  it('builds it again when the node refused it because the account moved, and it lands', async () => {
+    const test = harness({ circuitResult: changeResult(60n), withWallet: true, races: 1 });
+    hold();
+    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    const result = await send(test);
+    expect(test.grafts).toHaveLength(2);
+    expect(test.watched).toEqual(['bal-2']);
+    expect(result.txHash).not.toBeNull();
+    expect(pendingK1Spends(ACCOUNT)).toEqual([]);
+    expect(isK1NonceSpent(ACCOUNT, NONCE)).toBe(true);
+    info.mockRestore();
+  });
+
+  it('says it did not go through, and gives the coin back, when the account keeps moving', async () => {
+    const test = harness({ circuitResult: changeResult(60n), withWallet: true, races: 9 });
+    hold();
+    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    await expect(send(test)).rejects.toThrow(NOT_SENT);
+    expect(test.grafts).toHaveLength(3);
+    expect(heldK1Coin(ACCOUNT, COLOUR)?.nonce).toBe(NONCE);
+    expect(isK1NonceSpent(ACCOUNT, NONCE)).toBe(false);
+    expect(awaitingK1Coins(ACCOUNT)).toEqual([]);
+    expect(undoneK1Spends(ACCOUNT)).toEqual([]);
+    info.mockRestore();
+    warn.mockRestore();
+  });
+
+  it('says it did not go through at once for any other refusal by the node', async () => {
+    const test = harness({ circuitResult: changeResult(60n), withWallet: true, submitError: nodeRefusal('231') });
+    hold();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    await expect(send(test)).rejects.toThrow(NOT_SENT);
+    expect(test.grafts).toHaveLength(1);
+    expect(heldK1Coin(ACCOUNT, COLOUR)?.nonce).toBe(NONCE);
+    warn.mockRestore();
+  });
+
+  it('asks the chain, not the socket, when the submit failed after the booking', async () => {
+    const test = harness({
+      circuitResult: changeResult(60n),
+      withWallet: true,
+      submitError: new Error('WebSocket is not connected'),
+    });
+    hold();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const result = await send(test);
+    expect(test.watched).toEqual(['bal-1']);
+    expect(result.txHash).not.toBeNull();
+    warn.mockRestore();
+  });
+
+  it('asks the chain, not the socket, when the submit never answers after the booking', async () => {
+    const test = harness({ circuitResult: changeResult(60n), withWallet: true, submitHangs: true });
+    test.deps.handoverWaitMs = 5;
+    hold();
+    const result = await send(test);
+    expect(test.watched).toEqual(['bal-1']);
+    expect(result.txHash).not.toBeNull();
+  });
+
+  it('sets the booking aside — not forgotten — when the chain has no such transaction after the wait', async () => {
+    const test = harness({
+      circuitResult: changeResult(60n),
+      withWallet: true,
+      neverLands: true,
+      outcome: { outcome: 'absent', hash: null },
+    });
+    hold();
+    const released: string[] = [];
+    test.deps.releaseWallet = (user) => released.push(user);
+    await expect(send(test)).rejects.toThrow(NOT_SENT);
+    expect(heldK1Coin(ACCOUNT, COLOUR)?.nonce).toBe(NONCE);
+    expect(awaitingK1Coins(ACCOUNT)).toEqual([]);
+    expect(undoneK1Spends(ACCOUNT).map((row) => row.txId)).toEqual(['bal-1']);
+    expect(released).toHaveLength(1);
+  });
+
+  it('reports it sent when the chain holds it though the wait for it ran out', async () => {
+    const test = harness({
+      circuitResult: changeResult(60n),
+      withWallet: true,
+      neverLands: true,
+      nonceAfter: 4n,
+      outcome: { outcome: 'success', hash: 'f0'.repeat(32) },
+    });
+    hold();
+    const result = await send(test);
+    expect(result.txHash).toBe('f0'.repeat(32));
+    expect(pendingK1Spends(ACCOUNT)).toEqual([]);
+    expect(isK1NonceSpent(ACCOUNT, NONCE)).toBe(true);
+  });
+
+  it('reports it sent when the chain holds it but named no hash', async () => {
+    const test = harness({
+      circuitResult: changeResult(60n),
+      withWallet: true,
+      neverLands: true,
+      nonceAfter: 4n,
+      outcome: { outcome: 'success', hash: null },
+    });
+    hold();
+    const result = await send(test);
+    expect(result.txHash).toBe(chainHashOf('bal-1'));
+  });
+
+  it('gives the coin back when the chain says it refused the payment', async () => {
+    const test = harness({
+      circuitResult: changeResult(60n),
+      withWallet: true,
+      neverLands: true,
+      outcome: { outcome: 'failure', hash: null },
+    });
+    hold();
+    await expect(send(test)).rejects.toThrow('That payment did not go through, and nothing left your Passport.');
+    expect(heldK1Coin(ACCOUNT, COLOUR)?.nonce).toBe(NONCE);
+    expect(undoneK1Spends(ACCOUNT)).toEqual([]);
+  });
+
+  it('keeps the booking and says so when nothing can decide it', async () => {
+    const test = harness({ circuitResult: changeResult(60n), withWallet: true, neverLands: true, nonceAfter: 4n });
+    hold();
+    await expect(send(test)).rejects.toThrow(/could not confirm/);
+    expect(pendingK1Spends(ACCOUNT).map((row) => row.txId)).toEqual(['bal-1']);
+  });
+
+  it('asks the indexer through its own reader when none is injected, and survives it throwing', async () => {
+    const test = harness({ circuitResult: changeResult(60n), withWallet: true, neverLands: true, nonceAfter: 4n });
+    test.deps.txOutcome = () => Promise.reject(new Error('indexer down'));
+    hold();
+    await expect(send(test)).rejects.toThrow(/could not confirm/);
+  });
+
+  it('books on the submit’s own answer when the balanced transaction cannot be named', async () => {
+    const test = harness({ circuitResult: changeResult(60n), withWallet: true });
+    test.deps.identifierOf = () => null;
+    hold();
+    const result = await send(test);
+    expect(test.watched).toEqual(['bal-1']);
+    expect(result.txHash).not.toBeNull();
+  });
+
+  it('takes this account through the lock every call on it shares', async () => {
+    const test = harness({ circuitResult: changeResult(60n) });
+    const keys: string[] = [];
+    test.deps.accountLock = {
+      run: (account, _wait, work) => {
+        keys.push(account);
+        return work();
+      },
+    };
+    hold();
+    await send(test);
+    expect(keys).toEqual([`stagenet::${ADDRESS}`]);
+  });
+});

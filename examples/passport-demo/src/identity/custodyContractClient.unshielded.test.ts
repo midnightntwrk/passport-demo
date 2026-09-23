@@ -13,7 +13,7 @@
  * secp256k1 signature are real; the chain is injected through `CustodyDeps`.
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { secp256k1 } from '@noble/curves/secp256k1.js';
 
 import {
@@ -447,5 +447,67 @@ describe('a NIGHT payment the chain does not record', () => {
       chain: 'refused',
     });
     await expect(pay(run, signer)).rejects.toThrow('That payment did not go through');
+  });
+});
+
+describe('a NIGHT payment the node refuses (2026/09/22)', () => {
+  function refusal(code: string): Error {
+    const rpc = Object.assign(new Error('1010: Invalid Transaction'), { data: `Custom error: ${code}` });
+    return Object.assign(new Error('Transaction submission error'), { cause: { _tag: 'SubmissionError', cause: rpc } });
+  }
+
+  function run(submits: (() => Promise<string>)[]) {
+    const pure = pureFake();
+    const signer = jubjubFake();
+    const test = harness({ user: 'jubjub:1092', members: [entryFor(pure, 'jj', signer.pk, 0n)] });
+    let submitted = 0;
+    const contracts = test.deps.contracts as unknown as () => Promise<Record<string, unknown>>;
+    test.deps.contracts = async () => ({
+      ...(await contracts()),
+      submitTxAsync: () => {
+        const next = submits[Math.min(submitted, submits.length - 1)];
+        submitted += 1;
+        return next();
+      },
+    }) as never;
+    const pay = () =>
+      withdrawUnshieldedK1(null, signer, { recipient: RECIPIENT, colourHex: NIGHT, amount: 1n }, undefined, test.deps);
+    return { pay, submitted: () => submitted };
+  }
+
+  it('is built again when the account moved under it, and lands', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    const drill = run([() => Promise.reject(refusal('104')), () => Promise.resolve('tx-2')]);
+    await expect(drill.pay()).resolves.toEqual(expect.objectContaining({ txHash: 'ab'.repeat(32) }));
+    expect(drill.submitted()).toBe(2);
+    info.mockRestore();
+  });
+
+  it('says it did not go through when the account keeps moving, or for any other refusal', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const moving = run([() => Promise.reject(refusal('104'))]);
+    await expect(moving.pay()).rejects.toThrow("That payment didn't go through. Nothing left your Passport.");
+    expect(moving.submitted()).toBe(3);
+    const refused = run([() => Promise.reject(refusal('231'))]);
+    await expect(refused.pay()).rejects.toThrow("That payment didn't go through. Nothing left your Passport.");
+    expect(refused.submitted()).toBe(1);
+    const socket = run([() => Promise.reject(new Error('WebSocket is not connected'))]);
+    await expect(socket.pay()).rejects.toThrow('WebSocket is not connected');
+    info.mockRestore();
+    warn.mockRestore();
+  });
+
+  it('is answered within the bound when the account cannot be read before it is sent', async () => {
+    const pure = pureFake();
+    const signer = jubjubFake();
+    const test = harness({ user: 'jubjub:1092', members: [entryFor(pure, 'jj', signer.pk, 0n)] });
+    test.deps.prepareWaitMs = 5;
+    test.deps.contractModule = () => new Promise(() => undefined);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    await expect(
+      withdrawUnshieldedK1(null, signer, { recipient: RECIPIENT, colourHex: NIGHT, amount: 1n }, undefined, test.deps),
+    ).rejects.toThrow("That payment didn't go through. Nothing left your Passport.");
+    warn.mockRestore();
   });
 });
