@@ -160,3 +160,16 @@
   .mnwl-primary { transition: none; }
   .mnwl-primary:hover { transform: none; }
 }
+
+/* The custody road's welcome sits inside the onboarding shell, whose wider
+   screens are capped at 680px; the four cards were designed at 1040px. */
+.mnob-screen.mnwl-screen .mnwl-bar,
+.mnob-screen.mnwl-screen .mnwl-body {
+  width: min(100% - 40px, 1040px);
+}
+.mnob-screen.mnwl-screen .mnwl-lede { max-width: 550px; }
+
+@media (max-width: 520px) {
+  .mnob-screen.mnwl-screen .mnwl-bar,
+  .mnob-screen.mnwl-screen .mnwl-body { width: min(100% - 32px, 440px); }
+}
