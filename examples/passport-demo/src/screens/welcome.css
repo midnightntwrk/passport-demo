@@ -1,0 +1,162 @@
+/* The one-time welcome screen. Scoped so the name and recovery steps retain
+   their own, denser form layout. */
+.mnwl-screen {
+  --mnwl-art-surface: #e4e9ff;
+  --mnwl-art-border: #dce3ff;
+}
+
+:root[data-theme='dark'] .mnwl-screen {
+  --mnwl-art-surface: #242a43;
+  --mnwl-art-border: #323b61;
+}
+
+.mnwl-bar,
+.mnwl-body {
+  width: min(100% - 40px, 1040px);
+}
+
+.mnwl-body {
+  display: block;
+  padding-top: clamp(32px, 6vh, 72px);
+  padding-bottom: max(36px, env(safe-area-inset-bottom));
+}
+
+.mnwl-intro {
+  max-width: 700px;
+}
+
+.mnwl-title {
+  max-width: 700px;
+  font-size: clamp(38px, 5.5vw, 68px);
+  letter-spacing: -.045em;
+  line-height: 1.02;
+}
+
+.mnwl-lede {
+  max-width: 550px;
+  margin-top: 16px;
+  font-size: clamp(15px, 1.4vw, 17px);
+  line-height: 1.55;
+}
+
+.mnwl-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+  padding: 0;
+  margin: clamp(30px, 5vh, 56px) 0 0;
+  list-style: none;
+}
+
+.mnwl-card {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--mn-border-hairline);
+  border-radius: 22px;
+  background: var(--mn-surface-card);
+  box-shadow: var(--mn-shadow-sm);
+}
+
+.mnwl-art {
+  height: clamp(130px, 14vw, 176px);
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  background: var(--mnwl-art-surface);
+  border-bottom: 1px solid var(--mnwl-art-border);
+}
+
+.mnwl-art img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  padding: 4px;
+  filter: drop-shadow(0 12px 14px rgba(14, 22, 85, .12));
+}
+
+.mnwl-card-copy {
+  padding: 20px 20px 24px;
+}
+
+.mnwl-card h2 {
+  margin: 0;
+  color: var(--mn-text-primary);
+  font-size: 17px;
+  font-weight: 750;
+  letter-spacing: -.025em;
+  line-height: 1.2;
+}
+
+.mnwl-card p {
+  margin: 8px 0 0;
+  color: var(--mn-text-secondary);
+  font-size: 13px;
+  line-height: 1.48;
+}
+
+.mnwl-actions {
+  max-width: 380px;
+  margin-top: clamp(30px, 5vh, 52px);
+}
+
+.mnwl-primary {
+  width: 100%;
+  min-height: 58px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 0 23px;
+  border: 0;
+  border-radius: 16px;
+  color: #fff;
+  background: var(--mn-accent);
+  box-shadow: var(--mn-shadow-accent);
+  font: 700 15px var(--mn-font-body);
+  letter-spacing: -.01em;
+  cursor: pointer;
+  transition: background .18s ease, transform .18s ease, box-shadow .18s ease;
+}
+
+.mnwl-primary:hover {
+  background: var(--mn-accent-hover);
+  transform: translateY(-2px);
+}
+
+.mnwl-primary:active { transform: translateY(0); }
+.mnwl-primary:focus-visible {
+  outline: 2px solid var(--mn-focus-ring);
+  outline-offset: 4px;
+}
+
+@media (max-width: 860px) {
+  .mnwl-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .mnwl-art { height: 158px; }
+}
+
+@media (max-width: 520px) {
+  .mnwl-bar,
+  .mnwl-body { width: min(100% - 32px, 440px); }
+  .mnwl-body { padding-top: 30px; }
+  .mnwl-title { font-size: clamp(36px, 10vw, 48px); }
+  .mnwl-lede { margin-top: 12px; font-size: 14px; }
+  .mnwl-grid { gap: 10px; margin-top: 24px; }
+  .mnwl-card { border-radius: 16px; }
+  .mnwl-art { height: clamp(100px, 30vw, 136px); }
+  .mnwl-card-copy { padding: 13px 13px 16px; }
+  .mnwl-card h2 { font-size: 14px; }
+  .mnwl-card p { margin-top: 6px; font-size: 12.5px; line-height: 1.43; }
+  .mnwl-actions { max-width: none; margin-top: 24px; }
+}
+
+@media (max-width: 350px) {
+  .mnwl-grid { grid-template-columns: 1fr; }
+  .mnwl-card { display: grid; grid-template-columns: 108px minmax(0, 1fr); }
+  .mnwl-art { height: 100%; min-height: 112px; border-bottom: 0; border-right: 1px solid var(--mnwl-art-border); }
+  .mnwl-card-copy { align-self: center; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mnwl-primary { transition: none; }
+  .mnwl-primary:hover { transform: none; }
+}
