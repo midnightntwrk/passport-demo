@@ -979,12 +979,8 @@ test.describe('a Passport opened again after a payment', () => {
  * picker offers them in (the order is the sheet's to change).
  */
 async function chooseAsset(page: Page, symbol: string): Promise<void> {
-  const offered = await sendPicker(page)
-    .locator('option')
-    .evaluateAll((nodes) =>
-      (nodes as HTMLOptionElement[]).map((node) => ({ value: node.value, label: node.textContent ?? '' })),
-    );
-  const wanted = offered.find((option) => option.label.trim().startsWith(symbol));
-  expect(wanted, `the picker offers ${symbol}`).toBeDefined();
-  await sendPicker(page).selectOption(wanted!.value);
+  /* Waited for, as an index-based choice waits: the picker fills from a read. */
+  const option = sendPicker(page).locator('option').filter({ hasText: new RegExp(`^\\s*${symbol}\\b`) });
+  await expect(option.first()).toBeAttached({ timeout: 30_000 });
+  await sendPicker(page).selectOption({ label: ((await option.first().textContent()) ?? '').trim() });
 }
