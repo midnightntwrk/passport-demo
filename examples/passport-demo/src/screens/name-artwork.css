@@ -58,3 +58,11 @@
   .mnob-screen.mndyn:not(.mnob-landing) .mnob-stage.mndyn-name-stage { margin-top: 26px; }
   .mndyn-name-stage .mnob-primary { margin-top: 18px; }
 }
+
+/* Keep the header's edges on the name step's wider body. */
+.mnob-screen.mndyn:not(.mnob-landing):has(.mndyn-name-body) .mnob-bar {
+  width: min(100% - 48px, 720px);
+}
+@media (max-width: 760px) {
+  .mnob-screen.mndyn:not(.mnob-landing):has(.mndyn-name-body) .mnob-bar { width: min(100% - 40px, 540px); }
+}
