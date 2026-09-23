@@ -413,6 +413,67 @@ export function custodyStateRace(cause: unknown): boolean {
   return /Custom error:\s*104\b/.test(custodyFailureChainText(cause));
 }
 
+/**
+ * Whether the node refused because the fee's DUST coin was spent twice.
+ *
+ * `1010: Invalid Transaction: Custom error: 196` is `DustDoubleSpend`
+ * (midnight-node, `ledger/src/ledger_9/types.rs`). LIVE ON THE DEV SITE,
+ * 2026/09/23 17:44 UTC: one Passport's background wave and a second
+ * Passport's activation were balanced by the sponsor at the same moment and
+ * both paid from the same DUST coin. The other transaction took the coin;
+ * this one was refused whole, so nothing of it was applied.
+ */
+export function custodyDustCollision(cause: unknown): boolean {
+  return /Custom error:\s*196\b/.test(custodyFailureChainText(cause));
+}
+
+/**
+ * Whether the node refused a transaction in a way that applied nothing and
+ * that building and balancing it again can cure: the account moved under it
+ * (104), or its fee coin was spent by another (196). Every other refusal is a
+ * verdict on the transaction itself — 239, 217, and the rest — and is not
+ * offered again.
+ */
+export function custodyRebuildRefusal(cause: unknown): boolean {
+  return custodyStateRace(cause) || custodyDustCollision(cause);
+}
+
+/**
+ * Run a setup step, and run it AGAIN, a bounded number of times, when the node
+ * refused it in a way {@link custodyRebuildRefusal} says can be cured.
+ *
+ * `step` must be a whole resumable entry point — one that reads the chain
+ * before it sends anything — so a second run never pays twice for what the
+ * first already put on chain. The wait is {@link CUSTODY_STATE_RACE_WAIT_MS}
+ * for both causes: after a DUST collision the sponsor has to see the other
+ * transaction's spend in a block before it will pick a different coin, and
+ * rebalancing sooner would meet the same coin again; a block or two, which is
+ * also the 104 wait. Past the retries the refusal travels unchanged.
+ */
+export async function custodyRebuildOnRefusal<T>(
+  what: string,
+  step: () => Promise<T>,
+  options: {
+    sleep(milliseconds: number): Promise<void>;
+    waitMs?: number;
+    log?: (line: string) => void;
+  },
+): Promise<T> {
+  const attempt = async (retried: number): Promise<T> => {
+    try {
+      return await step();
+    } catch (cause) {
+      if (!custodyRebuildRefusal(cause) || retried >= CUSTODY_STATE_RACE_RETRIES) throw cause;
+      options.log?.(
+        `[account-custody] the node refused ${what} without applying it (${custodyDustCollision(cause) ? 'its fee coin was spent by another transaction' : 'the account moved under it'}); building it again (${retried + 1} of ${CUSTODY_STATE_RACE_RETRIES})`,
+      );
+      await options.sleep(options.waitMs ?? CUSTODY_STATE_RACE_WAIT_MS);
+      return attempt(retried + 1);
+    }
+  };
+  return attempt(0);
+}
+
 /** Effect's key for the cause a `FiberFailure` carries. */
 const FIBER_FAILURE_CAUSE = Symbol.for('effect/Runtime/FiberFailure/Cause');
 

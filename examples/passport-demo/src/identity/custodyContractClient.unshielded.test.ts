@@ -483,6 +483,22 @@ describe('a NIGHT payment the node refuses (2026/09/22)', () => {
     info.mockRestore();
   });
 
+  it('is built again when its fee coin was spent by another transaction (196), and lands', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    const drill = run([() => Promise.reject(refusal('196')), () => Promise.resolve('tx-2')]);
+    await expect(drill.pay()).resolves.toEqual(expect.objectContaining({ txHash: 'ab'.repeat(32) }));
+    expect(drill.submitted()).toBe(2);
+    info.mockRestore();
+  });
+
+  it('is not built again for a refusal that is a verdict (239)', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const refused = run([() => Promise.reject(refusal('239'))]);
+    await expect(refused.pay()).rejects.toThrow("That payment didn't go through. Nothing left your Passport.");
+    expect(refused.submitted()).toBe(1);
+    warn.mockRestore();
+  });
+
   it('says it did not go through when the account keeps moving, or for any other refusal', async () => {
     const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);

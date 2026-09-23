@@ -432,8 +432,21 @@ function harness(
      */
     indexerLagReads?: number;
     storage?: ReturnType<typeof storageFake>;
+    /**
+     * The node refusing the next submissions of one kind outright, with the
+     * code it gives — `196` is the sponsor's DUST coin spent twice (live,
+     * 2026/09/23). A refused transaction applies nothing.
+     */
+    refuse?: { kind: 'deploy' | 'wave' | 'activate'; code: string; times: number };
   } = {},
 ): Harness {
+  const refusals = overrides.refuse ? { ...overrides.refuse } : null;
+  /** Whether the node refuses this submission; counts the refusal down. */
+  const refused = (kind: 'deploy' | 'wave' | 'activate'): Error | null => {
+    if (refusals === null || refusals.kind !== kind || refusals.times <= 0) return null;
+    refusals.times -= 1;
+    return nodeRefusal(refusals.code);
+  };
   const chain: FakeChain = {
     authNonce: 0n,
     epoch: 0n,
@@ -514,6 +527,8 @@ function harness(
           /* The seam, as the contract runs it: consume this entry, insert the
              next, advance auth_nonce. Only the gated circuits do this. */
           if (circuit.startsWith('activate_initial_device')) {
+            const refusal = refused('activate');
+            if (refusal !== null) return Promise.reject(refusal);
             /* THE ARM PICKS THE ENTRY DERIVATION, exactly as the contract does.
                A fake that always derived the k256 entry would put a device on
                the roster that a jubjub caller can never find, and the failure
@@ -656,6 +671,10 @@ function harness(
             chain.authNonce += 1n;
             return Promise.resolve(finalisedCall(`id-${calls.length}`));
           }
+          const refusal = refused(
+            (options as { unprovenTx: FakeTx }).unprovenTx.deploys ? 'deploy' : 'wave',
+          );
+          if (refusal !== null) return Promise.reject(refusal);
           if (!overrides.dropSubmissions) {
             const tx = (options as { unprovenTx: FakeTx }).unprovenTx;
             if (tx.deploys) {
@@ -704,6 +723,17 @@ function harness(
       return state.submits;
     },
   };
+}
+
+/** The node's refusal as it really arrives: four layers deep (live, 2026/09/22). */
+function nodeRefusal(code: string): Error {
+  const rpc = Object.assign(new Error('1010: Invalid Transaction'), { name: 'RpcError', data: `Custom error: ${code}` });
+  const fiber = new Error('Transaction submission error');
+  fiber.name = '(FiberFailure) SubmissionError';
+  Object.defineProperty(fiber, Symbol.for('effect/Runtime/FiberFailure/Cause'), {
+    value: { _tag: 'Fail', error: { _tag: 'SubmissionError', message: 'Transaction submission error', cause: rpc } },
+  });
+  return fiber;
 }
 
 /**
@@ -1349,6 +1379,86 @@ describe('the deploy on its own, and the waves behind Home', () => {
     await expect(
       addDeviceK1(session, device, { arm: 'jubjub', pk: device.pk }, undefined, test.deps),
     ).rejects.toThrow(CUSTODY_STILL_FINISHING);
+  });
+});
+
+describe('a setup step the node refused without applying it', () => {
+  /* LIVE ON THE DEV SITE, 2026/09/23 17:44 UTC: a second Passport's activation
+     refused with `Custom error: 196` — the sponsor had paid its fee and another
+     Passport's wave from the same DUST coin. Nothing was applied, and the step
+     is built again on the same press. */
+  let info: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+  });
+
+  it('activates on the first press when the node refused the activation once with 196', async () => {
+    const test = harness({ refuse: { kind: 'activate', code: '196', times: 1 } });
+    const sleep = vi.fn(() => Promise.resolve(undefined));
+    const deps = { ...test.deps, sleep, stateRaceWaitMs: 1_234 };
+    const { session, device } = deviceFake();
+    await deployCustodyWaveOne(session, device, undefined, deps);
+    const activated = await activateK1Device(session, device, undefined, deps);
+    expect(activated.record.activated).toBe(true);
+    expect(test.calls.filter((c) => c.circuit === 'activate_initial_device_with_k256')).toHaveLength(2);
+    expect(sleep).toHaveBeenCalledWith(1_234);
+    expect(info.mock.calls.flat().join(' ')).toMatch(/fee coin was spent by another transaction/);
+    info.mockRestore();
+  });
+
+  it('lands the deploy on the first press when the node refused it once with 104', async () => {
+    const test = harness({ refuse: { kind: 'deploy', code: '104', times: 1 } });
+    const { session, device } = deviceFake();
+    const submitted = vi.fn();
+    const result = await deployCustodyWaveOne(session, device, undefined, test.deps, { onSubmitted: submitted });
+    expect(result.record.wavesDone).toBe(1);
+    expect(test.submits).toBe(2);
+    expect(submitted).toHaveBeenCalledTimes(1);
+    expect(info.mock.calls.flat().join(' ')).toMatch(/the account moved under it/);
+    info.mockRestore();
+  });
+
+  it('finishes a wave the node refused once with 196, paying for no wave twice', async () => {
+    const test = harness({ refuse: { kind: 'wave', code: '196', times: 1 } });
+    const { session, device } = deviceFake();
+    await deployCustodyWaveOne(session, device, undefined, test.deps);
+    const finished = await finishCustodyWaves(session, device, undefined, test.deps);
+    expect(finished.record.wavesDone).toBe(3);
+    // Wave 1, the refused wave 2, wave 2 again, wave 3.
+    expect(test.submits).toBe(4);
+    expect(test.chain.authorityCounter).toBe(2n);
+    info.mockRestore();
+  });
+
+  it('builds the whole deploy again when it was refused, and lands it', async () => {
+    const test = harness({ refuse: { kind: 'wave', code: '196', times: 1 } });
+    const { session, device } = deviceFake();
+    const result = await deployCustodyAccount(session, device, undefined, test.deps);
+    expect(result.record.wavesDone).toBe(3);
+    expect(test.submits).toBe(4);
+    info.mockRestore();
+  });
+
+  it('gives up after the bounded retries, with the refusal unchanged', async () => {
+    const test = harness({ refuse: { kind: 'activate', code: '196', times: 9 } });
+    const { session, device } = deviceFake();
+    await deployCustodyWaveOne(session, device, undefined, test.deps);
+    await expect(activateK1Device(session, device, undefined, test.deps)).rejects.toThrow(
+      'Transaction submission error',
+    );
+    expect(test.calls.filter((c) => c.circuit === 'activate_initial_device_with_k256')).toHaveLength(3);
+    info.mockRestore();
+  });
+
+  it('does not build again a refusal that is a verdict, such as 239', async () => {
+    const test = harness({ refuse: { kind: 'activate', code: '239', times: 1 } });
+    const { session, device } = deviceFake();
+    await deployCustodyWaveOne(session, device, undefined, test.deps);
+    await expect(activateK1Device(session, device, undefined, test.deps)).rejects.toThrow(
+      'Transaction submission error',
+    );
+    expect(test.calls.filter((c) => c.circuit === 'activate_initial_device_with_k256')).toHaveLength(1);
+    info.mockRestore();
   });
 });
 
