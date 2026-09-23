@@ -32,9 +32,12 @@ import {
   addDeviceK1,
   appendChangeToInboxK1,
   custodyAccountActivatedOnChain,
+  custodySetupDeps,
   defaultCustodyDeps,
-  deployCustodyAccount,
+  deployCustodyWaveOne,
+  finishCustodyWaves,
   startCustodyAccountAgain,
+  warmCustodySetup,
   withdrawShieldedK1,
   withdrawShieldedToContractK1,
   withdrawUnshieldedK1,
@@ -46,6 +49,9 @@ import {
   CUSTODY_SEND_NOT_SENT,
   custodyActivatedRecord,
   custodyFailureSentence,
+  custodyOpeningBalanceDue,
+  custodyWavesPending,
+  loadCustodyRecord,
   nextCustodyStep,
   resolveCustodyUseCounter,
   saveCustodyRecord,
@@ -119,10 +125,13 @@ import {
   runCustodyWork,
 } from '../lib/custodyScreenRules.js'
 import {
+  custodyBackgroundWork,
+  custodySetupClock,
   custodySetupHint,
   custodySetupPhase,
   custodySetupSteps,
   custodySetupSubStages,
+  type CustodySetupClock,
   type CustodySetupSignal,
 } from '../lib/custodySetupProgress.js'
 import { LONG_WAIT_NOTE } from '../lib/claimSteps.js'
@@ -272,15 +281,30 @@ const PHASE_LABELS: Record<CustodyPhase['step'], string> = {
 /**
  * Which of the custody road's reported steps moves the timeline on.
  *
- * Three of the seven, and the other four are deliberately absent — see the
- * note at the one call site. `../lib/custodySetupProgress.ts` turns these into
- * the row and the state a reader is shown.
+ * Two of the seven, and the other five are deliberately absent — see the note
+ * at the one call site. `waves` joined the absent ones on 2026/09/22: the waves
+ * after the deploy land behind Home now, and a row about them would count a
+ * wait nobody is in. `../lib/custodySetupProgress.ts` turns these into the row
+ * and the state a reader is shown.
  */
 const SETUP_SIGNAL_OF_STEP: Partial<Record<CustodyPhase['step'], CustodySetupSignal>> = {
   deploy: 'deploy',
-  waves: 'waves',
   activate: 'activate',
 }
+
+/**
+ * The stopwatch for a live run: `[setup-timing] <phase> <ms since the press>`
+ * in the page console, one line per phase. See `custodySetupClock`.
+ */
+function startSetupClock(): CustodySetupClock {
+  return custodySetupClock(
+    () => performance.now(),
+    (line) => console.info(line),
+  )
+}
+
+/** Where the chosen name's claim is, in THIS tab. */
+type NameClaimState = 'idle' | 'running' | 'done' | 'failed'
 
 export interface CustodyPassportProps {
   /** The network this build transacts on. */
@@ -505,6 +529,30 @@ export default function CustodyPassport({
    * same breath.
    */
   const welcomeReadRef = useRef(false)
+  /**
+   * WHERE THE NAME'S CLAIM IS, IN THIS TAB (2026/09/22).
+   *
+   * The claim starts the moment the account is submitted and runs beside the
+   * activation, so it can still be running when the key is on — and a Passport
+   * in that state goes to Home, whose name card says the name is being
+   * registered. State for the render; the ref for {@link refresh}, which
+   * decides the screen and depends on nothing (see `userRef`).
+   */
+  const [nameClaim, setNameClaimState] = useState<NameClaimState>('idle')
+  const nameClaimRef = useRef<NameClaimState>('idle')
+  const setNameClaim = useCallback((next: NameClaimState) => {
+    nameClaimRef.current = next
+    setNameClaimState(next)
+  }, [])
+  /* The claim itself, so a second press joins it rather than starting another. */
+  const nameClaimRun = useRef<Promise<void> | null>(null)
+  /* The waves after the deploy, landing behind Home. One run at a time. */
+  const wavesRun = useRef<Promise<void> | null>(null)
+  /* The stopwatch of the press that is running, for the lines behind Home. */
+  const setupClock = useRef<CustodySetupClock | null>(null)
+  /* Whether the device is settled in this tab, for the effect that picks the
+     waves back up — a ref cannot wake an effect. */
+  const [identityHeld, setIdentityHeld] = useState(false)
   const device = useRef<CustodyIdentity | null>(null)
   /* Whether a payment or a setup is running. See {@link run}. */
   const inFlight = useRef(false)
@@ -583,12 +631,16 @@ export default function CustodyPassport({
         claimedName: next.name,
         chosenName: next.chosenName,
         welcomeRead: welcomeReadRef.current,
+        nameRegistering: nameClaimRef.current === 'running',
         recoveryDue: recoveryStepDue({
           setupFinished: next.stage === 'name' || next.stage === 'home',
           claimedName: next.name,
           socialAvailable: socialAvailableRef.current,
           heldBySocial: heldBySocialRef.current,
           record,
+          /* The way back is a k256 key, and the k256 circuits land in the
+             waves behind Home — so the step waits for them. */
+          accountComplete: next.record === null || !custodyWavesPending(next.record),
         }),
       }),
     )
@@ -667,6 +719,7 @@ export default function CustodyPassport({
     const identity = await arm.ensureIdentity()
     device.current = identity
     rememberUser(identity.userKey)
+    setIdentityHeld(true)
     return identity
   }, [arm, rememberUser])
 
@@ -871,8 +924,15 @@ export default function CustodyPassport({
    * own words go to the console, where they are of use to somebody; what the
    * reader gets is the truth in a sentence of ours, because the service's
    * sentence is both wrong and full of words this screen does not say.
+   *
+   * NOT AWAITED BY THE SETUP ANY MORE (2026/09/22). It was a minute of every
+   * setup — the service pays both legs into the account before it answers —
+   * and Home already shows the figures off the chain when they land. It is
+   * asked behind Home once the last wave is in (`custodyOpeningBalanceDue`
+   * says why not sooner), and answers whether a service ANSWERED: a refusal is
+   * an answer, and a Passport that got one is not asked again.
    */
-  const askForOpeningBalance = useCallback(async (contractAddress: string): Promise<void> => {
+  const askForOpeningBalance = useCallback(async (contractAddress: string): Promise<boolean> => {
     for (const funderUrl of FUNDER_URLS) {
       try {
         const response = await fetch(`${funderUrl}/fund-account`, {
@@ -880,14 +940,17 @@ export default function CustodyPassport({
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ contractAddress }),
         })
-        if (response.ok) return
+        if (response.ok) return true
         const body: unknown = await response.json().catch(() => ({}))
         console.warn('[account-custody] the opening balance was refused', response.status, body)
-        return
+        /* A verdict (4xx) is an answer; a busy or broken service (429, 5xx) is
+           not, and the next open asks again. */
+        return response.status < 500 && response.status !== 429
       } catch (cause) {
         console.warn('[account-custody] the opening balance could not be asked for', cause)
       }
     }
+    return false
   }, [])
 
   /* ---------------------------------------------------------------------- */
@@ -910,110 +973,181 @@ export default function CustodyPassport({
   )
 
   /**
-   * Registers the chosen name against an account that now exists.
+   * Registers the chosen name against an account that has been SUBMITTED.
    *
    * THE RE-READ BEFORE THE CLAIM IS NOT BELT AND BRACES. The name was chosen
-   * before a three-step setup, which is minutes, and a name is a first-come
-   * thing — so by the time there is an account to bind it to, somebody else may
-   * hold it. Asking once more costs one read and turns a refusal from the
-   * service into a sentence the reader can act on, on a screen with a field in
-   * it. `fresh` because the answer from the typing is exactly the answer that
-   * may have gone stale.
+   * before the setup, and a name is a first-come thing — so by the time there
+   * is an account to bind it to, somebody else may hold it. Asking once more
+   * costs one read and turns a refusal from the service into a sentence the
+   * reader can act on, on a screen with a field in it. `fresh` because the
+   * answer from the typing is exactly the answer that may have gone stale.
    *
    * WHAT A LOST RACE DOES NOT DO IS THROW THE PASSPORT AWAY. The account is
    * built, activated, and theirs; only the name went. See
    * {@link custodyNameRaceOutcome}.
+   *
+   * IT RUNS BESIDE THE SETUP, NOT AFTER IT (2026/09/22). The service accepts a
+   * target that is submitted and not yet served (`targetPending`) and checks it
+   * just before the registry call, a leaf deploy later — so the claim starts
+   * the moment the deploy is submitted and overlaps the activation, instead of
+   * waiting for the account, its key, and its opening balance in turn. It
+   * therefore owns none of the press's busy line or timeline signal; it reports
+   * where it is through {@link setNameClaim}, and a failure that is not a lost
+   * race is said here, because the press it started beside may be long over.
    */
   const claimChosenName = useCallback(
     async (options: {
       alias: string
       user: string
       address: string
+      /** Resolves when the deploy has landed; the service's own fallback. */
+      awaitTarget?: () => Promise<unknown>
+      clock?: CustodySetupClock | null
     }): Promise<void> => {
-      const { alias, user: owner, address } = options
+      const { alias, user: owner, address, clock = null } = options
       const networkLabel = NETWORK_LABELS[network as PassportNetwork] ?? network
       const loseTheRace = () => {
         const outcome = custodyNameRaceOutcome(aliasDomain(alias), networkLabel)
         forgetCustodyChosenName(window.localStorage, owner, network)
+        setNameClaim('idle')
         setTaken(alias)
         setError(outcome.sentence)
+        clock?.mark('name-taken')
         refresh()
       }
 
-      setBusy('Claiming your name')
-      const [{ checkAliasAvailability, deriveMidnamesOwnerKey }, { sponsorAliasRegistrationAcross }, deps] =
-        await Promise.all([
-          import('../identity/midnames.js'),
-          import('../identity/sponsoredAlias.js'),
-          Promise.resolve(defaultCustodyDeps()),
-        ])
-      const stillFree = await checkAliasAvailability(network as PassportNetwork, alias, {
-        fresh: true,
-      })
-      if (stillFree.status === 'taken') {
-        loseTheRace()
-        return
-      }
-      /* The name's owner secret comes from this device's own transaction key
-         rather than from anything the sign-in holds, because the sign-in holds
-         nothing a key can be derived from — its signatures carry fresh
-         randomness every time (DKLs23), so there is nothing deterministic to
-         hash. The consequence is written down in `dynamic-integration.md`: the
-         name can be claimed here and cannot be re-pointed from a second device
-         in this version. Coming back to the Passport does not need it. */
-      const { custodyWalletSeed } = await import('../identity/custodyContractClient.js')
-      const ownerKey = await deriveMidnamesOwnerKey(custodyWalletSeed(deps, owner))
-      setSetupSignal('register')
+      setNameClaim('running')
+      clock?.mark('name-claim-start')
       try {
-        const claimed = await sponsorAliasRegistrationAcross(FUNDER_URLS, {
-          alias,
-          ownerKey,
-          contractAddress: address,
-          network: network as 'stagenet',
+        const [{ checkAliasAvailability, deriveMidnamesOwnerKey }, { sponsorAliasRegistrationAcross }, deps] =
+          await Promise.all([
+            import('../identity/midnames.js'),
+            import('../identity/sponsoredAlias.js'),
+            Promise.resolve(defaultCustodyDeps()),
+          ])
+        const stillFree = await checkAliasAvailability(network as PassportNetwork, alias, {
+          fresh: true,
         })
+        if (stillFree.status === 'taken') {
+          loseTheRace()
+          return
+        }
+        /* The name's owner secret comes from this device's own transaction key
+           rather than from anything the sign-in holds, because the sign-in holds
+           nothing a key can be derived from — its signatures carry fresh
+           randomness every time (DKLs23), so there is nothing deterministic to
+           hash. The consequence is written down in `dynamic-integration.md`: the
+           name can be claimed here and cannot be re-pointed from a second device
+           in this version. Coming back to the Passport does not need it. */
+        const { custodyWalletSeed } = await import('../identity/custodyContractClient.js')
+        const ownerKey = await deriveMidnamesOwnerKey(custodyWalletSeed(deps, owner))
+        let claimed
+        try {
+          claimed = await sponsorAliasRegistrationAcross(
+            FUNDER_URLS,
+            {
+              alias,
+              ownerKey,
+              contractAddress: address,
+              network: network as 'stagenet',
+              /* THE DEPLOY IS IN FLIGHT, and the service is told so: it checks
+                 the target before the registry call rather than before it will
+                 talk to us. Harmless for an account already served. */
+              targetPending: true,
+            },
+            options.awaitTarget ? { awaitTarget: options.awaitTarget } : {},
+          )
+        } catch (cause) {
+          if (custodyNameWasTaken(cause)) {
+            loseTheRace()
+            return
+          }
+          throw cause
+        }
         /* KEPT FOR THE TRAIL AND FOR NOTHING ELSE. The row that says the name
            is registered is worth a link to the transaction that registered it;
            the name card needs no such thing, and neither does anything else on
            screen, so it is session state rather than another stored field. */
         setRegisterTxId(claimed.registerTxId ?? null)
+        saveCustodyName(window.localStorage, owner, network, alias)
+        forgetCustodyChosenName(window.localStorage, owner, network)
+        setTaken(null)
+        setNameClaim('done')
+        clock?.mark('name-registered')
+        refresh()
       } catch (cause) {
-        if (custodyNameWasTaken(cause)) {
-          loseTheRace()
-          return
-        }
-        throw cause
+        /* NOT A LOST PASSPORT, AND NOT A LOST NAME EITHER. The chosen name is
+           still written down, so the name step offers the claim again — which
+           is where a claim that is no longer running always lands. */
+        console.warn('[account-custody] the name could not be claimed this time', cause)
+        setNameClaim('failed')
+        setError(custodyFailureSentence(cause))
+        clock?.mark('name-failed')
+        refresh()
       }
-      /* REGISTERED IS NOT YET CONFIRMED. What is shown from here on is read
-         back rather than assumed, so the last state of the long row is the
-         read and not a flourish over one that already happened. */
-      setSetupSignal('confirm')
-      saveCustodyName(window.localStorage, owner, network, alias)
-      forgetCustodyChosenName(window.localStorage, owner, network)
-      setTaken(null)
-      refresh()
     },
-    [network, refresh],
+    [network, refresh, setNameClaim],
   )
 
   /**
-   * ONE PRESS: the approval, the setup, and the name.
+   * Starts the claim, or joins the one that is already running.
    *
-   * THE ORDER IS THE POINT (2026/09/22). The name is written down BEFORE the
-   * first transaction leaves, so a reload in the middle of a three-step setup
-   * comes back to a Passport that still knows what it is called; and the claim
-   * runs on the same press as the setup, so nobody is shown a "your Passport is
-   * ready" screen whose only content is a second button.
+   * One claim per Passport at a time: a second press made while the first is
+   * still with the service would ask for the same name twice, and the service
+   * would answer the second with a refusal about a name this Passport holds.
+   */
+  const startNameClaim = useCallback(
+    (options: Parameters<typeof claimChosenName>[0]): Promise<void> => {
+      if (nameClaimRun.current !== null) return nameClaimRun.current
+      const running = claimChosenName(options).finally(() => {
+        nameClaimRun.current = null
+      })
+      nameClaimRun.current = running
+      return running
+    },
+    [claimChosenName],
+  )
+
+  /**
+   * Hands the waves after the deploy to the background. Assigned below, once
+   * {@link finishInBackground} exists — it reads the holdings, which are
+   * declared after this press.
+   */
+  const backgroundRef = useRef<(identity: CustodyIdentity, clock: CustodySetupClock | null) => Promise<void>>(
+    () => Promise.resolve(),
+  )
+
+  /**
+   * ONE PRESS: the approval, the account, the key — and the name beside them.
    *
-   * The name is written after {@link ensureIdentity} and not before it, because
-   * on the passkey arm the key every store is filed under IS the ceremony's
-   * output: writing earlier would mean writing under a user key that is either
-   * null or somebody else's.
+   * THE ORDER, SINCE 2026/09/22, AND WHY. The press used to run nine dependent
+   * transactions in a row — the deploy, three maintenance waves, the
+   * activation, the opening balance, a resolver leaf, and the registration —
+   * at twenty-odd seconds each on stagenet, 251 s measured. It now runs:
+   *
+   *   ceremony → deploy (wave 1) ─┬─ activation → Home
+   *                               └─ name claim, from the moment the deploy
+   *                                  is SUBMITTED, beside the activation
+   *
+   * and behind Home: waves 2 and up, then the opening balance. Wave 1 carries
+   * every circuit a Passport held by this arm calls, so nothing a person can
+   * do on Home waits on the waves; the one thing that does — adding a sign-in
+   * as the way back — is gated on them (`recoveryStepDue`).
+   *
+   * The name is written down BEFORE the first transaction leaves, so a reload
+   * in the middle comes back to a Passport that still knows what it is called;
+   * and the name is written after {@link ensureIdentity} and not before it,
+   * because on the passkey arm the key every store is filed under IS the
+   * ceremony's output.
    */
   const createPassport = useCallback(
     (alias: string) => {
       setSetupName(alias)
+      const clock = startSetupClock()
+      setupClock.current = clock
+      clock.mark('press')
       /* The BUTTON names the row that is running; the line under it counts the
-         three. Putting the same sentence on both would be the same words twice,
+         steps. Putting the same sentence on both would be the same words twice,
          which reads as a stutter rather than as progress. */
       void run(PHASE_LABELS.deploy, async () => {
         /* The ceremony is the first thing the press costs, and it is the
@@ -1021,13 +1155,9 @@ export default function CustodyPassport({
            asked of them rather than after they have answered. */
         setSetupSignal('identity')
         const settled = await ensureIdentity()
+        clock.mark('identity')
         /* THE CEREMONY IS OVER THE MOMENT IT ANSWERS, and the timeline says so
-           here rather than waiting for the custody road's first report. That
-           report comes after the compiled module, the ledger WASM, and the
-           circuit keys have been fetched — tens of seconds on a cold cache,
-           and forever behind a prover that is not answering — and a reader
-           held on "Confirm with your passkey" through all of it has already
-           done the one thing that row is about. */
+           here rather than waiting for the custody road's first report. */
         setSetupSignal('deploy')
         const identity = settled.device
         const owner = settled.userKey
@@ -1041,43 +1171,62 @@ export default function CustodyPassport({
           setInterrupted(false)
         }
         const onPhase = (phase: CustodyPhase) => {
-          setBusy(phase.detail ? `${PHASE_LABELS[phase.step]}` : PHASE_LABELS[phase.step])
-          /* ONLY THE THREE THAT MOVE THE TIMELINE. `wallet`, `sign`, `submit`,
-             and `confirm` are moments INSIDE one of these waves — advancing on
-             the `confirm` that ends the activation would move the row to the
-             name before the name had been asked for. */
+          setBusy(PHASE_LABELS[phase.step])
+          clock.mark(phase.detail ? `phase:${phase.step}:${phase.detail}` : `phase:${phase.step}`)
+          /* ONLY THE TWO THAT MOVE THE TIMELINE. `wallet`, `sign`, `submit`,
+             and `confirm` are moments INSIDE one of these — advancing on the
+             `confirm` that ends the activation would move the row to the name
+             before the name had been asked for. */
           const signal = SETUP_SIGNAL_OF_STEP[phase.step]
           if (signal !== undefined) setSetupSignal(signal)
         }
-        /* Both halves are resumable and both check the chain before they act, so
-           running them one after the other is safe on a second press: whatever
-           already landed is skipped rather than replayed. */
-        let record = (await deployCustodyAccount(arm.session, identity, onPhase)).record
-        if (!record.activated) {
-          record = (await activateK1Device(arm.session, identity, onPhase)).record
+        const deps = custodySetupDeps()
+
+        /* THE NAME, FROM THE MOMENT THE DEPLOY IS SUBMITTED. Not awaited here:
+           it runs beside the activation, and Home is shown with the name card
+           saying it is being registered if it is still running then. */
+        let landed: () => void = () => undefined
+        const deployLanded = new Promise<void>((resolve) => {
+          landed = resolve
+        })
+        const claimFor = (address: string) => {
+          /* A Passport that already holds its name is not asked to claim it. */
+          if (readDynamicPassport({ storage: window.localStorage, user: owner, network }).name !== null) {
+            return
+          }
+          void startNameClaim({ alias, user: owner, address, awaitTarget: () => deployLanded, clock })
         }
-        /* THE OPENING BALANCE IS ASKED FOR WHEN THE KEY IS ON, and not when the
-           account lands. An unactivated account holds nothing and can be called
-           by nobody, and the service refuses to fund one — so asking at the
-           deploy is a refusal every time, on a schedule. */
-        if (record.address !== null) await askForOpeningBalance(record.address)
-        refresh()
+
+        let record = (
+          await deployCustodyWaveOne(arm.session, identity, onPhase, deps, {
+            onSubmitted: (address) => {
+              clock.mark('deploy-submitted')
+              claimFor(address)
+            },
+          })
+        ).record
+        landed()
+        clock.mark('deploy-landed')
         if (record.address === null) {
           throw new Error('Your Passport is still being set up. Try again once it is ready.')
         }
-        await claimChosenName({ alias, user: owner, address: record.address })
+        /* A deploy that had landed on an earlier press reports no submission;
+           the claim starts here instead, against the address it already has. */
+        claimFor(record.address)
+
+        if (!record.activated) {
+          record = (await activateK1Device(arm.session, identity, onPhase, deps)).record
+        }
+        clock.mark('activated')
+        /* HOME, NOW. The screen is decided from what is stored plus whether the
+           name's claim is still running (`custodyNameFirstStage`). */
+        refresh()
+        clock.mark('home')
+        /* And behind it: the rest of the roster, then the opening balance. */
+        void backgroundRef.current(settled, clock)
       })
     },
-    [
-      arm,
-      askForOpeningBalance,
-      claimChosenName,
-      ensureIdentity,
-      interrupted,
-      network,
-      refresh,
-      run,
-    ],
+    [arm, ensureIdentity, interrupted, network, refresh, run, startNameClaim],
   )
 
   /* ---------------------------------------------------------------------- */
@@ -1324,6 +1473,146 @@ export default function CustodyPassport({
     if (screen !== 'home') return
     void readHoldings()
   }, [readHoldings, screen])
+
+  /* ---------------------------------------------------------------------- */
+  /* Behind Home: the rest of the roster, then the opening balance          */
+  /* ---------------------------------------------------------------------- */
+
+  /**
+   * Asks for the opening balance once the account can be paid into, and writes
+   * down that it was answered.
+   *
+   * No ceremony: the grant needs the address and nothing else. A Passport the
+   * service answered is never asked again (`custodyOpeningBalanceDue`).
+   */
+  const balanceAsking = useRef(false)
+  /* Whether THIS tab has already asked once. The effect below asks at most once
+     per tab, so a service that cannot be reached is not asked on every
+     refresh; the waves' own finish always asks, because it is new news. */
+  const balanceTried = useRef(false)
+  const settleOpeningBalance = useCallback(
+    async (record: CustodyAccountRecord, clock: CustodySetupClock | null): Promise<void> => {
+      if (!custodyOpeningBalanceDue(record) || record.address === null) return
+      /* One question at a time: the effect below re-runs on every refresh. */
+      if (balanceAsking.current) return
+      balanceAsking.current = true
+      balanceTried.current = true
+      try {
+        clock?.mark('balance-asked')
+        const answered = await askForOpeningBalance(record.address)
+        clock?.mark(answered ? 'balance-answered' : 'balance-unanswered')
+        if (!answered) return
+        const latest = loadCustodyRecord(window.localStorage, record.user, record.network) ?? record
+        saveCustodyRecord(window.localStorage, { ...latest, openingBalanceAsked: true })
+      } finally {
+        balanceAsking.current = false
+      }
+      refresh()
+      void readHoldings()
+    },
+    [askForOpeningBalance, readHoldings, refresh],
+  )
+
+  /**
+   * Lands the waves after the deploy, then asks for the opening balance.
+   *
+   * BEHIND HOME, AND RESUMABLE (2026/09/22). The waves install the other arm and
+   * the grant circuits — nothing a Passport held by this arm calls — so nobody
+   * waits for them; they are landed here after the key is on, one at a time,
+   * each recorded only once the chain shows it (`finishCustodyWaves`). A tab
+   * closed half-way leaves a record that says how far they got, and the next
+   * time this device's key is settled they are picked up from there (see the
+   * effect below). The opening balance follows the last wave because the
+   * service cannot pay into an account that is missing any of its circuits.
+   *
+   * A FAILURE HERE IS NOT SHOWN AS ONE. The Passport works; the next settle of
+   * the key tries again. The console says what happened, for whoever is
+   * measuring.
+   */
+  /* When the last background run stopped short, so a failure that comes back
+     at once is not retried on every render. */
+  const wavesStoppedAt = useRef<number | null>(null)
+  const finishInBackground = useCallback(
+    (identity: CustodyIdentity, clock: CustodySetupClock | null): Promise<void> => {
+      if (wavesRun.current !== null) return wavesRun.current
+      const settled = userRef.current
+      const stored =
+        settled === null ? null : loadCustodyRecord(window.localStorage, settled, network)
+      if (stored === null) return Promise.resolve()
+      /* THE WAVES, AND ONLY THE WAVES, are what a caller waits on — adding the
+         way back waits for them, and must not also wait out a minute of the
+         opening balance behind them. */
+      const waves = (async (): Promise<CustodyAccountRecord | null> => {
+        if (!custodyWavesPending(stored)) return stored
+        clock?.mark('waves-start')
+        try {
+          const finished = (
+            await finishCustodyWaves(
+              arm.session,
+              identity.device,
+              (phase) => {
+                if (phase.step === 'waves') {
+                  clock?.mark(`wave-${phase.detail ?? ''}`.replace(/\s+/g, '-'))
+                }
+              },
+              custodySetupDeps(),
+            )
+          ).record
+          clock?.mark('waves-done')
+          wavesStoppedAt.current = null
+          return finished
+        } catch (cause) {
+          clock?.mark('waves-stopped')
+          wavesStoppedAt.current = Date.now()
+          console.warn('[account-custody] the rest of this Passport could not be finished this time', cause)
+          return null
+        }
+      })()
+      const running = waves
+        .then(() => undefined)
+        .finally(() => {
+          wavesRun.current = null
+          refresh()
+        })
+      wavesRun.current = running
+      /* Then the opening balance, behind the waves and awaited by nobody. */
+      void waves.then((record) => (record === null ? undefined : settleOpeningBalance(record, clock)))
+      return running
+    },
+    [arm.session, network, refresh, settleOpeningBalance],
+  )
+  backgroundRef.current = finishInBackground
+
+  /**
+   * PICKS THE BACKGROUND WORK BACK UP, whenever it can be done without asking.
+   *
+   * The opening balance needs nobody, so a Passport whose last wave landed and
+   * whose balance was never asked for is asked on open. The waves need this
+   * device's key — a passkey's maintenance authority is derived from it and
+   * written nowhere — so they resume the moment the key is settled in this tab
+   * for any reason: the setup press, a payment, adding the way back. Never by
+   * prompting on open: a browser refuses a passkey prompt nobody pressed for,
+   * and a fingerprint asked for out of nowhere is the one thing about this that
+   * a person would notice.
+   */
+  useEffect(() => {
+    const record = view?.record ?? null
+    if (record === null) return
+    const work = custodyBackgroundWork({
+      wavesPending: custodyWavesPending(record),
+      openingBalanceDue: custodyOpeningBalanceDue(record),
+      keyHeld: identityHeld && device.current !== null,
+      busy: inFlight.current || wavesRun.current !== null || balanceAsking.current,
+      balanceTried: balanceTried.current,
+      wavesStoppedMsAgo:
+        wavesStoppedAt.current === null ? null : Date.now() - wavesStoppedAt.current,
+    })
+    if (work === 'waves' && device.current !== null) {
+      void finishInBackground(device.current, setupClock.current)
+    } else if (work === 'opening-balance') {
+      void settleOpeningBalance(record, setupClock.current)
+    }
+  }, [finishInBackground, identityHeld, settleOpeningBalance, view])
 
   /**
    * A STOPPED PAYMENT, ANSWERED FROM THE CHAIN (2026/09/22).
@@ -2199,6 +2488,14 @@ export default function CustodyPassport({
       setError(null)
       try {
         const identity = await ensureIdentity()
+        /* THE WAY BACK WAITS FOR THE WAVES. It is a k256 key, and every k256
+           circuit lands in the waves behind Home (2026/09/22) — so they are
+           finished first, under the same busy line, rather than enrolling a
+           key that could approve nothing. Usually they are long done. */
+        const pending = loadCustodyRecord(window.localStorage, identity.userKey, network)
+        if (pending !== null && custodyWavesPending(pending)) {
+          await finishInBackground(identity, setupClock.current)
+        }
         const spare = await signIn.device()
         await addDeviceK1(arm.session, identity.device, spare, (phase) =>
           setBusy(PHASE_LABELS[phase.step] ?? RECOVERY_COPY.busy),
@@ -2218,7 +2515,7 @@ export default function CustodyPassport({
         refresh()
       }
     },
-    [arm.session, ensureIdentity, network, refresh],
+    [arm.session, ensureIdentity, finishInBackground, network, refresh],
   )
 
   /** The press on the offer. */
@@ -2295,6 +2592,33 @@ export default function CustodyPassport({
   /* be worth a distraction. The rule is `../lib/custodySetupProgress.ts`'s; */
   /* nothing below decides anything.                                         */
   /* ---------------------------------------------------------------------- */
+  /**
+   * THE WARM-UP, WHILE THE NAME IS BEING TYPED (2026/09/22).
+   *
+   * Fourteen seconds of a measured setup were the client getting ready — the
+   * compiled module, the ledger WASM, the thirty verifier keys, a wallet — with
+   * nothing on chain. The name step is ten to thirty seconds of somebody typing,
+   * so it is fetched then, once per screen, and the press finds it in hand. A
+   * warm-up that fails costs nothing: the press fetches what is missing.
+   */
+  const warmed = useRef(false)
+  useEffect(() => {
+    if (screen !== 'name' || warmed.current) return
+    warmed.current = true
+    const shownAt = performance.now()
+    void warmCustodySetup({
+      user: userRef.current,
+      arm: arm.kind === 'passkey' ? 'jubjub' : 'k256',
+    }).then(() => {
+      console.info(`[setup-timing] warmup-done-since-name-step ${Math.round(performance.now() - shownAt)}`)
+    })
+  }, [arm.kind, screen])
+
+  /* The name's own state on the long row, when this tab knows it: the claim
+     runs BESIDE the account and the key, so it can be live at the same time. */
+  const nameSubState =
+    nameClaim === 'running' ? 'active' : nameClaim === 'done' ? 'done' : undefined
+
   const setupPhase = custodySetupPhase({
     running: busy !== null,
     signal: setupSignal,
@@ -2356,7 +2680,11 @@ export default function CustodyPassport({
             detail: row.id === 'identity' && row.state === 'active' ? arm.approvalPrompt : null,
             subStages:
               row.id === 'account'
-                ? custodySetupSubStages(setupPhase, timelineName !== null ? aliasDomain(timelineName) : undefined)
+                ? custodySetupSubStages(
+                    setupPhase,
+                    timelineName !== null ? aliasDomain(timelineName) : undefined,
+                    nameSubState,
+                  )
                 : null,
             note: row.id === 'account' ? LONG_WAIT_NOTE : null,
           }))}
@@ -2446,12 +2774,14 @@ export default function CustodyPassport({
                     claimedName: view?.name ?? null,
                     chosenName: view?.chosenName ?? null,
                     welcomeRead: welcomeReadRef.current,
+                    nameRegistering: nameClaim === 'running',
                     recoveryDue: recoveryStepDue({
                       setupFinished: view?.stage === 'name' || view?.stage === 'home',
                       claimedName: view?.name ?? null,
                       socialAvailable,
                       heldBySocial,
                       record: recoveryRecord,
+                      accountComplete: view?.record == null || !custodyWavesPending(view.record),
                     }),
                   }),
                 )
@@ -2533,6 +2863,10 @@ export default function CustodyPassport({
       user,
       network,
       name: view?.name ?? null,
+      /* THE NAME STILL BEING REGISTERED, beside the key that is already on
+         (2026/09/22). The name card says so, and says "Registered" only once
+         the claim has landed — `view.name` is written by nothing else. */
+      registeringName: view?.name == null && nameClaim === 'running' ? (view?.chosenName ?? setupName) : null,
       /* THE ACCOUNT, AND NOT THE WALLET. Receive offers this and only this: it
          is what the name points at and what a payment is made into. The
          wallet's own address is machinery and is never handed out. */

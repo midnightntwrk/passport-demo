@@ -186,6 +186,13 @@ async function seedPasskeyPassport(
      * down "not finished" about an account that is finished.
      */
     activated?: boolean;
+    /**
+     * How many of the four waves have landed. Fewer than four is a Passport
+     * that is usable — its key is on — with the rest of its circuits still
+     * landing behind Home, the state the setup order of 2026/09/22 leaves
+     * every new Passport in for about a minute.
+     */
+    wavesDone?: number;
   },
 ): Promise<void> {
   const key = `${options.userKey}|${WALK_NETWORK}`;
@@ -197,7 +204,7 @@ async function seedPasskeyPassport(
     saltHex: '',
     pkXHex: null,
     pkYHex: null,
-    wavesDone: 4,
+    wavesDone: options.wavesDone ?? 4,
     totalWaves: 4,
     activated: options.activated ?? true,
     txHashes: [],
@@ -400,10 +407,9 @@ test.describe('a passkey with no Passport yet', () => {
     const before = network.sponsorTraffic().requests;
     await page.getByRole('button', { name: 'Create my Passport' }).click();
 
-    /* The count line while it works. It is the SAME three steps as the other
-       arm — set the Passport up, finish it, turn the key on — even though a
-       jubjub-born account is four transactions rather than three, because the
-       middle ones are one thing to the person waiting.
+    /* The count line while it works: TWO steps since 2026/09/22 — set the
+       Passport up, turn the key on — because the waves that used to sit
+       between them land behind Home now, where nobody waits for them.
 
        Since 2026/09/22 it is read off the LIVE phase rather than off the
        stored record, which is what makes it true: the record is re-read when a
@@ -411,7 +417,7 @@ test.describe('a passkey with no Passport yet', () => {
        chain showed all three landed. The next test is where the whole journey
        it now belongs to is drilled. */
     await expect(page.locator('p.mnob-hint[role="status"]')).toHaveText(
-      'Setting up your Passport, step 1 of 3',
+      'Setting up your Passport, step 1 of 2',
       { timeout: 60_000 },
     );
 
@@ -511,21 +517,23 @@ test.describe('a passkey with no Passport yet', () => {
     await expect(rows.nth(0)).toHaveAttribute('data-state', 'done');
     await expect(rows.nth(1)).toContainText('Confirm with your passkey');
 
-    /* THE LONG ROW, RUNNING, AND THE FIVE STATES IT IS MADE OF — on screen
+    /* THE LONG ROW, RUNNING, AND THE THREE STATES IT IS MADE OF — on screen
        whole from the first frame, so they fill in rather than appearing under
-       a reader who is already waiting. */
+       a reader who is already waiting. Since 2026/09/22 there is no "Finishing
+       your account" between the account and the key (that work lands behind
+       Home), and the name is claimed BESIDE the key from the moment the
+       account is submitted — which, with the circuit keys held open here, it
+       never is, so the name is still ahead. */
     const account = rows.nth(2);
     await expect(account).toHaveAttribute('data-state', 'active', { timeout: 120_000 });
     await expect(account).toContainText('Setting up your account');
     const stages = account.locator('.mnid-substage');
-    await expect(stages).toHaveCount(5);
+    await expect(stages).toHaveCount(3);
     await expect(stages.nth(0)).toContainText('Creating your account');
-    await expect(stages.nth(1)).toContainText('Finishing your account');
-    await expect(stages.nth(2)).toContainText('Turning on your sign-in');
-    await expect(stages.nth(3)).toContainText('Registering walker.night');
-    await expect(stages.nth(4)).toContainText('Confirming your name');
+    await expect(stages.nth(1)).toContainText('Turning on your sign-in');
+    await expect(stages.nth(2)).toContainText('Registering walker.night');
     await expect(stages.nth(0)).toHaveAttribute('data-state', 'active');
-    for (const index of [1, 2, 3, 4]) {
+    for (const index of [1, 2]) {
       await expect(stages.nth(index)).toHaveAttribute('data-state', 'todo');
     }
     /* And the warning about the minutes is up FRONT, on the row that costs
@@ -538,7 +546,7 @@ test.describe('a passkey with no Passport yet', () => {
        stuck: it came off a stored record that is re-read only when the press
        FINISHES, so it said "1 of 3" through all three. */
     await expect(page.locator('p.mnob-hint[role="status"]')).toHaveText(
-      'Setting up your Passport, step 1 of 3',
+      'Setting up your Passport, step 1 of 2',
     );
 
     /* AND THE CLOCK KEEPS COUNTING ON A PHASE THAT IS NOT MOVING. This is the
@@ -547,7 +555,8 @@ test.describe('a passkey with no Passport yet', () => {
        hang it was built to disprove. Read twice, five seconds apart, with
        nothing changing between the two reads except the number. */
     const timing = account.locator('.mnid-stepper-timing');
-    await expect(timing).toHaveText(/Usually about 4 minutes — \d+:\d{2} so far/);
+    /* Ninety seconds since 2026/09/22, said as "about 2 minutes". */
+    await expect(timing).toHaveText(/Usually about 2 minutes — \d+:\d{2} so far/);
     const clock = async (): Promise<number> => {
       const match = /(\d+):(\d{2})/.exec(await timing.innerText());
       if (match === null) throw new Error('no clock on the running row');
@@ -1140,7 +1149,7 @@ test.describe('a passkey Passport paying somebody', () => {
  */
 async function passkeyPassportAfterTheName(
   browser: import('@playwright/test').Browser,
-  options: { recovered?: boolean } = {},
+  options: { recovered?: boolean; wavesDone?: number } = {},
 ): Promise<{ page: Page; close: () => Promise<void> }> {
   const context = await browser.newContext(
     walkContextOptions({ viewport: { width: 420, height: 900 } }),
@@ -1179,6 +1188,7 @@ async function passkeyPassportAfterTheName(
     userKey: identity.userKey,
     name: 'walker',
     musd: '250',
+    ...(options.wavesDone === undefined ? {} : { wavesDone: options.wavesDone }),
   });
   if (options.recovered === true) {
     /* A Passport that already has a way back, written in the shape the app's
@@ -1273,6 +1283,35 @@ test.describe('a passkey Passport that has just been named', () => {
        somebody who changed their mind goes looking for it. */
     await expect(page.getByRole('button', { name: 'Add recovery' })).toBeVisible();
     await expect(page.getByTestId('recovery-state')).toHaveCount(0);
+
+    await close();
+  });
+
+  /* THE ORDER OF 2026/09/22. A new Passport reaches Home with its key on and
+     the rest of its circuits still landing behind it. The way back is a key of
+     the OTHER arm, which can do nothing until those land — so the step is held
+     back, Home is shown, and nothing asks for a fingerprint to finish them: the
+     waves resume the next time the key is settled for something the reader
+     asked for. */
+  test('goes Home while the rest is still landing, and holds the way back until it has', async ({
+    browser,
+  }) => {
+    const { page, close } = await passkeyPassportAfterTheName(browser, { wavesDone: 1 });
+    const funding: string[] = [];
+    page.on('request', (request) => {
+      if (request.url().includes('/fund-account')) funding.push(request.url());
+    });
+
+    await expect(greeting(page)).toBeVisible({ timeout: 60_000 });
+    await expect(page.getByRole('heading', { name: /Add a way\s*back/ })).toHaveCount(0);
+    /* The Passport is usable: the money row is there. */
+    await expect(page.getByRole('button', { name: /^Send$/ }).first()).toBeVisible();
+    /* No ceremony was asked for on open. */
+    await expect(page.getByRole('button', { name: SIGN_IN_BUTTON })).toHaveCount(0);
+    /* And no opening balance was asked for into an account the service cannot
+       open until its last wave has landed. */
+    await page.waitForTimeout(2_000);
+    expect(funding).toEqual([]);
 
     await close();
   });

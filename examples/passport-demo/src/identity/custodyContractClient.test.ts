@@ -17,6 +17,7 @@ import {
   CUSTODY_PROVER_UNAVAILABLE,
   CUSTODY_SETUP_INTERRUPTED,
   CUSTODY_SETUP_UNCONFIRMED,
+  CUSTODY_STILL_FINISHING,
   custodyProofNotBuilt,
   hexToBytes,
   loadCustodyAuthorityKey,
@@ -35,6 +36,11 @@ import {
 } from './k1CoinStore.js';
 import {
   activateK1Device,
+  addDeviceK1,
+  custodySetupDeps,
+  deployCustodyWaveOne,
+  finishCustodyWaves,
+  warmCustodySetup,
   appendChangeToInboxK1,
   appendInboxK1,
   custodyAccountActivatedOnChain,
@@ -1139,6 +1145,220 @@ describe('activating the Dynamic key', () => {
     await expect(activateK1Device(session, device, undefined, test.deps)).rejects.toThrow(
       /no Passport to add this key to/,
     );
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The setup order of 2026/09/22: deploy, activate, Home — then the waves     */
+/* -------------------------------------------------------------------------- */
+
+describe('the deploy on its own, and the waves behind Home', () => {
+  it('lands the deploy alone, and says the moment the node has taken it', async () => {
+    const test = harness();
+    const { session, device } = deviceFake();
+    const submittedAt: { address: string; deployedYet: boolean }[] = [];
+    const result = await deployCustodyWaveOne(session, device, undefined, test.deps, {
+      onSubmitted: (address) => submittedAt.push({ address, deployedYet: test.submits === 1 }),
+    });
+
+    expect(test.submits).toBe(1);
+    expect(test.submitted[0].unprovenTx.deploys).toHaveLength(10);
+    expect(result.record.address).toBe(ADDRESS);
+    expect(result.record.wavesDone).toBe(1);
+    expect(result.record.totalWaves).toBe(3);
+    /* Once, with the address, straight after the submission. */
+    expect(submittedAt).toEqual([{ address: ADDRESS, deployedYet: true }]);
+  });
+
+  it('does not deploy again, or report a submission, once the deploy has landed', async () => {
+    const test = harness();
+    const { session, device } = deviceFake();
+    await deployCustodyWaveOne(session, device, undefined, test.deps);
+    const onSubmitted = vi.fn();
+    const again = await deployCustodyWaveOne(session, device, undefined, test.deps, { onSubmitted });
+    expect(test.submits).toBe(1);
+    expect(onSubmitted).not.toHaveBeenCalled();
+    expect(again.record.address).toBe(ADDRESS);
+  });
+
+  /* The name's claim is the caller's business. Its failure is not the deploy's. */
+  it('carries on when the caller cannot act on the submission', async () => {
+    const test = harness();
+    const { session, device } = deviceFake();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const result = await deployCustodyWaveOne(session, device, undefined, test.deps, {
+      onSubmitted: () => {
+        throw new Error('the caller broke');
+      },
+    });
+    expect(result.record.wavesDone).toBe(1);
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  /* THE ORDER THIS WHOLE CHANGE RESTS ON: activate after wave 1, and the waves
+     after that, without losing the activation from the record. */
+  it('activates after the deploy alone, then finishes the waves without undoing it', async () => {
+    const test = harness();
+    const { session, device } = deviceFake();
+    await deployCustodyWaveOne(session, device, undefined, test.deps);
+    const activated = await activateK1Device(session, device, undefined, test.deps);
+    expect(activated.record.activated).toBe(true);
+    expect(activated.record.wavesDone).toBe(1);
+    expect(test.calls.some((c) => c.circuit === 'activate_initial_device_with_k256')).toBe(true);
+
+    const phases: string[] = [];
+    const finished = await finishCustodyWaves(
+      session,
+      device,
+      (phase) => phases.push(`${phase.step}${phase.detail ? ` ${phase.detail}` : ''}`),
+      test.deps,
+    );
+    expect(test.submits).toBe(3);
+    expect(finished.record.wavesDone).toBe(3);
+    expect(finished.record.activated).toBe(true);
+    expect(phases).toEqual(['wallet', 'waves 2 of 3', 'waves 3 of 3']);
+    const stored = loadCustodyRecord(test.storage, k1UserKey(session), 'stagenet');
+    expect(stored?.activated).toBe(true);
+    expect(stored?.wavesDone).toBe(3);
+  });
+
+  it('finishes nothing twice: a second run finds the waves on chain', async () => {
+    const test = harness();
+    const { session, device } = deviceFake();
+    await deployCustodyWaveOne(session, device, undefined, test.deps);
+    await finishCustodyWaves(session, device, undefined, test.deps);
+    const after = test.submits;
+    await finishCustodyWaves(session, device, undefined, test.deps);
+    expect(test.submits).toBe(after);
+  });
+
+  it('refuses to finish a Passport that was never deployed', async () => {
+    const test = harness();
+    const { session, device } = deviceFake();
+    await expect(finishCustodyWaves(session, device, undefined, test.deps)).rejects.toThrow(
+      'There is no Passport to finish yet.',
+    );
+  });
+
+  /* midnight-js refuses to open a contract missing ANY circuit of the build,
+     which would refuse the activation itself while the waves are behind Home.
+     The check is kept for the circuits the call uses, and only those. */
+  it('checks the keys of the circuits a call uses, and not the ones still landing', async () => {
+    const test = harness();
+    const { session, device } = deviceFake();
+    const asked: string[][] = [];
+    const base = test.deps.providers as NonNullable<CustodyDeps['providers']>;
+    const baseContracts = test.deps.contracts as NonNullable<CustodyDeps['contracts']>;
+    const deps: Partial<CustodyDeps> = {
+      ...test.deps,
+      providers: async (wallet, id, account) => ({
+        ...(await base(wallet, id, account)),
+        zkConfigProvider: {
+          getVerifierKey: (circuit: string) =>
+            Promise.resolve(allCustodyCircuits('k256').includes(circuit) ? new Uint8Array(2_400) : null),
+          getVerifierKeys(ids: readonly string[]) {
+            asked.push([...ids]);
+            return Promise.resolve(ids.map((id) => [id, new Uint8Array(1)]));
+          },
+        },
+      }),
+      contracts: async () => {
+        const api = await baseContracts();
+        return {
+          ...api,
+          findDeployedContract: async (providers: unknown, options: unknown) => {
+            /* What midnight-js does first: every circuit of the build. */
+            const zk = (providers as { zkConfigProvider: { getVerifierKeys(ids: string[]): Promise<unknown> } })
+              .zkConfigProvider;
+            await zk.getVerifierKeys(allCustodyCircuits('k256'));
+            return api.findDeployedContract(providers, options);
+          },
+        };
+      },
+    };
+    await deployCustodyWaveOne(session, device, undefined, deps);
+    await activateK1Device(session, device, undefined, deps);
+    expect(asked).toEqual([['activate_initial_device_with_k256']]);
+  });
+
+  /* A way back of the OTHER arm can approve nothing until the waves carrying
+     that arm have landed, so it is refused in words until they have. */
+  it('will not add a key of the other arm while the waves are still landing', async () => {
+    const test = harness();
+    const { session, device } = deviceFake();
+    await deployCustodyWaveOne(session, device, undefined, test.deps);
+    await activateK1Device(session, device, undefined, test.deps);
+    await expect(
+      addDeviceK1(session, device, { arm: 'jubjub', pk: device.pk }, undefined, test.deps),
+    ).rejects.toThrow(CUSTODY_STILL_FINISHING);
+  });
+});
+
+describe('the setup’s own seams', () => {
+  it('opens one wallet per user for the whole setup, and forgets a failed one', async () => {
+    let built = 0;
+    const wallet = vi.fn((user: string) => {
+      built += 1;
+      return user === 'broken' && built < 3
+        ? Promise.reject(new Error('no'))
+        : Promise.resolve({ user } as never);
+    });
+    const deps = custodySetupDeps({ wallet });
+    const again = custodySetupDeps({ wallet });
+    const first = await deps.wallet?.('alice');
+    expect(await again.wallet?.('alice')).toBe(first);
+    expect(wallet).toHaveBeenCalledTimes(1);
+    await expect(deps.wallet?.('broken')).rejects.toThrow('no');
+    await Promise.resolve();
+    /* The failure is not remembered: the next press builds it again. */
+    await expect(deps.wallet?.('broken')).resolves.toEqual({ user: 'broken' });
+    resetCustodySessionState();
+    await deps.wallet?.('alice');
+    expect(wallet.mock.calls.filter(([user]) => user === 'alice')).toHaveLength(2);
+  });
+
+  it('warms what it can before the press, and never fails for what it cannot', async () => {
+    const test = harness();
+    const calls: string[] = [];
+    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    await warmCustodySetup(
+      { user: 'alice', arm: 'jubjub' },
+      {
+        ...test.deps,
+        contractModule: () => {
+          calls.push('module');
+          return Promise.reject(new Error('offline'));
+        },
+        ledger: () => {
+          calls.push('ledger');
+          return (test.deps.ledger as NonNullable<CustodyDeps['ledger']>)();
+        },
+        contracts: () => {
+          calls.push('contracts');
+          return (test.deps.contracts as NonNullable<CustodyDeps['contracts']>)();
+        },
+        wallet: (user) => {
+          calls.push(`wallet:${user}`);
+          return (test.deps.wallet as NonNullable<CustodyDeps['wallet']>)(user);
+        },
+      },
+    );
+    expect(calls.sort()).toEqual(['contracts', 'ledger', 'module', 'wallet:alice']);
+    /* No user yet — a passkey before its ceremony — and no wallet is built. */
+    calls.length = 0;
+    await warmCustodySetup(
+      { user: null, arm: 'jubjub' },
+      {
+        ...test.deps,
+        wallet: (user) => {
+          calls.push(`wallet:${user}`);
+          return (test.deps.wallet as NonNullable<CustodyDeps['wallet']>)(user);
+        },
+      },
+    );
+    expect(calls).toEqual([]);
+    info.mockRestore();
   });
 });
 

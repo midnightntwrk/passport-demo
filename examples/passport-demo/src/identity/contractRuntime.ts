@@ -1154,33 +1154,7 @@ export async function createContractProviders(
   wallet: LocalMidnightWallet,
   options: ContractProvidersOptions,
 ) {
-  const assetContract = contractAssetContract(options.contract);
-  let zkConfigProvider = zkConfigProviders.get(assetContract);
-  if (zkConfigProvider === undefined) {
-    const { FetchZkConfigProvider } = await import(
-      '@midnight-ntwrk/midnight-js-fetch-zk-config-provider'
-    );
-    zkConfigProvider = memoisingZkConfigProvider(
-      new FetchZkConfigProvider(contractAssetBase(options.contract), {
-        /* `globalThis`, not `window`: the identical call has to work under the
-           Node drill harness, which deliberately has no window.
-
-           WRAPPED IN `buildIdFetch` (2026/09/14). Every artefact url this
-           provider composes — the keys, the ZKIR, and above all
-           `compiler/contract-manifest.json` — is served
-           `max-age=31536000, immutable` and carries no content hash, so a
-           browser that fetched the manifest before a contract gained a circuit
-           kept it for a YEAR and then refused the new build's keys against it:
-           `ZKConfigurationReadError: Failed to read verifier key for
-           passport-account#transfer_shielded_to_account`, met by a reviewer
-           creating a new Passport. `buildIdFetch` puts this build's id in the
-           query, so a new deploy asks for an address no cache has an answer
-           for. See `../lib/buildId.ts`. */
-        fetchFunc: buildIdFetch(globalThis.fetch.bind(globalThis)) as never,
-      }) as unknown as ZkArtefactSource,
-    );
-    zkConfigProviders.set(assetContract, zkConfigProvider);
-  }
+  const zkConfigProvider = await contractZkConfigProvider(options.contract);
 
   const proofProvider = await createContractProofProvider(
     wallet,
@@ -1203,6 +1177,48 @@ export async function createContractProviders(
     walletProvider,
     midnightProvider: walletProvider,
   };
+}
+
+/**
+ * The tab's one ZK artefact provider for a contract, made on first use.
+ *
+ * EXPORTED FOR THE WARM-UP (2026/09/22). The same memoised provider every
+ * connection to the contract is handed, so the setup can fetch the verifier
+ * keys while the person is still typing their name — with no wallet, which on
+ * the passkey arm cannot exist before the ceremony — and the deploy that
+ * follows finds them already read.
+ */
+export async function contractZkConfigProvider(
+  contract: PassportContractName,
+): Promise<ZkArtefactSource> {
+  const assetContract = contractAssetContract(contract);
+  let zkConfigProvider = zkConfigProviders.get(assetContract);
+  if (zkConfigProvider === undefined) {
+    const { FetchZkConfigProvider } = await import(
+      '@midnight-ntwrk/midnight-js-fetch-zk-config-provider'
+    );
+    zkConfigProvider = memoisingZkConfigProvider(
+      new FetchZkConfigProvider(contractAssetBase(contract), {
+        /* `globalThis`, not `window`: the identical call has to work under the
+           Node drill harness, which deliberately has no window.
+
+           WRAPPED IN `buildIdFetch` (2026/09/14). Every artefact url this
+           provider composes — the keys, the ZKIR, and above all
+           `compiler/contract-manifest.json` — is served
+           `max-age=31536000, immutable` and carries no content hash, so a
+           browser that fetched the manifest before a contract gained a circuit
+           kept it for a YEAR and then refused the new build's keys against it:
+           `ZKConfigurationReadError: Failed to read verifier key for
+           passport-account#transfer_shielded_to_account`, met by a reviewer
+           creating a new Passport. `buildIdFetch` puts this build's id in the
+           query, so a new deploy asks for an address no cache has an answer
+           for. See `../lib/buildId.ts`. */
+        fetchFunc: buildIdFetch(globalThis.fetch.bind(globalThis)) as never,
+      }) as unknown as ZkArtefactSource,
+    );
+    zkConfigProviders.set(assetContract, zkConfigProvider);
+  }
+  return zkConfigProvider as ZkArtefactSource;
 }
 
 /**

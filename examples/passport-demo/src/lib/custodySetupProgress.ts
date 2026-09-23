@@ -20,7 +20,7 @@
  * "I like how we showed the full TX journey here … this part same way with the
  * game is critical" (2026/09/22). So the new road gets the same timeline, the
  * same clock, and the same game, and this module is the half of it that is a
- * decision rather than a paint: which row is running, which of the five states
+ * decision rather than a paint: which row is running, which of the three states
  * the long row is in, and what the one remaining sentence says.
  *
  * NO REACT, NO STORAGE, NO NETWORK, NO CLOCK. Every answer here is a value in
@@ -50,9 +50,17 @@ export type CustodySetupPhase =
   | 'confirm-identity'
   /** The account itself coming into existence. */
   | 'creating'
-  /** The rest of the roster going in — the maintenance waves. */
-  | 'finishing'
-  /** The key being turned on. */
+  /**
+   * The key being turned on.
+   *
+   * STRAIGHT AFTER THE ACCOUNT, since 2026/09/22. There used to be a
+   * `finishing` phase between the two — the maintenance waves carrying the
+   * other twenty circuits — and it was seventy seconds of somebody watching a
+   * row about work their Passport does not use. The deploy carries every
+   * circuit the key's own arm calls, so the key is turned on at once and the
+   * rest of the roster goes in behind Home, where nobody waits for it. It has
+   * no row, because a row about work nobody is waiting on is furniture.
+   */
   | 'activating'
   /** The `.night` name being registered against the account. */
   | 'registering'
@@ -64,24 +72,18 @@ export type CustodySetupPhase =
 /**
  * What the screen SAYS happened, as opposed to what it worked out.
  *
- * The three middle ones are the custody road's own phases, reported as each
- * wave starts; the other three are the screen's, because the ceremony and the
- * name claim are not the custody road's to report. Every other phase the
- * custody road reports — `wallet`, `sign`, `submit`, `confirm` — is a moment
- * INSIDE one of these and deliberately has no signal: advancing the timeline on
+ * The two middle ones are the custody road's own phases; the other three are
+ * the screen's, because the ceremony and the name claim are not the custody
+ * road's to report. Every other phase the custody road reports — `wallet`,
+ * `waves`, `sign`, `submit`, `confirm` — is a moment INSIDE one of these, or
+ * work behind Home, and deliberately has no signal: advancing the timeline on
  * the `confirm` that ends the activation would move it to the name before the
  * name had been asked for.
  */
-export type CustodySetupSignal =
-  | 'identity'
-  | 'deploy'
-  | 'waves'
-  | 'activate'
-  | 'register'
-  | 'confirm'
+export type CustodySetupSignal = 'identity' | 'deploy' | 'activate' | 'register' | 'confirm'
 
 /** What `nextCustodyStep` says is still to do about a stored record. */
-export type CustodySetupRecordStep = 'deploy' | 'waves' | 'activate' | 'ready' | 'interrupted'
+export type CustodySetupRecordStep = 'deploy' | 'activate' | 'ready' | 'interrupted'
 
 /** Everything the phase is decided from. */
 export interface CustodySetupProgressInput {
@@ -98,7 +100,6 @@ export interface CustodySetupProgressInput {
 const PHASE_OF_SIGNAL: Record<CustodySetupSignal, CustodySetupPhase> = {
   identity: 'confirm-identity',
   deploy: 'creating',
-  waves: 'finishing',
   activate: 'activating',
   register: 'registering',
   confirm: 'confirming',
@@ -106,7 +107,6 @@ const PHASE_OF_SIGNAL: Record<CustodySetupSignal, CustodySetupPhase> = {
 
 const PHASE_OF_RECORD_STEP: Record<CustodySetupRecordStep, CustodySetupPhase> = {
   deploy: 'creating',
-  waves: 'finishing',
   activate: 'activating',
   /* Built and activated, and the only thing left is the name. */
   ready: 'registering',
@@ -161,17 +161,20 @@ export interface CustodySetupStep {
 }
 
 /**
- * How long the long row usually takes, measured on 2026/09/22.
+ * How long the long row usually takes.
  *
- * Three real setups on stagenet ran three to four minutes from the deploy to
- * the activation, and the name behind them landed in about forty-five seconds.
- * Four minutes is the two of them together, rounded UP for the reason
- * `./claimSteps.ts` gives about its own estimate: over-stating one costs a
- * reader nothing, while understating it turns every ordinary setup into
- * "taking a little longer than usual", which is the copy kept for something
- * going wrong.
+ * WAS FOUR MINUTES, measured on 2026/09/22 over nine dependent transactions:
+ * the deploy, three maintenance waves, the activation, the opening balance,
+ * and the name. The row now covers two of them — the deploy and the
+ * activation, with the name running beside them — which on stagenet's
+ * twenty-odd seconds a dependent step is about forty-five to sixty seconds
+ * once the ceremony is over (`setup-speed-plan.md` §3a). Ninety is that,
+ * rounded UP for the reason `./claimSteps.ts` gives about its own estimate:
+ * over-stating one costs a reader nothing, while understating it turns every
+ * ordinary setup into "taking a little longer than usual", which is the copy
+ * kept for something going wrong. To be re-measured on the first live runs.
  */
-export const CUSTODY_SETUP_EXPECTED_SECONDS = 240
+export const CUSTODY_SETUP_EXPECTED_SECONDS = 90
 
 /** The label the ceremony row carries, which is about how the reader got in. */
 export function custodyIdentityStepLabel(arm: 'passkey' | 'dynamic'): string {
@@ -216,13 +219,8 @@ export function custodySetupSteps(
 /* The long row, from the inside                                              */
 /* -------------------------------------------------------------------------- */
 
-/** Stable identity for one of the five states the long row passes through. */
-export type CustodySetupSubStageId =
-  | 'account'
-  | 'finish'
-  | 'activate'
-  | 'register'
-  | 'confirm'
+/** Stable identity for one of the three states the long row passes through. */
+export type CustodySetupSubStageId = 'account' | 'activate' | 'register'
 
 export interface CustodySetupSubStage {
   readonly id: CustodySetupSubStageId
@@ -231,24 +229,38 @@ export interface CustodySetupSubStage {
   readonly state: ClaimStepState
 }
 
-/** The five phases the long row is made of, in the order they run. */
-const LONG_ROW_PHASES: readonly CustodySetupPhase[] = [
-  'creating',
-  'finishing',
-  'activating',
-  'registering',
-  'confirming',
-]
+/** The two SEQUENTIAL states of the long row, in the order they run. */
+const LONG_ROW_PHASES: readonly CustodySetupPhase[] = ['creating', 'activating']
 
 /**
- * The five states of the long row, with the one that is running now.
+ * The name's own state, when nothing says otherwise.
  *
- * They are NOT five more rows — a person cannot act on the difference between
+ * The press that sets a Passport up starts the name the moment the account is
+ * SUBMITTED, so the name runs BESIDE the other two rather than after them —
+ * and what the screen knows about it is handed in. Without that, the phase is
+ * the only witness: a press that is registering or confirming the name, or is
+ * done, is the name-only press a Passport whose name was not yet claimed makes.
+ */
+function nameStateOfPhase(phase: CustodySetupPhase): ClaimStepState {
+  if (phase === 'registering') return 'active'
+  if (phase === 'confirming' || phase === 'done') return 'done'
+  return 'todo'
+}
+
+/**
+ * The three states of the long row, with the ones that are running now.
+ *
+ * They are NOT three more rows — a person cannot act on the difference between
  * them, which is the whole reason they fold into one. What they answer is "is
- * anything actually happening", which four minutes of one unchanging sentence
- * cannot. They are returned for EVERY phase, all five `todo` before the row is
+ * anything actually happening", which a minute of one unchanging sentence
+ * cannot. They are returned for EVERY phase, all `todo` before the row is
  * reached, because the timeline's shape rule holds inside a row as well as
  * outside it: a state fills in, it never appears under a reader mid-wait.
+ *
+ * TWO CAN BE ACTIVE AT ONCE, and that is the truth rather than a glitch. Since
+ * 2026/09/22 the name is claimed as soon as the account is submitted, so
+ * "Registering alice.night" runs while the key is being turned on. `name` is
+ * that state as the screen knows it; omitted, it is read off the phase.
  *
  * `domain` is the name being claimed — `alice.night` — so the registration
  * state can name it; omitted, it says "your name".
@@ -256,19 +268,26 @@ const LONG_ROW_PHASES: readonly CustodySetupPhase[] = [
 export function custodySetupSubStages(
   phase: CustodySetupPhase,
   domain?: string,
+  name?: ClaimStepState,
 ): CustodySetupSubStage[] {
-  const active = phase === 'done' ? LONG_ROW_PHASES.length : LONG_ROW_PHASES.indexOf(phase)
-  const labels: readonly { id: CustodySetupSubStageId; label: string }[] = [
+  const active =
+    phase === 'registering' || phase === 'confirming' || phase === 'done'
+      ? LONG_ROW_PHASES.length
+      : LONG_ROW_PHASES.indexOf(phase)
+  const sequential: readonly { id: CustodySetupSubStageId; label: string }[] = [
     { id: 'account', label: 'Creating your account' },
-    { id: 'finish', label: 'Finishing your account' },
     { id: 'activate', label: 'Turning on your sign-in' },
-    { id: 'register', label: domain !== undefined ? `Registering ${domain}` : 'Registering your name' },
-    { id: 'confirm', label: 'Confirming your name' },
   ]
-  return labels.map((stage, index) => ({
-    ...stage,
-    state: index < active ? 'done' : index === active ? 'active' : 'todo',
-  }))
+  const stateAt = (index: number): ClaimStepState =>
+    index < active ? 'done' : index === active ? 'active' : 'todo'
+  return [
+    ...sequential.map((stage, index) => ({ ...stage, state: stateAt(index) })),
+    {
+      id: 'register',
+      label: domain !== undefined ? `Registering ${domain}` : 'Registering your name',
+      state: name ?? nameStateOfPhase(phase),
+    },
+  ]
 }
 
 /* -------------------------------------------------------------------------- */
@@ -280,9 +299,9 @@ export const CUSTODY_SETUP_PROMISE =
   'Setting your Passport up and claiming your name are paid for on your behalf.'
 
 /** How many steps the counted sentence counts. */
-export const CUSTODY_SETUP_COUNTED_STEPS = 3
+export const CUSTODY_SETUP_COUNTED_STEPS = 2
 
-const COUNTED_PHASES: readonly CustodySetupPhase[] = ['creating', 'finishing', 'activating']
+const COUNTED_PHASES: readonly CustodySetupPhase[] = ['creating', 'activating']
 
 /**
  * The hint beneath the button, which must never disagree with the timeline
@@ -307,4 +326,102 @@ export function custodySetupHint(phase: CustodySetupPhase | null): string {
   if (phase === 'done') return 'Your Passport is ready.'
   const step = COUNTED_PHASES.indexOf(phase) + 1
   return `Setting up your Passport, step ${step} of ${CUSTODY_SETUP_COUNTED_STEPS}`
+}
+
+/* -------------------------------------------------------------------------- */
+/* The stopwatch a live run is measured with                                  */
+/* -------------------------------------------------------------------------- */
+
+/** The tag every timing line carries, so a page console can be filtered to it. */
+export const CUSTODY_SETUP_TIMING_TAG = '[setup-timing]'
+
+/**
+ * One timing line: `[setup-timing] <phase> <ms since the press>`.
+ *
+ * Whole milliseconds and nothing else on the line, so a live run can be read
+ * straight out of the page console and pasted into a table without editing.
+ */
+export function custodySetupTimingLine(phase: string, sinceMs: number): string {
+  return `${CUSTODY_SETUP_TIMING_TAG} ${phase} ${Math.max(0, Math.round(sinceMs))}`
+}
+
+/** A stopwatch started at a press. */
+export interface CustodySetupClock {
+  /** Logs `phase` against the press and returns the milliseconds since it. */
+  mark(phase: string): number
+}
+
+/**
+ * Start the stopwatch for one press.
+ *
+ * The clock and the log are handed in, so the rule — every line is measured
+ * from the SAME press, and a phase is logged the moment it happens — can be
+ * drilled without a browser; the screen hands in `performance.now` and
+ * `console.info`.
+ */
+export function custodySetupClock(
+  now: () => number,
+  log: (line: string) => void,
+): CustodySetupClock {
+  const pressedAt = now()
+  return {
+    mark(phase: string): number {
+      const since = now() - pressedAt
+      log(custodySetupTimingLine(phase, since))
+      return since
+    },
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Behind Home: what to pick back up, and when                                */
+/* -------------------------------------------------------------------------- */
+
+/** What the screen knows when it asks whether to start the work behind Home. */
+export interface CustodyBackgroundInput {
+  /** The record's maintenance waves are not all in (`custodyWavesPending`). */
+  readonly wavesPending: boolean
+  /** The opening balance is still to be asked for (`custodyOpeningBalanceDue`). */
+  readonly openingBalanceDue: boolean
+  /** This tab holds the device key — the ceremony has happened here. */
+  readonly keyHeld: boolean
+  /** A press, a payment, or the background work itself is running. */
+  readonly busy: boolean
+  /** This tab has already asked for the opening balance once. */
+  readonly balanceTried: boolean
+  /**
+   * How long ago the last run of the waves in this tab stopped short, or null
+   * when none has. A failure that comes straight back is not retried on every
+   * render: see {@link CUSTODY_WAVES_RETRY_MS}.
+   */
+  readonly wavesStoppedMsAgo?: number | null
+}
+
+/** How long the waves are left alone after a run that stopped short. */
+export const CUSTODY_WAVES_RETRY_MS = 60_000
+
+/**
+ * Which piece of the work behind Home to start now, or null for none.
+ *
+ * THE WAVES FIRST, AND ONLY WITH THE KEY. A passkey's maintenance authority is
+ * derived from the device key and written nowhere, so the waves resume the
+ * moment the key is held in this tab — the setup press, a payment, adding the
+ * way back — and never by prompting for it: a browser refuses a passkey prompt
+ * nobody pressed for. Until then NOTHING else starts either, because the
+ * opening balance cannot be paid into an account that is missing circuits.
+ *
+ * THE BALANCE NEEDS NOBODY, and is asked once per tab from here; the waves'
+ * own finish asks again, because a wave landing is new news.
+ */
+export function custodyBackgroundWork(
+  input: CustodyBackgroundInput,
+): 'waves' | 'opening-balance' | null {
+  if (input.busy) return null
+  if (input.wavesPending) {
+    const cooling =
+      input.wavesStoppedMsAgo != null && input.wavesStoppedMsAgo < CUSTODY_WAVES_RETRY_MS
+    return input.keyHeld && !cooling ? 'waves' : null
+  }
+  if (input.openingBalanceDue && !input.balanceTried) return 'opening-balance'
+  return null
 }

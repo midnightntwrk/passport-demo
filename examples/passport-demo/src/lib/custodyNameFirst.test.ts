@@ -55,6 +55,30 @@ describe('which screen a Passport being made is on', () => {
     ).toBe('name');
   });
 
+  /* 2026/09/22: the name is claimed beside the activation, so the key can be
+     on while the name is still being registered. That Passport is at Home,
+     with a name card that says so. */
+  it('sends a finished Passport Home while its name is still being registered', () => {
+    expect(
+      custodyNameFirstStage({
+        ...FRESH,
+        setupStarted: true,
+        setupFinished: true,
+        chosenName: 'alice',
+        nameRegistering: true,
+        recoveryDue: true,
+      }),
+    ).toBe('home');
+  });
+
+  it('keeps it on the name step when the claim is not running, and before the key is on', () => {
+    const started = { ...FRESH, setupStarted: true, chosenName: 'alice' };
+    expect(
+      custodyNameFirstStage({ ...started, setupFinished: true, nameRegistering: false }),
+    ).toBe('name');
+    expect(custodyNameFirstStage({ ...started, nameRegistering: true })).toBe('name');
+  });
+
   it('sends a finished, named Passport Home', () => {
     expect(
       custodyNameFirstStage({

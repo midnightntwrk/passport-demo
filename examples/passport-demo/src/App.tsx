@@ -9872,6 +9872,7 @@ export default function PassportDemo() {
       name: custody.name,
       network: custody.network,
       accountAddress: custody.accountAddress,
+      registeringName: custody.registeringName ?? null,
     });
     const contractRecord = custodyHomeContractRecord({
       accountAddress: custody.accountAddress,

@@ -64,6 +64,14 @@ describe('whether the way back is offered after the name', () => {
   it('reads a record with neither answer in it as unanswered', () => {
     expect(recoveryStepDue({ ...JUST_NAMED, record: {} })).toBe(true);
   });
+
+  /* The way back is a k256 key, and every k256 circuit arrives in the waves
+     that now land after Home (2026/09/22). Offered before them, it would put a
+     key on the account that can do nothing. */
+  it('waits for the last wave, and is offered once it has landed', () => {
+    expect(recoveryStepDue({ ...JUST_NAMED, accountComplete: false })).toBe(false);
+    expect(recoveryStepDue({ ...JUST_NAMED, accountComplete: true })).toBe(true);
+  });
 });
 
 describe('whether a Passport has a way back', () => {

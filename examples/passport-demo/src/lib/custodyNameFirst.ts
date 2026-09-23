@@ -74,6 +74,19 @@ export interface CustodyNameFirstInput {
    * and every build with no sign-in behind it — reads exactly as it did.
    */
   readonly recoveryDue?: boolean;
+  /**
+   * Whether the chosen name's claim is RUNNING in this tab right now.
+   *
+   * Since 2026/09/22 the claim starts the moment the account is submitted and
+   * runs beside the activation, so the key can be on while the name is still
+   * being registered. That Passport goes to Home, whose name card says the
+   * name is being registered — and nowhere else says it is registered until it
+   * is. A claim that is NOT running (it failed, or the tab was closed on it)
+   * leaves the Passport on the name step, where the claim is made again.
+   *
+   * Optional, and false when omitted.
+   */
+  readonly nameRegistering?: boolean;
 }
 
 /**
@@ -99,6 +112,11 @@ export interface CustodyNameFirstInput {
  * until it is read.
  */
 export function custodyNameFirstStage(input: CustodyNameFirstInput): CustodyNameFirstStage {
+  /* HOME WHILE THE NAME IS STILL BEING REGISTERED, and never the way back: the
+     way back is offered after the name, so it waits for the name to land. */
+  if (input.setupFinished && input.claimedName === null && input.nameRegistering === true) {
+    return 'home';
+  }
   if (input.setupFinished && input.claimedName !== null) {
     /* THE STEP IS RESUMABLE BECAUSE IT IS DECIDED HERE. Nothing remembers that
        the reader was on it: the answer is recomputed from what is stored on

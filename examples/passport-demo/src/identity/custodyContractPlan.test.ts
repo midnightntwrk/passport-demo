@@ -6,6 +6,8 @@ import {
   forgetCustodyAuthorityKey,
   hexToBytes,
   custodyAccountIsUsable,
+  custodyOpeningBalanceDue,
+  custodyWavesPending,
   k1ArmCircuits,
   k1EnrolmentChallenges,
   custodyExplorerLink,
@@ -142,6 +144,35 @@ describe('the wave plan', () => {
     /* The property that matters: the account is activatable after wave 1. */
     expect(waves[0]?.circuits).toContain('activate_initial_device_with_k256');
     expect(waves[0]?.circuits).toContain('append_inbox_with_k256');
+  });
+
+  /* WHAT MAKES "ACTIVATE, THEN HOME, THEN THE WAVES" SAFE. Every circuit a
+     passkey Passport's own code paths call — the activation, the three
+     withdrawals, the inbox append, the key rotation, and adding or removing a
+     device — plus both permissionless deposits a payer calls into it, is in
+     wave 1. Nothing a passkey Passport does waits on waves 2 and up; they carry
+     the k256 arm (a sign-in's way back) and the grant circuits, and nothing
+     calls a grant circuit. */
+  it('puts every circuit a passkey Passport calls into the deploy', () => {
+    const waveOne = new Set(planCustodyWaves(evenSizes(), 'jubjub', false)[0]?.circuits);
+    for (const circuit of [
+      'deposit_unshielded',
+      'deposit_shielded',
+      'activate_initial_device_with_jubjub',
+      'withdraw_unshielded_with_jubjub',
+      'withdraw_shielded_with_jubjub',
+      'withdraw_shielded_to_contract_with_jubjub',
+      'append_inbox_with_jubjub',
+      'rotate_enc_key_with_jubjub',
+      'add_device_with_jubjub',
+      'remove_device_with_jubjub',
+    ]) {
+      expect(waveOne.has(circuit), circuit).toBe(true);
+    }
+    expect(waveOne.size).toBe(10);
+    /* And no k256 circuit: a sign-in added as a way back can do nothing until
+       the waves are in, which is why that step waits for them. */
+    expect([...waveOne].some((circuit) => circuit.endsWith('_k256'))).toBe(false);
   });
 
   it('plans the measured roster as three waves and covers every circuit', () => {
@@ -286,14 +317,49 @@ describe('the deploy record', () => {
     expect(custodyAccountIsUsable(record)).toBe(false);
   });
 
-  it('walks deploy → waves → activate → ready', () => {
+  /* THE ORDER OF 2026/09/22: deploy, activate, use — and the rest of the
+     roster after Home. Wave 1 carries every circuit the device's arm calls, so
+     an activated account is usable with waves still to land. */
+  it('walks deploy → activate → ready, with the waves after it', () => {
     const deployed = { ...base(), address: 'aa'.repeat(32), wavesDone: 1 };
-    expect(nextCustodyStep(deployed)).toBe('waves');
-    const wavedIn = { ...deployed, wavesDone: 3 };
-    expect(nextCustodyStep(wavedIn)).toBe('activate');
-    const ready = { ...wavedIn, activated: true };
-    expect(nextCustodyStep(ready)).toBe('ready');
-    expect(custodyAccountIsUsable(ready)).toBe(true);
+    expect(nextCustodyStep(deployed)).toBe('activate');
+    expect(custodyWavesPending(deployed)).toBe(false);
+    const activated = { ...deployed, activated: true };
+    expect(nextCustodyStep(activated)).toBe('ready');
+    expect(custodyAccountIsUsable(activated)).toBe(true);
+    expect(custodyWavesPending(activated)).toBe(true);
+    const complete = { ...activated, wavesDone: 3 };
+    expect(nextCustodyStep(complete)).toBe('ready');
+    expect(custodyWavesPending(complete)).toBe(false);
+  });
+
+  it('has no waves pending before there is an account to put them on', () => {
+    expect(custodyWavesPending(base())).toBe(false);
+    expect(custodyWavesPending({ ...base(), activated: true })).toBe(false);
+  });
+
+  it('asks for the opening balance once, after the last wave', () => {
+    const activated = { ...base(), address: 'aa'.repeat(32), wavesDone: 1, activated: true };
+    expect(base().openingBalanceAsked).toBe(false);
+    /* Before the last wave the service cannot open the account at all. */
+    expect(custodyOpeningBalanceDue(activated)).toBe(false);
+    const complete = { ...activated, wavesDone: 3 };
+    expect(custodyOpeningBalanceDue(complete)).toBe(true);
+    expect(custodyOpeningBalanceDue({ ...complete, openingBalanceAsked: true })).toBe(false);
+    expect(custodyOpeningBalanceDue({ ...complete, activated: false })).toBe(false);
+    expect(custodyOpeningBalanceDue({ ...complete, address: null })).toBe(false);
+  });
+
+  /* A record from before the reorder was funded inside its own press. Absent
+     is "already happened", so an old Passport is never asked a second time. */
+  it('never asks again for a Passport set up the old way', () => {
+    const { openingBalanceAsked: _dropped, ...legacy } = {
+      ...base(),
+      address: 'aa'.repeat(32),
+      wavesDone: 3,
+      activated: true,
+    };
+    expect(custodyOpeningBalanceDue(legacy)).toBe(false);
   });
 
   it('keys one account per user per network', () => {
@@ -440,6 +506,22 @@ describe('the resume rule', () => {
     };
     expect(nextCustodyStep(half)).toBe('interrupted');
     expect(custodyAccountIsUsable(half)).toBe(false);
+    expect(custodyWavesPending(half)).toBe(false);
+  });
+
+  /* An account whose key is ON is a working Passport, whether or not its
+     remaining waves can ever be signed. Start-again would abandon money. */
+  it('is not terminal once the key is on, and stops asking for the waves', () => {
+    const on: CustodyAccountRecord = {
+      ...newCustodyRecord({ user: 'u', network: 'n', privateStateId: 'p', saltHex: '', totalWaves: 3 }),
+      address: 'aa'.repeat(32),
+      wavesDone: 1,
+      activated: true,
+      interrupted: true,
+    };
+    expect(nextCustodyStep(on)).toBe('ready');
+    expect(custodyAccountIsUsable(on)).toBe(true);
+    expect(custodyWavesPending(on)).toBe(false);
   });
 });
 

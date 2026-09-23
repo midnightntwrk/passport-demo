@@ -119,6 +119,18 @@ export function allCustodyCircuits(firstArm: K1Arm = 'k256'): string[] {
  * which is a rejection AFTER a sponsored fee has been booked. 25,000 leaves
  * room for the intent envelope and lands the thirty-circuit roster on three
  * waves, which is the shape stagenet accepted on 2026/09/16.
+ *
+ * NOT RAISED TO 27,000 (2026/09/22), and the reason is the evidence rather
+ * than caution. Raising it would pack a passkey's remaining twenty circuits
+ * into two waves instead of three, and was proposed on the strength of
+ * "29,484 bytes accepted on stagenet". That figure is the DEVNET one above.
+ * The largest maintenance update stagenet has taken is 24,811 bytes in and
+ * 27,998 balanced (the sponsor's journal, 2026/09/22 22:43:53), while two
+ * transactions balanced to ~31,500 bytes that same evening were never included
+ * ("not on chain 121 s after balancing"); a 27,000-verifier-byte wave balances
+ * to about 31,800. Until a drill lands one on stagenet this stays where the
+ * chain has shown it works — and since the waves after the first now run after
+ * Home ({@link custodyWavesPending}), the third wave costs nobody a second.
  */
 export const CUSTODY_VERIFIER_BYTE_BUDGET = 25_000;
 
@@ -584,7 +596,7 @@ export function hexToBytes(value: string): Uint8Array {
  * again. The only move from here is to start again, which is why it is a step
  * of its own rather than a flag the screens are free to ignore.
  */
-export type CustodyDeployStep = 'interrupted' | 'deploy' | 'waves' | 'activate' | 'ready';
+export type CustodyDeployStep = 'interrupted' | 'deploy' | 'activate' | 'ready';
 
 /**
  * Everything a reload needs to carry on, and nothing it does not.
@@ -622,15 +634,69 @@ export interface CustodyAccountRecord {
    * written before this field existed still parse.
    */
   readonly interrupted?: boolean;
+  /**
+   * `false` from the moment a setup starts, and `true` once the opening balance
+   * has been asked for AND answered — granted or refused, either is an answer.
+   *
+   * ABSENT IS NEITHER. Every record written before 2026/09/22 was funded inside
+   * its own setup press, so a missing field means "that was the old order, and
+   * it already happened" — and such a Passport is never asked for a second
+   * grant on open. See {@link custodyOpeningBalanceDue}.
+   */
+  readonly openingBalanceAsked?: boolean;
 }
 
-/** The step a record is waiting on. */
+/**
+ * The step a record is waiting on BEFORE the Passport can be used.
+ *
+ * THE WAVES ARE NOT A STEP OF IT ANY MORE (2026/09/22). Wave 1 — the deploy —
+ * carries the two deposits and every circuit of the device's own arm,
+ * activation included (`planCustodyWaves`), which is every circuit a Passport
+ * held by that arm ever calls. So the order is deploy, activate, use; waves 2
+ * and up install the OTHER arm and the grant circuits, and they are finished
+ * after Home, in the background, where {@link custodyWavesPending} says so.
+ * That took four dependent transactions (~70 s on stagenet) off the time to
+ * Home.
+ *
+ * `interrupted` is terminal only BEFORE activation. An account whose key is on
+ * is a working Passport whether or not its remaining waves can ever be signed,
+ * and telling its holder to start again would abandon money that is there.
+ */
 export function nextCustodyStep(record: CustodyAccountRecord): CustodyDeployStep {
-  if (record.interrupted === true) return 'interrupted';
+  if (record.interrupted === true && !record.activated) return 'interrupted';
   if (record.address === null) return 'deploy';
-  if (record.wavesDone < record.totalWaves) return 'waves';
   if (!record.activated) return 'activate';
   return 'ready';
+}
+
+/**
+ * Whether a usable Passport still has maintenance waves to land.
+ *
+ * Only after activation: before it, the waves are simply not the next thing.
+ * Never for an interrupted record, because the key that would sign them is
+ * gone and asking again would fail the same way every time.
+ */
+export function custodyWavesPending(record: CustodyAccountRecord): boolean {
+  if (record.interrupted === true) return false;
+  if (record.address === null || !record.activated) return false;
+  return record.wavesDone < record.totalWaves;
+}
+
+/**
+ * Whether the opening balance is still to be asked for.
+ *
+ * AFTER THE LAST WAVE, NOT AFTER ACTIVATION, and that is the chain's rule and
+ * not a preference. The service pays the grant in through midnight-js's
+ * `findDeployedContract`, which refuses a contract whose state does not carry
+ * EVERY circuit of the build it was handed (`verifyContractState`) — so a grant
+ * asked for between activation and the last wave is refused every time. The
+ * balance therefore arrives a wave or two after Home, and Home says so by
+ * showing it when it lands.
+ */
+export function custodyOpeningBalanceDue(record: CustodyAccountRecord): boolean {
+  if (record.address === null || !record.activated) return false;
+  if (record.openingBalanceAsked !== false) return false;
+  return record.wavesDone >= record.totalWaves;
 }
 
 /** Whether the account can take a gated call. */
@@ -814,6 +880,7 @@ export function newCustodyRecord(options: {
     totalWaves: options.totalWaves,
     activated: false,
     txHashes: [],
+    openingBalanceAsked: false,
   };
 }
 
@@ -864,6 +931,15 @@ export function resolveCustodyUseCounter(probe: CustodyCounterProbe, known?: big
  */
 export const K1_ENROLMENT_UNCONFIRMED =
   'We could not confirm this sign-in can approve for a Passport. Try again.';
+
+/**
+ * The refusal for a step that needs the waves still landing behind Home.
+ *
+ * One plain sentence, none of the forbidden words, and TRUE: nothing is wrong,
+ * the Passport is finishing, and the same press works a minute later.
+ */
+export const CUSTODY_STILL_FINISHING =
+  'Your Passport is still finishing setting up. Try again in a minute.';
 
 /** The sentence a half-built Passport shows when its setup cannot be finished. */
 export const CUSTODY_SETUP_INTERRUPTED =

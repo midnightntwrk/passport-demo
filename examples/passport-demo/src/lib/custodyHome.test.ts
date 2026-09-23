@@ -17,6 +17,7 @@ import { custodyOpeningDepositTxHash,
   custodySentToastTitle,
   custodyActivityMarkKey,
   custodyHomeAccount,
+  CUSTODY_NAME_REGISTERING_REASON,
   custodyHomeAliasRecord,
   custodyHomeContractRecord,
   custodyHomePendingBalances,
@@ -171,6 +172,37 @@ describe('the name card', () => {
   it('is absent where there is no name, rather than empty', () => {
     expect(custodyHomeAliasRecord({ name: null, network: 'stagenet', accountAddress: ACCOUNT })).toBeNull();
     expect(custodyHomeAliasRecord({ name: '  ', network: 'stagenet', accountAddress: ACCOUNT })).toBeNull();
+    expect(
+      custodyHomeAliasRecord({ name: null, network: 'stagenet', accountAddress: ACCOUNT, registeringName: ' ' }),
+    ).toBeNull();
+  });
+
+  /* 2026/09/22: Home can open while the name's claim is still running. The
+     card names it, says it is being registered, and never says Registered. */
+  it('shows a name still being registered as exactly that', () => {
+    const record = custodyHomeAliasRecord({
+      name: null,
+      network: 'stagenet',
+      accountAddress: ACCOUNT,
+      registeringName: 'walker',
+    });
+    expect(record).toMatchObject({
+      alias: 'walker',
+      domain: 'walker.night',
+      status: 'queued',
+      registering: true,
+      queuedReason: CUSTODY_NAME_REGISTERING_REASON,
+      registryConfirmed: false,
+      resolverTargetHex: ACCOUNT,
+    });
+    expect(
+      custodyHomeAliasRecord({ name: null, network: 'stagenet', accountAddress: null, registeringName: 'walker' }),
+    ).not.toHaveProperty('resolverTargetHex');
+    /* A held name wins over a claim that is somehow still running. */
+    expect(
+      custodyHomeAliasRecord({ name: 'walker', network: 'stagenet', accountAddress: ACCOUNT, registeringName: 'x' })
+        ?.status,
+    ).toBe('registered');
   });
 });
 

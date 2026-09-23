@@ -75,6 +75,13 @@ export interface AliasRecord {
   registerTxId?: string;
   /** Present on every `'queued'` and `'failed'` record — never a bare status. */
   queuedReason?: string;
+  /**
+   * True on a `'queued'` record whose registration is RUNNING right now, in
+   * this tab — the custody setup claims the name beside the activation, so Home
+   * can open before it lands. The card says "being registered" for it rather
+   * than "queued", and never "Registered". Session-only: never stored.
+   */
+  registering?: boolean;
   /** Whether the registry itself was seen carrying the name. */
   registryConfirmed?: boolean;
   /**

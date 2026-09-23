@@ -19,6 +19,11 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  CUSTODY_WAVES_RETRY_MS,
+  custodyBackgroundWork,
+  CUSTODY_SETUP_TIMING_TAG,
+  custodySetupClock,
+  custodySetupTimingLine,
   CUSTODY_SETUP_COUNTED_STEPS,
   CUSTODY_SETUP_EXPECTED_SECONDS,
   CUSTODY_SETUP_PROMISE,
@@ -48,7 +53,6 @@ describe('which phase the setup is in', () => {
     const signals: [CustodySetupSignal, CustodySetupPhase][] = [
       ['identity', 'confirm-identity'],
       ['deploy', 'creating'],
-      ['waves', 'finishing'],
       ['activate', 'activating'],
       ['register', 'registering'],
       ['confirm', 'confirming'],
@@ -62,7 +66,6 @@ describe('which phase the setup is in', () => {
 
   it('falls back to the record when nothing has been reported — which is a reload', () => {
     expect(custodySetupPhase({ ...idle, recordStep: 'deploy' })).toBe('creating')
-    expect(custodySetupPhase({ ...idle, recordStep: 'waves' })).toBe('finishing')
     expect(custodySetupPhase({ ...idle, recordStep: 'activate' })).toBe('activating')
   })
 
@@ -79,7 +82,7 @@ describe('which phase the setup is in', () => {
   })
 
   it('reads a running press with nothing reported off the record, and a missing one as the start', () => {
-    expect(custodySetupPhase({ ...idle, running: true, recordStep: 'waves' })).toBe('finishing')
+    expect(custodySetupPhase({ ...idle, running: true, recordStep: 'activate' })).toBe('activating')
     expect(custodySetupPhase({ ...idle, running: true, recordStep: 'interrupted' })).toBe('creating')
     expect(custodySetupPhase({ ...idle, running: true, recordStep: 'ready' })).toBe('registering')
     expect(custodySetupPhase({ ...idle, running: true })).toBe('creating')
@@ -97,7 +100,6 @@ describe('the three rows', () => {
     for (const phase of [
       'confirm-identity',
       'creating',
-      'finishing',
       'activating',
       'registering',
       'confirming',
@@ -117,7 +119,7 @@ describe('the three rows', () => {
       'active',
       'todo',
     ])
-    for (const phase of ['creating', 'finishing', 'activating', 'registering', 'confirming'] as const) {
+    for (const phase of ['creating', 'activating', 'registering', 'confirming'] as const) {
       expect(custodySetupSteps(phase, 'passkey').map((row) => row.state)).toEqual([
         'done',
         'done',
@@ -143,62 +145,80 @@ describe('the three rows', () => {
     const rows = custodySetupSteps('creating', 'passkey')
     expect(rows[1].expectedSeconds).toBeNull()
     expect(rows[2].expectedSeconds).toBe(CUSTODY_SETUP_EXPECTED_SECONDS)
-    /* Four minutes, said as "about 4 minutes" by `./claimSteps.ts`. Measured
-       on 2026/09/22 and rounded UP, so an ordinary setup is not reported as
-       taking longer than usual every single time. */
-    expect(CUSTODY_SETUP_EXPECTED_SECONDS).toBe(240)
+    /* Ninety seconds, said as "about 2 minutes" by `./claimSteps.ts`: the
+       deploy and the activation, with the name beside them, rounded UP so an
+       ordinary setup is not reported as taking longer than usual every time.
+       It was four minutes while the waves and the grant sat in front of Home. */
+    expect(CUSTODY_SETUP_EXPECTED_SECONDS).toBe(90)
   })
 })
 
-describe('the five states of the long row', () => {
+describe('the three states of the long row', () => {
   it('is on screen whole from the first frame, so a row fills in rather than appearing', () => {
     const stages = custodySetupSubStages('confirm-identity')
-    expect(stages.map((stage) => stage.id)).toEqual([
-      'account',
-      'finish',
-      'activate',
-      'register',
-      'confirm',
-    ])
+    expect(stages.map((stage) => stage.id)).toEqual(['account', 'activate', 'register'])
     expect(stages.every((stage) => stage.state === 'todo')).toBe(true)
   })
 
   it('names them in the reader’s words, and names the name being claimed', () => {
     expect(custodySetupSubStages('creating', 'alice.night').map((stage) => stage.label)).toEqual([
       'Creating your account',
-      'Finishing your account',
       'Turning on your sign-in',
       'Registering alice.night',
-      'Confirming your name',
     ])
-    expect(custodySetupSubStages('creating')[3].label).toBe('Registering your name')
+    expect(custodySetupSubStages('creating')[2].label).toBe('Registering your name')
   })
 
-  it('marks the one that is running, and every one behind it', () => {
-    expect(custodySetupSubStages('activating').map((stage) => stage.state)).toEqual([
-      'done',
-      'done',
+  /* THE NEW ORDER (2026/09/22): no "Finishing your account" between the two —
+     that work runs behind Home now — and the key straight after the account. */
+  it('turns the key on straight after the account, with nothing between', () => {
+    expect(custodySetupSubStages('creating').map((stage) => stage.state)).toEqual([
       'active',
       'todo',
       'todo',
+    ])
+    expect(custodySetupSubStages('activating').map((stage) => stage.state)).toEqual([
+      'done',
+      'active',
+      'todo',
+    ])
+  })
+
+  /* The name is claimed the moment the account is SUBMITTED, so it runs beside
+     the other two — and two states active at once is the truth. */
+  it('runs the name beside the account and the key, as the screen reports it', () => {
+    expect(custodySetupSubStages('creating', 'a.night', 'active').map((s) => s.state)).toEqual([
+      'active',
+      'todo',
+      'active',
+    ])
+    expect(custodySetupSubStages('activating', 'a.night', 'done').map((s) => s.state)).toEqual([
+      'done',
+      'active',
+      'done',
+    ])
+  })
+
+  it('reads the name off the phase when nothing reports it — the name-only press', () => {
+    expect(custodySetupSubStages('registering').map((stage) => stage.state)).toEqual([
+      'done',
+      'done',
+      'active',
     ])
     expect(custodySetupSubStages('confirming').map((stage) => stage.state)).toEqual([
       'done',
       'done',
       'done',
-      'done',
-      'active',
     ])
     expect(custodySetupSubStages('done').every((stage) => stage.state === 'done')).toBe(true)
   })
 })
 
 describe('the one sentence under the button', () => {
-  it('counts the three, off the live phase and not off a stored record', () => {
-    expect(custodySetupHint('creating')).toBe('Setting up your Passport, step 1 of 3')
-    expect(custodySetupHint('finishing')).toBe('Setting up your Passport, step 2 of 3')
-    expect(custodySetupHint('activating')).toBe('Setting up your Passport, step 3 of 3')
-    expect(CUSTODY_SETUP_COUNTED_STEPS).toBe(3)
+  it('counts the two, off the live phase and not off a stored record', () => {
+    expect(custodySetupHint('creating')).toBe('Setting up your Passport, step 1 of 2')
+    expect(custodySetupHint('activating')).toBe('Setting up your Passport, step 2 of 2')
+    expect(CUSTODY_SETUP_COUNTED_STEPS).toBe(2)
   })
 
   it('says what it is instead of guessing a number, where there is no number', () => {
@@ -220,7 +240,6 @@ describe('the one sentence under the button', () => {
       null,
       'confirm-identity',
       'creating',
-      'finishing',
       'activating',
       'registering',
       'confirming',
@@ -245,5 +264,79 @@ describe('the one sentence under the button', () => {
     ]) {
       expect(words.toLowerCase()).not.toContain(forbidden.toLowerCase())
     }
+  })
+})
+
+describe('the stopwatch a live run is measured with', () => {
+  it('writes one filterable line per phase, in whole milliseconds since the press', () => {
+    expect(custodySetupTimingLine('activated', 41_234.6)).toBe('[setup-timing] activated 41235')
+    expect(custodySetupTimingLine('press', -3)).toBe('[setup-timing] press 0')
+    expect(CUSTODY_SETUP_TIMING_TAG).toBe('[setup-timing]')
+  })
+
+  it('measures every mark from the same press', () => {
+    let clock = 1_000
+    const lines: string[] = []
+    const watch = custodySetupClock(
+      () => clock,
+      (line) => lines.push(line),
+    )
+    clock = 1_250
+    expect(watch.mark('identity')).toBe(250)
+    clock = 20_000
+    expect(watch.mark('deploy-submitted')).toBe(19_000)
+    expect(lines).toEqual([
+      '[setup-timing] identity 250',
+      '[setup-timing] deploy-submitted 19000',
+    ])
+  })
+})
+
+describe('what is picked back up behind Home', () => {
+  const idleHome = {
+    wavesPending: false,
+    openingBalanceDue: false,
+    keyHeld: false,
+    busy: false,
+    balanceTried: false,
+  }
+
+  it('finishes the waves the moment the key is held, and never prompts for it', () => {
+    expect(custodyBackgroundWork({ ...idleHome, wavesPending: true, keyHeld: true })).toBe('waves')
+    expect(custodyBackgroundWork({ ...idleHome, wavesPending: true })).toBeNull()
+  })
+
+  /* The service cannot pay into an account missing any circuit, so the balance
+     waits for the waves even when it is otherwise due. */
+  it('asks for the opening balance only once the waves are in, and once per tab', () => {
+    expect(
+      custodyBackgroundWork({ ...idleHome, wavesPending: true, openingBalanceDue: true }),
+    ).toBeNull()
+    expect(custodyBackgroundWork({ ...idleHome, openingBalanceDue: true })).toBe('opening-balance')
+    expect(
+      custodyBackgroundWork({ ...idleHome, openingBalanceDue: true, balanceTried: true }),
+    ).toBeNull()
+  })
+
+  it('starts nothing while a press, a payment, or the work itself is running', () => {
+    expect(
+      custodyBackgroundWork({ ...idleHome, wavesPending: true, keyHeld: true, busy: true }),
+    ).toBeNull()
+    expect(custodyBackgroundWork({ ...idleHome, openingBalanceDue: true, busy: true })).toBeNull()
+  })
+
+  /* A run that stopped short is not retried on every render — only once the
+     cooling-off has passed, on the next thing that refreshes the screen. */
+  it('leaves the waves alone for a minute after a run that stopped short', () => {
+    const pending = { ...idleHome, wavesPending: true, keyHeld: true }
+    expect(custodyBackgroundWork({ ...pending, wavesStoppedMsAgo: 1_000 })).toBeNull()
+    expect(
+      custodyBackgroundWork({ ...pending, wavesStoppedMsAgo: CUSTODY_WAVES_RETRY_MS }),
+    ).toBe('waves')
+    expect(custodyBackgroundWork({ ...pending, wavesStoppedMsAgo: null })).toBe('waves')
+  })
+
+  it('has nothing to do for a finished Passport', () => {
+    expect(custodyBackgroundWork({ ...idleHome, keyHeld: true })).toBeNull()
   })
 })

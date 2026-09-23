@@ -183,6 +183,10 @@ export function custodyHomePendingBalances(holdings: CustodyHoldings): PendingBa
 /* The name card, and the line under it                                       */
 /* -------------------------------------------------------------------------- */
 
+/** What the name card says under a name that is still being registered. */
+export const CUSTODY_NAME_REGISTERING_REASON =
+  'Your name is being registered. This usually takes under a minute.';
+
 /**
  * The name card's record: the `.night` name this Passport holds, pointed at the
  * account it was bound to.
@@ -204,8 +208,32 @@ export function custodyHomeAliasRecord(input: {
   readonly accountAddress: string | null;
   /** The transaction the registration landed in, where this session saw it. */
   readonly registerTxId?: string | null;
+  /**
+   * A name whose claim is RUNNING and has not landed, or null.
+   *
+   * Since 2026/09/22 the claim runs beside the activation, so Home can open
+   * while the name is still being registered. The card then shows that name
+   * as `queued` and `registering` — "being registered", never "Registered" —
+   * because a sender cannot reach it yet, and the only thing that turns it
+   * into a registered record is the claim landing and `name` being written.
+   */
+  readonly registeringName?: string | null;
 }): AliasRecord | null {
   const name = (input.name ?? '').trim();
+  const registering = (input.registeringName ?? '').trim();
+  if (name.length === 0 && registering.length > 0) {
+    return {
+      alias: registering,
+      domain: `${registering}.night`,
+      network: input.network,
+      status: 'queued',
+      registering: true,
+      queuedReason: CUSTODY_NAME_REGISTERING_REASON,
+      registryConfirmed: false,
+      resolverTarget: 'contract',
+      ...(input.accountAddress ? { resolverTargetHex: input.accountAddress } : {}),
+    };
+  }
   if (name.length === 0) return null;
   return {
     alias: name,
@@ -329,6 +357,11 @@ export interface CustodyHomeView {
   readonly network: string;
   /** The `.night` name, without its suffix, or null. */
   readonly name: string | null;
+  /**
+   * The name whose claim is still running beside a Passport that is already
+   * usable, or null. See `custodyHomeAliasRecord`'s `registeringName`.
+   */
+  readonly registeringName?: string | null;
   /** The account this Passport is, and the address Receive offers. */
   readonly accountAddress: string | null;
   /** Whether every setup step has landed. */

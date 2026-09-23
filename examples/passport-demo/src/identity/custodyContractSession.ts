@@ -46,6 +46,7 @@ import {
   loadCustodyRecord,
   loadCustodyRecords,
   nextCustodyStep,
+  custodyWavesPending,
   type CustodyAccountRecord,
   type CustodyStorage,
 } from './custodyContractPlan.js';
@@ -144,7 +145,8 @@ export const DYNAMIC_SETUP_STEPS = 3;
  * possibly follow.
  *
  * So the count is of what a person is waiting FOR, and it is stable: set the
- * Passport up, finish it, turn the sign-in on.
+ * Passport up, turn the sign-in on, finish it — in that order since
+ * 2026/09/22, when the finishing moved behind Home.
  */
 export function dynamicSetupPhase(record: CustodyAccountRecord | null): DynamicSetupPhase {
   if (record === null) return 'create';
@@ -154,16 +156,19 @@ export function dynamicSetupPhase(record: CustodyAccountRecord | null): DynamicS
      not `done`, which is what it would fall through to. */
   if (step === 'interrupted') return 'create';
   if (step === 'deploy') return 'create';
-  if (step === 'waves') return 'finish';
   if (step === 'activate') return 'activate';
+  /* SINCE 2026/09/22 THE ROSTER GOES IN AFTER THE KEY IS ON: wave 1 carries
+     every circuit the key's own arm calls, so the account is activated straight
+     after the deploy and the other waves land behind Home. */
+  if (custodyWavesPending(record)) return 'finish';
   return 'done';
 }
 
 /** The step number a phase is, 1-based. `done` is past the last one. */
 export function dynamicSetupStep(phase: DynamicSetupPhase): number {
   if (phase === 'create') return 1;
-  if (phase === 'finish') return 2;
-  if (phase === 'activate') return 3;
+  if (phase === 'activate') return 2;
+  if (phase === 'finish') return 3;
   return DYNAMIC_SETUP_STEPS;
 }
 

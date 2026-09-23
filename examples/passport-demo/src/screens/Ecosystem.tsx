@@ -268,6 +268,14 @@ function StatusPill({ record, network }: { record: AliasRecord; network: Passpor
       </span>
     )
   }
+  if (record.status === 'queued' && record.registering === true) {
+    /* RUNNING, NOT WAITING: the claim is with the service right now, beside a
+       Passport whose key is already on. Still not "Registered" — that word is
+       kept for a name a sender can reach. */
+    return (
+      <span className="mnid-pill mnid-pill-queued">Being registered on {NETWORK_LABELS[network]}</span>
+    )
+  }
   if (record.status === 'queued') {
     /* "Queued" is the honest word and it stays. A name that is waiting is
        never shown as one that is done (ruled 2026/08/25). */

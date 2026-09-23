@@ -125,6 +125,8 @@ import {
   loadCustodyRecord,
   newCustodyRecord,
   nextCustodyStep,
+  custodyWavesPending,
+  CUSTODY_STILL_FINISHING,
   parseProveCustodyResponse,
   proveAccountCustodyDetail,
   proveAccountCustodyRefused,
@@ -141,6 +143,7 @@ import {
 } from './custodyContractPlan.js';
 import {
   compiledContractFor,
+  contractZkConfigProvider,
   createContractProviders,
   loadContractModule,
   messageOf,
@@ -863,6 +866,119 @@ export async function deployCustodyAccount(
   onPhase?: (phase: CustodyPhase) => void,
   overrides: Partial<CustodyDeps> = {},
 ): Promise<CustodyStepResult> {
+  const plan = await prepareCustodyDeploy(session, device, onPhase, overrides);
+  const landed = await landWaveOne(plan, onPhase);
+  const record = await landRemainingWaves(plan, landed.record, landed.onChain, onPhase);
+  return custodyStepResult(record, plan.network);
+}
+
+/** What {@link deployCustodyWaveOne} can be told while it runs. */
+export interface CustodyWaveOneOptions {
+  /**
+   * Called ONCE, the moment the node has taken the deploy — before it is in a
+   * block, and long before the indexer serves it. The address is final from
+   * here: it is derived from the state the deploy carries, not from where it
+   * lands.
+   *
+   * WHAT IT IS FOR is the name. The sponsor's registration accepts a target
+   * that is submitted and not yet served (`targetPending`), and checks it only
+   * before `register_domain_for` — several proofs and a block later. So the
+   * claim can start here and run beside everything that follows, instead of
+   * waiting for the account, its activation, and its funding in turn.
+   *
+   * Not called when the deploy had already landed on an earlier press; the
+   * caller has the address off the returned record then.
+   */
+  readonly onSubmitted?: (address: string) => void;
+}
+
+/**
+ * The deploy, and nothing after it — wave 1 only.
+ *
+ * WHY THIS EXISTS BESIDE {@link deployCustodyAccount} (2026/09/22). A full
+ * deploy is the deploy plus every maintenance wave, and each wave is a
+ * dependent transaction: included, then read back through an indexer that runs
+ * twenty-odd seconds behind, before the next can be built. Four of them in a
+ * row were seventy seconds of a four-minute setup, and none of them is needed
+ * to USE the Passport — wave 1 carries the two deposits and every circuit of
+ * the device's own arm, activation included (`planCustodyWaves`). So the setup
+ * press lands this, activates, shows Home, and runs
+ * {@link finishCustodyWaves} behind it.
+ *
+ * Resumable exactly as the full deploy is: an account the chain already
+ * carries is not deployed again.
+ */
+export async function deployCustodyWaveOne(
+  session: CustodySession,
+  device: CustodyDeviceIdentity,
+  onPhase?: (phase: CustodyPhase) => void,
+  overrides: Partial<CustodyDeps> = {},
+  options: CustodyWaveOneOptions = {},
+): Promise<CustodyStepResult> {
+  const plan = await prepareCustodyDeploy(session, device, onPhase, overrides);
+  const { record } = await landWaveOne(plan, onPhase, options.onSubmitted);
+  return custodyStepResult(record, plan.network);
+}
+
+/**
+ * Waves 2 and up, for an account whose deploy has landed.
+ *
+ * RUN BEHIND HOME, and resumable by the same rule every wave has always kept:
+ * the chain is read first, a wave it already carries is recorded rather than
+ * paid for twice, and a wave is recorded only once the counter shows it
+ * applied. So a tab closed half-way through leaves a record the next run picks
+ * up from, and the wave that was in flight is either on the chain or sent
+ * again — never skipped.
+ *
+ * It needs the same device as the deploy: a passkey's maintenance authority is
+ * DERIVED from it and written nowhere, so there is no finishing without the
+ * key that started. A record with nothing on chain is refused rather than
+ * deployed — this is the finishing half, and a deploy belongs to the press.
+ */
+export async function finishCustodyWaves(
+  session: CustodySession,
+  device: CustodyDeviceIdentity,
+  onPhase?: (phase: CustodyPhase) => void,
+  overrides: Partial<CustodyDeps> = {},
+): Promise<CustodyStepResult> {
+  const plan = await prepareCustodyDeploy(session, device, onPhase, overrides);
+  const onChain =
+    plan.record.address === null
+      ? null
+      : await readCustodyChainOperations(plan.providers, plan.ledgerApi, plan.record.address, plan.waves);
+  if (onChain === null) throw new Error('There is no Passport to finish yet.');
+  const record = await landRemainingWaves(plan, plan.record, onChain, onPhase);
+  return custodyStepResult(record, plan.network);
+}
+
+/** The result every deploy entry point hands back. */
+function custodyStepResult(record: CustodyAccountRecord, network: string): CustodyStepResult {
+  const txHash = record.txHashes[record.txHashes.length - 1] ?? null;
+  return { record, txHash, explorerUrl: txHash ? custodyExplorerLink(txHash, network) : null };
+}
+
+/** Everything a wave needs, gathered once per entry point. */
+interface CustodyDeployPlan {
+  readonly deps: CustodyDeps;
+  readonly network: string;
+  readonly storage: CustodyStorage;
+  readonly record: CustodyAccountRecord;
+  readonly device: CustodyDeviceIdentity;
+  readonly module: CustodyContractModule;
+  readonly ledgerApi: CustodyLedgerApi;
+  readonly contracts: CustodyContractsApi;
+  readonly providers: Record<string, unknown>;
+  readonly verifierKeys: Map<string, Uint8Array>;
+  readonly waves: CustodyWave[];
+  readonly derivedAuthority: (() => unknown) | null;
+}
+
+async function prepareCustodyDeploy(
+  session: CustodySession,
+  device: CustodyDeviceIdentity,
+  onPhase: ((phase: CustodyPhase) => void) | undefined,
+  overrides: Partial<CustodyDeps>,
+): Promise<CustodyDeployPlan> {
   const deps = withDefaults(overrides);
   const user = custodyUserKey(session, device);
   onPhase?.({ step: 'wallet' });
@@ -908,32 +1024,64 @@ export async function deployCustodyAccount(
      both wave runners: the one that builds the authority and the one that has
      to sign with it. See {@link derivedMaintenanceAuthority}. */
   const derivedAuthority = derivedMaintenanceAuthority(ledgerApi, device, waves);
+  return {
+    deps,
+    network,
+    storage,
+    record,
+    device,
+    module,
+    ledgerApi,
+    contracts,
+    providers,
+    verifierKeys,
+    waves,
+    derivedAuthority,
+  };
+}
 
+/** Wave 1, unless the chain already carries it. */
+async function landWaveOne(
+  plan: CustodyDeployPlan,
+  onPhase?: (phase: CustodyPhase) => void,
+  onSubmitted?: (address: string) => void,
+): Promise<{ record: CustodyAccountRecord; onChain: Set<string> }> {
+  const { deps, device, derivedAuthority, module, ledgerApi, contracts, providers, storage, waves } = plan;
   /* What the chain already carries, read ONCE before any wave runs. Null means
      there is nothing at that address — either no deploy yet, or a deploy that
      was recorded and never landed — and both answers are the same wave. */
-  let onChain =
-    record.address === null
+  const onChain =
+    plan.record.address === null
       ? null
-      : await readCustodyChainOperations(providers, ledgerApi, record.address, waves);
+      : await readCustodyChainOperations(providers, ledgerApi, plan.record.address, waves);
+  if (onChain !== null) return { record: plan.record, onChain };
 
-  if (onChain === null) {
-    onPhase?.({ step: 'deploy', detail: `1 of ${waves.length}` });
-    record = await runWaveOne({
-      deps,
-      record,
-      device,
-      derivedAuthority,
-      wave: waves[0],
-      module,
-      ledgerApi,
-      contracts,
-      providers,
-      storage,
-    });
-    onChain = new Set(waves[0].circuits);
-  }
+  onPhase?.({ step: 'deploy', detail: `1 of ${waves.length}` });
+  const record = await runWaveOne({
+    deps,
+    record: plan.record,
+    device,
+    derivedAuthority,
+    wave: waves[0],
+    module,
+    ledgerApi,
+    contracts,
+    providers,
+    storage,
+    onSubmitted,
+  });
+  return { record, onChain: new Set(waves[0].circuits) };
+}
 
+/** Waves 2 and up, skipping any the chain already carries. */
+async function landRemainingWaves(
+  plan: CustodyDeployPlan,
+  landed: CustodyAccountRecord,
+  onChain: ReadonlySet<string>,
+  onPhase?: (phase: CustodyPhase) => void,
+): Promise<CustodyAccountRecord> {
+  const { deps, derivedAuthority, verifierKeys, ledgerApi, providers, storage, waves } = plan;
+  let record = landed;
   for (const wave of waves.slice(1)) {
     if (custodyWaveIsOnChain(wave, onChain)) {
       /* On chain but not in the record: the write was lost, not the wave. Catch
@@ -947,7 +1095,15 @@ export async function deployCustodyAccount(
     onPhase?.({ step: 'waves', detail: `${wave.index} of ${waves.length}` });
     record = await runMaintenanceWave({
       deps,
-      record,
+      /* THE STORED RECORD, NOT THE ONE THIS PLAN READ. Behind Home the
+         activation lands while these waves run, and each wave writes the
+         record it was handed back with one more wave on it — so writing from a
+         copy read before the activation would put `activated: false` back over
+         a Passport whose key is on. Reading afresh keeps both writers' facts. */
+      record: {
+        ...(loadCustodyRecord(storage, record.user, record.network) ?? record),
+        totalWaves: record.totalWaves,
+      },
       derivedAuthority,
       wave,
       verifierKeys,
@@ -956,9 +1112,7 @@ export async function deployCustodyAccount(
       storage,
     });
   }
-
-  const txHash = record.txHashes[record.txHashes.length - 1] ?? null;
-  return { record, txHash, explorerUrl: txHash ? custodyExplorerLink(txHash, network) : null };
+  return record;
 }
 
 /** Every circuit's verifier key, read off the staged artefacts. */
@@ -1109,6 +1263,8 @@ async function runWaveOne(
     wave: CustodyWave;
     module: CustodyContractModule;
     contracts: CustodyContractsApi;
+    /** See {@link CustodyWaveOneOptions.onSubmitted}. */
+    onSubmitted?: (address: string) => void;
   },
 ): Promise<CustodyAccountRecord> {
   const { deps, ledgerApi, providers, storage, module, contracts, wave } = context;
@@ -1207,6 +1363,13 @@ async function runWaveOne(
      costs a whole second account — the record has no address, the next press
      deploys again, and the first one sits on chain for ever holding nothing. */
   const txId = await contracts.submitTxAsync(providers, { unprovenTx });
+  /* THE NODE HAS IT, so the address is real from here. A caller's own failure
+     is its own business and must not be mistaken for the deploy's. */
+  try {
+    context.onSubmitted?.(address);
+  } catch (cause) {
+    console.warn('[account-custody] the caller could not act on the submitted deploy', cause);
+  }
   try {
     await watchForTxData(providers, txId);
   } catch (cause) {
@@ -3005,6 +3168,13 @@ export async function addDeviceK1(
   if (!record || record.address === null || nextCustodyStep(record) !== 'ready') {
     throw new Error('This Passport is not finished being set up yet.');
   }
+  /* A KEY OF THE OTHER ARM NEEDS THE OTHER ARM'S CIRCUITS, and since
+     2026/09/22 those land in the waves after Home. Enrolling it before them
+     would put a key on the account that can approve nothing — so it waits,
+     and says so in words the screen may show. */
+  if (newDevice.arm !== device.arm && custodyWavesPending(record)) {
+    throw new Error(CUSTODY_STILL_FINISHING);
+  }
 
   const module = await deps.contractModule();
   const { providers } = await openCustodyAccount(deps, wallet, record, [
@@ -3291,6 +3461,41 @@ async function custodyProviders(
   return scoped;
 }
 
+/**
+ * The verifier-key check `findDeployedContract` makes, narrowed to the circuits
+ * this connection will call.
+ *
+ * WHY IT IS NARROWED (2026/09/22). midnight-js refuses to open a contract whose
+ * state does not carry EVERY circuit of the compiled build it is handed
+ * (`verifyContractState`, with a `ContractTypeError` naming the missing ones).
+ * Since the waves after the deploy land behind Home, a Passport is activated
+ * and used while twenty of its thirty operations are still on their way — and
+ * the check would refuse the activation itself, and every gated call, for the
+ * minute or so it takes them to land.
+ *
+ * What the check is FOR is kept: every circuit this connection actually calls
+ * is still compared against the key on chain, byte for byte, before anything is
+ * built. The chain verifies each proof against its own key in any case; this is
+ * the early, named refusal, for exactly the operations in play.
+ */
+function custodyCallScopedZkConfig(
+  providers: Record<string, unknown>,
+  circuits: readonly string[],
+): Record<string, unknown> {
+  const zk = providers.zkConfigProvider as
+    | { getVerifierKeys?(ids: readonly string[]): Promise<unknown> }
+    | undefined;
+  if (zk?.getVerifierKeys === undefined) return providers;
+  const wanted = new Set(circuits);
+  const scopedZk = Object.create(zk) as typeof zk & object;
+  scopedZk.getVerifierKeys = (ids: readonly string[]) =>
+    (zk.getVerifierKeys as (ids: readonly string[]) => Promise<unknown>).call(
+      zk,
+      ids.filter((id) => wanted.has(id)),
+    );
+  return { ...providers, zkConfigProvider: scopedZk };
+}
+
 /** Open a deployed custody account for one circuit's proof route. */
 async function openCustodyContract(
   deps: CustodyDeps,
@@ -3299,7 +3504,7 @@ async function openCustodyContract(
 ): Promise<{ callTx: CustodyCallTx; providers: Record<string, unknown> }> {
   const scoped = await custodyProviders(deps, wallet, target);
   const contracts = await deps.contracts();
-  const deployed = await contracts.findDeployedContract(scoped, {
+  const deployed = await contracts.findDeployedContract(custodyCallScopedZkConfig(scoped, target.circuits), {
     compiledContract: scoped.compiledContract,
     contractAddress: target.address,
     privateStateId: target.privateStateId,
@@ -3462,6 +3667,80 @@ export async function startCustodyAccountAgain(
 /** Reset the in-tab signing-key cache. For drills, and for a sign-out. */
 export function resetCustodySessionState(): void {
   signingKeys.clear();
+  setupWallets.clear();
+}
+
+/* -------------------------------------------------------------------------- */
+/* The setup's own seams: one wallet, warmed early                            */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The wallet the setup builds its transactions with, one per user per tab.
+ *
+ * `defaultCustodyDeps().wallet` builds and starts a fresh wallet facade on
+ * every call, and the setup calls it once per entry point — the deploy, the
+ * activation, the waves behind Home — which is the same seed opened three
+ * times over. The setup path shares one instead; a failed build is forgotten
+ * so the next press builds it again rather than inheriting the failure.
+ */
+const setupWallets = new Map<string, Promise<LocalMidnightWallet>>();
+
+/**
+ * The overrides the setup runs with: {@link defaultCustodyDeps}, with the wallet
+ * shared per user. Every other seam is the default one.
+ */
+export function custodySetupDeps(
+  base: Pick<CustodyDeps, 'wallet'> = defaultCustodyDeps(),
+): Partial<CustodyDeps> {
+  return {
+    wallet: (user) => {
+      const held = setupWallets.get(user);
+      if (held !== undefined) return held;
+      const built = base.wallet(user);
+      setupWallets.set(user, built);
+      built.catch(() => {
+        if (setupWallets.get(user) === built) setupWallets.delete(user);
+      });
+      return built;
+    },
+  };
+}
+
+/**
+ * Fetch and build what a setup needs, BEFORE the press that needs it.
+ *
+ * WHY (2026/09/22). The first fourteen seconds of a measured setup were the
+ * client getting ready — the compiled module, the ledger WASM, midnight-js, the
+ * thirty verifier keys, and a wallet — and nothing on chain. The name step
+ * gives the person ten to thirty seconds of typing for free, so the screen
+ * calls this when the field is shown and the press finds it all in hand.
+ *
+ * The wallet is built only where the user is already known: on the passkey arm
+ * the user key IS the device point, which costs the ceremony the press asks
+ * for. Everything else needs nobody. Every failure is swallowed — a warm-up
+ * that fails leaves the press to do the work exactly as it always did.
+ */
+export async function warmCustodySetup(
+  options: { readonly user: string | null; readonly arm: K1Arm },
+  overrides: Partial<CustodyDeps> = {},
+): Promise<void> {
+  const base = withDefaults(overrides);
+  const deps = { ...base, ...custodySetupDeps(base) };
+  const tasks: Promise<unknown>[] = [
+    deps.contractModule(),
+    deps.ledger(),
+    deps.contracts(),
+    compiledContractFor(ACCOUNT_CUSTODY_CONTRACT, ACCOUNT_CUSTODY_LABEL, custodyWitnesses()),
+    contractZkConfigProvider(ACCOUNT_CUSTODY_CONTRACT).then((zk) =>
+      Promise.all(allCustodyCircuits(options.arm).map((circuit) => zk.getVerifierKey(circuit))),
+    ),
+  ];
+  if (options.user !== null) tasks.push(deps.wallet(options.user));
+  const settled = await Promise.allSettled(tasks);
+  const failed = settled.filter((outcome) => outcome.status === 'rejected').length;
+  if (failed > 0) {
+    console.info(`[account-custody] ${failed} of the setup's pieces could not be fetched early; the press will fetch them`);
+  }
 }
 
 /* -------------------------------------------------------------------------- */

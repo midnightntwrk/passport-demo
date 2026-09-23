@@ -179,7 +179,11 @@ describe('dynamicStage', () => {
 
   it('resumes a setup that has an address and is unfinished', () => {
     expect(
-      dynamicStage({ identity: 'dynamic', record: { ...RECORD, wavesDone: 1 }, name: null }),
+      dynamicStage({
+        identity: 'dynamic',
+        record: { ...RECORD, wavesDone: 1, activated: false },
+        name: null,
+      }),
     ).toBe('resume');
     expect(
       dynamicStage({ identity: 'dynamic', record: { ...RECORD, activated: false }, name: null }),
@@ -190,34 +194,43 @@ describe('dynamicStage', () => {
     expect(dynamicStage({ identity: 'dynamic', record: RECORD, name: null })).toBe('name');
     expect(dynamicStage({ identity: 'dynamic', record: RECORD, name: 'alice' })).toBe('home');
   });
+
+  /* Usable is ACTIVATED, not every wave in: the rest land behind Home. */
+  it('goes home with waves still to land once the key is on', () => {
+    expect(
+      dynamicStage({ identity: 'dynamic', record: { ...RECORD, wavesDone: 1 }, name: 'alice' }),
+    ).toBe('home');
+  });
 });
 
 describe('the setup copy', () => {
   it('counts three steps, whatever the wave plan does', () => {
     expect(DYNAMIC_SETUP_STEPS).toBe(3);
     expect(dynamicSetupCopy('create')).toBe('Setting up your Passport, step 1 of 3');
-    expect(dynamicSetupCopy('finish')).toBe('Setting up your Passport, step 2 of 3');
-    expect(dynamicSetupCopy('activate')).toBe('Setting up your Passport, step 3 of 3');
+    expect(dynamicSetupCopy('activate')).toBe('Setting up your Passport, step 2 of 3');
+    expect(dynamicSetupCopy('finish')).toBe('Setting up your Passport, step 3 of 3');
     expect(dynamicSetupCopy('done')).toBe('Your Passport is ready.');
   });
 
   it('reads the phase off the record', () => {
     expect(dynamicSetupPhase(null)).toBe('create');
     expect(dynamicSetupPhase({ ...RECORD, address: null })).toBe('create');
+    /* Activated with waves still to land: the finishing is the LAST step now. */
     expect(dynamicSetupPhase({ ...RECORD, wavesDone: 1 })).toBe('finish');
     expect(dynamicSetupPhase({ ...RECORD, activated: false })).toBe('activate');
+    expect(dynamicSetupPhase({ ...RECORD, wavesDone: 1, activated: false })).toBe('activate');
     expect(dynamicSetupPhase(RECORD)).toBe('done');
     /* A setup that cannot be finished is back at the beginning, not `done`,
        which is what it would otherwise fall through to — and "Your Passport is
        ready" over a Passport that can never work is the worst sentence on the
        screen. */
-    expect(dynamicSetupPhase({ ...RECORD, interrupted: true })).toBe('create');
+    expect(dynamicSetupPhase({ ...RECORD, activated: false, interrupted: true })).toBe('create');
   });
 
   it('numbers the phases, and puts done past the last one', () => {
     expect(dynamicSetupStep('create')).toBe(1);
-    expect(dynamicSetupStep('finish')).toBe(2);
-    expect(dynamicSetupStep('activate')).toBe(3);
+    expect(dynamicSetupStep('activate')).toBe(2);
+    expect(dynamicSetupStep('finish')).toBe(3);
     expect(dynamicSetupStep('done')).toBe(3);
   });
 
@@ -242,11 +255,20 @@ describe('the setup copy', () => {
     expect(dynamicSetupInterrupted(null)).toBe(false);
     expect(dynamicSetupInterrupted(RECORD)).toBe(false);
     expect(dynamicSetupInterrupted({ ...RECORD, wavesDone: 1 })).toBe(false);
-    expect(dynamicSetupInterrupted({ ...RECORD, wavesDone: 1, interrupted: true })).toBe(true);
+    expect(
+      dynamicSetupInterrupted({ ...RECORD, wavesDone: 1, activated: false, interrupted: true }),
+    ).toBe(true);
+    /* And an interrupted record whose key is ON is a working Passport. */
+    expect(dynamicSetupInterrupted({ ...RECORD, wavesDone: 1, interrupted: true })).toBe(false);
   });
 
   it('answers for a sign-in whose network is not to hand, and for nobody else', () => {
-    const halted: CustodyAccountRecord = { ...RECORD, wavesDone: 1, interrupted: true };
+    const halted: CustodyAccountRecord = {
+      ...RECORD,
+      wavesDone: 1,
+      activated: false,
+      interrupted: true,
+    };
     const other = '0x00000000000000000000000000000000000000ff';
     const storage = memoryStorage({
       [CUSTODY_STORAGE_KEY]: JSON.stringify({
