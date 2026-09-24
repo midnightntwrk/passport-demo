@@ -21,6 +21,12 @@ import { describe, expect, it } from 'vitest'
 import {
   CUSTODY_WAVES_RETRY_MS,
   custodyBackgroundWork,
+  CUSTODY_FINISH_SETUP_BUSY,
+  CUSTODY_FINISH_SETUP_BUTTON,
+  CUSTODY_FINISH_SETUP_FAILED,
+  CUSTODY_FINISH_SETUP_LINE,
+  CUSTODY_FINISH_SETUP_TITLE,
+  custodyFinishSetupCard,
   CUSTODY_SETUP_TIMING_TAG,
   custodySetupClock,
   custodySetupTimingLine,
@@ -338,5 +344,65 @@ describe('what is picked back up behind Home', () => {
 
   it('has nothing to do for a finished Passport', () => {
     expect(custodyBackgroundWork({ ...idleHome, keyHeld: true })).toBeNull()
+  })
+})
+
+/* THE DEADLOCK OF 2026/09/24. A Passport whose tab closed in the minute after
+   Home had waves pending and no key held on every later open, so nothing
+   landed them and the opening balance was never asked for. Home offers the
+   press that settles the key; with the key held, it says nothing. */
+describe('the finish-setup card on Home', () => {
+  const none = { wavesPending: false, keyHeld: false, press: null } as const
+
+  it('offers the press when the rest is pending and this tab has no key', () => {
+    expect(custodyFinishSetupCard({ ...none, wavesPending: true })).toBe('offer')
+  })
+
+  it('says nothing while the tab holds the key: the waves are already landing', () => {
+    expect(custodyFinishSetupCard({ ...none, wavesPending: true, keyHeld: true })).toBeNull()
+  })
+
+  it('shows the press running, and a stopped press, until the rest has landed', () => {
+    expect(
+      custodyFinishSetupCard({ wavesPending: true, keyHeld: true, press: 'running' }),
+    ).toBe('running')
+    expect(
+      custodyFinishSetupCard({ wavesPending: true, keyHeld: true, press: 'failed' }),
+    ).toBe('failed')
+    expect(
+      custodyFinishSetupCard({ wavesPending: true, keyHeld: false, press: 'failed' }),
+    ).toBe('failed')
+  })
+
+  it('has nothing to say once the rest has landed, whatever was pressed', () => {
+    expect(custodyFinishSetupCard(none)).toBeNull()
+    expect(custodyFinishSetupCard({ ...none, keyHeld: true })).toBeNull()
+    expect(custodyFinishSetupCard({ ...none, press: 'running' })).toBeNull()
+    expect(custodyFinishSetupCard({ ...none, press: 'failed' })).toBeNull()
+  })
+
+  it('names none of the machinery', () => {
+    const words = [
+      CUSTODY_FINISH_SETUP_TITLE,
+      CUSTODY_FINISH_SETUP_LINE,
+      CUSTODY_FINISH_SETUP_BUTTON,
+      CUSTODY_FINISH_SETUP_BUSY,
+      CUSTODY_FINISH_SETUP_FAILED,
+    ]
+      .join(' ')
+      .toLowerCase()
+    for (const forbidden of [
+      'wallet address',
+      'dust',
+      'contract',
+      'registry',
+      'indexer',
+      'resolver',
+      'sponsor',
+      'sdk',
+      'dynamic',
+    ]) {
+      expect(words).not.toContain(forbidden)
+    }
   })
 })

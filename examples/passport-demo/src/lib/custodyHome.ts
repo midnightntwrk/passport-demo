@@ -386,6 +386,17 @@ export interface CustodyHomeView {
     readonly onAdd: () => void;
   };
   readonly send: CustodyHomeSend;
+  /**
+   * THE REST OF THE SETUP, WHEN NOTHING ELSE WILL FINISH IT (2026/09/24).
+   * Present only while the Passport's waves are pending and this tab cannot
+   * land them silently — see `custodyFinishSetupCard` in
+   * `./custodySetupProgress.ts`. While it is present the opening balance is
+   * NOT on its way, because it is asked for only after the rest has landed.
+   */
+  readonly finishSetup?: {
+    readonly state: 'offer' | 'running' | 'failed';
+    readonly onFinish: () => void;
+  } | null;
 }
 
 /** The four seams the Send sheet takes, bound to this Passport's account. */

@@ -425,3 +425,55 @@ export function custodyBackgroundWork(
   if (input.openingBalanceDue && !input.balanceTried) return 'opening-balance'
   return null
 }
+
+/* -------------------------------------------------------------------------- */
+/* On Home: a setup that cannot finish by itself                              */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * What Home says about the rest of a Passport's setup, or null for nothing.
+ *
+ *   `offer`    the rest is still to land and this tab does not hold the key,
+ *              so nothing will land it: one card, one press.
+ *   `running`  that press is running.
+ *   `failed`   that press stopped short; one sentence, and the press again.
+ *
+ * WHY THIS EXISTS (2026/09/24). The waves behind Home resume only once the key
+ * is settled in the tab — {@link custodyBackgroundWork} — and the opening
+ * balance is asked for only after the last of them. A tab closed, reloaded, or
+ * suspended in the minute after Home therefore left a Passport whose rest never
+ * landed and whose balance was never asked for, on every later open, while
+ * Home promised the balance was on its way. A payment would have settled the
+ * key, but there was nothing to pay with. The press is the way out: a browser
+ * allows a passkey prompt somebody pressed for.
+ *
+ * WITH THE KEY HELD AND NOTHING PRESSED, NOTHING IS SAID. That is the ordinary
+ * minute after setup, and the waves are already landing silently.
+ */
+export type CustodyFinishSetupState = 'offer' | 'running' | 'failed'
+
+export interface CustodyFinishSetupInput {
+  /** The record's waves are not all in (`custodyWavesPending`). */
+  readonly wavesPending: boolean
+  /** This tab holds the device key. */
+  readonly keyHeld: boolean
+  /** How the last "Finish setup" press in this tab stands, or null for none. */
+  readonly press: 'running' | 'failed' | null
+}
+
+export function custodyFinishSetupCard(
+  input: CustodyFinishSetupInput,
+): CustodyFinishSetupState | null {
+  if (!input.wavesPending) return null
+  if (input.press !== null) return input.press
+  return input.keyHeld ? null : 'offer'
+}
+
+/** The card's words. No machinery named — see `custodyHome.ts`'s copy rule. */
+export const CUSTODY_FINISH_SETUP_TITLE = 'Finish setting up your Passport'
+export const CUSTODY_FINISH_SETUP_LINE =
+  'It takes about a minute, and then your opening balance is sent.'
+export const CUSTODY_FINISH_SETUP_BUTTON = 'Finish setup'
+export const CUSTODY_FINISH_SETUP_BUSY = 'Finishing setup…'
+export const CUSTODY_FINISH_SETUP_FAILED =
+  "Setup didn't finish this time. Your Passport is safe, so please try again."

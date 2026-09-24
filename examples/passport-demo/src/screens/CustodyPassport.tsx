@@ -129,6 +129,7 @@ import {
 } from '../lib/custodyScreenRules.js'
 import {
   custodyBackgroundWork,
+  custodyFinishSetupCard,
   custodySetupClock,
   custodySetupHint,
   custodySetupPhase,
@@ -1663,6 +1664,43 @@ export default function CustodyPassport({
   backgroundRef.current = finishInBackground
 
   /**
+   * "FINISH SETUP" ON HOME — THE WAY OUT OF THE DEADLOCK OF 2026/09/24.
+   *
+   * The effect below picks the waves up only once the key is held in this tab,
+   * and never prompts for it. A tab closed in the minute after Home therefore
+   * left the rest pending with no key on every later open: nothing landed it,
+   * the opening balance behind it was never asked for, and there was no money
+   * for a payment that would have settled the key. So Home offers the press
+   * (`custodyFinishSetupCard`), and the press settles the key through the same
+   * {@link ensureIdentity} every other press uses — a browser allows a prompt
+   * somebody pressed for — and runs {@link finishInBackground}, which asks for
+   * the opening balance after the last wave exactly as it does after setup.
+   *
+   * Stopped short means the record still has waves pending once the run is
+   * over, or the key was not settled; either is one sentence and the press
+   * again. The cause goes to the console.
+   */
+  const [finishPress, setFinishPress] = useState<'running' | 'failed' | null>(null)
+  const finishPressing = useRef(false)
+  const finishSetup = useCallback(async (): Promise<void> => {
+    if (finishPressing.current) return
+    finishPressing.current = true
+    setFinishPress('running')
+    try {
+      const identity = await ensureIdentity()
+      await finishInBackground(identity, setupClock.current)
+      const settled = userRef.current
+      const latest = settled === null ? null : loadCustodyRecord(window.localStorage, settled, network)
+      setFinishPress(latest !== null && custodyWavesPending(latest) ? 'failed' : null)
+    } catch (cause) {
+      console.warn('[account-custody] the rest of this Passport could not be finished from Home', cause)
+      setFinishPress('failed')
+    } finally {
+      finishPressing.current = false
+    }
+  }, [ensureIdentity, finishInBackground, network])
+
+  /**
    * PICKS THE BACKGROUND WORK BACK UP, whenever it can be done without asking.
    *
    * The opening balance needs nobody, so a Passport whose last wave landed and
@@ -2941,6 +2979,11 @@ export default function CustodyPassport({
        apps, the trail, and the bottom bar — painted by `App.tsx` from this
        value. See `CustodyPassportProps.renderHome`. */
     const offer = custodyResumeOffer(stopped)
+    const finishState = custodyFinishSetupCard({
+      wavesPending: view?.record != null && custodyWavesPending(view.record),
+      keyHeld: identityHeld,
+      press: finishPress,
+    })
     return renderHome({
       user,
       network,
@@ -2995,6 +3038,11 @@ export default function CustodyPassport({
         state: recoveryHomeEntry({ socialAvailable, heldBySocial, record: recoveryRecord }),
         onAdd: addRecovery,
       },
+      /* THE REST OF THE SETUP, WHEN NOTHING ELSE WILL FINISH IT. Null in the
+         ordinary case, where this tab holds the key and the waves are already
+         landing — see `custodyFinishSetupCard`. */
+      finishSetup:
+        finishState === null ? null : { state: finishState, onFinish: () => void finishSetup() },
       send: {
         networkId: network,
         resolveName,

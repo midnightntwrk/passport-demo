@@ -1638,3 +1638,18 @@ button.mnhome-support { font-family: inherit; cursor: pointer; }
   color: var(--mn-accent-ink);
 }
 .mnhome-onway-hint { margin: 0; font-size: 12px; color: var(--mn-text-muted); }
+
+/* The rest of a setup that will not finish by itself (2026/09/24): the same
+   calm card, with the one press that finishes it. */
+.mnhome-finish-card {
+  display: grid;
+  gap: 12px;
+  margin: 12px 0 0;
+  padding: 14px;
+  border: var(--mn-hairline) solid var(--mn-border-hairline);
+  border-radius: var(--mn-radius-md);
+  background: var(--mn-accent-soft);
+}
+.mnhome-finish-error { margin: 0; font-size: 12px; color: var(--mn-danger, var(--mn-text-primary)); }
+.mnhome-finish-button { justify-self: start; min-height: 44px; }
+.mnhome-finish-button[disabled] { opacity: 0.7; cursor: progress; }

@@ -223,6 +223,11 @@ async function seedPasskeyPassport(
     totalWaves: 4,
     activated: options.activated ?? true,
     txHashes: [],
+    /* A Passport whose rest is still landing has not had its opening balance
+       asked for: setup writes `false` on the new record and only the answer
+       after the last wave turns it `true`. A finished seed leaves it out, which
+       is the shape a Passport from before the field reads as already asked. */
+    ...((options.wavesDone ?? 4) < 4 ? { openingBalanceAsked: false } : {}),
   };
   const store = {
     [`${WALK_NETWORK}::${ACCOUNT_CUSTODY_ADDRESS}`]: {
@@ -1327,6 +1332,57 @@ test.describe('a passkey Passport that has just been named', () => {
        open until its last wave has landed. */
     await page.waitForTimeout(2_000);
     expect(funding).toEqual([]);
+
+    await close();
+  });
+
+  /* THE DEADLOCK OF 2026/09/24. The tab that made this Passport closed in
+     the minute after Home, so the rest of its setup is pending and nothing in
+     this tab holds the key. Before the fix Home promised an opening balance
+     that was never asked for, for ever. Now Home offers one press; the press
+     settles the key, lands the rest, and the opening balance is asked for. */
+  test('offers "Finish setup" on a reopened Passport whose rest never landed, and the press asks for the balance', async ({
+    browser,
+  }) => {
+    const { page, close } = await passkeyPassportAfterTheName(browser, { wavesDone: 1 });
+    const funding: string[] = [];
+    page.on('request', (request) => {
+      if (request.url().includes('/fund-account')) funding.push(request.url());
+    });
+
+    await expect(page.getByRole('heading', { name: /Add a way\s*back/ })).toBeVisible({ timeout: 60_000 });
+    await page.getByTestId('skip-recovery').click();
+    await expect(greeting(page)).toBeVisible({ timeout: 60_000 });
+
+    /* THE CARD, AND NOT THE PROMISE. */
+    const card = page.getByTestId('finish-setup');
+    await expect(card).toBeVisible();
+    await expect(card).toContainText('Finish setting up your Passport');
+    await expect(card).toContainText('about a minute');
+    await expect(page.getByText('Your opening balance is on its way')).toHaveCount(0);
+    const cardText = (await card.innerText()).toLowerCase();
+    for (const forbidden of ['wallet address', 'dust', 'contract', 'registry', 'indexer', 'resolver', 'sponsor', 'sdk', 'dynamic']) {
+      expect(cardText, `"${forbidden}" is on the card`).not.toContain(forbidden);
+    }
+    /* Nothing runs by itself: no balance is asked for before the press. */
+    await page.waitForTimeout(2_000);
+    expect(funding).toEqual([]);
+
+    /* THE PRESS. The virtual authenticator answers the passkey prompt; the
+       rest is already on the chain this tier serves, so it is caught up
+       without a proof, and the opening balance follows the last of it. */
+    await page.getByRole('button', { name: 'Finish setup' }).click();
+    await expect(card).toHaveCount(0, { timeout: 120_000 });
+    await expect.poll(() => funding.length, { timeout: 60_000 }).toBeGreaterThan(0);
+    /* The record says the rest landed, so no reopen offers it again. */
+    expect(
+      await page.evaluate(() => {
+        const raw = window.localStorage.getItem('passport-account-custody:v1') ?? '{}';
+        return Object.values(JSON.parse(raw) as Record<string, { wavesDone: number }>).map(
+          (record) => record.wavesDone,
+        );
+      }),
+    ).toEqual([4]);
 
     await close();
   });
