@@ -81,3 +81,14 @@
   @keyframes recovery-arrive { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
   @keyframes recovery-spin { to { transform: rotate(360deg); } }
 }
+
+/* The add's timeline and its game, between the words and the buttons
+   (2026/09/24). The panel is the one live region while the add runs. */
+.mnrecovery-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 24px;
+}
+.mnrecovery-progress .mngame-offer,
+.mnrecovery-progress .mngame { margin: 0; }

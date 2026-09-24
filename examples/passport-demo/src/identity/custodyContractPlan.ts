@@ -1166,6 +1166,49 @@ export const K1_ENROLMENT_UNCONFIRMED =
 export const CUSTODY_STILL_FINISHING =
   'Your Passport is still finishing setting up. Try again in a minute.';
 
+/* -------------------------------------------------------------------------- */
+/* Adding a recovery key: the two outcomes the chain can leave (2026/09/24)   */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * A recovery key that was NOT added — refused, or never handed over.
+ *
+ * WHY ITS OWN SENTENCE. The add used to share the payment's sentences, so a
+ * refused add told somebody "That payment didn't go through. Nothing left your
+ * Passport." about a step that moves no money at all. It is definite: nothing
+ * was applied, and the same press is safe.
+ */
+export const CUSTODY_KEY_NOT_ADDED =
+  'Recovery was not added, and nothing on your Passport changed. Try again.';
+
+/**
+ * A recovery key that was sent and whose outcome could not be read, after the
+ * account itself was asked more than once.
+ *
+ * Hedged on purpose, and the press it points at is safe: `addDeviceK1` reads
+ * the account before it asks for anything, so a key that did land costs the
+ * second press nothing and is simply reported as on.
+ */
+export const CUSTODY_KEY_UNCONFIRMED =
+  'We could not confirm that recovery was added. Try again to check: it is never added twice.';
+
+/**
+ * How many times, and how far apart, the account is read for a key whose add
+ * ended without a verdict. The public read runs twenty-odd seconds behind the
+ * chain, so four reads ten seconds apart cover a key that landed as the socket
+ * dropped.
+ */
+/**
+ * The `detail` a bounded call's `submit` phase carries once its proof is made
+ * and the transaction is on its way to the network — so a screen can tell
+ * proving from sending with the callback that really marks the line, rather
+ * than a timer.
+ */
+export const CUSTODY_PHASE_PROVED = 'proved';
+
+export const CUSTODY_KEY_RECHECKS = 4;
+export const CUSTODY_KEY_RECHECK_WAIT_MS = 10_000;
+
 /** The sentence a half-built Passport shows when its setup cannot be finished. */
 export const CUSTODY_SETUP_INTERRUPTED =
   'Setting up this Passport was interrupted. Start again to finish it.';

@@ -1404,6 +1404,112 @@ test.describe('a passkey Passport that has just been named', () => {
     await close();
   });
 
+  /* "SHOW THE WHOLE TRANSACTION LIFE CYCLE WHEN ADDING RECOVERY, LIKE
+     ONBOARDING DOES" (2026/09/24). The same panel as the setup, with the
+     add's own rows, moved by what the add reports — and Snake offered after
+     the same delay the setup offers its game.
+
+     THE ACCOUNT NEVER ANSWERS from the moment of the press, which is the shape
+     of "sometimes the recovery transaction didn't go through": before
+     2026/09/24 that read had no bound and the screen said "Adding your way
+     back" for ever. It is held here with a bound short enough to watch end —
+     in one plain sentence and the same press, offered again. */
+  test('shows the add as a timeline, offers Snake, and ends a hang in one sentence', async ({ browser }) => {
+    test.setTimeout(180_000);
+    const { page, close } = await passkeyPassportAfterTheName(browser);
+    await expect(page.getByTestId('add-recovery')).toBeVisible({ timeout: 60_000 });
+    await page.evaluate(() => {
+      (window as unknown as { __passportCustodyBounds?: unknown }).__passportCustodyBounds = {
+        prepareWaitMs: 25_000,
+      };
+    });
+    await page.route('**/indexer.stagenet.shielded.tools/**', async (route) => {
+      const body = route.request().postData() ?? '';
+      if (body.includes('CONTRACT_STATE_QUERY') && body.toLowerCase().includes(ACCOUNT_CUSTODY_ADDRESS)) {
+        return new Promise<void>(() => undefined);
+      }
+      return route.fallback();
+    });
+    const proofs: string[] = [];
+    page.on('request', (request) => {
+      if (request.url().includes('prove-account-custody')) proofs.push(request.url());
+    });
+    await page.getByTestId('add-recovery').click();
+
+    const rows = page.locator('.mnrecovery-progress .mnid-stepper-item');
+    await expect(rows.first()).toBeVisible({ timeout: 60_000 });
+    await expect(rows).toHaveCount(4);
+    await expect(rows.nth(0)).toContainText('Sign in to your recovery account');
+    await expect(rows.nth(0)).toHaveAttribute('data-state', 'done');
+    await expect(rows.nth(1)).toContainText('Approve with your passkey');
+    await expect(rows.nth(2)).toContainText('Add your recovery key');
+    await expect(rows.nth(3)).toContainText('Recovery is on');
+    await expect(rows.nth(3)).toHaveAttribute('data-state', 'todo');
+
+    /* THE ADD ROW, RUNNING, WITH THE STATES IT IS MADE OF on screen whole —
+       reached by the add's own callbacks: the passkey approved, the recovery
+       key in hand, and the add being prepared against an account that never
+       answers. */
+    const add = rows.nth(2);
+    await expect(add).toHaveAttribute('data-state', 'active', { timeout: 60_000 });
+    await expect(rows.nth(1)).toHaveAttribute('data-state', 'done');
+    const stages = add.locator('.mnid-substage');
+    await expect(stages).toHaveCount(5);
+    await expect(stages.nth(0)).toContainText('Getting your recovery key');
+    await expect(stages.nth(0)).toHaveAttribute('data-state', 'done');
+    await expect(stages.nth(1)).toContainText('Preparing');
+    await expect(stages.nth(1)).toHaveAttribute('data-state', 'active');
+    await expect(stages.nth(2)).toContainText('Proving');
+    await expect(stages.nth(3)).toContainText('Sending');
+    await expect(stages.nth(4)).toContainText('Confirming');
+    for (const index of [2, 3, 4]) {
+      await expect(stages.nth(index)).toHaveAttribute('data-state', 'todo');
+    }
+    await expect(add.locator('.mnid-stepper-timing')).toHaveText(/so far/);
+    /* The button names the row that is running, and cannot be pressed twice. */
+    await expect(page.getByTestId('add-recovery')).toBeDisabled();
+    await expect(page.getByTestId('add-recovery')).toContainText('Add your recovery key');
+
+    /* SNAKE, OFFERED AFTER THE SAME DELAY THE SETUP OFFERS ITS GAME. */
+    const offer = page.getByRole('button', { name: 'Play Snake while you wait' });
+    await expect(offer).toBeVisible({ timeout: 20_000 });
+    await offer.click();
+    const game = page.getByTestId('snake-game');
+    await expect(game).toBeVisible();
+    await expect(game.getByRole('img', { name: 'Snake board' })).toBeVisible();
+    await expect(page.getByTestId('snake-score')).toHaveText('Arrow keys, WASD, or swipe to start');
+    for (const label of ['Move up', 'Move down', 'Move left', 'Move right']) {
+      await expect(game.getByRole('button', { name: label })).toBeVisible();
+    }
+    /* It starts on a turn, beneath the timeline, covering none of it. */
+    await page.keyboard.press('ArrowUp');
+    await expect(page.getByTestId('snake-score')).toHaveText(/^Score \d+ · Best \d+$/);
+    await expect(add).toHaveAttribute('data-state', 'active');
+    await expect(add).toBeInViewport({ ratio: 0.2 });
+    await page.screenshot({ path: test.info().outputPath('recovery-add-timeline.png'), fullPage: true });
+
+    /* NONE OF THE WORDS A READER HAS NO USE FOR, on the whole screen. */
+    const body = (await page.locator('body').innerText()).toLowerCase();
+    for (const forbidden of ['wallet address', 'dust', 'contract', 'registry', 'indexer', 'resolver', 'sponsor', 'sdk', 'dynamic']) {
+      expect(body, `"${forbidden}" is on screen`).not.toContain(forbidden);
+    }
+
+    /* THE BOUND ENDS IT: one plain sentence, the timeline and the game put
+       away, the same press offered again, and nothing was ever sent. */
+    await expect(page.locator('.mnob-unusable-copy')).toHaveText(
+      'Recovery was not added, and nothing on your Passport changed. Try again.',
+      { timeout: 60_000 },
+    );
+    await expect(rows).toHaveCount(0);
+    await expect(game).toHaveCount(0);
+    await expect(page.getByTestId('add-recovery')).toBeEnabled();
+    await expect(page.getByTestId('add-recovery')).toContainText('Try again');
+    await expect(page.getByTestId('skip-recovery')).toHaveText('Continue to my Passport');
+    expect(proofs).toEqual([]);
+
+    await close();
+  });
+
   test('never leaves anybody stuck on the offer, whichever way the add ends', async ({
     browser,
   }) => {
@@ -1430,7 +1536,10 @@ test.describe('a passkey Passport that has just been named', () => {
 
     if ((await page.getByTestId('skip-recovery').count()) > 0) {
       await expect(page.locator('.mnob-unusable-copy')).toHaveCount(1);
-      await expect(page.locator('.mnob-unusable-copy')).toContainText('Your Passport is set up');
+      /* One plain sentence about recovery — never a payment's, never a
+         library's words (2026/09/24) — and the same press offered again. */
+      await expect(page.locator('.mnob-unusable-copy')).toContainText('Recovery was not added');
+      await expect(page.getByTestId('add-recovery')).toContainText('Try again');
       await expect(page.getByTestId('skip-recovery')).toBeEnabled();
       await expect(page.getByTestId('skip-recovery')).toHaveText('Continue to my Passport');
       await page.getByTestId('skip-recovery').click();

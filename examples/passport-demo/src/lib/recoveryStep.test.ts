@@ -5,7 +5,6 @@ import {
   RECOVERY_COPY,
   loadRecoveryRecord,
   providerRecoveryStage,
-  recoveryFailureSentence,
   recoveryHeld,
   recoveryHomeEntry,
   recoveryRefusal,
@@ -185,28 +184,10 @@ describe('whether the press can be answered', () => {
   });
 });
 
-describe('what a failed add says', () => {
-  it('leads with the Passport being fine, and carries a short reason', () => {
-    const sentence = recoveryFailureSentence(new Error('The sign-in was closed.'));
-    expect(sentence).toContain('Your Passport is set up');
-    expect(sentence).toContain('The sign-in was closed.');
-    expect(sentence).toContain('later');
-  });
-
-  it('drops a reason nobody could read', () => {
-    const sentence = recoveryFailureSentence(new Error('x'.repeat(200)));
-    expect(sentence).not.toContain('xxx');
-    expect(sentence).toContain('Your Passport is set up');
-  });
-
-  it('says the same thing about a failure that is not an error at all', () => {
-    expect(recoveryFailureSentence('nope')).toContain('could not be added just now');
-  });
-
-  it('says the same thing about an error with nothing in it', () => {
-    expect(recoveryFailureSentence(new Error('   '))).toContain('could not be added just now');
-  });
-});
+/* What a failed add says moved to `./recoveryAdd.ts#recoveryAddFailureSentence`
+   on 2026/09/24, drilled in `./recoveryAdd.test.ts`: the sentence here passed
+   any short message through, which put a payment's sentence and a library's
+   words in front of somebody adding recovery. */
 
 describe('where the new-device road starts', () => {
   it('asks for the sign-in first', () => {

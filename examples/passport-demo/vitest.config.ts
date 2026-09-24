@@ -244,6 +244,32 @@
  * two listeners, holding no rules at all — is `src/screens/WaitingGame.tsx`,
  * out with the rest of the `.tsx`.
  *
+ * `src/lib/recoveryAdd.ts` went IN on 2026/09/24, the day it was written, and
+ * it is in the denominator because it is the answer to "sometimes the recovery
+ * transaction didn't go through correctly". It holds the ORDER of adding
+ * recovery and a bound on every step of it that can hang, and the one sentence
+ * a failure is shown — and every branch in it is a way of leaving somebody on
+ * a spinner or telling them something false: the rest of the setup that did
+ * not land, a sign-in whose key is not ready yet and is asked once more, a key
+ * that never comes, an add that outlives its last bound, and a library's words
+ * that must never reach the screen. It also builds the timeline's rows from
+ * the add's own callbacks, and a row that ticked on a timer would be the
+ * untruth the setup's timeline was written to remove. It holds no DOM, no
+ * React, no storage, and no clock — the steps and the wait are injected — so
+ * all of it is drilled in `src/lib/recoveryAdd.test.ts`. The screen that runs
+ * it, `src/screens/CustodyPassport.tsx`, is out with the rest of the `.tsx`.
+ *
+ * `src/lib/snakeGame.ts` went IN on 2026/09/24, the day it was written, for
+ * the reason `src/lib/waitingGame.ts` is in: a game offered beside a
+ * transaction must never be a reason the screen goes wrong, and the promise
+ * that makes "stop the instant the reader is wanted" one call — a step on a
+ * state that is not running returns that same state — is drilled rather than
+ * assumed. The rest of it is in because it can be: no canvas, no timer, no
+ * keyboard, and no `Math.random`, so the turn that cannot reverse, the walls,
+ * the body, growth, and food placement with an injected random source are all
+ * drilled in `src/lib/snakeGame.test.ts`. Its painter,
+ * `src/screens/SnakeGame.tsx`, is out with the rest of the `.tsx`.
+ *
  * `src/lib/companionLink.ts` went IN on 2026/09/03, the day it was written. It
  * is four lines of rule behind a link out to a Telegram chat, and it is in the
  * denominator because it is the only part of that control anybody can get
@@ -824,10 +850,12 @@ export default mergeConfig(
           'src/lib/qrPayload.ts',
           'src/lib/qrScan.ts',
           'src/lib/recipientName.ts',
+          'src/lib/recoveryAdd.ts',
           'src/lib/recoveryStep.ts',
           'src/lib/sendAssets.ts',
           'src/lib/sendLegs.ts',
           'src/lib/sheetHistory.ts',
+          'src/lib/snakeGame.ts',
           'src/lib/shieldedNote.ts',
           'src/lib/sponsor.ts',
           'src/lib/txFailure.ts',
