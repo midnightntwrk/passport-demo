@@ -26,6 +26,14 @@ import { assetsOnTheWay, assetsOnTheWayLine } from './assetsOnTheWay.js'
 import { OPENING_BALANCE_ON_THE_WAY_DETAIL, OPENING_MUSD, OPENING_NIGHT } from '../lib/activation.js'
 /* Whether the opening balance is still coming. Pure — see `lib/activation.ts`. */
 import { openingBalanceOnTheWay } from '../lib/activation.js'
+import {
+  CUSTODY_FINISH_SETUP_BUSY,
+  CUSTODY_FINISH_SETUP_BUTTON,
+  CUSTODY_FINISH_SETUP_FAILED,
+  CUSTODY_FINISH_SETUP_LINE,
+  CUSTODY_FINISH_SETUP_TITLE,
+  type CustodyFinishSetupState,
+} from '../lib/custodySetupProgress.js'
 /* The figure a row should paint while the ledger's own is momentarily not the
    one the reader is about to have — an opening grant on its way in, a send on
    its way out and back. Pure — see `lib/pendingBalances.ts`. */
@@ -441,6 +449,20 @@ export interface HomeScreenProps {
    * caller is unchanged.
    */
   showSignedInIdentity?: boolean
+  /**
+   * THE REST OF A SETUP THAT WILL NOT FINISH BY ITSELF (2026/09/24).
+   *
+   * A Passport whose tab closed in the minute after Home has the rest of its
+   * setup pending and no key held here, so nothing lands it and its opening
+   * balance is never asked for. This card is the one press that settles the
+   * key and lands it. While it is shown the opening balance is NOT announced
+   * as on its way — it is not, until the press has run. Omit it and nothing
+   * changes. See `lib/custodySetupProgress.ts#custodyFinishSetupCard`.
+   */
+  finishSetup?: {
+    state: CustodyFinishSetupState
+    onFinish: () => void
+  } | null
   onSignOut: () => void
 }
 
@@ -483,6 +505,7 @@ export default function HomeScreen(props: HomeScreenProps) {
     supportUrl,
     onOpenBackup,
     recovery,
+    finishSetup,
     showSignedInIdentity,
     onSignOut,
   } = props
@@ -613,7 +636,9 @@ export default function HomeScreen(props: HomeScreenProps) {
      is actually there. */
   const openingLegs = openingBalanceLegsHeld(account ?? null)
   const onTheWay = assetsOnTheWay(activity, {
-    openingBalance: openingBalanceOnTheWay({
+    /* NOT ON ITS WAY while the rest of the setup is waiting on a press: the
+       balance is asked for only once that has landed. */
+    openingBalance: !finishSetup && openingBalanceOnTheWay({
       hasAccount: Boolean(account),
       holdsOpeningNight: openingLegs.night,
       holdsOpeningStablecoin: openingLegs.stablecoin,
@@ -982,6 +1007,29 @@ export default function HomeScreen(props: HomeScreenProps) {
                 <span>Receive</span>
               </button>
             ) : null}
+          </div>
+        ) : null}
+
+        {finishSetup ? (
+          <div className="mnhome-finish-card" data-testid="finish-setup">
+            <div className="mnhome-onway-copy">
+              <p className="mnhome-onway-title">{CUSTODY_FINISH_SETUP_TITLE}</p>
+              <p className="mnhome-onway-hint">{CUSTODY_FINISH_SETUP_LINE}</p>
+              {finishSetup.state === 'failed' ? (
+                <p className="mnhome-finish-error" role="alert">
+                  {CUSTODY_FINISH_SETUP_FAILED}
+                </p>
+              ) : null}
+            </div>
+            <button
+              type="button"
+              className="mnhome-action mnhome-action-primary mnhome-finish-button"
+              onClick={finishSetup.onFinish}
+              disabled={finishSetup.state === 'running'}
+              aria-busy={finishSetup.state === 'running'}
+            >
+              {finishSetup.state === 'running' ? CUSTODY_FINISH_SETUP_BUSY : CUSTODY_FINISH_SETUP_BUTTON}
+            </button>
           </div>
         ) : null}
 

@@ -75,6 +75,12 @@ export type AssetsAccount = NonNullable<HomeScreenProps['account']>
 
 export interface AssetsScreenProps {
   /**
+   * The rest of this Passport's setup is waiting on a press on Home, so its
+   * opening balance has not been asked for and is not announced as on its way
+   * (2026/09/24). See `HomeScreenProps.finishSetup`.
+   */
+  setupUnfinished?: boolean
+  /**
    * What the account holds. `null` when this Passport has no account yet —
    * the shelves are then absent rather than showing zeros against something
    * that does not exist, and one line says so.
@@ -138,7 +144,7 @@ interface AssetRow {
 }
 
 export default function AssetsScreen(props: AssetsScreenProps) {
-  const { account, pendingBalances, onRefresh, activity } = props
+  const { account, pendingBalances, onRefresh, activity, setupUnfinished } = props
 
   /* What has been announced and has not landed. One line under the token
      shelf, from the trail, gone the moment the balances themselves say it —
@@ -147,7 +153,8 @@ export default function AssetsScreen(props: AssetsScreenProps) {
      the grant have arrived. */
   const openingLegs = openingBalanceLegsHeld(account)
   const onTheWay = assetsOnTheWay(activity, {
-    openingBalance: openingBalanceOnTheWay({
+    /* Not on its way while the rest of the setup waits on a press on Home. */
+    openingBalance: setupUnfinished !== true && openingBalanceOnTheWay({
       hasAccount: Boolean(account),
       holdsOpeningNight: openingLegs.night,
       holdsOpeningStablecoin: openingLegs.stablecoin,

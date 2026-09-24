@@ -9967,6 +9967,9 @@ export default function PassportDemo() {
            link where it cannot yet — which is where somebody who answered "not
            now" after their name goes looking for it. */
         recovery={custody.recovery ?? { state: 'hidden' }}
+        /* THE REST OF A SETUP NOTHING ELSE WILL FINISH, and the press that
+           does (2026/09/24). Absent in the ordinary case. */
+        finishSetup={custody.finishSetup ?? null}
         /* NO BACK-UP FILE FOR THIS PASSPORT YET, so no control offering one.
            `identity/backup.ts` exports the prototype's stores — the passkey
            profile, the alias records, the prototype account — and none of them
@@ -9996,6 +9999,7 @@ export default function PassportDemo() {
           <AssetsScreen
             account={account}
             pendingBalances={custodyHomePendingBalances(custody.holdings)}
+            setupUnfinished={Boolean(custody.finishSetup)}
             network={custody.network as PassportNetwork}
             onRefresh={custody.onRefresh}
             activity={homeActivity}
