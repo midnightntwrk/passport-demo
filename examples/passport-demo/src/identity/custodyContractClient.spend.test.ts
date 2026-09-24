@@ -285,6 +285,8 @@ interface ChainFake {
   submitError?: unknown;
   /** The first N submits are refused because the account moved (`Custom error: 104`). */
   races?: number;
+  /** The code those refusals carry: `104` by default, `196` for a DUST collision. */
+  raceCode?: string;
   /** The submit never answers, after balancing. */
   submitHangs?: boolean;
   /** Balancing waits on this before it answers. */
@@ -447,7 +449,7 @@ function harness(
     submitted += 1;
     if ((chain.races ?? 0) > 0) {
       chain.races = (chain.races ?? 0) - 1;
-      throw nodeRefusal('104');
+      throw nodeRefusal(chain.raceCode ?? '104');
     }
     if (chain.submitError !== undefined) throw chain.submitError as Error;
     if (chain.submitFailure !== undefined) throw new Error(chain.submitFailure);
@@ -1704,6 +1706,28 @@ describe('a payment that cannot wait for ever', () => {
     expect(pendingK1Spends(ACCOUNT)).toEqual([]);
     expect(isK1NonceSpent(ACCOUNT, NONCE)).toBe(true);
     info.mockRestore();
+  });
+
+  it('builds it again when the sponsor paid its fee from a DUST coin already spent (196), and it lands', async () => {
+    const test = harness({ circuitResult: changeResult(60n), withWallet: true, races: 1, raceCode: '196' });
+    hold();
+    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    const result = await send(test);
+    expect(test.grafts).toHaveLength(2);
+    expect(test.watched).toEqual(['bal-2']);
+    expect(result.txHash).not.toBeNull();
+    expect(isK1NonceSpent(ACCOUNT, NONCE)).toBe(true);
+    info.mockRestore();
+  });
+
+  it('does not build again a refusal that is a verdict (239)', async () => {
+    const test = harness({ circuitResult: changeResult(60n), withWallet: true, races: 1, raceCode: '239' });
+    hold();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    await expect(send(test)).rejects.toThrow(NOT_SENT);
+    expect(test.grafts).toHaveLength(1);
+    expect(heldK1Coin(ACCOUNT, COLOUR)?.nonce).toBe(NONCE);
+    warn.mockRestore();
   });
 
   it('says it did not go through, and gives the coin back, when the account keeps moving', async () => {

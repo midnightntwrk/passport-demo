@@ -1055,6 +1055,84 @@ describe('a node refusal, read down the whole chain of causes', () => {
     expect(custodyNodeRefused(liveRefusal('Custom error: 231'))).toBe(true);
   });
 
+  it('tells a DUST coin spent twice (196) and a moved account (104) from every verdict', async () => {
+    const { custodyDustCollision, custodyRebuildRefusal, custodyStateRace } = await import('./custodyContractPlan.js');
+    const dust = liveRefusal('Custom error: 196');
+    expect(custodyDustCollision(dust)).toBe(true);
+    expect(custodyStateRace(dust)).toBe(false);
+    expect(custodyRebuildRefusal(dust)).toBe(true);
+    expect(custodyRebuildRefusal(liveRefusal('Custom error: 104'))).toBe(true);
+    for (const verdict of ['239', '217', '231', '1960', '19']) {
+      expect(custodyRebuildRefusal(liveRefusal(`Custom error: ${verdict}`))).toBe(false);
+    }
+    expect(custodyRebuildRefusal(new Error('WebSocket is not connected'))).toBe(false);
+  });
+
+  it('runs a step again on a curable refusal, a bounded number of times, and nothing else', async () => {
+    const { custodyRebuildOnRefusal, CUSTODY_STATE_RACE_RETRIES, CUSTODY_STATE_RACE_WAIT_MS } = await import(
+      './custodyContractPlan.js'
+    );
+    const sleep = vi.fn(() => Promise.resolve(undefined));
+    const lines: string[] = [];
+
+    // Refused once with 196, then accepted: one wait, the default one, and the step's answer.
+    let calls = 0;
+    const once = await custodyRebuildOnRefusal(
+      'the activation',
+      () => {
+        calls += 1;
+        return calls === 1 ? Promise.reject(liveRefusal('Custom error: 196')) : Promise.resolve('on');
+      },
+      { sleep, log: (line) => lines.push(line) },
+    );
+    expect(once).toBe('on');
+    expect(sleep).toHaveBeenCalledWith(CUSTODY_STATE_RACE_WAIT_MS);
+    expect(lines).toEqual([
+      `[account-custody] the node refused the activation without applying it (its fee coin was spent by another transaction); building it again (1 of ${CUSTODY_STATE_RACE_RETRIES})`,
+    ]);
+
+    // Refused for ever: the retries, then the refusal itself; no log asked for is fine.
+    const always = liveRefusal('Custom error: 104');
+    let tries = 0;
+    await expect(
+      custodyRebuildOnRefusal(
+        'a wave',
+        () => {
+          tries += 1;
+          return Promise.reject(always);
+        },
+        { sleep, waitMs: 5 },
+      ),
+    ).rejects.toBe(always);
+    expect(tries).toBe(CUSTODY_STATE_RACE_RETRIES + 1);
+    expect(sleep).toHaveBeenLastCalledWith(5);
+
+    // A verdict is not run again.
+    const verdict = liveRefusal('Custom error: 239');
+    let verdictTries = 0;
+    await expect(
+      custodyRebuildOnRefusal(
+        'the activation',
+        () => {
+          verdictTries += 1;
+          return Promise.reject(verdict);
+        },
+        { sleep },
+      ),
+    ).rejects.toBe(verdict);
+    expect(verdictTries).toBe(1);
+
+    // And the moved account names itself in the log.
+    lines.length = 0;
+    let raced = 0;
+    await custodyRebuildOnRefusal(
+      'the first step',
+      () => (raced++ === 0 ? Promise.reject(always) : Promise.resolve(null)),
+      { sleep, log: (line) => lines.push(line) },
+    );
+    expect(lines[0]).toMatch(/the account moved under it/);
+  });
+
   it('reads the pool’s own refusals, and not a socket', async () => {
     const { custodyNodeRefused, custodyFailureChainText } = await import('./custodyContractPlan.js');
     expect(custodyNodeRefused({ _tag: 'TransactionInvalidError', message: 'rejected' })).toBe(true);

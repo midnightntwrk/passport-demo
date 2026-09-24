@@ -119,7 +119,8 @@ import {
   CUSTODY_STATE_RACE_RETRIES,
   CUSTODY_STATE_RACE_WAIT_MS,
   custodyNodeRefused,
-  custodyStateRace,
+  custodyRebuildOnRefusal,
+  custodyRebuildRefusal,
   withinCustodyBound,
   type CustodyTxOutcome,
   custodySubmitVerdict,
@@ -910,10 +911,37 @@ export async function deployCustodyAccount(
   onPhase?: (phase: CustodyPhase) => void,
   overrides: Partial<CustodyDeps> = {},
 ): Promise<CustodyStepResult> {
-  const plan = await prepareCustodyDeploy(session, device, onPhase, overrides);
-  const landed = await landWaveOne(plan, onPhase);
-  const record = await landRemainingWaves(plan, landed.record, landed.onChain, onPhase);
-  return custodyStepResult(record, plan.network);
+  return rebuildSetupStep('the setup', overrides, async () => {
+    const plan = await prepareCustodyDeploy(session, device, onPhase, overrides);
+    const landed = await landWaveOne(plan, onPhase);
+    const record = await landRemainingWaves(plan, landed.record, landed.onChain, onPhase);
+    return custodyStepResult(record, plan.network);
+  });
+}
+
+/**
+ * A setup entry point, run again when the node refused it without applying it
+ * (104 or 196 — see `custodyRebuildRefusal`), before anything is surfaced.
+ *
+ * LIVE ON THE DEV SITE, 2026/09/23 17:44 UTC. A second Passport's activation
+ * was refused with `Custom error: 196`: the sponsor had paid its fee and the
+ * first Passport's background wave from the same DUST coin. Nothing was
+ * applied, and the next press activated at once — so the press is no longer
+ * asked for. The WHOLE entry point runs again, not the transaction: each one
+ * reads the chain before it sends (a deploy that landed, a wave the counter
+ * shows, an account already booted), so a second run never pays twice.
+ */
+function rebuildSetupStep<T>(
+  what: string,
+  overrides: Partial<CustodyDeps>,
+  step: () => Promise<T>,
+): Promise<T> {
+  const deps = withDefaults(overrides);
+  return custodyRebuildOnRefusal(what, step, {
+    sleep: (milliseconds) => deps.sleep(milliseconds),
+    waitMs: deps.stateRaceWaitMs ?? CUSTODY_STATE_RACE_WAIT_MS,
+    log: (line) => console.info(line),
+  });
 }
 
 /** What {@link deployCustodyWaveOne} can be told while it runs. */
@@ -959,9 +987,11 @@ export async function deployCustodyWaveOne(
   overrides: Partial<CustodyDeps> = {},
   options: CustodyWaveOneOptions = {},
 ): Promise<CustodyStepResult> {
-  const plan = await prepareCustodyDeploy(session, device, onPhase, overrides);
-  const { record } = await landWaveOne(plan, onPhase, options.onSubmitted);
-  return custodyStepResult(record, plan.network);
+  return rebuildSetupStep('the first step', overrides, async () => {
+    const plan = await prepareCustodyDeploy(session, device, onPhase, overrides);
+    const { record } = await landWaveOne(plan, onPhase, options.onSubmitted);
+    return custodyStepResult(record, plan.network);
+  });
 }
 
 /**
@@ -985,14 +1015,16 @@ export async function finishCustodyWaves(
   onPhase?: (phase: CustodyPhase) => void,
   overrides: Partial<CustodyDeps> = {},
 ): Promise<CustodyStepResult> {
-  const plan = await prepareCustodyDeploy(session, device, onPhase, overrides);
-  const onChain =
-    plan.record.address === null
-      ? null
-      : await readCustodyChainOperations(plan.providers, plan.ledgerApi, plan.record.address, plan.waves);
-  if (onChain === null) throw new Error('There is no Passport to finish yet.');
-  const record = await landRemainingWaves(plan, plan.record, onChain, onPhase);
-  return custodyStepResult(record, plan.network);
+  return rebuildSetupStep('a setup wave', overrides, async () => {
+    const plan = await prepareCustodyDeploy(session, device, onPhase, overrides);
+    const onChain =
+      plan.record.address === null
+        ? null
+        : await readCustodyChainOperations(plan.providers, plan.ledgerApi, plan.record.address, plan.waves);
+    if (onChain === null) throw new Error('There is no Passport to finish yet.');
+    const record = await landRemainingWaves(plan, plan.record, onChain, onPhase);
+    return custodyStepResult(record, plan.network);
+  });
 }
 
 /** The result every deploy entry point hands back. */
@@ -1789,6 +1821,18 @@ export async function activateK1Device(
   onPhase?: (phase: CustodyPhase) => void,
   overrides: Partial<CustodyDeps> = {},
 ): Promise<CustodyStepResult> {
+  /* Run again on a curable refusal; the chain is read first on every run. */
+  return rebuildSetupStep('the activation', overrides, () =>
+    activateK1DeviceOnce(session, device, onPhase, overrides),
+  );
+}
+
+async function activateK1DeviceOnce(
+  session: CustodySession,
+  device: CustodyDeviceIdentity,
+  onPhase: ((phase: CustodyPhase) => void) | undefined,
+  overrides: Partial<CustodyDeps>,
+): Promise<CustodyStepResult> {
   const deps = withDefaults(overrides);
   const user = custodyUserKey(session, device);
   const wallet = await deps.wallet(user);
@@ -1974,13 +2018,16 @@ export async function k1Call(
         try {
           return await k1CallOnce(deps, session, device, request, onPhase, { wallet, record });
         } catch (cause) {
-          if (request.bounded !== true || !custodyStateRace(cause)) throw cause;
+          /* 104 (the account moved) and 196 (the sponsor paid its fee from a
+             DUST coin another transaction spent): refused whole, so nothing
+             was applied and building it again is safe. */
+          if (request.bounded !== true || !custodyRebuildRefusal(cause)) throw cause;
           if (races >= CUSTODY_STATE_RACE_RETRIES) {
-            console.warn(`[account-custody] ${request.operation} kept meeting a moved account`, cause);
+            console.warn(`[account-custody] ${request.operation} kept being refused without being applied`, cause);
             throw new CustodySubmitSettled(CUSTODY_SEND_NOT_SENT);
           }
           console.info(
-            `[account-custody] the account changed under ${request.operation}; building it again (${races + 1} of ${CUSTODY_STATE_RACE_RETRIES})`,
+            `[account-custody] the node refused ${request.operation} without applying it; building it again (${races + 1} of ${CUSTODY_STATE_RACE_RETRIES})`,
           );
           await deps.sleep(deps.stateRaceWaitMs ?? CUSTODY_STATE_RACE_WAIT_MS);
         }
@@ -2177,10 +2224,11 @@ async function boundedK1Submit(
       circuitId: [circuit],
     });
   } catch (cause) {
-    /* THE NODE REFUSED IT: nothing was applied. A refusal because the account
-       moved under it goes back to `k1Call`, which builds it again; any other
-       is said plainly. */
-    if (custodyNodeRefused(cause) && !custodyStateRace(cause)) {
+    /* THE NODE REFUSED IT: nothing was applied. A refusal that building it
+       again can cure (the account moved, or the fee's DUST coin was spent by
+       another) goes back to `k1Call`, which builds it again; any other is said
+       plainly. */
+    if (custodyNodeRefused(cause) && !custodyRebuildRefusal(cause)) {
       console.warn(`[account-custody] the node refused ${circuit}`, cause);
       throw new CustodySubmitSettled(CUSTODY_SEND_NOT_SENT);
     }
@@ -2652,10 +2700,10 @@ async function spendWithAccount(
              the booking is taken back exactly. */
           undoK1ChangeCoin(account, held, changeRef);
           restartK1CoinCandidates(account, colour);
-          if (custodyStateRace(cause) && races < CUSTODY_STATE_RACE_RETRIES) {
+          if (custodyRebuildRefusal(cause) && races < CUSTODY_STATE_RACE_RETRIES) {
             races += 1;
             console.info(
-              `[account-custody] the account changed under the payment; building it again (${races} of ${CUSTODY_STATE_RACE_RETRIES})`,
+              `[account-custody] the node refused the payment without applying it; building it again (${races} of ${CUSTODY_STATE_RACE_RETRIES})`,
             );
             await deps.sleep(deps.stateRaceWaitMs ?? CUSTODY_STATE_RACE_WAIT_MS);
             continue;

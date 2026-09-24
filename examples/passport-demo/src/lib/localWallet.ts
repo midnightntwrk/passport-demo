@@ -88,6 +88,8 @@
 import * as ledger from '@midnightntwrk/ledger-v9';
 import { setNetworkId } from '@midnight-ntwrk/midnight-js-network-id';
 import { NoOpTransactionHistoryStorage } from '@midnight-ntwrk/wallet-sdk';
+import { SubmissionError } from '@midnight-ntwrk/wallet-sdk/capabilities/submission';
+import { NodeClient, PolkadotNodeClient } from '@midnight-ntwrk/wallet-sdk/node-client/effect';
 import { MidnightBech32m } from '@midnight-ntwrk/wallet-sdk/address-format';
 import { DustWallet } from '@midnight-ntwrk/wallet-sdk/dust';
 import type { FacadeState } from '@midnight-ntwrk/wallet-sdk/facade';
@@ -100,6 +102,7 @@ import {
   type UnshieldedKeystore,
   UnshieldedWallet,
 } from '@midnight-ntwrk/wallet-sdk/unshielded';
+import { Effect, Exit, pipe, Scope } from 'effect';
 import * as Rx from 'rxjs';
 
 import type { PassportStateScope, PassportWalletSeedProvider } from '../backend.js';
@@ -112,6 +115,12 @@ import {
 } from './indexerFailover.js';
 import { sponsorReadiness, sponsorRefusal } from './sponsor.js';
 import type { SponsorUnavailableCause } from './sponsor.js';
+import {
+  settledSubmissionService,
+  type NodeClientHandle,
+  type NodeSocketApi,
+  type SubmissionWait,
+} from './nodeSubmission.js';
 import { httpWalletProvingService } from './walletProver.js';
 import { createWalletSnapshotCheckpointer } from './walletSnapshotCheckpoint.js';
 import { wasmWalletProvingService } from './wasmProver.js';
@@ -1037,6 +1046,37 @@ function messageOf(cause: unknown): string {
 }
 
 /**
+ * The wallet SDK's node client, opened exactly as its default submission
+ * service opens it, and handed to {@link settledSubmissionService} with its
+ * `api` in reach. A failed submission is wrapped as the SDK wraps it — a
+ * `SubmissionError`, "Transaction submission error" — so every caller's rules
+ * about what a failure means see precisely what they saw before.
+ */
+async function openSdkNodeClient(nodeURL: URL): Promise<NodeClientHandle<unknown>> {
+  const scope = Effect.runSync(Scope.make());
+  const client = await Effect.runPromise(
+    PolkadotNodeClient.make({ nodeURL }).pipe(Effect.provideService(Scope.Scope, scope)),
+  );
+  return {
+    api: client.api as unknown as NodeSocketApi,
+    send: (tx: unknown, waitFor: SubmissionWait) =>
+      Effect.runPromise(
+        pipe(
+          NodeClient.sendMidnightTransactionAndWait(
+            (tx as { serialize(): Uint8Array }).serialize() as never,
+            waitFor,
+          ),
+          Effect.provideService(NodeClient.NodeClient, client),
+          Effect.mapError(
+            (cause) => new SubmissionError({ message: 'Transaction submission error', cause }),
+          ),
+        ),
+      ),
+    close: () => Effect.runPromise(Scope.close(scope, Exit.void)),
+  };
+}
+
+/**
  * Builds the in-browser Midnight wallet from a passkey-derived seed.
  *
  * Mirrors `createWallet(seedHex)` in the custody prototype: HD derivation, then
@@ -1188,6 +1228,11 @@ export async function createLocalMidnightWallet(
                 ledger.LedgerParameters.initialParameters().dust,
               ),
         ...(provingService ? { provingService } : {}),
+        /* THE SDK'S OWN NODE CLIENT, with its closes made honest — see
+           `./nodeSubmission.ts` for the setup that failed on every press
+           without this (staging, 2026/09/23). */
+        submissionService: (config: { relayURL: URL }) =>
+          settledSubmissionService(() => openSdkNodeClient(config.relayURL)),
       });
       await started.start(shieldedSecretKeys, dustSecretKey);
       return started;
