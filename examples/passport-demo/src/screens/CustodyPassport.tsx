@@ -13,12 +13,17 @@ import { saveBackupRecord, type BackupRecord } from '../lib/backupDevice.js'
 import { saveAdoption, type AdoptionHandoff } from '../lib/custodyAdoption.js'
 import {
   RECOVERY_COPY,
+  clearRecoveryIntent,
+  consumeRecoveryIntent,
+  loadRecoveryIntent,
   loadRecoveryRecord,
   recoveryHomeEntry,
   recoveryRefusal,
   recoveryResumes,
   recoveryStepDue,
+  saveRecoveryIntent,
 } from '../lib/recoveryStep.js'
+import { holdCriticalWork } from '../lib/appBusy.js'
 import type { CustodyArm, CustodyIdentity } from '../lib/custodyArm.js'
 import { parseEndpointList } from '../lib/endpoints.js'
 import { type K256DeviceIdentity } from '../identity/custodyContractSigning.js'
@@ -426,6 +431,19 @@ export interface CustodySocialSignIn {
  */
 type Screen = 'welcome' | 'name' | 'recovery' | 'home' | 'recover'
 
+/**
+ * This tab's `sessionStorage`, or null where the browser refuses it (a private
+ * window, blocked site data). The recovery press is then remembered in this
+ * render only, which is what it was before it was written down at all.
+ */
+function intentStorage(): Storage | null {
+  try {
+    return window.sessionStorage
+  } catch {
+    return null
+  }
+}
+
 export default function CustodyPassport({
   network,
   arm,
@@ -476,6 +494,14 @@ export default function CustodyPassport({
   const [view, setView] = useState<DynamicPassportView | null>(null)
   const [screen, setScreen] = useState<Screen | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
+  /* WHILE ANYTHING IS RUNNING, A SERVICE-WORKER UPDATE MAY NOT RELOAD THE
+     PAGE (2026/09/25). `busy` is this screen's own answer to "is something
+     away" — the setup press, a recovery add, finishing the setup, a send — and
+     the host's own hold (`passportBusy` in `App.tsx`) never saw it, so an
+     update landing mid-add reloaded the page out from under the approval.
+     See `src/pwa.tsx` and `../lib/appBusy.ts`. */
+  const working = busy !== null
+  useEffect(() => (working ? holdCriticalWork() : undefined), [working])
   /**
    * THE LAST THING THE SETUP SAID, and the reason the timeline can be trusted.
    *
@@ -594,9 +620,13 @@ export default function CustodyPassport({
    *
    * It exists because the press does not finish the job: it opens a provider's
    * own overlay, and on a phone that can mean leaving this app and coming back
-   * to a fresh load of it. What comes back finds this false, the session
-   * signed in, and the step still due — which is the state
-   * `recoveryResumes` reads, and why the reader is not asked a second time.
+   * to a fresh load of it. So the press is ALSO written to `sessionStorage`
+   * (`saveRecoveryIntent`, scoped to this account and network, forgotten after
+   * ten minutes), and a fresh load reads it back into this state below. What
+   * comes back finds this true, the session signed in, and the step still due
+   * — which is the state `recoveryResumes` reads, and why the reader is not
+   * asked a second time. A load resumes a stored press at most once: the
+   * resume marks it consumed as it starts (2026/09/25).
    */
   const [recoveryIntended, setRecoveryIntended] = useState(false)
   /* One add at a time. A second run would ask for a second approval for an
@@ -2668,6 +2698,9 @@ export default function CustodyPassport({
       } finally {
         recoveryRunning.current = false
         setRecoveryIntended(false)
+        const settled = userRef.current
+        const intents = intentStorage()
+        if (settled !== null && intents !== null) clearRecoveryIntent(intents, settled, network)
         setRecoveryProgress(null)
         setBusy(null)
         refresh()
@@ -2689,15 +2722,21 @@ export default function CustodyPassport({
       return
     }
     if (signIn.status !== 'signed-in') {
-      /* The overlay is opened and the press is REMEMBERED, because the reader
-         may not come back to this render — see {@link recoveryIntended}. */
+      /* The overlay is opened and the press is REMEMBERED — in this render
+         and in `sessionStorage` — because the reader may not come back to this
+         render. See {@link recoveryIntended}. */
       setRecoveryIntended(true)
+      const settled = userRef.current
+      const intents = intentStorage()
+      if (settled !== null && intents !== null) {
+        saveRecoveryIntent(intents, settled, network, Date.now())
+      }
       setError(null)
       signIn.openAuthFlow()
       return
     }
     void runRecoveryAdd(signIn)
-  }, [runRecoveryAdd])
+  }, [network, runRecoveryAdd])
 
   /**
    * "Not now", and the same press under a failure.
@@ -2711,11 +2750,26 @@ export default function CustodyPassport({
     const settled = userRef.current
     if (settled !== null) {
       saveBackupRecord(window.localStorage, settled, network, { dismissedAt: Date.now() })
+      const intents = intentStorage()
+      if (intents !== null) clearRecoveryIntent(intents, settled, network)
     }
     setRecoveryIntended(false)
     setError(null)
     refresh()
   }, [network, refresh])
+
+  /* A PRESS MADE BEFORE A RELOAD, read back once the account is known. Only a
+     press that has not been resumed yet counts; a consumed one means a resume
+     already started on an earlier load, and a second automatic one would be a
+     loop (2026/09/25). Never sets false: a press made on this render stands. */
+  useEffect(() => {
+    if (user === null) return
+    const intents = intentStorage()
+    if (intents === null) return
+    if (loadRecoveryIntent(intents, user, network, Date.now()) === 'pending') {
+      setRecoveryIntended(true)
+    }
+  }, [network, user])
 
   /* Picks the add back up for somebody who has just come back from a
      provider's overlay. See `recoveryResumes`, which owns the rule. */
@@ -2732,8 +2786,15 @@ export default function CustodyPassport({
       return
     }
     if (social === null) return
+    /* The stored press is spent as the resume starts: whatever this run
+       meets — including a reload — the next load does not start another. */
+    const settled = userRef.current
+    const intents = intentStorage()
+    if (settled !== null && intents !== null) {
+      consumeRecoveryIntent(intents, settled, network, Date.now())
+    }
     void runRecoveryAdd(social)
-  }, [busy, recoveryIntended, recoveryRecord, runRecoveryAdd, screen, social])
+  }, [busy, network, recoveryIntended, recoveryRecord, runRecoveryAdd, screen, social])
 
   /* ---------------------------------------------------------------------- */
   /* THE JOURNEY, SHOWN THE WAY THE OLD ROAD SHOWED IT (2026/09/22)          */

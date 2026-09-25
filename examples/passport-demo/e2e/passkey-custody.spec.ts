@@ -1169,7 +1169,7 @@ test.describe('a passkey Passport paying somebody', () => {
  */
 async function passkeyPassportAfterTheName(
   browser: import('@playwright/test').Browser,
-  options: { recovered?: boolean; wavesDone?: number } = {},
+  options: { recovered?: boolean; wavesDone?: number; walk?: 'out' | 'away' } = {},
 ): Promise<{ page: Page; close: () => Promise<void> }> {
   const context = await browser.newContext(
     walkContextOptions({ viewport: { width: 420, height: 900 } }),
@@ -1225,7 +1225,7 @@ async function passkeyPassportAfterTheName(
       [`${identity.userKey.toLowerCase()}|${WALK_NETWORK}`] as const,
     );
   }
-  await page.goto(`${WALK}&dynamicwalk=out`);
+  await page.goto(`${WALK}&dynamicwalk=${options.walk ?? 'out'}`);
   return {
     page,
     close: async () => {
@@ -1519,6 +1519,104 @@ test.describe('a passkey Passport that has just been named', () => {
     await expect(page.getByTestId('add-recovery')).toContainText('Try again');
     await expect(page.getByTestId('skip-recovery')).toHaveText('Continue to my Passport');
     expect(proofs).toEqual([]);
+
+    await close();
+  });
+
+  /* "LET'S TRY THAT AGAIN", THEN A RELOAD, THEN THE SAME AGAIN (Android
+     Chrome, 2026/09/25). The provider's sign-in can reload this page before it
+     comes back, and until today the press lived in React state alone: the
+     reload forgot it, and the reader was on the offer again with a sign-in
+     attached and nothing moving. The press is in `sessionStorage` now, and a
+     load resumes it at most once.
+
+     Walked here: press Add recovery, the overlay takes the reader away and
+     never publishes on this load (`?dynamicwalk=away`), the page is loaded
+     again with the sign-in back (`?dynamicwalk=1`), and the add runs by itself
+     EXACTLY ONCE — and the new-device road ("Already have a Passport · Find
+     it by its name", "Open your Passport here", a sign-in's "Signed in with …"
+     kicker) never flashes over this passkey Passport while its session is
+     being reopened. Before 2026/09/25 it did, for about 70 ms on this box and
+     for as long as the wallet took to reopen on a phone. */
+  test('picks the add back up exactly once after a reload during the sign-in', async ({
+    browser,
+  }) => {
+    test.setTimeout(240_000);
+    const { page, close } = await passkeyPassportAfterTheName(browser, { walk: 'away' });
+    await expect(page.getByTestId('add-recovery')).toBeVisible({ timeout: 60_000 });
+
+    await page.getByTestId('add-recovery').click();
+    /* Nothing comes back to this load: the offer is still the offer, and the
+       press is written down for the next one. */
+    const stored = () =>
+      page.evaluate(() =>
+        Object.keys(window.sessionStorage)
+          .filter((key) => key.startsWith('passport-recovery-intent:v1:'))
+          .map((key) => JSON.parse(window.sessionStorage.getItem(key) ?? 'null') as { consumed: boolean }),
+      );
+    await expect.poll(stored).toEqual([expect.objectContaining({ consumed: false })]);
+    await expect(page.getByTestId('add-recovery')).toBeEnabled();
+    await expect(page.locator('.mnrecovery-progress')).toHaveCount(0);
+
+    /* Everything the next loads show, recorded from their first byte: how
+       many times an add started by itself, and whether the new-device road
+       was ever painted. */
+    await page.addInitScript(() => {
+      const w = window as unknown as { __addRuns: number; __sawRecoverRoad: string[] };
+      w.__addRuns = 0;
+      w.__sawRecoverRoad = [];
+      let running = false;
+      new MutationObserver(() => {
+        const now = document.querySelector('.mnrecovery-progress') !== null;
+        if (now && !running) w.__addRuns += 1;
+        running = now;
+        /* `textContent`, flattened and lower-cased: `innerText` applies the
+           sheet's upper-casing and the title's line breaks. */
+        const text = (document.body?.textContent ?? '').replace(/\s+/g, ' ').toLowerCase();
+        for (const marker of ['open your passport here', 'already have a passport', 'signed in with']) {
+          if (text.includes(marker) && !w.__sawRecoverRoad.includes(marker)) {
+            w.__sawRecoverRoad.push(marker);
+          }
+        }
+      }).observe(document, { subtree: true, childList: true, characterData: true });
+    });
+
+    /* THE SIGN-IN COMES BACK ON A FRESH LOAD. */
+    await page.goto(`${WALK}&dynamicwalk=1`);
+    const runs = () =>
+      page.evaluate(() => (window as unknown as { __addRuns: number }).__addRuns);
+    await expect.poll(runs, { timeout: 90_000 }).toBe(1);
+    /* The stored press was spent as the resume started. */
+    const now = await stored();
+    expect(now.length === 0 || now.every((intent) => intent.consumed)).toBe(true);
+
+    /* And it ends, one way or the other: the way back on, or one plain
+       sentence and the same press offered again. */
+    const settled = page.locator('.mnhome-name, .mnob-unusable-copy').first();
+    await expect(settled).toBeVisible({ timeout: 120_000 });
+    if ((await page.locator('.mnob-unusable-copy').count()) > 0) {
+      await expect(page.locator('.mnob-unusable-copy')).toContainText('Recovery was not added');
+      await expect(page.getByTestId('add-recovery')).toContainText('Try again');
+    } else {
+      await expect(page.getByTestId('recovery-state')).toHaveText('Recovery: on');
+    }
+    expect(await runs()).toBe(1);
+    expect(await stored()).toEqual([]);
+    expect(
+      await page.evaluate(() => (window as unknown as { __sawRecoverRoad: string[] }).__sawRecoverRoad),
+    ).toEqual([]);
+
+    /* NEVER A LOOP. Another load, the sign-in still attached: nothing starts
+       by itself, because nothing was pressed since. */
+    await page.goto(`${WALK}&dynamicwalk=1`);
+    await expect(page.locator('.mnhome-name, [data-testid="add-recovery"]').first()).toBeVisible({
+      timeout: 60_000,
+    });
+    await page.waitForTimeout(3_000);
+    expect(await runs()).toBe(0);
+    expect(
+      await page.evaluate(() => (window as unknown as { __sawRecoverRoad: string[] }).__sawRecoverRoad),
+    ).toEqual([]);
 
     await close();
   });

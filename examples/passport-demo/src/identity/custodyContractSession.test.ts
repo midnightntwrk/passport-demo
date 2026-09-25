@@ -136,6 +136,35 @@ describe('choosePassportIdentity', () => {
     ).toBe('none');
   });
 
+  it('answers none, not dynamic, while a passkey session is still being reopened', () => {
+    expect(
+      choosePassportIdentity({
+        hasPasskeyProfile: false,
+        dynamicStatus: 'signed-in',
+        evmAddress: '0xAbC',
+        passkeyRestoring: true,
+      }),
+    ).toBe('none');
+    /* The profile, once back, wins as it always has. */
+    expect(
+      choosePassportIdentity({
+        hasPasskeyProfile: true,
+        dynamicStatus: 'signed-in',
+        evmAddress: '0xAbC',
+        passkeyRestoring: true,
+      }),
+    ).toBe('passkey');
+    /* And a restore that has ended hands the sign-in its answer back. */
+    expect(
+      choosePassportIdentity({
+        hasPasskeyProfile: false,
+        dynamicStatus: 'signed-in',
+        evmAddress: '0xAbC',
+        passkeyRestoring: false,
+      }),
+    ).toBe('dynamic');
+  });
+
   it('answers dynamic for a signed-in session with an address and no passkey', () => {
     expect(
       choosePassportIdentity({

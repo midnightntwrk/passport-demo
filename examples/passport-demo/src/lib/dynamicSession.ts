@@ -303,6 +303,12 @@ export interface PassportIdentityInput {
   readonly dynamicStatus: string
   /** {@link DynamicSession.evmAddress}. */
   readonly evmAddress: string | null
+  /**
+   * Whether this device is still reopening a passkey session it holds — the
+   * silent restore after a reload, from its start until the profile is back
+   * or the restore has given up. Absent is false.
+   */
+  readonly passkeyRestoring?: boolean
 }
 
 /**
@@ -315,6 +321,14 @@ export interface PassportIdentityInput {
  * sign-in its holder made for an unrelated reason, and the Passport they cannot
  * see is the one holding the money.
  *
+ * A PASSKEY SESSION STILL BEING REOPENED IS NOT YET AN ABSENCE (2026/09/25).
+ * After a reload the profile arrives several awaits after the wallet does,
+ * and a sign-in that reported first used to win that race: the sign-in's arm
+ * painted the new-device road ("Open your Passport here") over a passkey
+ * Passport until the profile landed and the screen switched arms under the
+ * reader. So while a restore is in flight the answer is `'none'` — the
+ * restoring state — and the passkey question is asked once it can be answered.
+ *
  * An address of whitespace is an absence. Dynamic creates the embedded wallet
  * AFTER the auth flow resolves, so a person is genuinely signed in for a beat
  * with no address, and treating that beat as a social Passport would mean
@@ -322,6 +336,7 @@ export interface PassportIdentityInput {
  */
 export function choosePassportIdentity(input: PassportIdentityInput): PassportIdentityKind {
   if (input.hasPasskeyProfile) return 'passkey'
+  if (input.passkeyRestoring === true) return 'none'
   if (input.dynamicStatus !== 'signed-in') return 'none'
   return dynamicUserKey(input.evmAddress) === null ? 'none' : 'dynamic'
 }
