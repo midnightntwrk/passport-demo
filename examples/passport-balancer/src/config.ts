@@ -242,6 +242,21 @@ export interface BalancerConfig extends BalancerNetworkEndpoints {
    */
   trustedProxies: string[];
   /**
+   * Whether the sponsor pays a custody Passport's opening balance BY ITSELF
+   * once the account is activated, without waiting for the phone's
+   * `/fund-account`. `BALANCER_FUND_ON_ACTIVATION`, ON unless set to
+   * `0`/`false`/`off`/`no`. Off leaves `/fund-account` as the only way an
+   * opening balance is paid, which is the behaviour before 2026/09/24. See
+   * `./fundOnActivation.ts`.
+   */
+  fundOnActivation: boolean;
+  /**
+   * How long one account is watched for its activation before the sponsor
+   * leaves it to the phone. `BALANCER_FUND_ON_ACTIVATION_WINDOW_MS`, ten
+   * minutes by default.
+   */
+  fundOnActivationWindowMs: number;
+  /**
    * When set, the three spend endpoints require it in an `X-Passport-Key`
    * header. Unset — the default — leaves every caller admitted, which is the
    * deployed behaviour.
@@ -1036,6 +1051,22 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BalancerConfig
 
   const clientKey = trimmed(env.BALANCER_CLIENT_KEY);
 
+  const fundOnActivation = switchFrom(
+    'BALANCER_FUND_ON_ACTIVATION',
+    trimmed(env.BALANCER_FUND_ON_ACTIVATION),
+    true,
+  );
+  const fundOnActivationWindowMs = wholeNumber(
+    'BALANCER_FUND_ON_ACTIVATION_WINDOW_MS',
+    trimmed(env.BALANCER_FUND_ON_ACTIVATION_WINDOW_MS),
+    DEFAULT_FUND_ON_ACTIVATION_WINDOW_MS,
+  );
+  if (fundOnActivationWindowMs < 60_000) {
+    throw new Error(
+      'BALANCER_FUND_ON_ACTIVATION_WINDOW_MS must be at least 60000 ms; turn the feature off with BALANCER_FUND_ON_ACTIVATION=0 instead.',
+    );
+  }
+
   const midnamesTldAddress = contractAddressFrom(
     'BALANCER_MIDNAMES_TLD_ADDRESS',
     trimmed(env.BALANCER_MIDNAMES_TLD_ADDRESS) ?? MIDNAMES_TLD_DEFAULTS[networkId],
@@ -1094,6 +1125,23 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BalancerConfig
     resolverPoolTarget,
     resolverPoolFloor,
     trustedProxies: trustedProxies.length > 0 ? trustedProxies : [...DEFAULT_TRUSTED_PROXIES],
+    fundOnActivation,
+    fundOnActivationWindowMs,
     ...(clientKey ? { clientKey } : {}),
   };
+}
+
+/** Ten minutes: the phone's own schedule for the opening balance is the same length. */
+export const DEFAULT_FUND_ON_ACTIVATION_WINDOW_MS = 600_000;
+
+/**
+ * An on/off variable. Unset is `fallback`; anything but the eight spellings
+ * below is refused at start-up, so a typo cannot silently mean either.
+ */
+export function switchFrom(name: string, raw: string | undefined, fallback: boolean): boolean {
+  if (raw === undefined) return fallback;
+  const value = raw.toLowerCase();
+  if (['1', 'true', 'on', 'yes'].includes(value)) return true;
+  if (['0', 'false', 'off', 'no'].includes(value)) return false;
+  throw new Error(`${name} must be one of 1, true, on, yes, 0, false, off, or no.`);
 }
