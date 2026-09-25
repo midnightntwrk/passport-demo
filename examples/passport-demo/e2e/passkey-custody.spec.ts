@@ -110,6 +110,13 @@ const sendAmount = (page: Page) => page.locator('.mnhome-send-amount input');
 const sendFailure = (page: Page) =>
   page.locator('.mnhome-send').locator('.mnhome-notice[role="alert"]');
 
+/**
+ * The pill a payment in flight is shown by, above the tab bar (2026/09/25).
+ * The Send sheet closes once a payment is handed over, so a payment's answer —
+ * its phase, "Sent", or its one sentence — is read here rather than in it.
+ */
+const sendPill = (page: Page) => page.getByTestId('send-progress');
+
 /** The demo stablecoin's colour, as `src/lib/colour.ts` knows it. */
 const MUSD_COLOUR = '1a2917fbed8b5ce44d12ebc7d337689045f6c96a6bbd39cf3d8691ab310ef6a6';
 
@@ -969,26 +976,26 @@ test.describe('a passkey Passport paying somebody', () => {
     await page.getByRole('button', { name: /^Review$/ }).click();
     await page.locator('.mnhome-send-primary').click();
 
-    /* ONE SENTENCE, AND THE CONTROL BACK. There is no proving service behind
+    /* HANDED OVER, AND THE SHEET GETS OUT OF THE WAY (2026/09/25). */
+    await expect(page.locator('.mnhome-send')).toHaveCount(0);
+
+    /* ONE SENTENCE, AND A WAY TO TRY AGAIN. There is no proving service behind
        this tier, so the payment is planned in full — the coin chosen out of
        the store, the recipient read off the chain as one of these accounts,
        the amount checked against what one payment can draw on — and then
        stops. What is held is the property that holds whatever the refusal is,
        exactly as the k256 walk next door holds it. */
-    await expect(sendFailure(page).first()).toBeVisible({ timeout: 60_000 });
-    const sentence = (await sendFailure(page).first().innerText()).trim();
+    await expect(sendPill(page)).toHaveAttribute('data-state', 'failed', { timeout: 60_000 });
+    const sentence = (await sendPill(page).locator('.mnsendp-title').innerText()).trim();
     expect(sentence).not.toContain('not built yet');
     expect(sentence).not.toContain('Paying somebody from this Passport is coming');
-    await expect(page.locator('.mnhome-send-primary')).toBeEnabled();
+    await expect(sendPill(page).getByRole('button', { name: 'Try again' })).toBeVisible();
 
     /* AND THE PASSPORT SAYS WHERE THE MONEY IS: nothing went out, and the
        figure it started with is the figure it still holds. */
-    await page.locator('.mnhome-send').getByRole('button', { name: 'Close' }).click();
     await expect(greeting(page)).toBeVisible({ timeout: 30_000 });
-    await expect(
-      page.getByText('Nothing was sent, and it is all still in your Passport.'),
-    ).toBeVisible();
     await expect(assetRow(page, 'mUSD')).toContainText('250');
+    await expect(assetRow(page, 'mUSD')).not.toContainText(/Transferring/i);
 
     await close();
   });
@@ -1004,11 +1011,12 @@ test.describe('a passkey Passport paying somebody', () => {
     await page.getByRole('button', { name: /^Review$/ }).click();
     await page.locator('.mnhome-send-primary').click();
 
-    await expect(sendFailure(page).first()).toBeVisible({ timeout: 60_000 });
-    const sentence = (await sendFailure(page).first().innerText()).trim();
+    await expect(page.locator('.mnhome-send')).toHaveCount(0);
+    await expect(sendPill(page)).toHaveAttribute('data-state', 'failed', { timeout: 60_000 });
+    const sentence = (await sendPill(page).locator('.mnsendp-title').innerText()).trim();
     expect(sentence).not.toContain('not built yet');
     expect(sentence).not.toContain('Paying somebody from this Passport is coming');
-    await expect(page.locator('.mnhome-send-primary')).toBeEnabled();
+    await expect(sendPill(page).getByRole('button', { name: 'Try again' })).toBeVisible();
 
     await close();
   });
@@ -1669,12 +1677,12 @@ test.describe('a payment that cannot wait for ever (2026/09/22)', () => {
     });
     await page.locator('.mnhome-send-primary').click();
 
-    await expect(sendFailure(page).first()).toContainText(NOT_SENT, { timeout: 30_000 });
+    /* The sheet is gone at the hand-over; the pill carries the answer. */
+    await expect(page.locator('.mnhome-send')).toHaveCount(0);
+    await expect(sendPill(page)).toContainText(NOT_SENT, { timeout: 30_000 });
     expect(proofs).toEqual([]);
-    await expect(page.locator('.mnhome-send-primary')).toBeEnabled();
 
     /* The coin never left the store, and Home says so. */
-    await page.locator('.mnhome-send').getByRole('button', { name: 'Close' }).click();
     await expect(assetRow(page, 'mUSD')).toContainText('250');
     const held = await page.evaluate(() => window.localStorage.getItem('passport-k1-coins:v1'));
     expect(held).toContain('"value":"250"');
@@ -1717,3 +1725,210 @@ async function chooseAsset(page: Page, symbol: string): Promise<void> {
   await expect(option.first()).toBeAttached({ timeout: 30_000 });
   await sendPicker(page).selectOption({ label: ((await option.first().textContent()) ?? '').trim() });
 }
+
+
+/* -------------------------------------------------------------------------- */
+/* The Send sheet holds still, and a payment runs behind the Passport          */
+/* (2026/09/25)                                                               */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Installs the two observers the stillness walk reads — every mutation inside
+ * the open Send form, and every layout shift — before the sheet is opened.
+ */
+async function watchSendSheet(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const w = window as unknown as { __still: { mutations: number; cls: number; heights: number[] } };
+    w.__still = { mutations: 0, cls: 0, heights: [] };
+    new PerformanceObserver((list) => {
+      for (const entry of list.getEntries() as unknown as { value: number; hadRecentInput: boolean }[]) {
+        if (!entry.hadRecentInput) w.__still.cls += entry.value;
+      }
+    }).observe({ type: 'layout-shift', buffered: false });
+    new MutationObserver((records) => {
+      for (const record of records) {
+        const target = record.target as Element;
+        const element = target.nodeType === 1 ? target : target.parentElement;
+        if (element?.closest('.mnhome-send-form')) w.__still.mutations += 1;
+      }
+    }).observe(document.body, { subtree: true, childList: true, attributes: true, characterData: true });
+    const sample = () => {
+      const sheet = document.querySelector('.mnhome-send');
+      if (sheet) w.__still.heights.push(Math.round(sheet.getBoundingClientRect().height));
+      requestAnimationFrame(sample);
+    };
+    sample();
+  });
+}
+
+async function resetStill(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const w = window as unknown as { __still: { mutations: number; cls: number; heights: number[] } };
+    w.__still.mutations = 0;
+    w.__still.cls = 0;
+    w.__still.heights = [];
+  });
+}
+
+async function readStill(page: Page): Promise<{ mutations: number; cls: number; heights: number[] }> {
+  return page.evaluate(
+    () => (window as unknown as { __still: { mutations: number; cls: number; heights: number[] } }).__still,
+  );
+}
+
+/** A stand-in for the payment engine, a step apart — see `paymentEngine` in `CustodyPassport.tsx`. */
+function walkPayment(options: { stepMs: number; fail?: string }) {
+  return async (page: Page): Promise<void> => {
+    await page.addInitScript((asked) => {
+      (window as unknown as { __passportWalkPayment?: unknown }).__passportWalkPayment = asked;
+    }, options);
+  };
+}
+
+/** Fills in 10 mUSD to the resolvable name and confirms it. */
+async function payTenMusd(page: Page): Promise<void> {
+  await openSend(page);
+  await chooseAsset(page, 'mUSD');
+  await sendRecipient(page).fill(RESOLVABLE_NAME);
+  await sendAmount(page).fill('10');
+  await expect(page.getByRole('button', { name: /^Review$/ })).toBeEnabled({ timeout: 30_000 });
+  await page.getByRole('button', { name: /^Review$/ }).click();
+  await page.locator('.mnhome-send-primary').click();
+}
+
+test.describe('a payment that runs behind the Passport (2026/09/25)', () => {
+  test('an open Send sheet holds still: no re-rendering, no layout shift, one height', async ({
+    browser,
+  }) => {
+    const { page, close } = await passkeyPassportOnHome(browser, { night: true });
+    await expect(assetRow(page, 'mUSD')).toContainText('250', { timeout: 30_000 });
+    await watchSendSheet(page);
+    await openSend(page);
+    /* Its first paint, and the picker's authoritative read, settle. */
+    await page.waitForTimeout(1_000);
+    await resetStill(page);
+    await page.waitForTimeout(5_000);
+    const still = await readStill(page);
+    expect(still.mutations, 'nothing inside the form changes while nobody touches it').toBeLessThanOrEqual(1);
+    expect(still.cls, 'the sheet does not shift').toBeLessThan(0.01);
+    expect(new Set(still.heights).size, `one height, not ${[...new Set(still.heights)].join(', ')}`).toBe(1);
+    /* No keyboard raised on a phone before anybody has chosen to type. */
+    const touch = await page.evaluate(() => window.matchMedia('(pointer: coarse)').matches);
+    if (touch) {
+      expect(await page.evaluate(() => document.activeElement?.tagName)).not.toBe('TEXTAREA');
+    }
+    await close();
+  });
+
+  test('confirming closes the sheet, the pill walks the phases while Home stays usable, and it ends Sent', async ({
+    browser,
+  }) => {
+    const { page, close } = await passkeyPassportOnHome(browser, {
+      beforeOpen: walkPayment({ stepMs: 2_500 }),
+    });
+    await payTenMusd(page);
+
+    /* The sheet is gone at once, and the pill says what is happening. */
+    await expect(page.locator('.mnhome-send')).toHaveCount(0);
+    await expect(sendPill(page)).toHaveAttribute('data-state', 'running');
+    await expect(sendPill(page)).toContainText(/Sending 10 mUSD to /);
+    /* The live row at the head of the activity list says the same. */
+    await expect(page.getByTestId('send-progress-row')).toContainText(/Sending 10 mUSD to /);
+    /* And the balance that is moving says so, in the word the rows use. */
+    await expect(assetRow(page, 'mUSD')).toContainText('Transferring');
+    await expect(sendPill(page).locator('.mnsendp-phase')).toHaveText('Proving…', { timeout: 30_000 });
+
+    /* THE PASSPORT IS STILL USABLE: Receive opens and the pill stays in view. */
+    await page.getByRole('button', { name: /^Receive$/ }).click();
+    await expect(page.getByRole('dialog', { name: 'Receive to your Passport' })).toBeVisible();
+    await expect(sendPill(page)).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('dialog', { name: 'Receive to your Passport' })).toHaveCount(0);
+
+    /* So does another tab. */
+    await page.getByRole('button', { name: /^Assets$/ }).click();
+    await expect(sendPill(page)).toBeVisible();
+    await expect(sendPill(page).locator('.mnsendp-phase')).toHaveText('Confirming…', { timeout: 30_000 });
+
+    /* A second payment waits for the first, and says why in one line. */
+    await page.getByRole('button', { name: /^Home$/ }).click();
+    await expect(greeting(page)).toBeVisible();
+
+    /* It ends Sent, with the link to the transaction. */
+    await expect(sendPill(page)).toHaveAttribute('data-state', 'sent', { timeout: 30_000 });
+    await expect(sendPill(page)).toContainText(/Sent 10 mUSD to /);
+    await expect(sendPill(page).getByRole('link', { name: /View/ })).toHaveAttribute('href', /.+/);
+    /* The trail's own row takes over from the live one. */
+    await expect(page.getByTestId('send-progress-row')).toHaveCount(0);
+    await expect(page.locator('.mnhome-activity')).toContainText(/Sent 10 mUSD to /);
+    /* And "Sent" goes by itself. */
+    await expect(sendPill(page)).toHaveCount(0, { timeout: 15_000 });
+    await close();
+  });
+
+  test('a second payment waits for the first, with the reason in one line', async ({ browser }) => {
+    const { page, close } = await passkeyPassportOnHome(browser, {
+      beforeOpen: walkPayment({ stepMs: 4_000 }),
+    });
+    await payTenMusd(page);
+    await expect(sendPill(page)).toHaveAttribute('data-state', 'running');
+    await openSend(page);
+    await expect(page.getByRole('button', { name: 'Waiting for your last payment' })).toBeDisabled();
+    await expect(page.locator('.mnhome-send')).toContainText('is still going through');
+    await page.locator('.mnhome-send').getByRole('button', { name: 'Close' }).click();
+    await close();
+  });
+
+  test('a failure ends in one sentence and Try again, which reopens Send on the same payment', async ({
+    browser,
+  }) => {
+    const { page, close } = await passkeyPassportOnHome(browser, {
+      beforeOpen: walkPayment({
+        stepMs: 500,
+        fail: 'That payment did not go through. Nothing left your Passport.',
+      }),
+    });
+    await payTenMusd(page);
+    await expect(page.locator('.mnhome-send')).toHaveCount(0);
+    await expect(sendPill(page)).toHaveAttribute('data-state', 'failed', { timeout: 30_000 });
+    await expect(sendPill(page)).toContainText(
+      'That payment did not go through. Nothing left your Passport.',
+    );
+    await expect(page.getByTestId('send-progress-row')).toContainText('Try again');
+    await expect(assetRow(page, 'mUSD')).not.toContainText(/Transferring/i);
+
+    await sendPill(page).getByRole('button', { name: 'Try again' }).click();
+    await expect(page.locator('.mnhome-send')).toBeVisible();
+    await expect(sendRecipient(page)).toHaveValue(/iamtester|\.night/);
+    await expect(sendAmount(page)).toHaveValue('10');
+    /* The failure is put away once it has been acted on. */
+    await expect(sendPill(page)).toHaveCount(0);
+    await close();
+  });
+
+  test('a reload in the middle of a payment shows the same pill, from the record', async ({
+    browser,
+  }) => {
+    const { page, close } = await passkeyPassportOnHome(browser, {
+      beforeOpen: walkPayment({ stepMs: 700 }),
+    });
+    /* The chain has not seen the stand-in's transaction yet. */
+    await page.route('**/indexer.stagenet.shielded.tools/**', async (route) => {
+      const body = route.request().postData() ?? '';
+      if (body.includes('e5'.repeat(32))) {
+        return route.fulfill({ json: { data: { transactions: [] } } });
+      }
+      return route.fallback();
+    });
+    await payTenMusd(page);
+    await expect(sendPill(page).locator('.mnsendp-phase')).toHaveText('Confirming…', { timeout: 30_000 });
+
+    await page.reload();
+    await expect(greeting(page)).toBeVisible({ timeout: 60_000 });
+    await expect(sendPill(page)).toHaveAttribute('data-state', 'running', { timeout: 30_000 });
+    await expect(sendPill(page)).toContainText(/Sending 10 mUSD to /);
+    await expect(sendPill(page).locator('.mnsendp-phase')).toHaveText('Confirming…');
+    await expect(page.getByTestId('send-progress-row')).toContainText('Confirming…');
+    await close();
+  });
+});

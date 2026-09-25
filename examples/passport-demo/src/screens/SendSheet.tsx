@@ -89,6 +89,9 @@ import {
   sendStepLine,
 } from '../lib/sendLegs.js'
 
+/* The draft "Try again" hands back. Type-only. */
+import type { SendDraft } from '../lib/sendProgress.js'
+
 import './home.css'
 
 /**
@@ -520,6 +523,38 @@ export interface SendSheetProps {
    */
   onSignOut?: () => void
   onClose: () => void
+  /**
+   * THE PAYMENT RUNS BEHIND THE PASSPORT, NOT IN FRONT OF IT (2026/09/25).
+   *
+   * Set by a host that shows a payment's progress somewhere of its own — the
+   * pill above the tab bar and the live row in the activity list. The sheet
+   * then closes the moment the payment has been handed over, instead of
+   * holding every control on the screen for the approval, the proof, and the
+   * wait for the network. What the payment comes to, and a failure's one
+   * sentence, are the host's to show; the promise the seam returns is only
+   * watched so that nothing is left unhandled.
+   *
+   * Everything before the hand-over still happens here, because it is still
+   * about the sheet: the fee re-check and its "the fee arrangement changed"
+   * refusal, and a seam this host does not have. Omit it and the sheet behaves
+   * exactly as it always has, open until the payment has an answer.
+   */
+  background?: boolean
+  /**
+   * Why a second payment has to wait for the one already running, in one line,
+   * or null when nothing is running. The sheet can still be opened and filled
+   * in; its Review waits and says why. See `sendInFlightReason` in
+   * `lib/sendProgress.ts` for why this, rather than queueing, is the safe
+   * answer.
+   */
+  inFlightReason?: string | null
+  /**
+   * A payment to open on — what "Try again" hands back after one that did not
+   * go through. It fills the three fields and nothing else: the sheet opens at
+   * the first step, and the payment is reviewed and confirmed again like any
+   * other.
+   */
+  initialDraft?: SendDraft | null
 }
 
 type Step = 'compose' | 'review'
@@ -535,6 +570,32 @@ type Mode = 'unshielded' | 'shielded'
  * either way, so the wait is never silent.
  */
 const NAME_DEBOUNCE_MS = 400
+
+/**
+ * How long the first fee answer may take before the line says it is being
+ * checked. The sponsor answers well inside this on every Passport today — on a
+ * custody Passport it answers without going anywhere at all — so the line used
+ * to be inserted for one frame and removed on the next, which on a phone is a
+ * sheet that jumps as it opens. A probe that is genuinely slow still earns the
+ * sentence.
+ */
+const FEE_CHECKING_SHOWN_AFTER_MS = 700
+
+/**
+ * Whether this device's main pointer is a finger.
+ *
+ * Focusing the recipient field on open raises the keyboard on a phone, which
+ * resizes the viewport under a sheet that is still settling — the sheet jumps,
+ * and half of it is hidden before anybody has chosen to type. With a mouse or a
+ * keyboard the focus is simply where the next keystroke goes, so it stays.
+ */
+function coarsePointer(): boolean {
+  try {
+    return typeof window.matchMedia === 'function' && window.matchMedia('(pointer: coarse)').matches
+  } catch {
+    return false
+  }
+}
 
 /** Where the name in the field has got to. */
 type NameState =
@@ -737,12 +798,23 @@ export default function SendSheet(props: SendSheetProps) {
     continueUnfinishedSend,
     onSignOut,
     onClose,
+    background,
+    inFlightReason,
+    initialDraft,
   } = props
 
   const [step, setStep] = useState<Step>('compose')
-  const [recipient, setRecipient] = useState('')
+  const [recipient, setRecipient] = useState(initialDraft?.recipient ?? '')
   const [scanning, setScanning] = useState(false)
-  const [amountText, setAmountText] = useState('')
+  /* A draft's amount is atomic. NIGHT is shown in whole NIGHT, a shielded
+     colour in its own whole units, so the conversion is the asset's. */
+  const [amountText, setAmountText] = useState(() =>
+    initialDraft
+      ? initialDraft.assetId === NIGHT_ASSET_ID
+        ? formatNight(BigInt(initialDraft.amount))
+        : initialDraft.amount
+      : '',
+  )
   const [busy, setBusy] = useState(false)
   /* `wayOut` is set when the host marked the refusal as a passkey ceremony that
      could not be completed — see `SendSheetProps.onSignOut`. It rides on the
@@ -780,7 +852,7 @@ export default function SendSheet(props: SendSheetProps) {
   /* Null until the person chooses: the default is then mUSD whenever the
      Passport holds it (2026/09/22 — the stablecoin is what people send), and
      NIGHT otherwise. */
-  const [assetId, setAssetId] = useState<string | null>(null)
+  const [assetId, setAssetId] = useState<string | null>(initialDraft?.assetId ?? null)
 
   /* What the registry said about the name in the field, if there is one. */
   const [nameState, setNameState] = useState<NameState>({ status: 'idle' })
@@ -836,12 +908,25 @@ export default function SendSheet(props: SendSheetProps) {
      Paused while a transfer is in flight: the sponsor is busy balancing OUR
      transaction then, so a tick would report `available: 0` and rewrite the fee
      line into a refusal for the very send that is succeeding. */
+  /* THE PROBE IS READ THROUGH A REF (2026/09/25). The poll used to restart
+     whenever the host handed down a new `readFeeReadiness`, and a host that
+     builds it inline hands a new one on every render. Each restart published
+     "no answer yet", which put "Checking with the fee sponsor…" into the sheet
+     and took it out again a moment later — measured on staging as a sheet that
+     grew by 62 px and snapped back, many times a second, with nobody touching
+     it. The poll now lives exactly as long as the sheet is idle, and asks
+     whichever probe is current. */
+  const readFeeReadinessRef = useRef(readFeeReadiness)
+  readFeeReadinessRef.current = readFeeReadiness
   useEffect(() => {
     if (busy) return
     const poll = startFeeReadinessPoll({
-      probe: () => readFeeReadiness({ force: true }),
+      probe: () => readFeeReadinessRef.current({ force: true }),
       onChange: (snapshot) => {
-        setFee(snapshot.fee)
+        /* A probe starting again says "no answer yet" about a fee this sheet
+           already has an answer for. The answer stays until a new one
+           replaces it; only a failed probe clears it. */
+        setFee((known) => (snapshot.fee === null && snapshot.error === null ? known : snapshot.fee))
         setFeeUnknown(snapshot.error)
         setFeeProbing(snapshot.probing)
       },
@@ -851,7 +936,16 @@ export default function SendSheet(props: SendSheetProps) {
       poll.stop()
       feePollRef.current = null
     }
-  }, [busy, readFeeReadiness])
+  }, [busy])
+
+  /* Whether the first answer has taken long enough to be worth saying so. */
+  const [feeSlow, setFeeSlow] = useState(false)
+  const feeAnswered = fee !== null || feeUnknown !== null
+  useEffect(() => {
+    if (feeAnswered) return undefined
+    const timer = window.setTimeout(() => setFeeSlow(true), FEE_CHECKING_SHOWN_AFTER_MS)
+    return () => window.clearTimeout(timer)
+  }, [feeAnswered])
 
   // Escape closes, unless a transaction is in flight — abandoning the sheet
   // mid-submission would hide an outcome that is still coming. While the
@@ -865,6 +959,7 @@ export default function SendSheet(props: SendSheetProps) {
   }, [busy, onClose, scanning])
 
   useEffect(() => {
+    if (coarsePointer()) return
     recipientRef.current?.focus()
   }, [])
 
@@ -936,14 +1031,25 @@ export default function SendSheet(props: SendSheetProps) {
      never look at. That reasoning belonged to a sheet where the address came
      first. The asset is now the first field, so the list has to exist before
      anything is typed — and there is nothing to look at at all until it does. */
+  /* ONCE PER OPENING (2026/09/25), and that is the fix for the worst of the
+     sheet's re-rendering. The read used to re-run whenever the host handed
+     down a new `readShieldedHoldings` — and the custody host's seam closed
+     over the very figures the read refreshes, so every answer made a new seam,
+     which asked again, which answered again: a loop of account reads for as
+     long as the sheet was open, with the host re-rendering Home around it
+     each time. The sheet asks once, of whichever seam is current. */
+  const readShieldedHoldingsRef = useRef(readShieldedHoldings)
+  readShieldedHoldingsRef.current = readShieldedHoldings
+  const holdingsSupported = Boolean(readShieldedHoldings)
   useEffect(() => {
-    if (!readShieldedHoldings) return undefined
+    const read = readShieldedHoldingsRef.current
+    if (!holdingsSupported || !read) return undefined
     let live = true
     void (async () => {
       try {
-        const read = await readShieldedHoldings()
+        const answer = await read()
         if (!live) return
-        setHoldings(read)
+        setHoldings(answer)
         setHoldingsError(null)
       } catch (cause) {
         if (!live) return
@@ -954,7 +1060,7 @@ export default function SendSheet(props: SendSheetProps) {
     return () => {
       live = false
     }
-  }, [readShieldedHoldings])
+  }, [holdingsSupported])
 
   /* What the picker draws from. The host's own mirror of the account gets the
      picker on screen in the first frame; the read above replaces it and is what
@@ -1217,7 +1323,13 @@ export default function SendSheet(props: SendSheetProps) {
              untrue. */
           failure !== null
           ? '—'
-          : 'Checking with the fee sponsor…'
+          : /* Said only once the answer is late — see
+               `FEE_CHECKING_SHOWN_AFTER_MS`. Until then the line is absent,
+               which is also what it is once a covered fee has answered, so
+               the sheet does not change shape at all on the ordinary path. */
+            feeSlow
+            ? 'Checking with the fee sponsor…'
+            : null
       : fee.mode === 'sponsored'
         ? /* Nothing said when the fee is covered (2026/09/22): the reader pays
              nothing, so there is nothing for them to read. */
@@ -1239,7 +1351,12 @@ export default function SendSheet(props: SendSheetProps) {
      `SendSheetProps.blockedReason`. */
   const waitingOnLastTransfer =
     typeof blockedReason === 'string' && blockedReason.length > 0 ? blockedReason : null
-  const cannotSend = feeBlocksSend || waitingOnLastTransfer !== null
+  /* A PAYMENT ALREADY RUNNING BEHIND THE PASSPORT (2026/09/25). The sheet can
+     be opened and filled in while it runs; Review waits, and the line under
+     it says for what. See `inFlightReason`. */
+  const waitingOnRunningPayment =
+    typeof inFlightReason === 'string' && inFlightReason.length > 0 ? inFlightReason : null
+  const cannotSend = feeBlocksSend || waitingOnLastTransfer !== null || waitingOnRunningPayment !== null
 
   /* What the primary control says while it waits. A blocked control still says
      what it is waiting FOR — "disabled" on its own is the thing that reads as
@@ -1410,40 +1527,61 @@ export default function SendSheet(props: SendSheetProps) {
       /* ONE DISPATCH, ON THE PAIR. Every seam it can reach is re-read on the
          way in: `canReview` already required each of them, and re-reading is
          what makes it impossible for a branch to be entered on a `null` that
-         changed between the render that enabled the button and this click. */
-      if (sendRoute === 'shielded-name') {
-        if (!onSendShieldedToName || tokenType === null || resolvedName === null) {
-          throw new Error('This Passport cannot pay a name in this asset right now.')
+         changed between the render that enabled the button and this click.
+         The seam is CHOSEN here and called below, so a host that runs the
+         payment in the background is handed exactly the call this sheet
+         would have awaited. */
+      const payment = ((): (() => Promise<void>) => {
+        if (sendRoute === 'shielded-name') {
+          if (!onSendShieldedToName || tokenType === null || resolvedName === null) {
+            throw new Error('This Passport cannot pay a name in this asset right now.')
+          }
+          const target = resolvedName
+          return () =>
+            onSendShieldedToName({
+              domain: target.domain,
+              accountAddress: target.accountAddress,
+              tokenType,
+              amount,
+            })
         }
-        await onSendShieldedToName({
-          domain: resolvedName.domain,
-          accountAddress: resolvedName.accountAddress,
-          tokenType,
-          amount,
-        })
-      } else if (sendRoute === 'night-name') {
-        if (!onSendToName || resolvedName === null) {
-          throw new Error('This Passport cannot send to a name right now.')
+        if (sendRoute === 'night-name') {
+          if (!onSendToName || resolvedName === null) {
+            throw new Error('This Passport cannot send to a name right now.')
+          }
+          const target = resolvedName
+          return () =>
+            onSendToName({
+              domain: target.domain,
+              accountAddress: target.accountAddress,
+              amount,
+            })
         }
-        await onSendToName({
-          domain: resolvedName.domain,
-          accountAddress: resolvedName.accountAddress,
-          amount,
-        })
-      } else if (sendRoute === 'shielded-address') {
-        if (!onSendShielded || tokenType === null) {
-          throw new Error('This Passport cannot send a shielded token right now.')
+        if (sendRoute === 'shielded-address') {
+          if (!onSendShielded || tokenType === null) {
+            throw new Error('This Passport cannot send a shielded token right now.')
+          }
+          return () => onSendShielded({ recipientAddress: recipient.trim(), tokenType, amount })
         }
-        await onSendShielded({ recipientAddress: recipient.trim(), tokenType, amount })
-      } else if (sendRoute === 'night-address') {
-        await onSend({ recipientAddress: recipient.trim(), amount })
-      } else {
+        if (sendRoute === 'night-address') {
+          return () => onSend({ recipientAddress: recipient.trim(), amount })
+        }
         /* Unreachable behind `recipientReady`, and deliberately not a silent
            fall-through to the plain send: a pair with no route is a pair the
            rules refused, and quietly sending it somewhere is the wrong-send
            this whole dispatch exists to make impossible. */
         throw new Error('This Passport cannot make that transfer.')
+      })()
+      if (background) {
+        /* HANDED OVER, AND THE SHEET GETS OUT OF THE WAY (2026/09/25). The
+           host shows the payment from here on — its phase, what it came to,
+           and a failure's one sentence with "Try again" — so this promise is
+           only watched to leave nothing unhandled. */
+        void payment().catch(() => undefined)
+        onClose()
+        return
       }
+      await payment()
       // A real txId came back from the node. The host owns the toast, the
       // activity row, and the refreshes; the sheet's job here is to get out
       // of the way.
@@ -1486,6 +1624,7 @@ export default function SendSheet(props: SendSheetProps) {
     }
   }, [
     amount,
+    background,
     busy,
     fee,
     onClose,
@@ -1838,7 +1977,14 @@ export default function SendSheet(props: SendSheetProps) {
                 <span className="mnhome-send-hint">
                   {holdingsError !== null
                     ? `What this Passport’s account holds could not be read just now, so sending is disabled until it can be: ${holdingsError}`
-                    : holdings === null
+                    : /* THE FIGURE HOME IS ALREADY SHOWING, while the read behind
+                         it is still out (2026/09/25). The sheet used to open on a
+                         "Checking…" sentence and swap in the longer one half a
+                         second later, which grew the sheet by a line under the
+                         reader's thumb. The picker already carries Home's figure
+                         (`knownHoldings`), so the sentence is the same from the
+                         first frame; Review still waits on the read. */
+                      holdings === null && asset.available === null
                       ? `Checking what your account holds. ${asset.symbol} can be chosen now and sent once that answers.`
                       : `${(asset.available ?? 0n).toString()} ${asset.symbol} available. A shielded token carries no decimal scale on the ledger, so this is a whole-unit count. The network fee does not come out of it, so the whole balance can go.`}
                 </span>
@@ -1875,7 +2021,9 @@ export default function SendSheet(props: SendSheetProps) {
               }}
               disabled={!canReview || cannotSend}
             >
-              {waitingOnLastTransfer !== null ? (
+              {waitingOnRunningPayment !== null ? (
+                <span>Waiting for your last payment</span>
+              ) : waitingOnLastTransfer !== null ? (
                 <span>{waitingOnLastTransfer}</span>
               ) : feeBlocksSend ? (
                 <span>{blockedPrimaryLabel}</span>
@@ -1886,7 +2034,11 @@ export default function SendSheet(props: SendSheetProps) {
                 </>
               )}
             </button>
-            {waitingOnLastTransfer !== null ? (
+            {waitingOnRunningPayment !== null ? (
+              <p className="mnhome-send-hint" role="status">
+                {waitingOnRunningPayment}
+              </p>
+            ) : waitingOnLastTransfer !== null ? (
               typeof continueUnfinishedSend === 'function' ? (
                 /* A PAYMENT THAT STOPPED, AND THE WAY TO FINISH IT (2026/09/14).
                    The sentence above names who it is owed to; this is the
@@ -2147,6 +2299,8 @@ export default function SendSheet(props: SendSheetProps) {
                         checked again, so the control does not claim it has. */}
                     <span>{feeRechecking ? 'Checking the fee…' : 'Sending…'}</span>
                   </>
+                ) : waitingOnRunningPayment !== null ? (
+                  <span>Waiting for your last payment</span>
                 ) : feeBlocksSend ? (
                   /* The sponsor stood down between Review and here. The control
                      stays, disabled, and the row above says what it waits for. */

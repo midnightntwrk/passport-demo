@@ -14,7 +14,7 @@ import {
   ShieldCheck,
   X,
 } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 
 import type { AliasRecord } from '../identity/aliasStore.js'
@@ -71,6 +71,8 @@ import NotificationToggle from './NotificationToggle.js'
 import PassportContractCard, { type PassportContractCardProps } from './PassportContract.js'
 import { RECOVERY_COPY, type RecoveryHomeEntry } from '../lib/recoveryStep.js'
 import SendSheet, { type SendSheetHolding, type SendSheetProps } from './SendSheet.js'
+import { SEND_PROGRESS_ROW_ID, SendProgressPill, SendProgressRow } from './SendProgress.js'
+import type { SendDraft, SendProgressView } from '../lib/sendProgress.js'
 import ThemeToggle from './ThemeToggle.js'
 /* The colour's own mark, where this build has one. Falls back to the glyph
    each row already carried — see `TokenMark.tsx`. */
@@ -372,7 +374,26 @@ export interface HomeScreenProps {
     /* The button under that sentence, where the reader can clear the block
        themselves. See {@link SendSheetProps.continueUnfinishedSend}. */
     continueUnfinishedSend?: SendSheetProps['continueUnfinishedSend']
+    /** The sheet closes once a payment is handed over. See {@link SendSheetProps.background}. */
+    background?: boolean
+    /** Why a second payment waits for the first. See {@link SendSheetProps.inFlightReason}. */
+    inFlightReason?: string | null
   } | null
+  /**
+   * A PAYMENT RUNNING BEHIND THE PASSPORT (2026/09/25), or the outcome of the
+   * one that just finished: the pill above the tab bar, and the live row at the
+   * head of the activity list. Omit it and neither is drawn. See
+   * `SendProgress.tsx` and `../lib/sendProgress.ts`.
+   */
+  sendProgress?: {
+    view: SendProgressView
+    onDismiss: () => void
+  } | null
+  /**
+   * "Try again" pressed on another tab: the draft to open Send on, and a
+   * number that changes with every press so the same draft twice opens twice.
+   */
+  sendRetryRequest?: { draft: SendDraft; nonce: number } | null
   /**
    * The sender's own change coming back from the last transfer, as one quiet
    * line under the balances — or nothing, which is the usual answer.
@@ -508,6 +529,8 @@ export default function HomeScreen(props: HomeScreenProps) {
     finishSetup,
     showSignedInIdentity,
     onSignOut,
+    sendProgress,
+    sendRetryRequest,
   } = props
 
   const [copied, setCopied] = useState(false)
@@ -523,6 +546,28 @@ export default function HomeScreen(props: HomeScreenProps) {
      2026/08/24 — they describe the wallet, and the wallet is machinery. */
   const [receiveOpen, setReceiveOpen] = useState(false)
   const [sendOpen, setSendOpen] = useState(false)
+  /* What Send opens on: nothing, or the draft "Try again" handed back. */
+  const [sendDraft, setSendDraft] = useState<SendDraft | null>(null)
+  /* TRY AGAIN, HERE OR FROM ANOTHER TAB. Either way it puts the failure away
+     and opens the sheet on the same payment, at its first step. */
+  const dismissSendProgress = sendProgress?.onDismiss
+  const retrySend = useCallback(
+    (draft: SendDraft) => {
+      dismissSendProgress?.()
+      setReceiveOpen(false)
+      setSendDraft(draft)
+      setSendOpen(true)
+    },
+    [dismissSendProgress],
+  )
+  const retryNonce = sendRetryRequest?.nonce ?? null
+  const retryDraftRef = useRef(sendRetryRequest?.draft ?? null)
+  retryDraftRef.current = sendRetryRequest?.draft ?? null
+  useEffect(() => {
+    if (retryNonce === null || retryDraftRef.current === null) return
+    retrySend(retryDraftRef.current)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [retryNonce])
   /* Whether the balance list is showing everything. Collapsed by default and
      never remembered: the list is short for almost every Passport, and a
      preference that outlived the session would be one more thing to explain. */
@@ -988,6 +1033,7 @@ export default function HomeScreen(props: HomeScreenProps) {
                 className="mnhome-action mnhome-action-primary"
                 onClick={() => {
                   send?.onOpen?.()
+                  setSendDraft(null)
                   setSendOpen(true)
                 }}
                 aria-haspopup="dialog"
@@ -1226,7 +1272,24 @@ export default function HomeScreen(props: HomeScreenProps) {
         {/* What has happened to this Passport, under the apps rather than over
             them: the grid is what a person came to Home to USE, and the trail
             is what they come back to check. */}
-        {activity ? <ActivityFeed entries={activity} /> : null}
+        {activity ? (
+          <ActivityFeed
+            entries={activity}
+            /* THE PAYMENT IN FLIGHT, AT THE HEAD OF THE LIST (2026/09/25), and
+               the failure it came to. Not once it is Sent: the trail's own
+               "Sent" row, with its View link, is written at that moment and
+               takes over from it. */
+            live={
+              sendProgress && sendProgress.view.kind !== 'sent' ? (
+                <SendProgressRow
+                  view={sendProgress.view}
+                  onDismiss={sendProgress.onDismiss}
+                  onRetry={retrySend}
+                />
+              ) : null
+            }
+          />
+        ) : null}
         </div>
 
         {sendOpen && send ? (
@@ -1276,7 +1339,33 @@ export default function HomeScreen(props: HomeScreenProps) {
                Home already holds the sign-out; the sheet offers it only beside
                a failure the host marked as that one. */
             onSignOut={onSignOut}
-            onClose={() => setSendOpen(false)}
+            {...(send.background ? { background: true } : {})}
+            inFlightReason={send.inFlightReason ?? null}
+            initialDraft={sendDraft}
+            onClose={() => {
+              setSendOpen(false)
+              setSendDraft(null)
+            }}
+          />
+        ) : null}
+
+        {/* The pill, on Home. Not while Send is open: the sheet covers the
+            foot of the screen, and says itself why its Review is waiting. Over
+            the Receive sheet it moves to the top, which is the one part of the
+            screen that sheet does not use. */}
+        {sendProgress && !sendOpen ? (
+          <SendProgressPill
+            view={sendProgress.view}
+            placement={receiveOpen ? 'top' : 'bottom'}
+            onDismiss={sendProgress.onDismiss}
+            onRetry={retrySend}
+            onOpen={() => {
+              setReceiveOpen(false)
+              ;(
+                document.getElementById(SEND_PROGRESS_ROW_ID) ??
+                document.querySelector('.mnhome-activity')
+              )?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+            }}
           />
         ) : null}
 

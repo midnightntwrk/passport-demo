@@ -57,7 +57,8 @@ import {
   formatCustodyAmount,
   type CustodyAssetRow,
 } from './custodyAssets.js';
-import type { PendingBalanceNotes } from './pendingBalances.js';
+import type { PendingBalanceNote, PendingBalanceNotes } from './pendingBalances.js';
+import type { SendDraft, SendProgressView } from './sendProgress.js';
 import type { RecoveryHomeEntry } from './recoveryStep.js';
 
 /* -------------------------------------------------------------------------- */
@@ -166,15 +167,33 @@ export function custodyHomeSendableHoldings(
  * is either the figure or it is not — there is no queue behind it for a word to
  * be about.
  */
-export function custodyHomePendingBalances(holdings: CustodyHoldings): PendingBalanceNotes {
-  const notes = new Map<string, { value: string; state: 'arriving' }>();
-  if (!Number.isFinite(holdings.arriving) || holdings.arriving <= 0) return notes;
+export function custodyHomePendingBalances(
+  holdings: CustodyHoldings,
+  /**
+   * The asset a payment is moving right now, in the Send sheet's own ids —
+   * `night`, or the colour — or null. Its row says `Transferring` for as long
+   * as the in-progress pill says the payment is running, so the figure and the
+   * pill never disagree about whether money is in motion (2026/09/25). It wins
+   * over `Arriving` on the same row: the payment is the thing the reader has
+   * just done, and it is what the pill is talking about.
+   */
+  sendingAssetId: string | null = null,
+): PendingBalanceNotes {
+  const notes = new Map<string, PendingBalanceNote>();
+  const arriving = Number.isFinite(holdings.arriving) && holdings.arriving > 0;
+  const sending = sendingAssetId === null ? null : sendingAssetId.trim().toLowerCase();
   for (const row of custodyHomeRows(holdings)) {
-    if (row.mode !== 'shielded') continue;
-    notes.set(row.colourHex, {
-      value: formatCustodyAmount(row.amount ?? 0n, row.decimals),
-      state: 'arriving',
-    });
+    const value = formatCustodyAmount(row.amount ?? 0n, row.decimals);
+    if (row.mode !== 'shielded') {
+      /* Home keys NIGHT by its own constant, whatever the account calls it. */
+      if (sending === 'night') notes.set(NIGHT_COLOUR_HEX, { value, state: 'transferring' });
+      continue;
+    }
+    if (sending === row.colourHex) {
+      notes.set(row.colourHex, { value, state: 'transferring' });
+      continue;
+    }
+    if (arriving) notes.set(row.colourHex, { value, state: 'arriving' });
   }
   return notes;
 }
@@ -387,6 +406,12 @@ export interface CustodyHomeView {
   };
   readonly send: CustodyHomeSend;
   /**
+   * THE PAYMENT IN FLIGHT, OR THE ONE THAT HAS JUST FINISHED (2026/09/25), for
+   * the pill above the tab bar and the live row at the head of the activity
+   * list. Null when there is nothing to say. See `./sendProgress.ts`.
+   */
+  readonly sendProgress?: CustodySendProgress | null;
+  /**
    * THE REST OF THE SETUP, WHEN NOTHING ELSE WILL FINISH IT (2026/09/24).
    * Present only while the Passport's waves are pending and this tab cannot
    * land them silently — see `custodyFinishSetupCard` in
@@ -398,6 +423,18 @@ export interface CustodyHomeView {
     readonly onFinish: () => void;
   } | null;
 }
+
+/** A payment in flight, as Home and the other tabs are handed it. */
+export interface CustodySendProgress {
+  readonly view: SendProgressView;
+  /** The asset whose row says `Transferring`, in the sheet's ids, or null. */
+  readonly sendingAssetId: string | null;
+  /** Puts away an outcome. A running payment cannot be put away. */
+  readonly onDismiss: () => void;
+}
+
+/** What "Try again" hands back to the Send sheet. Re-exported for the host. */
+export type CustodySendDraft = SendDraft;
 
 /** The four seams the Send sheet takes, bound to this Passport's account. */
 export interface CustodyHomeSend {
@@ -436,6 +473,10 @@ export interface CustodyHomeSend {
   readonly readShieldedHoldings: () => Promise<{ tokenType: string; amount: bigint }[]>;
   /** The live step of a payment, in the sheet's own four words. */
   readonly phase: 'checking' | 'connecting' | 'submitting' | 'confirming' | null;
+  /** The sheet closes once a payment is handed over; the pill carries it. */
+  readonly background?: boolean;
+  /** Why a second payment waits for the first, or null. */
+  readonly inFlightReason?: string | null;
 }
 
 /**

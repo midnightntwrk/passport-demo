@@ -172,6 +172,9 @@ import OnboardingScreen from './screens/Onboarding.js';
 import WelcomeScreen from './screens/Welcome.js';
 import AccountRecoveryScreen from './screens/AccountRecovery.js';
 import HomeScreen from './screens/Home.js';
+/* The pill a payment in flight is shown by on the tabs that are not Home. */
+import { SEND_PROGRESS_ROW_ID, SendProgressPill } from './screens/SendProgress.js';
+import type { SendDraft } from './lib/sendProgress.js';
 import AliasClaimScreen from './screens/AliasClaim.js';
 import BackupScreen from './screens/Backup.js';
 import EcosystemScreen from './screens/Ecosystem.js';
@@ -1470,6 +1473,21 @@ const NO_ACCOUNT_BALANCES: AccountBalances = {
   error: null,
 };
 
+/**
+ * The fee answer on a custody Passport, where every call is paid for on the
+ * holder's behalf and nothing needs asking.
+ *
+ * A MODULE CONSTANT, NOT AN ARROW IN THE RENDER (2026/09/25). The Send sheet
+ * polls this for as long as it is open, and it restarted the poll whenever it
+ * was handed a different function. An inline arrow is a different function on
+ * every render, and each restart published "no answer yet" before the answer:
+ * the "Checking with the fee sponsor…" line was inserted into the sheet and
+ * removed again on every render of the app, which on a phone is a sheet that
+ * grows and snaps back several times a second (measured on staging, v3.3).
+ */
+const CUSTODY_FEE_READINESS = (): Promise<{ mode: 'sponsored' }> =>
+  Promise.resolve({ mode: 'sponsored' as const });
+
 export default function PassportDemo() {
   // Selected network context: filters the app registry. The demo wallet runs
   // on the ONE network this build was configured for, and the UI says so
@@ -1487,6 +1505,11 @@ export default function PassportDemo() {
   const [activity, setActivity] = useState<ActivityEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [mobileTab, setMobileTab] = useState<MobileTab>('home');
+  /* "Try again" pressed on the Assets or Apps tab: Home opens Send on the
+     draft. The nonce makes the same draft pressed twice open twice. */
+  const [sendRetryRequest, setSendRetryRequest] = useState<{ draft: SendDraft; nonce: number } | null>(
+    null,
+  );
   // One-button onboarding (2026/08/05): there is no separate "choose" step
   // any more, so the screen only distinguishes idle from working.
   const [onboardingIntent, setOnboardingIntent] = useState<OnboardingIntent | null>(null);
@@ -9880,6 +9903,16 @@ export default function PassportDemo() {
    */
   const renderCustodyHome = (custody: CustodyHomeView) => {
     const account = custodyHomeAccount(custody.holdings);
+    /* The `Arriving` word, and `Transferring` on the asset a payment is moving
+       while the pill says it is running — one projection for Home and the
+       Assets shelf, so the two cannot disagree with each other or the pill. */
+    const custodyPending = custodyHomePendingBalances(
+      custody.holdings,
+      custody.sendProgress?.sendingAssetId ?? null,
+    );
+    const sendProgress = custody.sendProgress
+      ? { view: custody.sendProgress.view, onDismiss: custody.sendProgress.onDismiss }
+      : null;
     const aliasRecord = custodyHomeAliasRecord({
       name: custody.name,
       network: custody.network,
@@ -9918,7 +9951,7 @@ export default function PassportDemo() {
         account={account}
         /* The `Arriving` word under a figure with coins behind it that have no
            position yet. Never added to the figure itself. */
-        pendingBalances={custodyHomePendingBalances(custody.holdings)}
+        pendingBalances={custodyPending}
         error={custody.error}
         onDismissError={custody.onDismissError}
         onRefresh={custody.onRefresh}
@@ -9927,8 +9960,11 @@ export default function PassportDemo() {
           /* This Passport's calls are proved by a service, not in this tab. */
           provingMode: 'http',
           /* Every call on this path is paid for on the holder's behalf, so the
-             probe answers the one thing it is asked without going anywhere. */
-          readFeeReadiness: () => Promise.resolve({ mode: 'sponsored' as const }),
+             probe answers the one thing it is asked without going anywhere.
+             ONE FUNCTION FOR THE LIFE OF THE APP (2026/09/25): an inline arrow
+             here was a new probe on every render, and the Send sheet restarted
+             its fee poll for each one — see `CUSTODY_FEE_READINESS`. */
+          readFeeReadiness: CUSTODY_FEE_READINESS,
           onSend: custody.send.onSend,
           onSendToName: custody.send.onSendToName,
           /* WHICH BUILD HOLDS THIS PASSPORT'S MONEY, for the one rule on that
@@ -9958,7 +9994,14 @@ export default function PassportDemo() {
              `identity/custodyContractSend.ts` — so the review step says so
              rather than counting legs this build does not have. */
           nameLegSteps: 1 as const,
+          /* The sheet closes once the payment is handed over, and a second
+             payment waits for the first. See `lib/sendProgress.ts`. */
+          ...(custody.send.background ? { background: true } : {}),
+          inFlightReason: custody.send.inFlightReason ?? null,
         }}
+        /* The pill and the live row. */
+        sendProgress={sendProgress}
+        sendRetryRequest={sendRetryRequest}
         activity={homeActivity}
         appsProfile={custodyAppsProfile}
         supportUrl={(import.meta.env.VITE_TELEGRAM_URL as string | undefined) ?? null}
@@ -9998,7 +10041,7 @@ export default function PassportDemo() {
              disagree about what this Passport holds. */
           <AssetsScreen
             account={account}
-            pendingBalances={custodyHomePendingBalances(custody.holdings)}
+            pendingBalances={custodyPending}
             setupUnfinished={Boolean(custody.finishSetup)}
             network={custody.network as PassportNetwork}
             onRefresh={custody.onRefresh}
@@ -10011,6 +10054,31 @@ export default function PassportDemo() {
              below it is the prototype wallet's, and this Passport has none. */
           <AppsScreen profile={custodyAppsProfile} network={custody.network as PassportNetwork} />
         )}
+        {/* THE PAYMENT IN FLIGHT, ON THE OTHER TABS (2026/09/25). Home draws
+            its own, because it knows when its sheets are open. Pressing it
+            goes to Home and the live row; "Try again" goes to Home and opens
+            Send on the same payment. */}
+        {mobileTab !== 'home' && sendProgress ? (
+          <SendProgressPill
+            view={sendProgress.view}
+            onDismiss={sendProgress.onDismiss}
+            onRetry={(draft) => {
+              setMobileTab('home');
+              setSendRetryRequest((previous) => ({ draft, nonce: (previous?.nonce ?? 0) + 1 }));
+            }}
+            onOpen={() => {
+              setMobileTab('home');
+              window.requestAnimationFrame(() =>
+                window.requestAnimationFrame(() =>
+                  (
+                    document.getElementById(SEND_PROGRESS_ROW_ID) ??
+                    document.querySelector('.mnhome-activity')
+                  )?.scrollIntoView({ block: 'center' }),
+                ),
+              );
+            }}
+          />
+        ) : null}
         <PassportNav active={mobileTab} onSelect={setMobileTab} />
       </>
     );
