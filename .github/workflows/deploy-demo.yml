@@ -145,7 +145,6 @@ env:
   VITE_MIDNIGHT_PROVING_URL_V3: https://67-205-177-162.sslip.io/prover-v3
   VITE_SPONSOR_URL: https://67-205-177-162.sslip.io/balancer,https://api-stagenet.1am.xyz
   VITE_FUNDER_URL: https://67-205-177-162.sslip.io/balancer
-  VITE_RAFFLE_URL: https://raffle.midnightpassport.com
 
 jobs:
   deploy:
