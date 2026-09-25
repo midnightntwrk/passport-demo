@@ -79,6 +79,7 @@ import {
   custodyStoppedSendVerdict,
   custodyShieldedSendRefusal,
   custodyUnshieldedBalance,
+  custodyShieldedSendOutcome,
   loadCustodyShieldedSend,
   newCustodyShieldedSend,
   planCustodyShieldedAddressSend,
@@ -3316,7 +3317,10 @@ export default function CustodyPassport({
               },
               startedAt: stopped.startedAt,
               submitted: stopped.sendTxId !== null,
-              sentence: custodyShieldedSendOutcome(stopped),
+              /* A stopped payment that landed never reaches this view (the
+                 screen settles it first), so an empty answer is not a
+                 success here; say plainly that it did not go through. */
+              sentence: custodyShieldedSendOutcome(stopped) ?? CUSTODY_SEND_NOT_SENT,
             },
     })
     const finishState = custodyFinishSetupCard({
