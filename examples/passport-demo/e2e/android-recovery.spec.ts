@@ -323,13 +323,9 @@ test('a NEW passkey starts clean, and does not inherit the old name', async ({ b
   });
 
   await backToLanding(h);
+  /* Sign up makes the new passkey straight away (2026/09/25): it never asks
+     after the one that went, so there is no panel in front of it. */
   await h.page.getByRole('button', { name: SIGN_IN_BUTTON }).click();
-
-  /* The targeted assertion cannot produce the credential, so the keyless panel
-     comes up. It carries the control that makes a new passkey. */
-  const create = h.page.getByRole('button', { name: /Create a new passkey/i });
-  await expect(create).toBeVisible({ timeout: 120_000 });
-  await create.click();
 
   await expect(h.page.getByRole('heading', { name: /Welcome to Passport/i })).toBeVisible({
     timeout: 120_000,
@@ -370,7 +366,10 @@ test('"Set up a new Passport on this device" forgets this device\'s records and 
   });
 
   await backToLanding(h);
-  await h.page.getByRole('button', { name: SIGN_IN_BUTTON }).click();
+  /* "Log in", the way back to what this browser holds — and the passkey it
+     names is gone, so the picker has nothing to offer and the keyless panel
+     comes up. "Sign up" would simply make a new Passport. */
+  await h.page.getByRole('button', { name: 'Log in', exact: true }).click();
 
   /* THE CONTROL THAT DID NOT EXIST. Every other control on this screen reopens
      what the browser already holds; when what it holds is wrong, all of them
