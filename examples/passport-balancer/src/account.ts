@@ -72,12 +72,14 @@
 import {
   accountDeposits,
   accountModuleForState,
+  CUSTODY_SPONSOR_CIRCUITS,
   proverForModule,
   type AccountModuleName,
   scanInboxForEntry,
   InboxEntryRequired,
   sealedShieldedDeposit,
   shieldedDepositConfirmed,
+  verifierKeysScopedTo,
 } from './accountModule.js';
 import {
   AccountStateRefusal,
@@ -1337,10 +1339,19 @@ export async function createAccountFunder(
   const openingFor = async (module: AccountModuleName): Promise<AccountOpening> => {
     const deposits = accountDeposits(module);
     if (module === 'account-custody') {
+      const compiled = await compiledAccountCustodyOnce();
       return {
         module,
-        compiledContract: await compiledAccountCustodyOnce(),
-        zkConfigProvider: custodyZkConfigProvider,
+        compiledContract: compiled,
+        /* SCOPED TO THE DEPOSITS. `findDeployedContract` checks the deployed
+           state against the verifier key of every circuit the compiled build
+           declares — thirty here — and a Passport whose maintenance waves have
+           not all landed carries only wave 1. The deposits are in wave 1, so
+           they are what is checked; see `verifierKeysScopedTo`. The prototype
+           builds below are opened exactly as before. */
+        zkConfigProvider: custodyZkConfigProvider
+          ? verifierKeysScopedTo(custodyZkConfigProvider, CUSTODY_SPONSOR_CIRCUITS)
+          : custodyZkConfigProvider,
         proofProvider: await custodyProofProviderOnce(),
         deposits,
       };

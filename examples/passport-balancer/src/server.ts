@@ -214,6 +214,13 @@ import {
 } from './wallet.js';
 import { activationLegs, GRANT_RETRY_DELAY_MS, shouldRetryGrant } from './activationLegs.js';
 import {
+  accountsToResume,
+  concurrentFundingAnswer,
+  createFundOnActivation,
+  type ActivationProbe,
+  type FundOnActivation,
+} from './fundOnActivation.js';
+import {
   GIFT_REQUEST_SHAPES,
   ColourPayFailure,
   createColourPayer,
@@ -303,6 +310,9 @@ async function main(): Promise<void> {
     `grant     ${config.accountGrantAtomic} atomic NIGHT (${formatNight(config.accountGrantAtomic)} NIGHT) into each account contract`,
   );
   console.log(`grant cap ${config.accountMaxPerHour} funded accounts per rolling hour`);
+  console.log(
+    `on-activation ${config.fundOnActivation ? `a custody Passport named here is funded by this service as soon as it is activated, watched for up to ${Math.round(config.fundOnActivationWindowMs / 60_000)} min (BALANCER_FUND_ON_ACTIVATION=0 turns it off)` : 'OFF (BALANCER_FUND_ON_ACTIVATION=0) — opening balances are paid only when the phone asks /fund-account'}`,
+  );
   console.log(
     `asset     ${config.assetGrant > 0n && config.assetFaucetAddress ? `${config.assetGrant} ${ASSET_SYMBOL} minted from faucet ${config.assetFaucetAddress} into each account contract` : `no ${ASSET_SYMBOL} grant — the asset leg of /fund-account is off`}`,
   );
@@ -449,6 +459,19 @@ async function main(): Promise<void> {
    * deposit.
    */
   const accountInFlight = new Set<string>();
+  /**
+   * The sponsor's own funding of a custody Passport on its activation. Built
+   * once `/fund-account`'s flow exists, below, because that flow is the whole of
+   * what it runs; `null` until then and when there is no account funder.
+   */
+  let fundOnActivation: FundOnActivation | null = null;
+  /**
+   * The subset of {@link accountInFlight} this service is funding on its own,
+   * on activation. Claimed together with the in-flight entry, so it names only
+   * a funding that really holds the lock — a watch whose own attempt was turned
+   * away by the phone's is never in it.
+   */
+  const activationInFlight = new Set<string>();
 
   const startedAt = Date.now();
 
@@ -1735,6 +1758,10 @@ async function main(): Promise<void> {
    */
   const fundAccount = async (
     body: FundAccountRequestBody,
+    /* `activation` is this service funding an account on its own — see
+       `./fundOnActivation.ts`. It changes the arrival line and nothing else:
+       every gate below is the same gate for both. */
+    origin: 'client' | 'activation' = 'client',
   ): Promise<{ status: number; body: Record<string, unknown> }> => {
     const fail = (why: Refusal) => {
       /* Every refusal is logged: a 503 that leaves no trace made tonight's
@@ -1750,9 +1777,11 @@ async function main(): Promise<void> {
        activation that went silent left no journal line saying it had ever been
        asked for, so reading the journal after a wedge could not tell a request
        that hung from one that never came. */
-    console.log(
-      `[account] asked to fund ${typeof body.contractAddress === 'string' ? body.contractAddress : '(no address)'}`,
-    );
+    if (origin === 'client') {
+      console.log(
+        `[account] asked to fund ${typeof body.contractAddress === 'string' ? body.contractAddress : '(no address)'}`,
+      );
+    }
 
     /* Captured, not re-read: `accountFunder` is a `let`, and TypeScript's
        narrowing does not survive into the closures below. */
@@ -1799,15 +1828,16 @@ async function main(): Promise<void> {
           for the same account is refused outright rather than queued: the
           honest answer is "one is already running", not a second grant. */
     if (accountInFlight.has(contractAddress)) {
-      return fail(
-        refusal(
-          409,
-          'funding-in-flight',
-          'A funding for this Passport is already in progress. Wait for it to finish before asking again.',
-        ),
-      );
+      /* In progress. When the running funding is this service's own, on the
+         account's activation, the answer is "ask again shortly" rather than
+         the 409 two racing callers get — see `concurrentFundingAnswer`. Only a
+         custody Passport is ever funded on activation, so the 409 is
+         still what a prototype Passport hears, word for word. */
+      const busy = concurrentFundingAnswer(activationInFlight.has(contractAddress), GRANT_RETRY_DELAY_MS);
+      return fail(refusal(busy.status, busy.error, busy.message, busy.extra));
     }
     accountInFlight.add(contractAddress);
+    if (origin === 'activation') activationInFlight.add(contractAddress);
     try {
       /* 3. It has to BE an account, and it has to be SET UP. One indexer read
             that must find state, recognise which of the three builds it is, and
@@ -2267,8 +2297,78 @@ async function main(): Promise<void> {
       /* Released on every path — recorded, refused, or thrown — so a failure
          can never leave a Passport permanently unfundable. */
       accountInFlight.delete(contractAddress);
+      activationInFlight.delete(contractAddress);
     }
   };
+
+  /* -------------------------------------------------------------------------- */
+  /* Funding on activation                                                      */
+  /* -------------------------------------------------------------------------- */
+
+  /**
+   * Whether this service's own ledger records the whole opening balance: the
+   * NIGHT leg, and the mUSD leg wherever there is one to pay.
+   */
+  const openingBalanceRecorded = (contractAddress: string): boolean => {
+    const entry = accountLedger.get(contractAddress);
+    if (!entry?.txHash) return false;
+    return entry.asset !== undefined || !(accountFunder?.assetAvailable ?? false);
+  };
+
+  /**
+   * One read of the account, in the watcher's terms. Never throws.
+   *
+   * `view()` is the funding pre-flight's own read, so "activated" here means
+   * exactly what `/fund-account` will accept a moment later: the account
+   * custody build, booted, with a device. A PROTOTYPE account decodes without
+   * error as its own build and is answered `not-custody`, which ends its watch
+   * with no spend and no journal line.
+   */
+  const probeActivation = async (contractAddress: string): Promise<ActivationProbe> => {
+    const funder = accountFunder;
+    if (!funder) return { kind: 'unservable', why: accountFunderUnavailableReason };
+    try {
+      const view = await funder.view(contractAddress);
+      return view.module === 'account-custody' ? { kind: 'activated' } : { kind: 'not-custody' };
+    } catch (cause) {
+      if (cause instanceof AccountFundingError) {
+        if (cause.code === 'account-not-activated') return { kind: 'not-activated' };
+        if (cause.code === 'prover-unavailable') return { kind: 'unservable', why: cause.message };
+        /* `not-an-account` included: a deploy the indexer does not serve yet
+           reads exactly like that for its first ten to fifteen seconds. */
+        return { kind: 'not-yet-readable', why: `${cause.code}: ${cause.message}` };
+      }
+      return { kind: 'not-yet-readable', why: cause instanceof Error ? cause.message : String(cause) };
+    }
+  };
+
+  if (accountFunder) {
+    fundOnActivation = createFundOnActivation({
+      enabled: config.fundOnActivation,
+      windowMs: config.fundOnActivationWindowMs,
+      probe: probeActivation,
+      fund: (contractAddress) =>
+        fundAccount({ contractAddress, network: config.networkId }, 'activation'),
+      isFunded: openingBalanceRecorded,
+    });
+    /* A RESTART DOES NOT FORGET A PASSPORT MID-SETUP. The spend queue is in
+       memory, so the watches are too; what is on disk is the alias ledger,
+       which names every Passport this service has registered a name for and
+       when. Anything named inside the window and not yet funded is watched
+       again. A prototype account among them is dropped on its first read. */
+    if (config.fundOnActivation) {
+      const resume = accountsToResume(
+        aliasLedger.list().map(({ key, entry }) => ({ address: key, at: entry.at })),
+        openingBalanceRecorded,
+        Date.now(),
+        config.fundOnActivationWindowMs,
+      );
+      for (const address of resume) fundOnActivation.watch(address, 'picked up again after a restart');
+      if (resume.length > 0) {
+        console.log(`[account] watching ${resume.length} Passport(s) named before the restart for their activation`);
+      }
+    }
+  }
 
   /* -------------------------------------------------------------------------- */
   /* POST /register-alias                                                       */
@@ -2388,6 +2488,14 @@ async function main(): Promise<void> {
         ),
       );
     }
+
+    /* THE ACCOUNT IS KNOWN FROM HERE, and its deploy has been submitted. The
+       watch runs in the background and changes nothing about this request: it
+       funds the account once it is an activated custody Passport and drops it
+       otherwise. Started before the name gates below, so a Passport whose name
+       claim is refused (taken, already sponsored) still gets its opening
+       balance — the phone would have asked for it anyway. */
+    fundOnActivation?.watch(contractAddress, 'its name was claimed');
 
     /* Strictly `true`, never anything truthy: a client sending a string or a
        number has not made this claim, and a flag that decides when a gate is
@@ -3411,7 +3519,8 @@ async function main(): Promise<void> {
         /* A probe answered "the sponsor is retrying this itself, ask again in
            fifteen seconds" cost nothing and must not count against the
            client that obeys it — see `TokenBucket.refund`. */
-        if (guard && (outcome.body as { error?: unknown }).error === 'grant-retrying') {
+        const refusedWith = (outcome.body as { error?: unknown }).error;
+        if (guard && (refusedWith === 'grant-retrying' || refusedWith === 'funding-on-activation')) {
           guard.bucket.refund(who);
         }
         respond(request, response, outcome.status, outcome.body);
@@ -3545,6 +3654,7 @@ async function main(): Promise<void> {
        read a half-shut facade as a fault. */
     healthMonitor?.stop();
     resolverPool?.stop();
+    fundOnActivation?.stop();
     server.close();
     void wallet
       .close()

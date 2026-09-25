@@ -1416,6 +1416,8 @@ Everything comes from the environment. Only `BALANCER_SEED` is required.
 | `RESOLVER_POOL_FLOOR` | `50` | The depth below which `/status` calls the shelf low. Changes nothing about the filler, which is always at the lowest priority. Must not exceed the target. |
 | `BALANCER_ACCOUNT_GRANT_ATOMIC` | `2000` | The activation grant, in atomic NIGHT (0.002 NIGHT). |
 | `BALANCER_ACCOUNT_MAX_PER_HOUR` | `30` | Funded accounts per rolling hour. Counts activations, not legs. |
+| `BALANCER_FUND_ON_ACTIVATION` | `1` (on) | Pays a **custody** Passport's opening balance (the NIGHT grant and the mUSD) by itself as soon as the account is activated on chain, without waiting for the phone's `/fund-account`. The watch starts when the phone claims the account's `.night` name, runs `/fund-account`'s own flow (same once-only ledger, same hourly ceiling), and never touches a prototype account. **`0`, `false`, `off`, or `no` turns it off**, and `/fund-account` is then the only way an opening balance is paid. See `src/fundOnActivation.ts`. |
+| `BALANCER_FUND_ON_ACTIVATION_WINDOW_MS` | `600000` | How long one account is watched for its activation before it is left to the phone. At least `60000`. |
 | `BALANCER_ASSET_GRANT` | `100` | The opening balance, in whole mUSD. **`0` turns the asset leg off.** |
 | `BALANCER_ASSET_FAUCET_ADDRESS` | our stagenet faucet | The mUSD faucet the grant is minted from. Unset **and** no known default disables the asset leg. |
 | `BALANCER_BALANCE_MAX_PER_MIN` | `12` | Per-client ceiling on `/balance-only`. **`0` turns the per-client limit off.** |

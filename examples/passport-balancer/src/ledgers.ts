@@ -172,6 +172,11 @@ export class JsonLedger<Entry> {
     return null;
   }
 
+  /** Every entry with its key, in insertion order. A copy; writing to it changes nothing. */
+  list(): Array<{ key: string; entry: Entry }> {
+    return Object.entries(this.entries).map(([key, entry]) => ({ key, entry }));
+  }
+
   async record(key: string, entry: Entry): Promise<void> {
     this.entries[key] = entry;
     const temp = `${this.path}.tmp`;

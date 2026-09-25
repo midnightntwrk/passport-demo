@@ -523,3 +523,69 @@ export function shieldedDepositConfirmed(
   if (evidence?.entryFound === true) return true;
   return evidence?.inboxUnreadable === true && evidence.included === true;
 }
+
+/* -------------------------------------------------------------------------- */
+/* Opening a custody account that has not landed all of its waves             */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Every circuit this service ever calls on the account custody contract.
+ *
+ * The two deposits, and nothing else: they are permissionless and armless, and
+ * the compiled build this service opens refuses the one witness (`held_coin`)
+ * that any other circuit would need. Both are in WAVE 1 — they go in with the
+ * constructor — so an account carries them from its first block.
+ */
+export const CUSTODY_SPONSOR_CIRCUITS: readonly string[] = ['deposit_unshielded', 'deposit_shielded'];
+
+/**
+ * The same ZK config provider, answering `getVerifierKeys` only for `circuits`.
+ *
+ * WHY (2026/09/24). `findDeployedContract` asks the provider for the verifier
+ * key of EVERY provable circuit of the compiled contract — thirty on the
+ * account custody build — and refuses unless the deployed state carries each
+ * one with a matching key ("Following operations: … are undefined or have
+ * mismatched verifier keys"). A custody Passport lands its circuits in four
+ * waves: wave 1 (the deposits and the device circuits) at deploy, and the k256
+ * and grant circuits in three maintenance updates the phone submits after Home,
+ * two to three minutes later and only while the page is alive. Until the last
+ * wave landed, every deposit into a brand-new account was refused before a coin
+ * moved, which is why the opening balance had to wait for the phone.
+ *
+ * NOTHING IS WEAKENED FOR THE CIRCUITS THIS SERVICE CALLS. Their keys are still
+ * fetched from this host's artefacts and still compared byte for byte with the
+ * deployed ones, and an account without them is still refused. What is no
+ * longer asked is whether the account carries circuits this service can never
+ * call. `getVerifierKeys` is the only method changed; proving (`get`,
+ * `getProverKey`, `getZKIR`) is untouched, and the proof provider is built on
+ * the unwrapped provider in any case.
+ *
+ * An empty intersection is refused rather than verified vacuously: a compiled
+ * build that declares none of `circuits` is not the build this was written for.
+ */
+export function verifierKeysScopedTo<Provider extends object>(
+  provider: Provider,
+  circuits: readonly string[],
+): Provider {
+  const allowed = new Set(circuits);
+  return new Proxy(provider, {
+    get(target, property) {
+      if (property === 'getVerifierKeys') {
+        return async (circuitIds: readonly string[]) => {
+          const scoped = circuitIds.filter((id) => allowed.has(id));
+          if (scoped.length === 0) {
+            throw new Error(
+              `None of the circuits this service calls (${[...allowed].join(', ')}) is declared by the compiled build, so the deployed contract cannot be checked against it.`,
+            );
+          }
+          const getVerifierKeys = (
+            target as { getVerifierKeys: (ids: readonly string[]) => Promise<unknown> }
+          ).getVerifierKeys;
+          return getVerifierKeys.call(target, scoped);
+        };
+      }
+      const value: unknown = Reflect.get(target, property, target);
+      return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+    },
+  });
+}
