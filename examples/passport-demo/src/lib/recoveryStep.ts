@@ -135,9 +135,12 @@ export function recoveryHomeEntry(input: {
  * THE SIGN-IN TAKES THE READER AWAY AND BRINGS THEM BACK, which is the whole
  * reason this question exists. Pressing the offer opens a provider's own
  * overlay, and on a phone that can mean a redirect and a fresh load of this
- * app; the intent is therefore written down before the overlay opens, and what
- * comes back finds a Passport on the recovery step with a sign-in attached and
- * finishes the job rather than asking a second time.
+ * app; the intent is therefore written down in `sessionStorage` before the
+ * overlay opens ({@link saveRecoveryIntent}), and what comes back — the same
+ * render, or a fresh load of the same tab — finds a Passport on the recovery
+ * step with a sign-in attached and finishes the job rather than asking a
+ * second time. A fresh load resumes a stored press at most ONCE: see
+ * {@link loadRecoveryIntent}.
  *
  * `busy` is in here rather than checked by the caller so the answer is false
  * for the whole time the add is running — an effect that re-fired on a render
@@ -166,6 +169,131 @@ export function recoveryResumes(input: {
   if (!input.intended) return false;
   if (recoveryHeld(input.record)) return false;
   return input.readyScreen && input.socialReady && !input.busy;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Remembering the press across a reload                                      */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * THE PRESS, WRITTEN DOWN, SO A RELOAD DOES NOT LOSE IT (2026/09/25).
+ *
+ * Until today the press lived in React state alone, while two comments said
+ * it survived a fresh load. It did not: on Android Chrome a reload during the
+ * provider's sign-in — the provider's own error view reloads the page — came
+ * back to a Passport that had forgotten the press, and the reader was asked
+ * again, or reloaded again, for as long as they kept trying.
+ *
+ * `sessionStorage`, and not `localStorage`, because the press belongs to this
+ * tab and this visit: a Passport opened tomorrow in a new tab must not start
+ * an enrolment nobody pressed for. Scoped to the account and the network for
+ * the same reason, and dropped after {@link RECOVERY_INTENT_TTL_MS}.
+ *
+ * AT MOST ONE AUTOMATIC RESUME PER PRESS. The resume marks the stored press
+ * consumed as it starts ({@link consumeRecoveryIntent}); a load that finds a
+ * consumed press does not resume it. So a sign-in that reloads the page every
+ * time it loads costs one attempt and then the offer, never a loop.
+ */
+export const RECOVERY_INTENT_KEY = 'passport-recovery-intent:v1';
+
+/** How long a press is remembered for. */
+export const RECOVERY_INTENT_TTL_MS = 10 * 60_000;
+
+/** What a load finds: a press to resume, one already resumed, or nothing. */
+export type RecoveryIntentState = 'pending' | 'consumed' | null;
+
+interface StoredRecoveryIntent {
+  readonly at: number;
+  readonly consumed: boolean;
+}
+
+function recoveryIntentSlot(user: string, network: string): string {
+  return `${RECOVERY_INTENT_KEY}:${user.toLowerCase()}|${network}`;
+}
+
+/* Every access is guarded: a private window or blocked site data makes the
+   storage throw, and then the press is simply not remembered — which is what
+   happened before this store existed, and nothing worse. */
+function writeIntent(
+  storage: CustodyStorage,
+  user: string,
+  network: string,
+  intent: StoredRecoveryIntent,
+): void {
+  try {
+    storage.setItem(recoveryIntentSlot(user, network), JSON.stringify(intent));
+  } catch {
+    /* Not remembered. */
+  }
+}
+
+/** Remembers a press on the offer, as the overlay opens. */
+export function saveRecoveryIntent(
+  storage: CustodyStorage,
+  user: string,
+  network: string,
+  now: number,
+): void {
+  writeIntent(storage, user, network, { at: now, consumed: false });
+}
+
+/** Forgets the press: the add has ended, or the reader said "Not now". */
+export function clearRecoveryIntent(storage: CustodyStorage, user: string, network: string): void {
+  try {
+    storage.removeItem(recoveryIntentSlot(user, network));
+  } catch {
+    /* Nothing to forget with. */
+  }
+}
+
+/**
+ * What a load finds for this account on this network.
+ *
+ * A press older than {@link RECOVERY_INTENT_TTL_MS}, one dated in the future,
+ * and one this build cannot read are all forgotten and answered `null`.
+ */
+export function loadRecoveryIntent(
+  storage: CustodyStorage,
+  user: string,
+  network: string,
+  now: number,
+): RecoveryIntentState {
+  let raw: string | null;
+  try {
+    raw = storage.getItem(recoveryIntentSlot(user, network));
+  } catch {
+    return null;
+  }
+  if (raw === null) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    parsed = null;
+  }
+  const intent = parsed as Partial<StoredRecoveryIntent> | null;
+  const age = typeof intent?.at === 'number' ? now - intent.at : Number.NaN;
+  if (!(age >= 0 && age <= RECOVERY_INTENT_TTL_MS) || typeof intent?.consumed !== 'boolean') {
+    clearRecoveryIntent(storage, user, network);
+    return null;
+  }
+  return intent.consumed ? 'consumed' : 'pending';
+}
+
+/**
+ * Marks the press as resumed, as the resume starts — the rule that makes a
+ * second load in a row find nothing to resume. A press that is not stored
+ * (it expired, or storage refused it) is left alone. The consumed press is
+ * dated from the resume, so it is forgotten ten minutes after that.
+ */
+export function consumeRecoveryIntent(
+  storage: CustodyStorage,
+  user: string,
+  network: string,
+  now: number,
+): void {
+  if (loadRecoveryIntent(storage, user, network, now) !== 'pending') return;
+  writeIntent(storage, user, network, { at: now, consumed: true });
 }
 
 /* -------------------------------------------------------------------------- */
