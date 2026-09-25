@@ -137,6 +137,11 @@ import {
   custodySubmitOnLiveConnection,
   type CustodySubmitRoute,
   CUSTODY_STILL_FINISHING,
+  CUSTODY_KEY_NOT_ADDED,
+  CUSTODY_KEY_UNCONFIRMED,
+  CUSTODY_KEY_RECHECKS,
+  CUSTODY_KEY_RECHECK_WAIT_MS,
+  CUSTODY_PHASE_PROVED,
   parseProveCustodyResponse,
   proveAccountCustodyDetail,
   proveAccountCustodyRefused,
@@ -2219,7 +2224,7 @@ async function boundedK1Submit(
   })) as CustodyUnprovenCall;
   let identifier: string;
   try {
-    identifier = await contracts.submitTxAsync(providers, {
+    identifier = await contracts.submitTxAsync(announceProved(providers, context.onPhase), {
       unprovenTx: unproven.private.unprovenTx,
       circuitId: [circuit],
     });
@@ -2271,6 +2276,34 @@ async function boundedK1Submit(
     explorerUrl: txHash ? custodyExplorerLink(txHash, context.network) : null,
     result: null,
   };
+}
+
+/**
+ * The same providers, with one addition: the moment the proof is made, the
+ * caller is told (`submit`, {@link CUSTODY_PHASE_PROVED}).
+ *
+ * `submitTxAsync` proves, balances, and hands over in one call, and a screen
+ * that wants to show proving and sending as two states has no other honest
+ * place to draw the line — a timer would be a guess. The provider is
+ * delegated to, not copied, so every other method it has is untouched.
+ */
+function announceProved(
+  providers: Record<string, unknown>,
+  onPhase: ((phase: CustodyPhase) => void) | undefined,
+): Record<string, unknown> {
+  const prover = providers.proofProvider as
+    | { proveTx?: (...args: unknown[]) => Promise<unknown> }
+    | undefined;
+  const proveTx = prover?.proveTx;
+  if (onPhase === undefined || prover === undefined || typeof proveTx !== 'function') return providers;
+  const announcing = Object.assign(Object.create(prover) as object, {
+    proveTx: async (...args: unknown[]): Promise<unknown> => {
+      const proved = await proveTx.apply(prover, args);
+      onPhase({ step: 'submit', detail: CUSTODY_PHASE_PROVED });
+      return proved;
+    },
+  });
+  return { ...providers, proofProvider: announcing };
 }
 
 /**
@@ -3651,39 +3684,47 @@ export async function addDeviceK1(
 ): Promise<CustodyStepResult> {
   const deps = withDefaults(overrides);
   const user = custodyUserKey(session, device);
-  const wallet = await deps.wallet(user);
-  const network = wallet.network.networkId;
-  const record = loadCustodyRecord(deps.storage(), user, network);
-  if (!record || record.address === null || nextCustodyStep(record) !== 'ready') {
-    throw new Error('This Passport is not finished being set up yet.');
+  const prepareMs = deps.prepareWaitMs ?? CUSTODY_PREPARE_WAIT_MS;
+  /* BOUNDED BEFORE ANYTHING IS ASKED FOR (2026/09/24). Opening the connection
+     and reading the account had no end, so a node that never answered left
+     "Adding your way back" on screen for ever. Nothing has been sent here, so
+     running out is a definite "not added". */
+  const opened = await withinCustodyBound(
+    (async () => {
+      const wallet = await deps.wallet(user);
+      const network = wallet.network.networkId;
+      const record = loadCustodyRecord(deps.storage(), user, network);
+      if (!record || record.address === null || nextCustodyStep(record) !== 'ready') {
+        throw new Error('This Passport is not finished being set up yet.');
+      }
+      /* A KEY OF THE OTHER ARM NEEDS THE OTHER ARM'S CIRCUITS, and since
+         2026/09/22 those land in the waves after Home. Enrolling it before them
+         would put a key on the account that can approve nothing — so it waits,
+         and says so in words the screen may show. */
+      if (newDevice.arm !== device.arm && custodyWavesPending(record)) {
+        throw new Error(CUSTODY_STILL_FINISHING);
+      }
+      const module = await deps.contractModule();
+      const { providers } = await openCustodyAccount(deps, wallet, record, [
+        `add_device_with_${device.arm}`,
+      ]);
+      const state = module.ledger(await queryStateData(providers, record.address));
+      return { record, module, providers, state };
+    })(),
+    prepareMs,
+  );
+  if (opened.kind === 'timeout') {
+    console.warn(`[account-custody] opening the account to add a key did not finish in ${Math.round(prepareMs / 1000)} s; nothing was sent`);
+    throw new Error(CUSTODY_KEY_NOT_ADDED);
   }
-  /* A KEY OF THE OTHER ARM NEEDS THE OTHER ARM'S CIRCUITS, and since
-     2026/09/22 those land in the waves after Home. Enrolling it before them
-     would put a key on the account that can approve nothing — so it waits,
-     and says so in words the screen may show. */
-  if (newDevice.arm !== device.arm && custodyWavesPending(record)) {
-    throw new Error(CUSTODY_STILL_FINISHING);
-  }
-
-  const module = await deps.contractModule();
-  const { providers } = await openCustodyAccount(deps, wallet, record, [
-    `add_device_with_${device.arm}`,
-  ]);
-  const addressBytes = hexToBytes(record.address);
-  const state = module.ledger(await queryStateData(providers, record.address));
+  const { record, module, providers, state } = opened.value;
+  const address = record.address as string;
+  const addressBytes = hexToBytes(address);
 
   /* Already on the account? Then there is nothing to do and nothing to ask
-     for. `resolveCustodyUseCounter` throws when the series is not in the set,
-     which is the ordinary answer here rather than a failure. */
-  try {
-    resolveCustodyUseCounter({
-      entryAt: (counter) =>
-        deviceEntry(module.pureCircuits, newDevice, addressBytes, state.device_epoch, counter),
-      isMember: (entry) => state.devices.member(entry),
-    });
+     for. */
+  if (deviceIsEnrolled(module, newDevice, addressBytes, state)) {
     return { record, txHash: null, explorerUrl: null };
-  } catch {
-    /* Not enrolled, which is what this function is for. */
   }
 
   const entry = enrolmentEntry(
@@ -3692,22 +3733,97 @@ export async function addDeviceK1(
     addressBytes,
     state.device_epoch,
   );
-  return k1Call(
-    session,
-    device,
-    {
-      operation: 'add_device',
-      args: [entry],
-      /* The SIGNING device's arm picks the challenge, never the new one's: the
-         new device is 32 bytes of argument and signs nothing here. */
-      challenge: (pure, context, pk) =>
-        device.arm === 'jubjub'
-          ? jubjubChallenges.addDevice(pure, context, pk, entry)
-          : k256Challenges.addDevice(pure, context, pk, entry),
-    },
-    onPhase,
-    overrides,
-  );
+  /* Whether anything was handed over. Before the `submit` phase nothing was,
+     and a failure there is a definite "not added"; after it the only honest
+     answer is the account's own. */
+  let handedOver = false;
+  try {
+    return await k1Call(
+      session,
+      device,
+      {
+        operation: 'add_device',
+        args: [entry],
+        /* BOUNDED (2026/09/24), and for the reasons every payment already is.
+           Unbounded, it went through midnight-js's own `callTx`, whose wait for
+           finality has no end — and `k1Call` only builds a call again on the
+           node's 104 or 196 when it is bounded, so a refusal that the next
+           attempt would have cured was reported to the reader as a failure. */
+        bounded: true,
+        /* The SIGNING device's arm picks the challenge, never the new one's: the
+           new device is 32 bytes of argument and signs nothing here. */
+        challenge: (pure, context, pk) =>
+          device.arm === 'jubjub'
+            ? jubjubChallenges.addDevice(pure, context, pk, entry)
+            : k256Challenges.addDevice(pure, context, pk, entry),
+      },
+      (phase) => {
+        if (phase.step === 'submit') handedOver = true;
+        onPhase?.(phase);
+      },
+      overrides,
+    );
+  } catch (cause) {
+    const message = cause instanceof Error ? cause.message : '';
+    /* DEFINITELY NOT ADDED: nothing handed over, the node refused it whole,
+       the chain recorded it as failed, or no proof was ever made. */
+    const definite =
+      !handedOver ||
+      message === CUSTODY_SEND_NOT_SENT ||
+      message === CUSTODY_SEND_FAILED ||
+      message === CUSTODY_PROVER_UNAVAILABLE ||
+      isCustodyProofNotBuilt(cause) ||
+      custodyNodeRefused(cause);
+    if (definite) {
+      console.warn('[account-custody] the key was not added', cause);
+      throw new Error(CUSTODY_KEY_NOT_ADDED);
+    }
+    /* AN OUTCOME NOBODY SAW — a socket dropped after the booking, or a wait
+       that ran out over an account that moved. The add is idempotent, so the
+       account is ASKED: a key it holds is a key that is on, and the reader is
+       told so rather than told it failed. */
+    console.warn('[account-custody] the key was sent and its outcome is not known; asking the account', cause);
+    for (let attempt = 0; attempt < CUSTODY_KEY_RECHECKS; attempt += 1) {
+      if (attempt > 0) await deps.sleep(CUSTODY_KEY_RECHECK_WAIT_MS);
+      const read = await withinCustodyBound(
+        queryStateData(providers, address).catch(() => null),
+        CUSTODY_READ_WAIT_MS,
+      );
+      if (read.kind === 'done' && read.value !== null) {
+        if (deviceIsEnrolled(module, newDevice, addressBytes, module.ledger(read.value))) {
+          console.info('[account-custody] the account holds the new key: it landed');
+          return { record, txHash: null, explorerUrl: null };
+        }
+      }
+    }
+    throw new Error(CUSTODY_KEY_UNCONFIRMED);
+  }
+}
+
+/**
+ * Whether `newDevice` is already on the account whose state is `state`.
+ *
+ * The same series scan `k1Call` and the recovery check do: a device's entry
+ * rolls forward each time it approves, so counter zero alone would miss every
+ * device that has ever been used. `resolveCustodyUseCounter` throws when the
+ * series is not in the set, which is the ordinary answer here.
+ */
+function deviceIsEnrolled(
+  module: CustodyContractModule,
+  newDevice: JubjubDeviceIdentity | K256DeviceIdentity,
+  addressBytes: Uint8Array,
+  state: CustodyLedger,
+): boolean {
+  try {
+    resolveCustodyUseCounter({
+      entryAt: (counter) =>
+        deviceEntry(module.pureCircuits, newDevice, addressBytes, state.device_epoch, counter),
+      isMember: (entry) => state.devices.member(entry),
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**

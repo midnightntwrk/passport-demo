@@ -134,7 +134,17 @@ export function useDynamicCustodyArm(session: DynamicArmInput): CustodyArm {
   )
 
   const ensureIdentity = useCallback(async (): Promise<CustodyIdentity> => {
-    if (built.current) return built.current
+    /* ONLY THIS SIGN-IN'S KEY (2026/09/24). The cache outlived the sign-in it
+       was made for: signed out and back in as somebody else in the same tab,
+       the next ask returned the FIRST account's key — and adding recovery
+       would have put that key on the Passport. It is keyed on the address the
+       session reports now, and a session with no address yet has no key. */
+    if (custodySession.address.length === 0) {
+      throw new Error('Your sign-in is still finishing. Try again in a moment.')
+    }
+    if (built.current && built.current.userKey === custodySession.address.toLowerCase()) {
+      return built.current
+    }
     const [{ recoverK1DevicePoint, k1UserKey }, { recoverSecp256k1Point }, signing] =
       await Promise.all([
         import('../identity/custodyContractClient.js'),

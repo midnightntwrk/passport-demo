@@ -1,0 +1,72 @@
+@import './tokens.css';
+
+/* Snake, offered while recovery is added — prefix "mnsnake-".
+   The panel, its title, and its close control are the waiting game's own
+   (`./waiting-game.css`); what is here is the board and the steering. Every
+   colour is a Midnight token, so the board reads in both themes. */
+
+.mnsnake-board {
+  display: block;
+  width: 100%;
+  max-width: 288px;
+  height: auto;
+  aspect-ratio: 4 / 3;
+  margin: 0 auto;
+  border-radius: var(--mn-radius-sm);
+  background: var(--mn-surface-page, transparent);
+  /* A swipe steers; it must not scroll the page under it. */
+  touch-action: none;
+  cursor: pointer;
+}
+
+.mnsnake-score {
+  color: var(--mn-text-secondary);
+  font-variant-numeric: var(--mn-numeric);
+}
+
+.mnsnake-controls {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0 2px;
+}
+
+/* A small cross: up on top, left-down-right beneath. */
+.mnsnake-pad {
+  display: grid;
+  grid-template-columns: repeat(3, 40px);
+  grid-template-rows: repeat(2, 40px);
+  gap: 4px;
+}
+.mnsnake-key-up { grid-column: 2; grid-row: 1; }
+.mnsnake-key-left { grid-column: 1; grid-row: 2; }
+.mnsnake-key-down { grid-column: 2; grid-row: 2; }
+.mnsnake-key-right { grid-column: 3; grid-row: 2; }
+
+.mnsnake-key,
+.mnsnake-restart {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: var(--mn-hairline) solid var(--mn-border-medium);
+  border-radius: var(--mn-radius-sm);
+  color: var(--mn-accent-ink);
+  background: var(--mn-accent-soft);
+  font-family: var(--mn-font-body);
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.mnsnake-key { width: 40px; height: 40px; padding: 0; }
+.mnsnake-restart { min-height: 36px; padding: 6px 14px; font-size: 12.5px; font-weight: 600; }
+.mnsnake-key:hover,
+.mnsnake-restart:hover { border-color: var(--mn-accent-ink); }
+.mnsnake-key:focus-visible,
+.mnsnake-restart:focus-visible { outline: 2px solid var(--mn-accent-ink); outline-offset: 2px; }
+
+/* Where there is a keyboard and a fine pointer, the pad is still there — it
+   is also how a switch or a screen reader steers — but quieter. */
+@media (hover: hover) and (pointer: fine) {
+  .mnsnake-key { opacity: .8; }
+}

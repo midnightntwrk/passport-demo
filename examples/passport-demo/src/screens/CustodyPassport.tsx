@@ -14,7 +14,6 @@ import { saveAdoption, type AdoptionHandoff } from '../lib/custodyAdoption.js'
 import {
   RECOVERY_COPY,
   loadRecoveryRecord,
-  recoveryFailureSentence,
   recoveryHomeEntry,
   recoveryRefusal,
   recoveryResumes,
@@ -142,6 +141,14 @@ import { LONG_WAIT_NOTE } from '../lib/claimSteps.js'
 import { OFFER_AFTER_MS } from '../lib/waitingGame.js'
 import ProgressTimeline, { useTimelineClock, type TimelineRow } from './ProgressTimeline.js'
 import WaitingGame from './WaitingGame.js'
+import SnakeGame from './SnakeGame.js'
+import {
+  recoveryAddFailureSentence,
+  recoveryAddNeedsReader,
+  recoveryAddRows,
+  runRecoveryAdd as addRecoveryInOrder,
+  type RecoveryAddProgress,
+} from '../lib/recoveryAdd.js'
 import {
   CUSTODY_NAME_CHECKING_SENTENCE,
   CUSTODY_NAME_UNREACHABLE_SENTENCE,
@@ -273,6 +280,9 @@ const STABLECOIN_COLOUR = custodyStablecoinColour(
   (import.meta.env as Record<string, string | undefined>).VITE_MUSD_COLOUR_HEX,
 )
 
+
+/** How long "Recovery is on" stays ticked on screen before Home. */
+const RECOVERY_DONE_HOLD_MS = 1_500
 
 /** What the screen is doing right now, for the one busy line it shows. */
 const PHASE_LABELS: Record<CustodyPhase['step'], string> = {
@@ -592,6 +602,12 @@ export default function CustodyPassport({
   /* One add at a time. A second run would ask for a second approval for an
      enrolment that is already away. */
   const recoveryRunning = useRef(false)
+  /**
+   * Where a running add of recovery has got to, for its timeline — null when
+   * none is running. Set only from the add's own callbacks
+   * (`../lib/recoveryAdd.ts#runRecoveryAdd`), never from a timer.
+   */
+  const [recoveryProgress, setRecoveryProgress] = useState<RecoveryAddProgress | null>(null)
   /**
    * Whether the key holding this Passport IS a provider key.
    *
@@ -2598,7 +2614,7 @@ export default function CustodyPassport({
    *
    * A FAILURE IS NOT A FAILURE OF THE PASSPORT, and the sentence says so. What
    * is offered underneath is the same thing that was offered before the press:
-   * Home. See `../lib/recoveryStep.ts#recoveryFailureSentence`.
+   * Home. See `../lib/recoveryAdd.ts#recoveryAddFailureSentence`.
    */
   const runRecoveryAdd = useCallback(
     async (signIn: CustodySocialSignIn): Promise<void> => {
@@ -2606,31 +2622,53 @@ export default function CustodyPassport({
       recoveryRunning.current = true
       setBusy(RECOVERY_COPY.busy)
       setError(null)
+      const wavesPending = (): boolean => {
+        const settled = userRef.current
+        const stored = settled === null ? null : loadCustodyRecord(window.localStorage, settled, network)
+        return stored !== null && custodyWavesPending(stored)
+      }
+      const wait = (milliseconds: number): Promise<void> =>
+        new Promise((resolve) => window.setTimeout(resolve, milliseconds))
       try {
-        const identity = await ensureIdentity()
-        /* THE WAY BACK WAITS FOR THE WAVES. It is a k256 key, and every k256
-           circuit lands in the waves behind Home (2026/09/22) — so they are
-           finished first, under the same busy line, rather than enrolling a
-           key that could approve nothing. Usually they are long done. */
-        const pending = loadCustodyRecord(window.localStorage, identity.userKey, network)
-        if (pending !== null && custodyWavesPending(pending)) {
-          await finishInBackground(identity, setupClock.current)
-        }
-        const spare = await signIn.device()
-        await addDeviceK1(arm.session, identity.device, spare, (phase) =>
-          setBusy(PHASE_LABELS[phase.step] ?? RECOVERY_COPY.busy),
-        )
-        saveBackupRecord(window.localStorage, identity.userKey, network, {
-          doneAt: Date.now(),
-          ...(signIn.provider === null ? {} : { provider: signIn.provider }),
+        /* THE ORDER AND EVERY BOUND ARE `../lib/recoveryAdd.ts`'s (2026/09/24).
+           What stood here awaited the rest of the setup through a call that
+           swallows its own failure and then asked for the sign-in's key
+           anyway; asked for that key with no bound; and reported an add whose
+           socket dropped after the chain took it as a failure. */
+        let identity: CustodyIdentity | null = null
+        await addRecoveryInOrder<CustodyIdentity, K256DeviceIdentity>({
+          ensureIdentity: async () => {
+            identity = await ensureIdentity()
+            return identity
+          },
+          wavesPending,
+          /* THE WAY BACK WAITS FOR THE WAVES. It is a k256 key, and every
+             k256 circuit lands in the waves behind Home (2026/09/22). */
+          finishWaves: (held) => finishInBackground(held, setupClock.current),
+          recoveryKey: () => signIn.device(),
+          addKey: async (held, spare, onPhase) => {
+            await addDeviceK1(arm.session, held.device, spare, onPhase)
+          },
+          onProgress: setRecoveryProgress,
+          wait,
         })
+        const held = identity as CustodyIdentity | null
+        if (held !== null) {
+          saveBackupRecord(window.localStorage, held.userKey, network, {
+            doneAt: Date.now(),
+            ...(signIn.provider === null ? {} : { provider: signIn.provider }),
+          })
+        }
         setNotice(RECOVERY_COPY.done(signIn.provider))
+        /* "Recovery is on", ticked, long enough to be read. */
+        await wait(RECOVERY_DONE_HOLD_MS)
       } catch (cause) {
         console.warn('[account-custody] the way back could not be added', cause)
-        setError(recoveryFailureSentence(cause))
+        setError(recoveryAddFailureSentence(cause))
       } finally {
         recoveryRunning.current = false
         setRecoveryIntended(false)
+        setRecoveryProgress(null)
         setBusy(null)
         refresh()
       }
@@ -2829,6 +2867,70 @@ export default function CustodyPassport({
     )
 
   /* ---------------------------------------------------------------------- */
+  /* ADDING RECOVERY, SHOWN THE SAME WAY (2026/09/24)                        */
+  /*                                                                         */
+  /* "Show the whole transaction life cycle when adding recovery, like       */
+  /* onboarding does." The same panel and clock as the setup above, with     */
+  /* the add's rows — `../lib/recoveryAdd.ts#recoveryAddRows`, moved only by */
+  /* the add's own callbacks — and a different game beneath it, offered      */
+  /* after the same {@link OFFER_AFTER_MS}.                                  */
+  /* ---------------------------------------------------------------------- */
+  const recoveryRows = recoveryProgress === null ? null : recoveryAddRows(recoveryProgress)
+  const recoveryRunningRow = recoveryRows?.find((row) => row.state === 'active') ?? null
+  const recoveryElapsedFor = useTimelineClock(recoveryRunningRow?.id ?? null)
+  const recoveryAdding = recoveryProgress !== null
+  const [recoveryWaitedMs, setRecoveryWaitedMs] = useState(0)
+  const [snakeOpen, setSnakeOpen] = useState(false)
+  const [snakeDismissed, setSnakeDismissed] = useState(false)
+  useEffect(() => {
+    if (!recoveryAdding) {
+      setRecoveryWaitedMs(0)
+      setSnakeOpen(false)
+      setSnakeDismissed(false)
+      return undefined
+    }
+    const startedAt = Date.now()
+    const timer = window.setInterval(() => setRecoveryWaitedMs(Date.now() - startedAt), 1_000)
+    return () => window.clearInterval(timer)
+  }, [recoveryAdding])
+  /* The passkey prompt, or the sign-in's own approval, has the reader's hands. */
+  const recoveryNeedsReader = recoveryProgress !== null && recoveryAddNeedsReader(recoveryProgress.stage)
+  const offerSnake =
+    recoveryAdding && recoveryProgress.stage !== 'done' && recoveryWaitedMs >= OFFER_AFTER_MS && !snakeDismissed
+
+  const recoveryTimeline =
+    recoveryRows === null ? null : (
+      <>
+        <ProgressTimeline
+          rows={recoveryRows.map((row): TimelineRow => ({
+            id: row.id,
+            label: row.label,
+            state: row.state,
+            expectedSeconds: row.expectedSeconds,
+            elapsedMs: recoveryElapsedFor(row),
+            subStages: row.subStages,
+          }))}
+        />
+        {offerSnake ? (
+          snakeOpen ? (
+            <SnakeGame
+              paused={recoveryNeedsReader}
+              onDismiss={() => {
+                setSnakeOpen(false)
+                setSnakeDismissed(true)
+              }}
+            />
+          ) : recoveryNeedsReader ? null : (
+            <button type="button" className="mngame-offer" onClick={() => setSnakeOpen(true)}>
+              <Gamepad2 size={14} aria-hidden="true" />
+              Play Snake while you wait
+            </button>
+          )
+        ) : null}
+      </>
+    )
+
+  /* ---------------------------------------------------------------------- */
   /* What is on screen                                                      */
   /* ---------------------------------------------------------------------- */
 
@@ -2960,14 +3062,20 @@ export default function CustodyPassport({
     )
   }
 
-  if (stage === 'recovery') {
+  /* THE STEP, AND HOME'S OWN "ADD RECOVERY" WHILE IT RUNS. The press on Home
+     used to run with nothing on screen but a banner at the end; it now shows
+     the same timeline, and Home comes back when the add has ended. */
+  if (stage === 'recovery' || (stage === 'home' && recoveryAdding)) {
     return (
       <RecoveryStep
         provider={social?.provider ?? null}
-        busy={busy}
+        /* The button names the row that is running, once — the timeline
+           above it is the progress. */
+        busy={busy === null ? null : (recoveryRunningRow?.label ?? busy)}
         error={error}
         onAdd={addRecovery}
         onSkip={skipRecovery}
+        progress={recoveryTimeline}
       />
     )
   }

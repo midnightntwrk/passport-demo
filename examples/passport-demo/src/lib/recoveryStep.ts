@@ -191,21 +191,10 @@ export function recoveryRefusal(input: {
   return null;
 }
 
-/**
- * What a failed add says, and it is ONE sentence.
- *
- * THE PASSPORT IS FINE, and the sentence has to lead with that, because the
- * reader is one press away from Home and the thing that just failed was
- * optional. A stack trace, a circuit name, or the word "failed" on its own all
- * read as "your Passport is broken", which is false. What is offered underneath
- * is Home, every time: see `RECOVERY_COPY.continue`.
- */
-export function recoveryFailureSentence(cause: unknown): string {
-  const detail = cause instanceof Error ? cause.message.trim() : '';
-  return detail.length > 0 && detail.length <= 140
-    ? `Your Passport is set up, but the way back could not be added: ${detail} You can add it later from your Passport.`
-    : 'Your Passport is set up, but the way back could not be added just now. You can add it later from your Passport.';
-}
+/* What a failed add says is `./recoveryAdd.ts#recoveryAddFailureSentence`
+   (2026/09/24). The sentence that stood here passed any message of up to 140
+   characters through verbatim — "That payment didn't go through", a socket's
+   own words — which is a wrong statement about a step that moves no money. */
 
 /* -------------------------------------------------------------------------- */
 /* Coming back on a new device                                                */
