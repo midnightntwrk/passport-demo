@@ -270,7 +270,7 @@ const stages: {
   stage: CustodyShieldedSendStage;
   patch?: Partial<CustodyShieldedSendRecord>;
   step: 'report' | 'nothing';
-  says: RegExp;
+  says: RegExp | null;
 }[] = [
   {
     name: 'sending, with a transaction away',
@@ -286,7 +286,8 @@ const stages: {
     step: 'report',
     says: /Nothing was sent, and it is all still in your Passport\./,
   },
-  { name: 'done', stage: 'done', step: 'nothing', says: /alice\.night has it/ },
+  /* A payment that landed has no sentence: it is an activity row (2026/09/25). */
+  { name: 'done', stage: 'done', step: 'nothing', says: null },
 ];
 
 describe('a payment at every stage it can be in', () => {
@@ -295,6 +296,10 @@ describe('a payment at every stage it can be in', () => {
       const record = send({ stage: row.stage, ...row.patch });
       expect(nextCustodyShieldedSendStep(record)).toBe(row.step);
       const sentence = custodyShieldedSendOutcome(record);
+      if (row.says === null) {
+        expect(sentence).toBeNull();
+        return;
+      }
       expect(sentence).toMatch(row.says);
       expect(sentence).not.toMatch(FORBIDDEN);
       /* Nothing claims the value came back, because nothing can put it back:
