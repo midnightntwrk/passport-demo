@@ -1340,6 +1340,10 @@ export default function SendSheet(props: SendSheetProps) {
              about a wallet the user does not own, and it now goes to
              `console.info` from the watcher instead. */ fee.reason
 
+  /* The review names the fee even when it is covered, because that is the
+     step somebody confirms against. */
+  const reviewFee = feeNote ?? (fee?.mode === 'sponsored' ? 'Covered for you' : null)
+
   const feeBlocksSend = fee?.mode === 'unsponsored'
   const feeCause = fee?.mode === 'unsponsored' ? fee.cause : null
 
@@ -2148,10 +2152,15 @@ export default function SendSheet(props: SendSheetProps) {
                   )}
                 </dd>
               </div>
-              {resolvedName !== null ? (
+              {resolvedName !== null && nameLegSteps !== 1 ? (
                 /* Said before the confirm, not after it: paying a name is two
                    transactions, and somebody who is about to wait through both
                    should know that is what they are waiting for. */
+                /* ONLY WHERE THERE IS SOMETHING TO SAY (2026/09/25). A payment
+                   that is one transaction read "How it goes — Transferring",
+                   and the review also named the network: "they add nothing"
+                   (product owner, on a phone). Both are gone; the two-step
+                   explanation the older build still needs stays. */
                 <div className="mnhome-send-row">
                   <dt>How it goes</dt>
                   <dd>
@@ -2170,25 +2179,23 @@ export default function SendSheet(props: SendSheetProps) {
                         progress line say the same word for the same reason. The
                         two-step wording below is untouched and still describes
                         exactly what the older build does. */}
-                    <strong>{nameLegSteps === 1 ? 'Transferring' : 'Two steps'}</strong>
-                    {nameLegSteps === 1 ? null : (
+                    <strong>Two steps</strong>
                     <small>
                       {nameLegSteps === 3
                           ? 'The whole of what your account holds of this comes out, then they are paid. Both are network transactions, so this takes longer than sending to an address. Your change comes back to you on its own afterwards — you do not have to wait for it.'
                           : 'The amount leaves your account, then it is paid into theirs. Both are network transactions, so this takes longer than sending to an address.'}
                     </small>
-                    )}
                   </dd>
                 </div>
               ) : null}
-              <div className="mnhome-send-row">
-                <dt>Network</dt>
-                <dd>{networkId}</dd>
-              </div>
-              {feeNote !== null ? (
-                <div className="mnhome-send-row">
+              {reviewFee !== null ? (
+                /* STEADY ON THE REVIEW (2026/09/25): the row the reader is
+                   about to confirm against says the fee is covered rather than
+                   being absent, and — with the poll no longer restarting on
+                   every render — it stays exactly as it is while they read. */
+                <div className="mnhome-send-row" data-testid="send-review-fee">
                   <dt>Fee</dt>
-                  <dd>{feeNote}</dd>
+                  <dd>{reviewFee}</dd>
                 </div>
               ) : null}
             </dl>

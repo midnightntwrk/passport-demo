@@ -1738,8 +1738,10 @@ async function chooseAsset(page: Page, symbol: string): Promise<void> {
  */
 async function watchSendSheet(page: Page): Promise<void> {
   await page.evaluate(() => {
-    const w = window as unknown as { __still: { mutations: number; cls: number; heights: number[] } };
-    w.__still = { mutations: 0, cls: 0, heights: [] };
+    const w = window as unknown as {
+      __still: { mutations: number; cls: number; heights: number[]; feeAbsent: number };
+    };
+    w.__still = { mutations: 0, cls: 0, heights: [], feeAbsent: 0 };
     new PerformanceObserver((list) => {
       for (const entry of list.getEntries() as unknown as { value: number; hadRecentInput: boolean }[]) {
         if (!entry.hadRecentInput) w.__still.cls += entry.value;
@@ -1755,6 +1757,10 @@ async function watchSendSheet(page: Page): Promise<void> {
     const sample = () => {
       const sheet = document.querySelector('.mnhome-send');
       if (sheet) w.__still.heights.push(Math.round(sheet.getBoundingClientRect().height));
+      /* On the review step, every frame without the fee row is a flicker. */
+      if (document.querySelector('.mnhome-send-rows') && !document.querySelector('[data-testid="send-review-fee"]')) {
+        w.__still.feeAbsent += 1;
+      }
       requestAnimationFrame(sample);
     };
     sample();
@@ -1763,16 +1769,24 @@ async function watchSendSheet(page: Page): Promise<void> {
 
 async function resetStill(page: Page): Promise<void> {
   await page.evaluate(() => {
-    const w = window as unknown as { __still: { mutations: number; cls: number; heights: number[] } };
+    const w = window as unknown as {
+      __still: { mutations: number; cls: number; heights: number[]; feeAbsent: number };
+    };
     w.__still.mutations = 0;
     w.__still.cls = 0;
     w.__still.heights = [];
+    w.__still.feeAbsent = 0;
   });
 }
 
-async function readStill(page: Page): Promise<{ mutations: number; cls: number; heights: number[] }> {
+async function readStill(
+  page: Page,
+): Promise<{ mutations: number; cls: number; heights: number[]; feeAbsent: number }> {
   return page.evaluate(
-    () => (window as unknown as { __still: { mutations: number; cls: number; heights: number[] } }).__still,
+    () =>
+      (window as unknown as {
+        __still: { mutations: number; cls: number; heights: number[]; feeAbsent: number };
+      }).__still,
   );
 }
 
@@ -1817,6 +1831,28 @@ test.describe('a payment that runs behind the Passport (2026/09/25)', () => {
     if (touch) {
       expect(await page.evaluate(() => document.activeElement?.tagName)).not.toBe('TEXTAREA');
     }
+
+    /* AND THE REVIEW STEP (2026/09/25): the fee was seen to "appear,
+       disappear, appear, disappear" there on a phone. It stays put, and so
+       does everything else, for five seconds of nobody touching it. */
+    await chooseAsset(page, 'mUSD');
+    await sendRecipient(page).fill(RESOLVABLE_NAME);
+    await sendAmount(page).fill('10');
+    await expect(page.getByRole('button', { name: /^Review$/ })).toBeEnabled({ timeout: 30_000 });
+    await page.getByRole('button', { name: /^Review$/ }).click();
+    await expect(page.getByTestId('send-review-fee')).toHaveText(/Covered for you/);
+    await page.waitForTimeout(1_000);
+    await resetStill(page);
+    await page.waitForTimeout(5_000);
+    const review = await readStill(page);
+    expect(review.feeAbsent, 'the fee row never leaves the review').toBe(0);
+    expect(review.mutations, 'nothing on the review changes while nobody touches it').toBeLessThanOrEqual(1);
+    expect(review.cls, 'the review does not shift').toBeLessThan(0.01);
+    expect(new Set(review.heights).size).toBe(1);
+    /* The two rows that added nothing are gone. */
+    const rows = await page.locator('.mnhome-send-rows').innerText();
+    expect(rows).not.toContain('How it goes');
+    expect(rows).not.toMatch(/Network/i);
     await close();
   });
 
@@ -1838,6 +1874,20 @@ test.describe('a payment that runs behind the Passport (2026/09/25)', () => {
     await expect(assetRow(page, 'mUSD')).toContainText('Transferring');
     await expect(sendPill(page).locator('.mnsendp-phase')).toHaveText('Proving…', { timeout: 30_000 });
 
+    /* THE PENDING ROW IS A BUTTON, and it reopens the payment read-only: what,
+       to whom, the steps with the live one marked, and the time so far. */
+    await page.getByRole('button', { name: /^Sending 10 mUSD to .+ — view progress$/ }).click();
+    const progress = page.getByTestId('send-progress-sheet');
+    await expect(progress).toBeVisible();
+    await expect(progress).toContainText('10 mUSD');
+    await expect(progress.locator('[aria-current="step"]')).toHaveText(/Proving|Confirming/);
+    await expect(progress.getByTestId('send-progress-elapsed')).toHaveText(/\d+ s$/);
+    await expect(progress.getByRole('textbox')).toHaveCount(0);
+    /* Closing it leaves the payment running. */
+    await progress.getByRole('button', { name: 'Close' }).first().click();
+    await expect(progress).toHaveCount(0);
+    await expect(sendPill(page)).toHaveAttribute('data-state', 'running');
+
     /* THE PASSPORT IS STILL USABLE: Receive opens and the pill stays in view. */
     await page.getByRole('button', { name: /^Receive$/ }).click();
     await expect(page.getByRole('dialog', { name: 'Receive to your Passport' })).toBeVisible();
@@ -1858,6 +1908,12 @@ test.describe('a payment that runs behind the Passport (2026/09/25)', () => {
     await expect(sendPill(page)).toHaveAttribute('data-state', 'sent', { timeout: 30_000 });
     await expect(sendPill(page)).toContainText(/Sent 10 mUSD to /);
     await expect(sendPill(page).getByRole('link', { name: /View/ })).toHaveAttribute('href', /.+/);
+    /* The pill reopens it too, and it says Sent, with the link. */
+    await sendPill(page).locator('.mnsendp-open').click();
+    await expect(page.getByTestId('send-progress-sheet')).toContainText('Sent');
+    await expect(page.getByTestId('send-progress-sheet').getByRole('link', { name: /View/ })).toBeVisible();
+    await expect(page.getByTestId('send-progress-sheet').locator('[data-state="done"]')).toHaveCount(5);
+    await page.getByTestId('send-progress-sheet').getByRole('button', { name: 'Close' }).first().click();
     /* The trail's own row takes over from the live one. */
     await expect(page.getByTestId('send-progress-row')).toHaveCount(0);
     await expect(page.locator('.mnhome-activity')).toContainText(/Sent 10 mUSD to /);

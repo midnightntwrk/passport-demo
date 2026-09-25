@@ -96,17 +96,25 @@ export interface SendDraft {
 
 /** The payment this tab is running or has just finished, and nothing older. */
 export type SendProgress =
-  | { readonly kind: 'running'; readonly subject: SendProgressSubject; readonly draft: SendDraft }
+  | {
+      readonly kind: 'running';
+      readonly subject: SendProgressSubject;
+      readonly draft: SendDraft;
+      /** When it was confirmed, for the progress view's elapsed time. */
+      readonly startedAt: number;
+    }
   | {
       readonly kind: 'sent';
       readonly subject: SendProgressSubject;
       readonly link: SendProgressLink | null;
+      readonly startedAt: number;
     }
   | {
       readonly kind: 'failed';
       readonly subject: SendProgressSubject;
       readonly sentence: string;
       readonly draft: SendDraft;
+      readonly startedAt: number;
     };
 
 /** Where the finished transaction can be looked at. */
@@ -117,7 +125,12 @@ export interface SendProgressLink {
 
 /** Everything that can happen to a payment while this tab watches it. */
 export type SendProgressEvent =
-  | { readonly type: 'start'; readonly subject: SendProgressSubject; readonly draft: SendDraft }
+  | {
+      readonly type: 'start';
+      readonly subject: SendProgressSubject;
+      readonly draft: SendDraft;
+      readonly at: number;
+    }
   | { readonly type: 'sent'; readonly link: SendProgressLink | null }
   | {
       readonly type: 'failed';
@@ -148,15 +161,21 @@ export function sendProgressReduce(
 ): SendProgress | null {
   switch (event.type) {
     case 'start':
-      return { kind: 'running', subject: event.subject, draft: event.draft };
+      return { kind: 'running', subject: event.subject, draft: event.draft, startedAt: event.at };
     case 'sent':
       return state?.kind === 'running'
-        ? { kind: 'sent', subject: state.subject, link: event.link }
+        ? { kind: 'sent', subject: state.subject, link: event.link, startedAt: state.startedAt }
         : state;
     case 'failed':
       if (state?.kind !== 'running') return state;
       if (event.handedOver) return null;
-      return { kind: 'failed', subject: state.subject, sentence: event.sentence, draft: state.draft };
+      return {
+        kind: 'failed',
+        subject: state.subject,
+        sentence: event.sentence,
+        draft: state.draft,
+        startedAt: state.startedAt,
+      };
     case 'dismiss':
       return state?.kind === 'running' ? state : null;
   }
@@ -183,6 +202,8 @@ export function sentLine(subject: SendProgressSubject): string {
 export interface SendProgressRecord {
   readonly subject: SendProgressSubject;
   readonly draft: SendDraft;
+  /** When the payment was started, as the record wrote it down. */
+  readonly startedAt: number;
   readonly submitted: boolean;
   readonly sentence: string;
 }
@@ -200,6 +221,10 @@ export interface SendProgressView {
   readonly retry: SendDraft | null;
   /** Who the payment is for, for the one line that explains a waiting Review. */
   readonly recipient: string;
+  /** Who was paid what, for the progress view's summary. */
+  readonly subject: SendProgressSubject;
+  /** When the payment was started, for the progress view's elapsed time. */
+  readonly startedAt: number;
 }
 
 /**
@@ -226,6 +251,8 @@ export function sendProgressView(input: {
       link: null,
       retry: null,
       recipient: progress.subject.recipient,
+      subject: progress.subject,
+      startedAt: progress.startedAt,
     };
   }
   if (progress?.kind === 'sent') {
@@ -237,6 +264,8 @@ export function sendProgressView(input: {
       link: progress.link,
       retry: null,
       recipient: progress.subject.recipient,
+      subject: progress.subject,
+      startedAt: progress.startedAt,
     };
   }
   if (progress?.kind === 'failed') {
@@ -248,6 +277,8 @@ export function sendProgressView(input: {
       link: null,
       retry: progress.draft,
       recipient: progress.subject.recipient,
+      subject: progress.subject,
+      startedAt: progress.startedAt,
     };
   }
   if (record === null) return null;
@@ -260,6 +291,8 @@ export function sendProgressView(input: {
       link: null,
       retry: null,
       recipient: record.subject.recipient,
+      subject: record.subject,
+      startedAt: record.startedAt,
     };
   }
   return {
@@ -270,6 +303,8 @@ export function sendProgressView(input: {
     link: null,
     retry: record.draft,
     recipient: record.subject.recipient,
+    subject: record.subject,
+    startedAt: record.startedAt,
   };
 }
 
@@ -286,6 +321,54 @@ export function sendProgressView(input: {
 export function sendInFlightReason(view: SendProgressView | null): string | null {
   if (view === null || view.kind !== 'running') return null;
   return `Your payment to ${view.recipient} is still going through. You can send again once it has finished.`;
+}
+
+/** The steps the progress view lists, in order, ending in Sent. */
+export const SEND_PROGRESS_STEPS: readonly { readonly key: SendProgressPhase | 'sent'; readonly label: string }[] = [
+  { key: 'preparing', label: 'Preparing' },
+  { key: 'approving', label: 'Waiting for your approval' },
+  { key: 'proving', label: 'Proving' },
+  { key: 'confirming', label: 'Confirming' },
+  { key: 'sent', label: 'Sent' },
+];
+
+/** One step of the progress view's list, and where the payment is against it. */
+export interface SendProgressStepRow {
+  readonly key: SendProgressPhase | 'sent';
+  readonly label: string;
+  readonly state: 'done' | 'current' | 'waiting';
+}
+
+/**
+ * The progress view's step list, from the view.
+ *
+ * Every step before the current one is done, and a Sent payment has done them
+ * all. Approval is a step a Passport may not need — a key already held in this
+ * tab skips it — so it reads done once anything after it is. A FAILED payment
+ * claims no step at all: it was never handed over, so nothing on the list
+ * happened in any sense a reader cares about, and its one sentence says so.
+ */
+export function sendProgressSteps(view: SendProgressView): SendProgressStepRow[] {
+  const order = SEND_PROGRESS_STEPS.map((step) => step.key);
+  const at =
+    view.kind === 'sent'
+      ? order.length
+      : view.kind === 'running'
+        ? order.indexOf(view.phase ?? 'preparing')
+        : -1;
+  return SEND_PROGRESS_STEPS.map((step, index) => ({
+    key: step.key,
+    label: step.label,
+    state: at < 0 || index > at ? 'waiting' : index < at ? 'done' : 'current',
+  }));
+}
+
+/** "12 s", "1 min 05 s" — elapsed time, said plainly. */
+export function sendElapsed(startedAt: number, now: number): string {
+  const seconds = Math.max(0, Math.floor((now - startedAt) / 1000));
+  if (seconds < 60) return `${seconds} s`;
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes} min ${String(seconds % 60).padStart(2, '0')} s`;
 }
 
 /** How long "Sent" stays on the pill before it goes by itself. */

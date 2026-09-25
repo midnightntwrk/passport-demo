@@ -71,7 +71,7 @@ import NotificationToggle from './NotificationToggle.js'
 import PassportContractCard, { type PassportContractCardProps } from './PassportContract.js'
 import { RECOVERY_COPY, type RecoveryHomeEntry } from '../lib/recoveryStep.js'
 import SendSheet, { type SendSheetHolding, type SendSheetProps } from './SendSheet.js'
-import { SEND_PROGRESS_ROW_ID, SendProgressPill, SendProgressRow } from './SendProgress.js'
+import { SendProgressPill, SendProgressRow, SendProgressSheet } from './SendProgress.js'
 import type { SendDraft, SendProgressView } from '../lib/sendProgress.js'
 import ThemeToggle from './ThemeToggle.js'
 /* The colour's own mark, where this build has one. Falls back to the glyph
@@ -395,6 +395,17 @@ export interface HomeScreenProps {
    */
   sendRetryRequest?: { draft: SendDraft; nonce: number } | null
   /**
+   * The pill pressed on another tab: a number that changes with every press,
+   * and Home opens the payment's progress view.
+   */
+  sendProgressOpenNonce?: number | null
+  /**
+   * Called once either request above has been acted on, so the host can clear
+   * it. Home remounts when its tab comes back, and a request left standing
+   * would be acted on again every time it did.
+   */
+  onSendRequestHandled?: () => void
+  /**
    * The sender's own change coming back from the last transfer, as one quiet
    * line under the balances — or nothing, which is the usual answer.
    *
@@ -531,6 +542,8 @@ export default function HomeScreen(props: HomeScreenProps) {
     onSignOut,
     sendProgress,
     sendRetryRequest,
+    sendProgressOpenNonce,
+    onSendRequestHandled,
   } = props
 
   const [copied, setCopied] = useState(false)
@@ -551,8 +564,23 @@ export default function HomeScreen(props: HomeScreenProps) {
   /* TRY AGAIN, HERE OR FROM ANOTHER TAB. Either way it puts the failure away
      and opens the sheet on the same payment, at its first step. */
   const dismissSendProgress = sendProgress?.onDismiss
+  /* THE PAYMENT, REOPENED — read-only, from the pending row or the pill. */
+  const [progressOpen, setProgressOpen] = useState(false)
+  const openProgress = useCallback(() => {
+    setReceiveOpen(false)
+    setProgressOpen(true)
+  }, [])
+  const closeProgress = useCallback(() => setProgressOpen(false), [])
+  const requestHandledRef = useRef(onSendRequestHandled)
+  requestHandledRef.current = onSendRequestHandled
+  useEffect(() => {
+    if (sendProgressOpenNonce == null) return
+    openProgress()
+    requestHandledRef.current?.()
+  }, [openProgress, sendProgressOpenNonce])
   const retrySend = useCallback(
     (draft: SendDraft) => {
+      setProgressOpen(false)
       dismissSendProgress?.()
       setReceiveOpen(false)
       setSendDraft(draft)
@@ -566,6 +594,7 @@ export default function HomeScreen(props: HomeScreenProps) {
   useEffect(() => {
     if (retryNonce === null || retryDraftRef.current === null) return
     retrySend(retryDraftRef.current)
+    requestHandledRef.current?.()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [retryNonce])
   /* Whether the balance list is showing everything. Collapsed by default and
@@ -1285,6 +1314,7 @@ export default function HomeScreen(props: HomeScreenProps) {
                   view={sendProgress.view}
                   onDismiss={sendProgress.onDismiss}
                   onRetry={retrySend}
+                  onOpen={openProgress}
                 />
               ) : null
             }
@@ -1353,19 +1383,24 @@ export default function HomeScreen(props: HomeScreenProps) {
             foot of the screen, and says itself why its Review is waiting. Over
             the Receive sheet it moves to the top, which is the one part of the
             screen that sheet does not use. */}
-        {sendProgress && !sendOpen ? (
+        {sendProgress && !sendOpen && !progressOpen ? (
           <SendProgressPill
             view={sendProgress.view}
             placement={receiveOpen ? 'top' : 'bottom'}
             onDismiss={sendProgress.onDismiss}
             onRetry={retrySend}
-            onOpen={() => {
-              setReceiveOpen(false)
-              ;(
-                document.getElementById(SEND_PROGRESS_ROW_ID) ??
-                document.querySelector('.mnhome-activity')
-              )?.scrollIntoView({ block: 'center', behavior: 'smooth' })
-            }}
+            onOpen={openProgress}
+          />
+        ) : null}
+        {/* Pressing the pill or the pending row reopens the payment, read-only.
+            Closing it leaves the payment running. It goes with the payment:
+            once there is nothing to show, there is no sheet. */}
+        {sendProgress && progressOpen && !sendOpen ? (
+          <SendProgressSheet
+            view={sendProgress.view}
+            onDismiss={sendProgress.onDismiss}
+            onRetry={retrySend}
+            onClose={closeProgress}
           />
         ) : null}
 

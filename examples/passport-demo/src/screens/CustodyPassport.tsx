@@ -1435,7 +1435,7 @@ export default function CustodyPassport({
       k1ColourHoldings(account).map((holding) => ({ colourHex: holding.colour, amount: holding.value })),
     )
     setArriving(custodyArrivingCount({ awaitingRows: awaitingK1Coins(account).length, unplaced: null }))
-  }, [view])
+  }, [setTokens, view])
 
   /* ONE READ AT A TIME. Home's effect, the Send sheet opening, a refresh, and
      the read after a payment all ask; the second of two overlapping asks waits
@@ -2250,7 +2250,7 @@ export default function CustodyPassport({
       /* THE PILL IS UP FROM THE PRESS (2026/09/25). The Send sheet has closed by
          now, so this is the only thing on screen that says a payment is
          running — including the second or two before its record is written. */
-      dispatchProgress({ type: 'start', subject: payment.subject, draft: payment.draft })
+      dispatchProgress({ type: 'start', subject: payment.subject, draft: payment.draft, at: Date.now() })
       const refusal = custodyInFlightRefusal(inFlight.current)
       if (refusal !== null) {
         dispatchProgress({ type: 'failed', sentence: refusal, handedOver: false })
@@ -3292,6 +3292,7 @@ export default function CustodyPassport({
                 recipient: stopped.recipientAccountAddress.length > 0 ? stopped.recipientLabel : '',
                 amount: stopped.amount,
               },
+              startedAt: stopped.startedAt,
               submitted: stopped.sendTxId !== null,
               sentence: custodyShieldedSendOutcome(stopped),
             },

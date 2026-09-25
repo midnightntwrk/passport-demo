@@ -1817,3 +1817,58 @@ button.mnhome-support { font-family: inherit; cursor: pointer; }
 .mnsendp-row .mnsendp-text { flex: 1 1 auto; }
 .mnsendp-row .mnsendp-title { white-space: normal; }
 .mnsendp-row .mnsendp-phase { white-space: normal; }
+
+/* The live row is PENDING, not a record: an accent edge and a small tag set it
+   apart from the calm rows under it, and the whole of it is a button. */
+.mnsendp-row {
+  border-color: var(--mn-accent);
+  border-left-width: 3px;
+  background: var(--mn-accent-soft);
+  padding: 4px 8px 4px 4px;
+}
+.mnsendp-row[data-state='failed'] {
+  border-color: var(--mn-border-strong);
+  background: var(--mn-surface-card);
+}
+.mnsendp-row .mnsendp-open { border-radius: var(--mn-radius-sm); }
+.mnsendp-tag {
+  color: var(--mn-accent-ink);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.mnsendp-row[data-state='failed'] .mnsendp-tag { color: var(--mn-text-secondary); }
+
+/* The payment, reopened: the five steps. */
+.mnsendp-steps {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0;
+  padding: 0;
+  list-style: none;
+}
+.mnsendp-step {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--mn-text-muted);
+  font-size: 13px;
+}
+.mnsendp-step[data-state='done'] { color: var(--mn-text-secondary); }
+.mnsendp-step[data-state='current'] { color: var(--mn-text-primary); font-weight: 600; }
+.mnsendp-step-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--mn-surface-sunken);
+}
+.mnsendp-step[data-state='done'] .mnsendp-step-mark,
+.mnsendp-step[data-state='current'] .mnsendp-step-mark {
+  background: var(--mn-accent-soft);
+  color: var(--mn-accent-ink);
+}
+.mnsendp-sheet-link { display: inline-flex; align-items: center; gap: 6px; text-decoration: none; }

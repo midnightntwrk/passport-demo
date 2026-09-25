@@ -173,7 +173,7 @@ import WelcomeScreen from './screens/Welcome.js';
 import AccountRecoveryScreen from './screens/AccountRecovery.js';
 import HomeScreen from './screens/Home.js';
 /* The pill a payment in flight is shown by on the tabs that are not Home. */
-import { SEND_PROGRESS_ROW_ID, SendProgressPill } from './screens/SendProgress.js';
+import { SendProgressPill } from './screens/SendProgress.js';
 import type { SendDraft } from './lib/sendProgress.js';
 import AliasClaimScreen from './screens/AliasClaim.js';
 import BackupScreen from './screens/Backup.js';
@@ -1510,6 +1510,8 @@ export default function PassportDemo() {
   const [sendRetryRequest, setSendRetryRequest] = useState<{ draft: SendDraft; nonce: number } | null>(
     null,
   );
+  /* The pill pressed on the Assets or Apps tab: Home opens the progress view. */
+  const [sendProgressOpenNonce, setSendProgressOpenNonce] = useState<number | null>(null);
   // One-button onboarding (2026/08/05): there is no separate "choose" step
   // any more, so the screen only distinguishes idle from working.
   const [onboardingIntent, setOnboardingIntent] = useState<OnboardingIntent | null>(null);
@@ -10002,6 +10004,11 @@ export default function PassportDemo() {
         /* The pill and the live row. */
         sendProgress={sendProgress}
         sendRetryRequest={sendRetryRequest}
+        sendProgressOpenNonce={sendProgressOpenNonce}
+        onSendRequestHandled={() => {
+          setSendRetryRequest(null);
+          setSendProgressOpenNonce(null);
+        }}
         activity={homeActivity}
         appsProfile={custodyAppsProfile}
         supportUrl={(import.meta.env.VITE_TELEGRAM_URL as string | undefined) ?? null}
@@ -10056,7 +10063,7 @@ export default function PassportDemo() {
         )}
         {/* THE PAYMENT IN FLIGHT, ON THE OTHER TABS (2026/09/25). Home draws
             its own, because it knows when its sheets are open. Pressing it
-            goes to Home and the live row; "Try again" goes to Home and opens
+            goes to Home and reopens the payment; "Try again" goes to Home and opens
             Send on the same payment. */}
         {mobileTab !== 'home' && sendProgress ? (
           <SendProgressPill
@@ -10068,14 +10075,7 @@ export default function PassportDemo() {
             }}
             onOpen={() => {
               setMobileTab('home');
-              window.requestAnimationFrame(() =>
-                window.requestAnimationFrame(() =>
-                  (
-                    document.getElementById(SEND_PROGRESS_ROW_ID) ??
-                    document.querySelector('.mnhome-activity')
-                  )?.scrollIntoView({ block: 'center' }),
-                ),
-              );
+              setSendProgressOpenNonce((previous) => (previous ?? 0) + 1);
             }}
           />
         ) : null}
