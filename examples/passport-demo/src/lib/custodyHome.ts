@@ -41,6 +41,7 @@
  */
 
 import type { AliasRecord } from '../identity/aliasStore.js';
+import type { CustodyShieldedSendRecord } from '../identity/custodyContractSend.js';
 import type { PassportContractRecord } from '../identity/passportContractStore.js';
 /* The two labels the sponsor's deposits are recorded under, taken from the one
    place that owns them rather than re-typed: `lib/activation.ts` matches on
@@ -51,7 +52,7 @@ import {
   ACTIVATION_DEPOSITED_LABEL,
   ACTIVATION_STABLECOIN_LABEL,
 } from './activation.js';
-import { NIGHT_COLOUR_HEX } from './colour.js';
+import { NIGHT_COLOUR_HEX, describeColour } from './colour.js';
 import {
   custodyAssetRows,
   formatCustodyAmount,
@@ -610,6 +611,30 @@ export function custodySentEntry(input: {
     status: 'complete',
     ...(input.txHash && input.txHash.trim().length > 0 ? { txHash: input.txHash } : {}),
   };
+}
+
+/**
+ * The row a payment interrupted by a reload writes once the chain says it
+ * LANDED (2026/09/25).
+ *
+ * A payment that finishes in the tab writes its row through
+ * {@link custodySentEntry} as it goes. One whose tab was closed or reloaded
+ * while it was on its way never got that far, and the screen used to report it
+ * afterwards with an alert-styled "Sent. … has it." strip over Home instead.
+ * The activity list is where a finished payment is recorded, so that is where
+ * this one goes too, in the same words — named from the colour alone, because
+ * the record is all that survived the reload.
+ */
+export function custodyLandedSendEntry(record: CustodyShieldedSendRecord): CustodyActivityEntry {
+  const identity = describeColour(record.colourHex);
+  return custodySentEntry({
+    /* The store only hands back records whose amount is a decimal integer. */
+    amount: BigInt(record.amount),
+    decimals: identity.decimals,
+    symbol: identity.symbol,
+    recipient: record.recipientLabel,
+    txHash: record.sendTxId,
+  });
 }
 
 /** What the milestones are decided from. Every field is read, never inferred. */

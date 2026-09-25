@@ -929,13 +929,24 @@ test.describe('a Passport opened again after a payment', () => {
       await page.goto(WALK);
 
       const offer = page.locator('.mnhome-notice[role="alert"]');
-      await expect(offer).toBeVisible({ timeout: 60_000 });
-      await expect(offer).toContainText(
-        answer === 'landed'
-          ? `Sent. ${RESOLVABLE_NAME}.night has it.`
-          : "That payment didn't go through. Nothing left your Passport.",
-      );
-      await expect(offer).not.toContainText('Checking whether');
+      if (answer === 'landed') {
+        /* A PAYMENT THAT LANDED IS RECORDED, NOT ANNOUNCED (2026/09/25). The
+           activity list gets the row the payment would have written had its
+           tab stayed open, and Home's alert strip — the error styling — stays
+           empty once the chain has answered. */
+        await expect(page.locator('.mnhome-activity')).toContainText(
+          `Sent 10 mUSD to ${RESOLVABLE_NAME}.night`,
+          { timeout: 60_000 },
+        );
+        await expect(offer).toHaveCount(0);
+        await expect(page.getByText(`Sent. ${RESOLVABLE_NAME}.night has it.`)).toHaveCount(0);
+      } else {
+        await expect(offer).toBeVisible({ timeout: 60_000 });
+        await expect(offer).toContainText(
+          "That payment didn't go through. Nothing left your Passport.",
+        );
+        await expect(offer).not.toContainText('Checking whether');
+      }
       /* The record is settled: it does not come back on the next open. */
       const kept = await page.evaluate(() =>
         window.localStorage.getItem('passport-account-custody-shielded-send:v1'),
