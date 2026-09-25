@@ -1536,8 +1536,10 @@ test.describe('a passkey Passport that has just been named', () => {
      EXACTLY ONCE — and the new-device road ("Already have a Passport · Find
      it by its name", "Open your Passport here", a sign-in's "Signed in with …"
      kicker) never flashes over this passkey Passport while its session is
-     being reopened. Before 2026/09/25 it did, for about 70 ms on this box and
-     for as long as the wallet took to reopen on a phone. */
+     being reopened, and nor does the old Home ("No name on this network yet")
+     in the beat between the wallet and the profile. Before 2026/09/25 both
+     did, for tens of milliseconds on this box and for as long as the wallet
+     took to reopen on a phone. */
   test('picks the add back up exactly once after a reload during the sign-in', async ({
     browser,
   }) => {
@@ -1573,7 +1575,12 @@ test.describe('a passkey Passport that has just been named', () => {
         /* `textContent`, flattened and lower-cased: `innerText` applies the
            sheet's upper-casing and the title's line breaks. */
         const text = (document.body?.textContent ?? '').replace(/\s+/g, ' ').toLowerCase();
-        for (const marker of ['open your passport here', 'already have a passport', 'signed in with']) {
+        for (const marker of [
+          'open your passport here',
+          'already have a passport',
+          'signed in with',
+          'no name on this network yet',
+        ]) {
           if (text.includes(marker) && !w.__sawRecoverRoad.includes(marker)) {
             w.__sawRecoverRoad.push(marker);
           }

@@ -6104,6 +6104,15 @@ export default function PassportDemo() {
    */
   const localSessionActive = localWalletStatus === 'ready' && localSurfaces !== null;
   const sessionActive = localSessionActive;
+  /**
+   * THE BEAT BETWEEN THE WALLET AND THE PROFILE, on a reload (2026/09/25).
+   * The silent restore opens the wallet first and hands the profile back two
+   * awaits later; in between, nothing knows whose Passport this is, and what
+   * rendered was whichever screen answered first — a sign-in's new-device
+   * road, or the old Home with "Choose a name". It is the restoring state
+   * instead, which is what it is.
+   */
+  const passkeyProfilePending = passkeyRestoring && profile === null && localSessionActive;
 
   /**
    * WHICH PASSPORT THIS RENDER BELONGS TO.
@@ -6279,7 +6288,7 @@ export default function PassportDemo() {
    */
   const custodyArm = dynamicOnly
     ? dynamicArm
-    : localSessionActive && passkeyRoute !== 'legacy'
+    : localSessionActive && passkeyRoute !== 'legacy' && !passkeyProfilePending
       ? passkeyArm
       : null;
   /* The two way-out panels hold the screen open in their own right. They have
@@ -6380,6 +6389,7 @@ export default function PassportDemo() {
 
   const showOnboarding =
     !sessionActive ||
+    passkeyProfilePending ||
     onboardingIntent !== null ||
     onboardingError !== null ||
     keylessPasskey !== null ||
@@ -6387,7 +6397,9 @@ export default function PassportDemo() {
   // The §2.2 session restore opens the wallet with no onboarding intent set,
   // so an opening local wallet also reads as the working stage.
   const onboardingStage: 'welcome' | 'working' =
-    onboardingIntent !== null || localWalletStatus === 'opening' ? 'working' : 'welcome';
+    onboardingIntent !== null || localWalletStatus === 'opening' || passkeyProfilePending
+      ? 'working'
+      : 'welcome';
   const onboardingLabel =
     onboardingBusyLabel ?? 'Follow the passkey prompt on this device';
   /**
