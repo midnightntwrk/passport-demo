@@ -1,18 +1,27 @@
 @import './tokens.css';
 
 /* Theme toggle — prefix "mnthemetoggle-".
-   A three-segment control sized to sit beside the 34px icon buttons in the
-   Home top bar. Midnight-native: a rounded segmented control — pill track,
-   pill segments — with the selected segment carried by the solid
-   accent-blue emphasis surface. */
+   A three-segment control sized to sit beside the icon buttons in the top
+   bars. Midnight-native: a rounded segmented control — pill track, pill
+   segments — with the selected segment carried by the solid accent-blue
+   emphasis surface.
+
+   THE TARGET IS 44 × 44, THE DRAWING IS NOT (2026/09/25). Measured on a Pixel 7
+   profile, each segment used to be a 28 × 26 button (30 × 32 on Home) with a
+   vertical-only slop: three targets ~30 px apart, below Android's 48 dp and
+   Apple's 44 pt, on the control a phone user reaches for with a thumb. Every
+   segment's BUTTON is now a full 44 × 44 box that abuts its neighbours, so
+   no tap lands between two of them, and the pill a person sees is drawn
+   inside it by `::before`. The button overhangs the 34 px track by 5 px above
+   and below with negative margins, so the bars keep their height and nothing
+   moves when the control mounts. */
 
 .mnthemetoggle {
   display: inline-flex;
   flex: 0 0 auto;
-  align-items: stretch;
-  gap: 2px;
+  align-items: center;
   height: 34px;
-  padding: 3px;
+  padding: 0;
   border: var(--mn-hairline) solid var(--mn-border-hairline);
   border-radius: var(--mn-radius-pill);
   color: var(--mn-text-primary);
@@ -22,38 +31,40 @@
 
 .mnthemetoggle-option {
   position: relative;
-  width: 30px;
+  width: 44px;
+  min-width: 44px;
+  height: 44px;
+  margin-block: -5px;
   display: inline-grid;
   place-items: center;
   padding: 0;
   border: 0;
-  border-radius: var(--mn-radius-pill);
   color: var(--mn-text-muted);
   background: transparent;
   cursor: pointer;
-  transition: background .15s ease, color .15s ease;
+  /* No double-tap-to-zoom wait, and no grey system flash over the pill: the
+     control answers a tap with its own pressed state (below). */
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
 }
-.mnthemetoggle-option:hover:not(.mnthemetoggle-option-on) {
-  color: var(--mn-text-primary);
-  background: var(--mn-surface-hover);
-}
-.mnthemetoggle-option-on {
-  color: var(--mn-text-inverted);
-  background: var(--mn-surface-inverted);
-}
-/* Vertical touch slop to a 44px effective target. Horizontal is left alone:
-   the segments abut, so sideways misses land on the neighbouring segment. */
-.mnthemetoggle-option::after {
+/* The visible segment. It swaps instantly — no transition — so a tap on a
+   slow phone shows its answer in the same frame the theme is applied, rather
+   than fading in over the repaint of the whole page. */
+.mnthemetoggle-option::before {
   content: '';
   position: absolute;
-  inset: -9px -1px;
+  inset: 8px 5px;
+  border-radius: var(--mn-radius-pill);
+  background: transparent;
 }
+.mnthemetoggle-option > svg { position: relative; }
+.mnthemetoggle-option:hover:not(.mnthemetoggle-option-on) { color: var(--mn-text-primary); }
+.mnthemetoggle-option:hover:not(.mnthemetoggle-option-on)::before { background: var(--mn-surface-hover); }
+/* Immediate feedback under the finger, before React has re-rendered. */
+.mnthemetoggle-option:active:not(.mnthemetoggle-option-on)::before { background: var(--mn-surface-active); }
+.mnthemetoggle-option-on { color: var(--mn-text-inverted); }
+.mnthemetoggle-option-on::before { background: var(--mn-surface-inverted); }
 
-/* Compact variant. Kept at the 34px control height so a bar mixing this with
-   the standard icon buttons still reads as one row; only the segments narrow. */
+/* Compact variant: kept for the call sites that ask for it. The target stays
+   44 × 44 — only the icon is smaller (see ThemeToggle.tsx). */
 .mnthemetoggle-sm { height: 34px; }
-.mnthemetoggle-sm .mnthemetoggle-option { width: 28px; }
-
-@media (prefers-reduced-motion: reduce) {
-  .mnthemetoggle-option { transition: none; }
-}

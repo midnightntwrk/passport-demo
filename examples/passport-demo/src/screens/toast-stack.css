@@ -104,13 +104,19 @@
    rather than centred on a now-taller body. */
 .mntoast:has(.mntoast-link) { align-items: flex-start; }
 .mntoast:has(.mntoast-link) .mntoast-icon,
-.mntoast:has(.mntoast-link) .mntoast-close { margin-top: 1px; }
+.mntoast:has(.mntoast-link) .mntoast-close { margin-top: -7px; }
 
+/* A 44 × 44 target (2026/09/25; it was 29 × 29). The negative margins take
+   back the extra size, so the card is exactly as tall as it was and the ✕
+   sits where it did — only the area a thumb can hit has grown. */
 .mntoast-close {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
+  min-width: 44px;
+  min-height: 44px;
+  margin: -8px -10px -8px -4px;
   padding: 8px;
   border: 0;
   border-radius: var(--mn-radius-pill);

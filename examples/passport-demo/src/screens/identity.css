@@ -60,6 +60,22 @@
   text-transform: uppercase;
 }
 .mnid-bar .mnid-theme { margin-left: 14px; }
+/* On a phone the theme control's 44 px segments (theme-toggle.css,
+   2026/09/25) make this row wider than it was, and at 320 px it pushed the
+   page sideways. Below 400 px the row tightens (a smaller wordmark, closer
+   gaps), which keeps the step label beside the control down to 360 px;
+   narrower than that the label goes, as the landing's does (atmosphere.css).
+   The row may wrap as a last resort, so it can never scroll the page. */
+.mnid-bar { flex-wrap: wrap; }
+@media (max-width: 400px) {
+  .mnid-bar { gap: 8px; }
+  .mnid-bar .mnid-wordmark { width: 88px; }
+  .mnid-bar .mnid-theme { margin-left: 6px; }
+}
+@media (max-width: 359px) {
+  .mnid-bar .mnid-step { display: none; }
+  .mnid-bar .mnid-theme { margin-left: auto; }
+}
 
 .mnid-body {
   width: min(100% - 48px, 520px);

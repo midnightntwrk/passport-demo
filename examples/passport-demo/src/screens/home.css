@@ -58,9 +58,9 @@
    scrolled sideways as a result. Nothing was ever clipped, so no screenshot
    looked broken; every screen could simply be dragged off-centre with a
    thumb. Below 460 px the actions take their own row, right-aligned under the
-   wordmark, and the segments narrow to keep that row on one line down to
-   about 380 px. Narrower still and the actions wrap again rather than pushing
-   the page out. */
+   wordmark. The theme segments no longer narrow here: they are 44 px touch
+   targets at every width (theme-toggle.css, 2026/09/25). Where the row does
+   not fit, the actions wrap again rather than pushing the page out. */
 @media (max-width: 460px) {
   .mnhome-bar {
     flex-wrap: wrap;
@@ -74,7 +74,6 @@
     flex-wrap: wrap;
     gap: 6px;
   }
-  .mnhome-bar-actions .mnthemetoggle-option { width: 26px; }
 }
 
 .mnhome-icon-button {

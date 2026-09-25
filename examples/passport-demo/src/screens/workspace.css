@@ -349,8 +349,6 @@
   .mnhome-passport-column .mnid-alias { font-size: 24px; }
   .mnhome-bar .mnhome-icon-button,
   .mnassets-bar .mnassets-icon-button { width: 40px; height: 40px; }
-  .mnhome-bar-actions .mnthemetoggle-option,
-  .mnassets-bar-actions .mnthemetoggle-option { width: 30px; min-height: 32px; }
   .mnid-welcome .mnid-point { padding: 16px; }
 }
 
