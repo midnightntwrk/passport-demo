@@ -28,7 +28,7 @@ import './theme-toggle.css'
  */
 
 export interface ThemeToggleProps {
-  /** Both sizes share the 34px control height; `sm` narrows the segments. */
+  /** Both sizes share the 34px track and 44px segment targets; `sm` draws a smaller icon. */
   size?: 'sm' | 'md'
   /** Extra class names, appended to the control's own. */
   className?: string
