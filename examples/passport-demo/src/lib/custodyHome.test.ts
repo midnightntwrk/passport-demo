@@ -8,6 +8,7 @@
 
 import { describe, expect, it } from 'vitest';
 
+import { newCustodyShieldedSend } from '../identity/custodyContractSend.js';
 import { MUSD_COLOUR_HEX, NIGHT_COLOUR_HEX } from './colour.js';
 import { custodyOpeningDepositTxHash,
   CUSTODY_NIGHT_SEND_REFUSAL,
@@ -28,6 +29,7 @@ import { custodyOpeningDepositTxHash,
   custodyMilestonesLanded,
   custodySendPhase,
   custodySentEntry,
+  custodyLandedSendEntry,
   custodyStablecoinHeld,
   type CustodyHoldings,
   type CustodyMilestone,
@@ -356,6 +358,42 @@ describe('what each row says', () => {
     expect(custodySentEntry({ amount: 2n, decimals: 0, symbol: 'mUSD', recipient: '' }).label).toBe(
       'Sent 2 mUSD to another Passport',
     );
+  });
+
+  it('records a payment a reload interrupted, once it landed, as the row it would have written', () => {
+    const record = {
+      ...newCustodyShieldedSend({
+        network: 'stagenet',
+        accountAddress: ACCOUNT,
+        colourHex: MUSD_COLOUR_HEX,
+        amount: 10n,
+        recipientLabel: 'alice.night',
+        recipientAccountAddress: 'cd'.repeat(32),
+        now: 1,
+      }),
+      sendTxId: 'ef'.repeat(32),
+    };
+    expect(custodyLandedSendEntry(record)).toEqual({
+      label: 'Sent 10 mUSD to alice.night',
+      detail: 'It left your Passport and is on its way.',
+      status: 'complete',
+      txHash: 'ef'.repeat(32),
+    });
+  });
+
+  it('names a NIGHT payment in NIGHT, and leaves the link off when no transaction was kept', () => {
+    const record = newCustodyShieldedSend({
+      network: 'stagenet',
+      accountAddress: ACCOUNT,
+      colourHex: NIGHT_COLOUR_HEX,
+      amount: 2_500_000n,
+      recipientLabel: '',
+      recipientAccountAddress: 'cd'.repeat(32),
+      now: 1,
+    });
+    const entry = custodyLandedSendEntry(record);
+    expect(entry.label).toBe('Sent 2.5 NIGHT to another Passport');
+    expect(entry).not.toHaveProperty('txHash');
   });
 });
 
