@@ -431,3 +431,120 @@ describe('runCustodyPayment — the answer is not held up by what follows it', (
     info.mockRestore();
   });
 });
+
+/* -------------------------------------------------------------------------- */
+/* A second payment waits for the first (2026/09/26)                          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * A hand-wound clock: `sleep` moves time on, and what is busy is decided by
+ * the time, so every branch runs without a real timer.
+ */
+function turnClock(script: { busyUntil: number; settlingUntil?: number }) {
+  let now = 0;
+  const waits: number[] = [];
+  const deps = {
+    busy: () => now < script.busyUntil,
+    settling: () => now < (script.settlingUntil ?? 0),
+    now: () => now,
+    sleep: (milliseconds: number) => {
+      waits.push(milliseconds);
+      now += milliseconds;
+      return Promise.resolve();
+    },
+    onWait: vi.fn(),
+  };
+  return { deps, waits, at: () => now };
+}
+
+describe('a second payment confirmed while the account is still finishing the last', () => {
+  it('starts at once, and says nothing about waiting, when nothing is in front of it', async () => {
+    const { awaitCustodyTurn } = await import('./custodyScreenRules.js');
+    const clock = turnClock({ busyUntil: 0, settlingUntil: 10_000 });
+    await expect(awaitCustodyTurn(clock.deps, 120_000)).resolves.toBeNull();
+    expect(clock.deps.onWait).not.toHaveBeenCalled();
+    /* A read on its own is not a payment to wait for: pressing Send during
+       one starts the payment, exactly as it always did. */
+    expect(clock.waits).toEqual([]);
+  });
+
+  it('waits for the tidy-up of the last payment, says so once, and then goes', async () => {
+    const { awaitCustodyTurn, CUSTODY_TURN_POLL_MS } = await import('./custodyScreenRules.js');
+    const clock = turnClock({ busyUntil: 4_000 });
+    await expect(awaitCustodyTurn(clock.deps, 120_000)).resolves.toBeNull();
+    expect(clock.deps.onWait).toHaveBeenCalledTimes(1);
+    expect(clock.at()).toBe(4_000);
+    expect(new Set(clock.waits)).toEqual(new Set([CUSTODY_TURN_POLL_MS]));
+  });
+
+  it('waits for the read after the last payment too, because that read rewrites the store', async () => {
+    const { awaitCustodyTurn } = await import('./custodyScreenRules.js');
+    const clock = turnClock({ busyUntil: 1_000, settlingUntil: 3_000 });
+    await expect(awaitCustodyTurn(clock.deps, 120_000)).resolves.toBeNull();
+    expect(clock.at()).toBe(3_000);
+  });
+
+  it('is refused in the sentence there always was, once the bound has run out', async () => {
+    const { awaitCustodyTurn, custodyInFlightRefusal } = await import('./custodyScreenRules.js');
+    const clock = turnClock({ busyUntil: Number.POSITIVE_INFINITY });
+    await expect(awaitCustodyTurn(clock.deps, 120_000)).resolves.toBe(custodyInFlightRefusal(true));
+    /* Not a moment longer than the bound. */
+    expect(clock.at()).toBe(120_000);
+  });
+
+  it('goes ahead at the bound when only the read is left, which never refused anybody', async () => {
+    const { awaitCustodyTurn } = await import('./custodyScreenRules.js');
+    const clock = turnClock({ busyUntil: 1_000, settlingUntil: Number.POSITIVE_INFINITY });
+    await expect(awaitCustodyTurn(clock.deps, 5_000)).resolves.toBeNull();
+    expect(clock.at()).toBe(5_000);
+  });
+
+  it('treats a bound below nothing as no wait at all', async () => {
+    const { awaitCustodyTurn, custodyInFlightRefusal } = await import('./custodyScreenRules.js');
+    const clock = turnClock({ busyUntil: Number.POSITIVE_INFINITY });
+    await expect(awaitCustodyTurn(clock.deps, -1)).resolves.toBe(custodyInFlightRefusal(true));
+    expect(clock.waits).toEqual([]);
+  });
+
+  it('never lets two payments into the account at once', async () => {
+    /* The screen's own order: the wait resolves, and the SAME synchronous turn
+       raises the flag — `runCustodyPayment` sets it before its first await. A
+       second waiter woken by the same free moment then finds it up again. */
+    const { awaitCustodyTurn, runCustodyPayment } = await import('./custodyScreenRules.js');
+    const inFlight = { current: true };
+    const inside: string[] = [];
+    let peak = 0;
+    let running = 0;
+    const deps = {
+      busy: () => inFlight.current,
+      settling: () => false,
+      now: () => 0,
+      sleep: () => new Promise<void>((resolve) => setTimeout(resolve, 0)),
+      onWait: () => undefined,
+    };
+    const pay = async (name: string) => {
+      const refusal = await awaitCustodyTurn(deps, 60_000);
+      expect(refusal).toBeNull();
+      await runCustodyPayment(
+        inFlight,
+        async () => {
+          running += 1;
+          peak = Math.max(peak, running);
+          inside.push(name);
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          running -= 1;
+        },
+        () => Promise.resolve(),
+      );
+    };
+    const both = Promise.all([pay('second'), pay('third')]);
+    /* The first payment's tidy-up ends. */
+    setTimeout(() => {
+      inFlight.current = false;
+    }, 5);
+    await both;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(inside.sort()).toEqual(['second', 'third']);
+    expect(peak).toBe(1);
+  });
+});

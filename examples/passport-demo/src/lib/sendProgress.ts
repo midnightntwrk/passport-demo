@@ -23,14 +23,20 @@
  * shows the same pill from the same record, and nothing here is persisted.
  */
 
-/** The four things a running payment can be doing, in the order it does them. */
-export type SendProgressPhase = 'preparing' | 'approving' | 'proving' | 'confirming';
+/**
+ * The four things a running payment can be doing, in the order it does them —
+ * and `waiting`, which comes before all four for a payment confirmed while the
+ * last one was still finishing (2026/09/26). It is never an engine step: see
+ * {@link SendProgressEvent}'s `waiting`.
+ */
+export type SendProgressPhase = 'waiting' | 'preparing' | 'approving' | 'proving' | 'confirming';
 
 /**
  * What each phase is called on screen. Short, because it sits after a dot on
  * one line; each is true of the step it names and says nothing further ahead.
  */
 export const SEND_PROGRESS_PHASE_LABEL: Readonly<Record<SendProgressPhase, string>> = {
+  waiting: 'Waiting for your last payment to finish…',
   preparing: 'Preparing…',
   approving: 'Waiting for your approval…',
   proving: 'Proving…',
@@ -102,6 +108,8 @@ export type SendProgress =
       readonly draft: SendDraft;
       /** When it was confirmed, for the progress view's elapsed time. */
       readonly startedAt: number;
+      /** Whether it is still waiting for the last payment to finish. */
+      readonly waiting: boolean;
     }
   | {
       readonly kind: 'sent';
@@ -131,6 +139,13 @@ export type SendProgressEvent =
       readonly draft: SendDraft;
       readonly at: number;
     }
+  /**
+   * The account is still finishing the last payment, and this one waits for
+   * it rather than being refused; `turn` is the moment it goes. Both are about
+   * a RUNNING payment and are ignored otherwise.
+   */
+  | { readonly type: 'waiting' }
+  | { readonly type: 'turn' }
   | { readonly type: 'sent'; readonly link: SendProgressLink | null }
   | {
       readonly type: 'failed';
@@ -161,7 +176,18 @@ export function sendProgressReduce(
 ): SendProgress | null {
   switch (event.type) {
     case 'start':
-      return { kind: 'running', subject: event.subject, draft: event.draft, startedAt: event.at };
+      return {
+        kind: 'running',
+        subject: event.subject,
+        draft: event.draft,
+        startedAt: event.at,
+        waiting: false,
+      };
+    case 'waiting':
+    case 'turn':
+      return state?.kind === 'running' && state.waiting !== (event.type === 'waiting')
+        ? { ...state, waiting: !state.waiting }
+        : state;
     case 'sent':
       return state?.kind === 'running'
         ? { kind: 'sent', subject: state.subject, link: event.link, startedAt: state.startedAt }
@@ -242,7 +268,7 @@ export function sendProgressView(input: {
 }): SendProgressView | null {
   const { progress, record } = input;
   if (progress?.kind === 'running') {
-    const phase = sendProgressPhase(input.step);
+    const phase = progress.waiting ? 'waiting' : sendProgressPhase(input.step);
     return {
       kind: 'running',
       title: sendingLine(progress.subject),
@@ -317,6 +343,11 @@ export function sendProgressView(input: {
  * current one" would be carrying a plan that may no longer be true by the time
  * it runs. So the sheet may be opened and filled in, and its Review waits,
  * rather than queueing a payment nobody will get to review again.
+ *
+ * A payment confirmed once this says nothing — the pill has said "Sent" and
+ * the account is still writing down what the last one kept — has been
+ * reviewed, and waits BEFORE anything about it is planned (2026/09/26): see
+ * `awaitCustodyTurn` in `./custodyScreenRules.ts`.
  */
 export function sendInFlightReason(view: SendProgressView | null): string | null {
   if (view === null || view.kind !== 'running') return null;
@@ -331,6 +362,9 @@ export const SEND_PROGRESS_STEPS: readonly { readonly key: SendProgressPhase | '
   { key: 'confirming', label: 'Confirming' },
   { key: 'sent', label: 'Sent' },
 ];
+
+/** The step a waiting payment is on, as the progress view lists it. */
+export const SEND_WAITING_STEP_LABEL = 'Waiting for your last payment';
 
 /** One step of the progress view's list, and where the payment is against it. */
 export interface SendProgressStepRow {
@@ -356,11 +390,18 @@ export function sendProgressSteps(view: SendProgressView): SendProgressStepRow[]
       : view.kind === 'running'
         ? order.indexOf(view.phase ?? 'preparing')
         : -1;
-  return SEND_PROGRESS_STEPS.map((step, index) => ({
+  const steps = SEND_PROGRESS_STEPS.map((step, index): SendProgressStepRow => ({
     key: step.key,
     label: step.label,
     state: at < 0 || index > at ? 'waiting' : index < at ? 'done' : 'current',
   }));
+  /* A PAYMENT WAITING FOR THE LAST ONE (2026/09/26) has done none of the five
+     and is on a step the list does not otherwise have, so that step is put in
+     front of the five, as the current one, for as long as it lasts. */
+  if (view.phase === 'waiting') {
+    return [{ key: 'waiting', label: SEND_WAITING_STEP_LABEL, state: 'current' }, ...steps];
+  }
+  return steps;
 }
 
 /** "12 s", "1 min 05 s" — elapsed time, said plainly. */
