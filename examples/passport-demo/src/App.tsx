@@ -1582,6 +1582,17 @@ export default function PassportDemo() {
   const [unusableDevice, setUnusableDevice] = useState<string | null>(null);
   const [localSurfaces, setLocalSurfaces] = useState<LocalWalletSurfaces | null>(null);
   const [localWalletStatus, setLocalWalletStatus] = useState<LocalWalletStatus>('idle');
+  /**
+   * Whether the silent session restore below is still in flight — from mount
+   * until the profile is back or the restore has given up. Starts true only on
+   * a device that has signed in with a passkey before, which is the only
+   * device a restore can land on. `choosePassportIdentity` reads it so a
+   * provider sign-in that reports first cannot paint its own road over a
+   * passkey Passport that is a few awaits from being back (2026/09/25).
+   */
+  const [passkeyRestoring, setPasskeyRestoring] = useState<boolean>(
+    () => storedLastPasskey() !== null,
+  );
   const [localSyncPercent, setLocalSyncPercent] = useState<number | null>(null);
   const [localWalletNetworkId, setLocalWalletNetworkId] = useState<string | null>(null);
   /**
@@ -2358,7 +2369,13 @@ export default function PassportDemo() {
         // would blank the label out from under it.
         if (!superseded()) setOnboardingBusyLabel(null);
       }
-    })();
+    })().finally(() => {
+      /* Every way out of the restore — nothing stored, a ceremony took over,
+         a failure, or the profile back in state — ends the restoring answer.
+         A run cancelled by StrictMode's remount leaves it to the run that
+         replaced it. */
+      if (!cancelled) setPasskeyRestoring(false);
+    });
     return () => {
       cancelled = true;
       if (sessionRestoreCancel.current === abort) sessionRestoreCancel.current = null;
@@ -6112,6 +6129,15 @@ export default function PassportDemo() {
    */
   const localSessionActive = localWalletStatus === 'ready' && localSurfaces !== null;
   const sessionActive = localSessionActive;
+  /**
+   * THE BEAT BETWEEN THE WALLET AND THE PROFILE, on a reload (2026/09/25).
+   * The silent restore opens the wallet first and hands the profile back two
+   * awaits later; in between, nothing knows whose Passport this is, and what
+   * rendered was whichever screen answered first — a sign-in's new-device
+   * road, or the old Home with "Choose a name". It is the restoring state
+   * instead, which is what it is.
+   */
+  const passkeyProfilePending = passkeyRestoring && profile === null && localSessionActive;
 
   /**
    * WHICH PASSPORT THIS RENDER BELONGS TO.
@@ -6130,6 +6156,7 @@ export default function PassportDemo() {
       hasPasskeyProfile: profile !== null,
       dynamicStatus: dynamicSession.status,
       evmAddress: dynamicSession.evmAddress,
+      passkeyRestoring,
     }) === 'dynamic';
 
   /* ------------------------------------------------------------------ */
@@ -6286,7 +6313,7 @@ export default function PassportDemo() {
    */
   const custodyArm = dynamicOnly
     ? dynamicArm
-    : localSessionActive && passkeyRoute !== 'legacy'
+    : localSessionActive && passkeyRoute !== 'legacy' && !passkeyProfilePending
       ? passkeyArm
       : null;
   /* The two way-out panels hold the screen open in their own right. They have
@@ -6387,6 +6414,7 @@ export default function PassportDemo() {
 
   const showOnboarding =
     !sessionActive ||
+    passkeyProfilePending ||
     onboardingIntent !== null ||
     onboardingError !== null ||
     keylessPasskey !== null ||
@@ -6394,7 +6422,9 @@ export default function PassportDemo() {
   // The §2.2 session restore opens the wallet with no onboarding intent set,
   // so an opening local wallet also reads as the working stage.
   const onboardingStage: 'welcome' | 'working' =
-    onboardingIntent !== null || localWalletStatus === 'opening' ? 'working' : 'welcome';
+    onboardingIntent !== null || localWalletStatus === 'opening' || passkeyProfilePending
+      ? 'working'
+      : 'welcome';
   const onboardingLabel =
     onboardingBusyLabel ?? 'Follow the passkey prompt on this device';
   /**
@@ -10192,6 +10222,9 @@ export default function PassportDemo() {
       ) : custodyArm !== null && adoptStage !== 'enrol' ? (
         <Suspense fallback={<div className="passport-experience-loading" role="status" />}>
           <CustodyPassport
+            /* Keyed by the arm, so a change of arm is a fresh screen rather
+               than one arm's state carried into the other's. */
+            key={custodyArm.kind}
             network={custodyNetwork}
             arm={custodyArm}
             notice={passkeyOtherKeyNotice}

@@ -80,7 +80,12 @@ export function dynamicWalkAddress(search: string): string | null {
   const value = new URLSearchParams(search).get(DYNAMIC_WALK_PARAM);
   if (value === null) return null;
   const trimmed = value.trim();
-  if (trimmed.length === 0 || trimmed === '1' || trimmed === DYNAMIC_WALK_SIGNED_OUT) {
+  if (
+    trimmed.length === 0 ||
+    trimmed === '1' ||
+    trimmed === DYNAMIC_WALK_SIGNED_OUT ||
+    trimmed === DYNAMIC_WALK_AWAY
+  ) {
     return DYNAMIC_WALK_ADDRESS;
   }
   return trimmed;
@@ -104,9 +109,28 @@ export function dynamicWalkAddress(search: string): string | null {
  */
 export const DYNAMIC_WALK_SIGNED_OUT = 'out';
 
-/** Whether this URL wants the signed-out seed. */
+/**
+ * The value that seeds a signed-out session whose overlay NEVER COMES BACK to
+ * this load (2026/09/25).
+ *
+ * `?dynamicwalk=away` publishes `signed-out` like `out`, but its
+ * `openAuthFlow` publishes nothing: the reader has left for the provider's
+ * sign-in and this page is about to be reloaded — by a redirect, or by the
+ * provider's own error view, which is what Android Chrome met live. A spec
+ * presses the offer here and then loads the page again with `?dynamicwalk=1`,
+ * which is the sign-in coming back on a fresh load.
+ */
+export const DYNAMIC_WALK_AWAY = 'away';
+
+/** Whether this URL wants a signed-out seed, either kind. */
 export function dynamicWalkStartsSignedOut(search: string): boolean {
-  return new URLSearchParams(search).get(DYNAMIC_WALK_PARAM)?.trim() === DYNAMIC_WALK_SIGNED_OUT;
+  const value = new URLSearchParams(search).get(DYNAMIC_WALK_PARAM)?.trim();
+  return value === DYNAMIC_WALK_SIGNED_OUT || value === DYNAMIC_WALK_AWAY;
+}
+
+/** Whether this URL's overlay takes the reader away and never publishes. */
+function dynamicWalkOverlayLeaves(search: string): boolean {
+  return new URLSearchParams(search).get(DYNAMIC_WALK_PARAM)?.trim() === DYNAMIC_WALK_AWAY;
 }
 
 /**
@@ -128,7 +152,9 @@ export function seedDynamicWalk(search: string): boolean {
   const actions: DynamicActions = {
     /* The overlay, stood in for: it publishes what a completed sign-in would
        publish, and the app picks the flow back up exactly as it does live. */
-    openAuthFlow: () => publishDynamicSession(signedIn),
+    openAuthFlow: dynamicWalkOverlayLeaves(search)
+      ? () => undefined
+      : () => publishDynamicSession(signedIn),
     /* The EIP-191 path, refused with the sentence the real bridge refuses an
        externally connected wallet with. Nothing on this path uses it — the k256
        arm cannot verify a keccak of a prefixed string — and a stand-in that
