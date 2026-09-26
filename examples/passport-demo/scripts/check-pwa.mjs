@@ -232,6 +232,44 @@ includes(
 includes(sourceWorker, "request.mode === 'navigate'", 'navigation strategy is explicit');
 includes(sourceWorker, "caches.match('/offline.html')", 'offline navigation fallback is explicit');
 includes(sourceWorker, 'event.waitUntil(network.then(() => undefined))', 'runtime cache refresh extends worker lifetime');
+
+/* NO FETCH IN THE WORKER WITHOUT A DEADLINE (2026/09/25)
+   ------------------------------------------------------
+   A waiting worker that has called `skipWaiting()` still activates only once
+   the ACTIVE worker has no pending events. Every fetch here used to be
+   unbounded, so one request that never answered — a phone's dropped
+   connection — kept the running worker busy and parked the next build in
+   `waiting`, which is exactly what an Android phone showed on 2026/09/25. So
+   every network call goes through one of two helpers, and each call site is
+   asserted with the deadline it was given. The prover keys keep an unbounded
+   BODY on purpose: only the wait for their headers is bounded, because a slow
+   phone receiving tens of megabytes honestly must not be cut off. */
+/* The code only: the comments in the worker talk about `fetch()` too. */
+const workerCode = sourceWorker
+  .replace(/\/\*[\s\S]*?\*\//g, '')
+  .replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+const workerFetches = [...workerCode.matchAll(/(?<![\w.])fetch\(/g)].map((match) =>
+  workerCode.slice(match.index, match.index + 'fetch(withDeadline('.length),
+);
+assert.deepEqual(
+  workerFetches,
+  ['fetch(withDeadline(', 'fetch(withDeadline('],
+  'Every fetch in sw.js must go through fetchWithin or fetchHeadersWithin, which carry a deadline.',
+);
+pass('the worker makes no network request without a deadline');
+includes(sourceWorker, "typeof AbortSignal.timeout === 'function'", 'the deadline has a fallback for engines without AbortSignal.timeout');
+includes(sourceWorker, 'fetchWithin(request, NAVIGATION_TIMEOUT_MS)', 'the app shell navigation is bounded');
+includes(sourceWorker, 'fetchWithin(request, REFRESH_TIMEOUT_MS)', 'the stable-url refresh the worker waits on is bounded');
+includes(
+  sourceWorker,
+  "fetchWithin(new Request(asset, { cache: 'reload' }), REFRESH_TIMEOUT_MS)",
+  'each shell precache is bounded, so an install cannot hang on one asset',
+);
+includes(
+  sourceWorker,
+  'fetchHeadersWithin(request, RESPONSE_HEADERS_TIMEOUT_MS)',
+  'immutable assets bound the wait for headers and never the body',
+);
 assert.doesNotMatch(sourceWorker, /addEventListener\(['"](?:sync|periodicsync)['"]/);
 pass('no background transaction or proof queue is registered');
 
@@ -383,7 +421,28 @@ includes(pwaSource, 'inspectInstallingWorker(registration)', 'client detects an 
 includes(pwaSource, "document.addEventListener('visibilitychange', checkForUpdate)", 'opening the app checks for a new deployment');
 includes(pwaSource, "window.addEventListener('pageshow', checkForUpdate)", 'a page restored from the back/forward cache checks too');
 includes(pwaSource, "navigator.serviceWorker.addEventListener('controllerchange'", 'client reacts when a new worker takes over');
-includes(pwaSource, 'criticalWorkInFlight()', 'the reload is held back while a ceremony or transaction is running');
+
+/* THE UPDATE IS SILENT (2026/09/25)
+   ---------------------------------
+   `src/pwa.tsx` used to put the decision to the reader: an "Update Passport"
+   button whenever a worker installed, and a "Reload" bar whenever a reload
+   was deferred. On an Android phone the button sat across the bottom of a
+   page that already ran the new build and could only spin. The decisions
+   moved to `src/lib/appUpdate.ts`, so the check that a reload is held back
+   under a ceremony or a transaction moved with them — the same assertion,
+   against the file the rule now lives in. */
+const updateSource = await text(path.join(root, 'src/lib/appUpdate.ts'));
+includes(updateSource, 'criticalWorkInFlight()', 'the reload is held back while a ceremony or transaction is running');
+includes(updateSource, 'subscribeCriticalWork(', 'a held-back reload is reconsidered when the work ends');
+includes(
+  updateSource,
+  'workerBuildId === host.pageBuildId',
+  'a page that already runs the new build is never reloaded for it',
+);
+includes(updateSource, "if (!controlled) {", 'a first install is not treated as an update');
+includes(updateSource, 'CHUNK_RELOAD_KEY', 'a failed lazy chunk reloads at most once per build');
+includes(pwaSource, 'pageBuildId: BUILD_ID', "the page compares the worker's build with its own");
+includes(pwaSource, "window.addEventListener('vite:preloadError'", 'a lazy chunk lost to a deploy is recovered');
 includes(pwaSource, "window.addEventListener('beforeinstallprompt'", 'install prompt is captured progressively');
 includes(pwaSource, "window.addEventListener('offline'", 'offline state is surfaced');
 includes(pwaSource, 'navigator.storage.persist()', 'private-state setup requests persistent origin storage');
@@ -444,6 +503,20 @@ assert.ok(
   'Built client JavaScript does not carry the build id the service worker was stamped with.',
 );
 pass(`the client is stamped with the same build id as its service worker, ${builtBuildId[1]}`);
+
+/* …AND NOTHING IN THE BUILD OFFERS AN UPDATE (2026/09/25). Read off the
+   shipped JavaScript and CSS rather than the source, so a comment that tells
+   the story of the old button cannot trip it and a control that comes back
+   under another file's name cannot slip past it. */
+const cssNames = (await readdir(path.join(distDir, 'assets'))).filter((name) => name.endsWith('.css'));
+const builtCss = (
+  await Promise.all(cssNames.map((name) => text(path.join(distDir, 'assets', name))))
+).join('\n');
+for (const offered of ['Update Passport', 'A new version of Passport', 'pwa-update-bar', 'pwa-action']) {
+  assert.ok(!builtJavascript.includes(offered), `The production client offers an update again: ${offered}`);
+  assert.ok(!builtCss.includes(offered), `The production styles carry an update control again: ${offered}`);
+}
+pass('no update button or update bar is shipped; updating is the app\'s job');
 
 const builtManifest = await json(path.join(distDir, 'manifest.webmanifest'));
 assert.deepEqual(builtManifest, manifest);
