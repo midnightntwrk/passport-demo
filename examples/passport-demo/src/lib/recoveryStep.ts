@@ -400,4 +400,8 @@ export const RECOVERY_COPY = {
   /** The landing's quiet link under Log in and Sign up, into the same road. */
   landingEntry: 'Lost your device? Recover your Passport',
   recoverBack: 'Go back',
+  /** Under a second half that did not finish: the same run, again (2026/09/26). */
+  adoptRetry: 'Try again',
+  /** And the way out of it, back to choosing a sign-in. */
+  adoptLeave: 'Use a different sign-in',
 } as const;

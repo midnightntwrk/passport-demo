@@ -656,3 +656,80 @@ export function recoveredCustodyRecord(options: {
 export function k1PrivateStateId(user: string): string {
   return `passport-account-custody-${user.toLowerCase().slice(2, 10)}`;
 }
+
+/* -------------------------------------------------------------------------- */
+/* The sign-in's own record, on a device that has never held it               */
+/* -------------------------------------------------------------------------- */
+
+/** What {@link adoptionApproverRecord} decided. */
+export type AdoptionApproverRecord =
+  /** This device already holds a finished record for this sign-in and this account. */
+  | { readonly kind: 'ready' }
+  /** Write this one, then approve. */
+  | { readonly kind: 'write'; readonly record: CustodyAccountRecord }
+  /** This sign-in's record here names ANOTHER finished Passport. Refuse. */
+  | { readonly kind: 'other-passport' };
+
+/**
+ * The record a social sign-in approves a new device's key AGAINST, on a device
+ * where it has never held one (2026/09/26).
+ *
+ * THE DEFECT THIS EXISTS FOR, LIVE ON 2026/09/26. Every gated call reads the
+ * signing key's own record first and refuses without a finished one ("This
+ * Passport is not finished being set up yet."). Bringing a Passport to a new
+ * device is a gated call made by the SIGN-IN, and a new device is exactly a
+ * device where the sign-in has never held anything: since the ruling of
+ * 2026/09/22 nothing is filed under its key when the name is found, and the
+ * only record this flow wrote was the NEW key's — after the call that needed
+ * the sign-in's. So the add refused on every genuinely new device, before a
+ * signature was asked for, and the screen waited on it for ever.
+ *
+ * WHAT IS WRITTEN IS WHAT THE CHECK JUST ESTABLISHED. The name resolved to this
+ * account and the account's device set holds this sign-in's key, so the
+ * account is deployed, activated, and carries the sign-in's circuits — the
+ * facts {@link recoveredCustodyRecord} writes down, in the shape a Passport
+ * found by a sign-in has always been written in (`screens/CustodyPassport.tsx`
+ * `findByName`): the device point as unpadded hex, and the private-state id
+ * composed from the user key.
+ *
+ * WHAT IS NOT WRITTEN IS THE NAME. A sign-in's record with no name beside it
+ * keeps a sign-in on the way-back road in this browser (`dynamicStage` reads
+ * `name`), so this record authorises the add and does not turn the sign-in into
+ * the Passport's holder, which the ruling says it never is.
+ *
+ * AND ANOTHER PASSPORT'S RECORD IS NEVER WRITTEN OVER. One record per sign-in
+ * per network: a finished one naming a different account is a Passport this
+ * sign-in already opens here, and overwriting it would lose it. An unfinished
+ * one is a setup from before the ruling whose account was never turned on and
+ * holds nothing, so it is replaced.
+ */
+export function adoptionApproverRecord(input: {
+  readonly stored: CustodyAccountRecord | null;
+  /** The sign-in's user key: its embedded address, lower-cased. */
+  readonly user: string;
+  readonly network: string;
+  /** The account the recovery found. */
+  readonly address: string;
+  /** The sign-in's device point, recovered from its signatures. */
+  readonly pk: { readonly x: bigint; readonly y: bigint };
+}): AdoptionApproverRecord {
+  const { stored } = input;
+  if (stored !== null && nextCustodyStep(stored) === 'ready') {
+    /* `ready` implies an address; `String` keeps the comparison total without
+       a branch nothing could take. */
+    return String(stored.address).toLowerCase() === input.address.toLowerCase()
+      ? { kind: 'ready' }
+      : { kind: 'other-passport' };
+  }
+  return {
+    kind: 'write',
+    record: recoveredCustodyRecord({
+      user: input.user,
+      network: input.network,
+      address: input.address,
+      privateStateId: k1PrivateStateId(input.user),
+      pkXHex: input.pk.x.toString(16),
+      pkYHex: input.pk.y.toString(16),
+    }),
+  };
+}

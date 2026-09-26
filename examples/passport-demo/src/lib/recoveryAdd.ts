@@ -29,6 +29,13 @@
 
 import type { ClaimStepState } from './claimSteps.js'
 import {
+  ADOPTION_NOT_ADDED,
+  ADOPTION_OTHER_PASSPORT,
+  ADOPTION_OTHER_SIGN_IN,
+  ADOPTION_PASSKEY_DECLINED,
+  ADOPTION_UNCONFIRMED,
+} from './custodyAdoption.js'
+import {
   CUSTODY_KEY_NOT_ADDED,
   CUSTODY_KEY_UNCONFIRMED,
   CUSTODY_PHASE_PROVED,
@@ -381,3 +388,41 @@ export function recoveryAddFailureSentence(cause: unknown): string {
 
 /** What the primary control says under a failure: the same press, again. */
 export const RECOVERY_RETRY = 'Try again'
+
+/* -------------------------------------------------------------------------- */
+/* The same add, the other way round: a new device brought to a Passport       */
+/* -------------------------------------------------------------------------- */
+
+/** The sentences a failed hand-off may be shown verbatim, because they were written for it. */
+const ADOPTION_SHOWN_AS_IS: readonly string[] = [
+  ADOPTION_NOT_ADDED,
+  ADOPTION_UNCONFIRMED,
+  ADOPTION_PASSKEY_DECLINED,
+  ADOPTION_OTHER_SIGN_IN,
+  ADOPTION_OTHER_PASSPORT,
+  CUSTODY_STILL_FINISHING,
+  RECOVERY_KEY_NOT_READY,
+]
+
+/**
+ * The one sentence a failed hand-off shows (2026/09/26) — the second half of
+ * coming back on a new device, where the SIGN-IN approves adding this device's
+ * key. See `./custodyAdoption.ts` for the sentences and why they live there.
+ *
+ * THE SAME RULE AS {@link recoveryAddFailureSentence}, for the same add run the
+ * other way: only sentences written for this step are shown as they are, and
+ * everything else is "not added", which is true of it. `addDeviceK1`'s own two
+ * answers are translated rather than shown, because they are about a way back
+ * being added — the other direction — and would tell somebody on a new device
+ * that "recovery" was not added when what was not added is the device in their
+ * hand.
+ */
+export function adoptionFailureSentence(cause: unknown): string {
+  const message = cause instanceof Error ? cause.message.trim() : ''
+  if (ADOPTION_SHOWN_AS_IS.includes(message)) return message
+  if (message === CUSTODY_KEY_UNCONFIRMED) return ADOPTION_UNCONFIRMED
+  if (cause instanceof Error && (cause.name === 'NotAllowedError' || cause.name === 'AbortError')) {
+    return ADOPTION_PASSKEY_DECLINED
+  }
+  return ADOPTION_NOT_ADDED
+}
