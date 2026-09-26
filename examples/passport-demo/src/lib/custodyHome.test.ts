@@ -148,6 +148,18 @@ describe('the word under a figure that has not settled', () => {
        for a word to be about, so it never carries one. */
     expect(notes.has(NIGHT_COLOUR_HEX)).toBe(false);
   });
+
+  it('marks the asset a payment is moving Transferring, over Arriving on the same row', () => {
+    const notes = custodyHomePendingBalances(holdings({ arriving: 2 }), MUSD_COLOUR_HEX.toUpperCase());
+    expect(notes.get(MUSD_COLOUR_HEX)).toEqual({ value: '100', state: 'transferring' });
+    expect(notes.has(NIGHT_COLOUR_HEX)).toBe(false);
+  });
+
+  it('marks NIGHT Transferring under Home’s own key while NIGHT is being sent', () => {
+    const notes = custodyHomePendingBalances(holdings(), 'night');
+    expect(notes.get(NIGHT_COLOUR_HEX)?.state).toBe('transferring');
+    expect(notes.has(MUSD_COLOUR_HEX)).toBe(false);
+  });
 });
 
 /* -------------------------------------------------------------------------- */

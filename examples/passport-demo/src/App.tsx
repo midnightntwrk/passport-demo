@@ -172,6 +172,9 @@ import OnboardingScreen from './screens/Onboarding.js';
 import WelcomeScreen from './screens/Welcome.js';
 import AccountRecoveryScreen from './screens/AccountRecovery.js';
 import HomeScreen from './screens/Home.js';
+/* The pill a payment in flight is shown by on the tabs that are not Home. */
+import { SendProgressPill } from './screens/SendProgress.js';
+import type { SendDraft } from './lib/sendProgress.js';
 import AliasClaimScreen from './screens/AliasClaim.js';
 import BackupScreen from './screens/Backup.js';
 import EcosystemScreen from './screens/Ecosystem.js';
@@ -1470,6 +1473,21 @@ const NO_ACCOUNT_BALANCES: AccountBalances = {
   error: null,
 };
 
+/**
+ * The fee answer on a custody Passport, where every call is paid for on the
+ * holder's behalf and nothing needs asking.
+ *
+ * A MODULE CONSTANT, NOT AN ARROW IN THE RENDER (2026/09/25). The Send sheet
+ * polls this for as long as it is open, and it restarted the poll whenever it
+ * was handed a different function. An inline arrow is a different function on
+ * every render, and each restart published "no answer yet" before the answer:
+ * the "Checking with the fee sponsor…" line was inserted into the sheet and
+ * removed again on every render of the app, which on a phone is a sheet that
+ * grows and snaps back several times a second (measured on staging, v3.3).
+ */
+const CUSTODY_FEE_READINESS = (): Promise<{ mode: 'sponsored' }> =>
+  Promise.resolve({ mode: 'sponsored' as const });
+
 export default function PassportDemo() {
   // Selected network context: filters the app registry. The demo wallet runs
   // on the ONE network this build was configured for, and the UI says so
@@ -1487,6 +1505,13 @@ export default function PassportDemo() {
   const [activity, setActivity] = useState<ActivityEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [mobileTab, setMobileTab] = useState<MobileTab>('home');
+  /* "Try again" pressed on the Assets or Apps tab: Home opens Send on the
+     draft. The nonce makes the same draft pressed twice open twice. */
+  const [sendRetryRequest, setSendRetryRequest] = useState<{ draft: SendDraft; nonce: number } | null>(
+    null,
+  );
+  /* The pill pressed on the Assets or Apps tab: Home opens the progress view. */
+  const [sendProgressOpenNonce, setSendProgressOpenNonce] = useState<number | null>(null);
   // One-button onboarding (2026/08/05): there is no separate "choose" step
   // any more, so the screen only distinguishes idle from working.
   const [onboardingIntent, setOnboardingIntent] = useState<OnboardingIntent | null>(null);
@@ -1557,6 +1582,17 @@ export default function PassportDemo() {
   const [unusableDevice, setUnusableDevice] = useState<string | null>(null);
   const [localSurfaces, setLocalSurfaces] = useState<LocalWalletSurfaces | null>(null);
   const [localWalletStatus, setLocalWalletStatus] = useState<LocalWalletStatus>('idle');
+  /**
+   * Whether the silent session restore below is still in flight — from mount
+   * until the profile is back or the restore has given up. Starts true only on
+   * a device that has signed in with a passkey before, which is the only
+   * device a restore can land on. `choosePassportIdentity` reads it so a
+   * provider sign-in that reports first cannot paint its own road over a
+   * passkey Passport that is a few awaits from being back (2026/09/25).
+   */
+  const [passkeyRestoring, setPasskeyRestoring] = useState<boolean>(
+    () => storedLastPasskey() !== null,
+  );
   const [localSyncPercent, setLocalSyncPercent] = useState<number | null>(null);
   const [localWalletNetworkId, setLocalWalletNetworkId] = useState<string | null>(null);
   /**
@@ -2333,7 +2369,13 @@ export default function PassportDemo() {
         // would blank the label out from under it.
         if (!superseded()) setOnboardingBusyLabel(null);
       }
-    })();
+    })().finally(() => {
+      /* Every way out of the restore — nothing stored, a ceremony took over,
+         a failure, or the profile back in state — ends the restoring answer.
+         A run cancelled by StrictMode's remount leaves it to the run that
+         replaced it. */
+      if (!cancelled) setPasskeyRestoring(false);
+    });
     return () => {
       cancelled = true;
       if (sessionRestoreCancel.current === abort) sessionRestoreCancel.current = null;
@@ -6139,6 +6181,15 @@ export default function PassportDemo() {
    */
   const localSessionActive = localWalletStatus === 'ready' && localSurfaces !== null;
   const sessionActive = localSessionActive;
+  /**
+   * THE BEAT BETWEEN THE WALLET AND THE PROFILE, on a reload (2026/09/25).
+   * The silent restore opens the wallet first and hands the profile back two
+   * awaits later; in between, nothing knows whose Passport this is, and what
+   * rendered was whichever screen answered first — a sign-in's new-device
+   * road, or the old Home with "Choose a name". It is the restoring state
+   * instead, which is what it is.
+   */
+  const passkeyProfilePending = passkeyRestoring && profile === null && localSessionActive;
 
   /**
    * WHICH PASSPORT THIS RENDER BELONGS TO.
@@ -6157,6 +6208,7 @@ export default function PassportDemo() {
       hasPasskeyProfile: profile !== null,
       dynamicStatus: dynamicSession.status,
       evmAddress: dynamicSession.evmAddress,
+      passkeyRestoring,
     }) === 'dynamic';
 
   /* ------------------------------------------------------------------ */
@@ -6313,7 +6365,7 @@ export default function PassportDemo() {
    */
   const custodyArm = dynamicOnly
     ? dynamicArm
-    : localSessionActive && passkeyRoute !== 'legacy'
+    : localSessionActive && passkeyRoute !== 'legacy' && !passkeyProfilePending
       ? passkeyArm
       : null;
   /* The two way-out panels hold the screen open in their own right. They have
@@ -6414,6 +6466,7 @@ export default function PassportDemo() {
 
   const showOnboarding =
     !sessionActive ||
+    passkeyProfilePending ||
     onboardingIntent !== null ||
     onboardingError !== null ||
     keylessPasskey !== null ||
@@ -6421,7 +6474,9 @@ export default function PassportDemo() {
   // The §2.2 session restore opens the wallet with no onboarding intent set,
   // so an opening local wallet also reads as the working stage.
   const onboardingStage: 'welcome' | 'working' =
-    onboardingIntent !== null || localWalletStatus === 'opening' ? 'working' : 'welcome';
+    onboardingIntent !== null || localWalletStatus === 'opening' || passkeyProfilePending
+      ? 'working'
+      : 'welcome';
   const onboardingLabel =
     onboardingBusyLabel ?? 'Follow the passkey prompt on this device';
   /**
@@ -9934,6 +9989,16 @@ export default function PassportDemo() {
    */
   const renderCustodyHome = (custody: CustodyHomeView) => {
     const account = custodyHomeAccount(custody.holdings);
+    /* The `Arriving` word, and `Transferring` on the asset a payment is moving
+       while the pill says it is running — one projection for Home and the
+       Assets shelf, so the two cannot disagree with each other or the pill. */
+    const custodyPending = custodyHomePendingBalances(
+      custody.holdings,
+      custody.sendProgress?.sendingAssetId ?? null,
+    );
+    const sendProgress = custody.sendProgress
+      ? { view: custody.sendProgress.view, onDismiss: custody.sendProgress.onDismiss }
+      : null;
     const aliasRecord = custodyHomeAliasRecord({
       name: custody.name,
       network: custody.network,
@@ -9972,7 +10037,7 @@ export default function PassportDemo() {
         account={account}
         /* The `Arriving` word under a figure with coins behind it that have no
            position yet. Never added to the figure itself. */
-        pendingBalances={custodyHomePendingBalances(custody.holdings)}
+        pendingBalances={custodyPending}
         error={custody.error}
         onDismissError={custody.onDismissError}
         onRefresh={custody.onRefresh}
@@ -9981,8 +10046,11 @@ export default function PassportDemo() {
           /* This Passport's calls are proved by a service, not in this tab. */
           provingMode: 'http',
           /* Every call on this path is paid for on the holder's behalf, so the
-             probe answers the one thing it is asked without going anywhere. */
-          readFeeReadiness: () => Promise.resolve({ mode: 'sponsored' as const }),
+             probe answers the one thing it is asked without going anywhere.
+             ONE FUNCTION FOR THE LIFE OF THE APP (2026/09/25): an inline arrow
+             here was a new probe on every render, and the Send sheet restarted
+             its fee poll for each one — see `CUSTODY_FEE_READINESS`. */
+          readFeeReadiness: CUSTODY_FEE_READINESS,
           onSend: custody.send.onSend,
           onSendToName: custody.send.onSendToName,
           /* WHICH BUILD HOLDS THIS PASSPORT'S MONEY, for the one rule on that
@@ -10012,6 +10080,18 @@ export default function PassportDemo() {
              `identity/custodyContractSend.ts` — so the review step says so
              rather than counting legs this build does not have. */
           nameLegSteps: 1 as const,
+          /* The sheet closes once the payment is handed over, and a second
+             payment waits for the first. See `lib/sendProgress.ts`. */
+          ...(custody.send.background ? { background: true } : {}),
+          inFlightReason: custody.send.inFlightReason ?? null,
+        }}
+        /* The pill and the live row. */
+        sendProgress={sendProgress}
+        sendRetryRequest={sendRetryRequest}
+        sendProgressOpenNonce={sendProgressOpenNonce}
+        onSendRequestHandled={() => {
+          setSendRetryRequest(null);
+          setSendProgressOpenNonce(null);
         }}
         activity={homeActivity}
         appsProfile={custodyAppsProfile}
@@ -10052,7 +10132,7 @@ export default function PassportDemo() {
              disagree about what this Passport holds. */
           <AssetsScreen
             account={account}
-            pendingBalances={custodyHomePendingBalances(custody.holdings)}
+            pendingBalances={custodyPending}
             setupUnfinished={Boolean(custody.finishSetup)}
             network={custody.network as PassportNetwork}
             onRefresh={custody.onRefresh}
@@ -10065,6 +10145,24 @@ export default function PassportDemo() {
              below it is the prototype wallet's, and this Passport has none. */
           <AppsScreen profile={custodyAppsProfile} network={custody.network as PassportNetwork} />
         )}
+        {/* THE PAYMENT IN FLIGHT, ON THE OTHER TABS (2026/09/25). Home draws
+            its own, because it knows when its sheets are open. Pressing it
+            goes to Home and reopens the payment; "Try again" goes to Home and opens
+            Send on the same payment. */}
+        {mobileTab !== 'home' && sendProgress ? (
+          <SendProgressPill
+            view={sendProgress.view}
+            onDismiss={sendProgress.onDismiss}
+            onRetry={(draft) => {
+              setMobileTab('home');
+              setSendRetryRequest((previous) => ({ draft, nonce: (previous?.nonce ?? 0) + 1 }));
+            }}
+            onOpen={() => {
+              setMobileTab('home');
+              setSendProgressOpenNonce((previous) => (previous ?? 0) + 1);
+            }}
+          />
+        ) : null}
         <PassportNav active={mobileTab} onSelect={setMobileTab} />
       </>
     );
@@ -10178,6 +10276,9 @@ export default function PassportDemo() {
       ) : custodyArm !== null && adoptStage !== 'enrol' ? (
         <Suspense fallback={<div className="passport-experience-loading" role="status" />}>
           <CustodyPassport
+            /* Keyed by the arm, so a change of arm is a fresh screen rather
+               than one arm's state carried into the other's. */
+            key={custodyArm.kind}
             network={custodyNetwork}
             arm={custodyArm}
             notice={passkeyOtherKeyNotice}

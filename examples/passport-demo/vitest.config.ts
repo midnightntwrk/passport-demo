@@ -54,6 +54,18 @@
  * listener set, and the rule that a release only counts once — so every one of
  * those branches is drilled directly in `src/lib/appBusy.test.ts`.
  *
+ * `src/lib/appUpdate.ts` went IN on 2026/09/25, the day it was written. It
+ * decides when an open Passport is reloaded into a new deployment, and it
+ * replaced an "Update Passport" button that sat across the bottom of a phone
+ * offering a page its own build. Every branch in it is a reload in the wrong
+ * place or a missing one: a page reloaded under a passkey ceremony or a send,
+ * one reloaded over a half-typed payment, one that already runs the new build
+ * reloaded for nothing, a first install treated as an update, a lazy chunk
+ * that reloads the page for ever, and a new build never reached at all. It
+ * holds no DOM and no React — the page, the clock, the reload, and the
+ * question to the worker are injected — so all of it is drilled in
+ * `src/lib/appUpdate.test.ts`. The wiring is `src/pwa.tsx`.
+ *
  * `src/lib/balanceWatch.ts` went IN on 2026/09/03, the day it was written. It
  * decides WHEN this app reads the account's ledger again, and the defect it was
  * written for is a reviewer watching an opening balance sit at zero until they
@@ -110,6 +122,16 @@
  * finishes — and each is drilled in `src/lib/nodeSubmission.test.ts` against a
  * fake that closes the way polkadot-js does. The SDK glue that opens the real
  * client stays in `src/lib/localWallet.ts`, which is out below.
+ *
+ * `src/lib/sendProgress.ts` went IN on 2026/09/25, the day it was written. It
+ * decides what the in-progress pill and the live activity row say while a
+ * payment runs behind the Passport instead of in front of it: which of four
+ * phases the engine's step is, when a running payment becomes Sent or its one
+ * failure sentence, that a payment still moving cannot be put away, and that a
+ * record left by an earlier visit reads as confirming or as nothing sent. Each
+ * wrong answer is a pill that lies about somebody's money, and each is drilled
+ * in `src/lib/sendProgress.test.ts`. The painting is `src/screens/SendProgress.tsx`,
+ * which holds no decisions.
  *
  * `src/lib/sheetHistory.ts` went IN on 2026/09/04, the day it was written. It
  * decides which history entry belongs to which of Passport's sheets, and
@@ -815,6 +837,7 @@ export default mergeConfig(
           'src/lib/activityFeed.ts',
           'src/lib/address.ts',
           'src/lib/appBusy.ts',
+          'src/lib/appUpdate.ts',
           'src/lib/balanceWatch.ts',
           'src/lib/backupDevice.ts',
           'src/lib/buildId.ts',
@@ -854,6 +877,7 @@ export default mergeConfig(
           'src/lib/recoveryStep.ts',
           'src/lib/sendAssets.ts',
           'src/lib/sendLegs.ts',
+          'src/lib/sendProgress.ts',
           'src/lib/sheetHistory.ts',
           'src/lib/snakeGame.ts',
           'src/lib/shieldedNote.ts',

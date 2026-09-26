@@ -3,7 +3,13 @@ import { describe, expect, it } from 'vitest';
 import { CUSTODY_BACKUP_KEY } from './backupDevice.js';
 import {
   RECOVERY_COPY,
+  RECOVERY_INTENT_KEY,
+  RECOVERY_INTENT_TTL_MS,
+  clearRecoveryIntent,
+  consumeRecoveryIntent,
+  loadRecoveryIntent,
   loadRecoveryRecord,
+  saveRecoveryIntent,
   providerRecoveryStage,
   recoveryHeld,
   recoveryHomeEntry,
@@ -159,6 +165,93 @@ describe('picking the step back up after the sign-in', () => {
 
   it('never asks for a second approval while the first is away', () => {
     expect(recoveryResumes({ ...PRESSED, busy: true })).toBe(false);
+  });
+});
+
+describe('remembering the press across a reload', () => {
+  const T = 1_800_000_000_000;
+  const USER = '0xAbC';
+  const SLOT = `${RECOVERY_INTENT_KEY}:0xabc|stagenet`;
+
+  function throwing() {
+    return {
+      getItem: (): string | null => {
+        throw new Error('blocked');
+      },
+      setItem: (): void => {
+        throw new Error('blocked');
+      },
+      removeItem: (): void => {
+        throw new Error('blocked');
+      },
+    };
+  }
+
+  it('finds nothing where nothing was pressed', () => {
+    expect(loadRecoveryIntent(store(), USER, 'stagenet', T)).toBeNull();
+  });
+
+  it('finds a press after a reload, scoped to the account and the network', () => {
+    const storage = store();
+    saveRecoveryIntent(storage, USER, 'stagenet', T);
+    expect(storage.getItem(SLOT)).not.toBeNull();
+    expect(loadRecoveryIntent(storage, '0xabc', 'stagenet', T + 1_000)).toBe('pending');
+    expect(loadRecoveryIntent(storage, '0xdef', 'stagenet', T + 1_000)).toBeNull();
+    expect(loadRecoveryIntent(storage, USER, 'preprod', T + 1_000)).toBeNull();
+  });
+
+  it('resumes a press at most once', () => {
+    const storage = store();
+    saveRecoveryIntent(storage, USER, 'stagenet', T);
+    consumeRecoveryIntent(storage, USER, 'stagenet', T + 5_000);
+    expect(loadRecoveryIntent(storage, USER, 'stagenet', T + 6_000)).toBe('consumed');
+    /* A second consume of a consumed press changes nothing. */
+    consumeRecoveryIntent(storage, USER, 'stagenet', T + 7_000);
+    expect(loadRecoveryIntent(storage, USER, 'stagenet', T + 8_000)).toBe('consumed');
+    /* And the consumed press is dated from the resume. */
+    expect(loadRecoveryIntent(storage, USER, 'stagenet', T + 5_000 + RECOVERY_INTENT_TTL_MS)).toBe(
+      'consumed',
+    );
+  });
+
+  it('consumes nothing that is not stored', () => {
+    const storage = store();
+    consumeRecoveryIntent(storage, USER, 'stagenet', T);
+    expect(storage.getItem(SLOT)).toBeNull();
+  });
+
+  it('forgets a press after ten minutes, and one dated in the future', () => {
+    const storage = store();
+    saveRecoveryIntent(storage, USER, 'stagenet', T);
+    expect(loadRecoveryIntent(storage, USER, 'stagenet', T + RECOVERY_INTENT_TTL_MS)).toBe('pending');
+    expect(loadRecoveryIntent(storage, USER, 'stagenet', T + RECOVERY_INTENT_TTL_MS + 1)).toBeNull();
+    expect(storage.getItem(SLOT)).toBeNull();
+    saveRecoveryIntent(storage, USER, 'stagenet', T + 60_000);
+    expect(loadRecoveryIntent(storage, USER, 'stagenet', T)).toBeNull();
+    expect(storage.getItem(SLOT)).toBeNull();
+  });
+
+  it('forgets what it cannot read', () => {
+    for (const junk of ['not json', 'null', '{"at":"soon","consumed":false}', `{"at":${T}}`]) {
+      const storage = store({ [SLOT]: junk });
+      expect(loadRecoveryIntent(storage, USER, 'stagenet', T)).toBeNull();
+      expect(storage.getItem(SLOT)).toBeNull();
+    }
+  });
+
+  it('forgets a press when the add ends or the reader says "Not now"', () => {
+    const storage = store();
+    saveRecoveryIntent(storage, USER, 'stagenet', T);
+    clearRecoveryIntent(storage, USER, 'stagenet');
+    expect(loadRecoveryIntent(storage, USER, 'stagenet', T)).toBeNull();
+  });
+
+  it('remembers nothing, and throws nothing, where storage is refused', () => {
+    const storage = throwing();
+    expect(() => saveRecoveryIntent(storage, USER, 'stagenet', T)).not.toThrow();
+    expect(() => clearRecoveryIntent(storage, USER, 'stagenet')).not.toThrow();
+    expect(() => consumeRecoveryIntent(storage, USER, 'stagenet', T)).not.toThrow();
+    expect(loadRecoveryIntent(storage, USER, 'stagenet', T)).toBeNull();
   });
 });
 

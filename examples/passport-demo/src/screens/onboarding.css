@@ -211,6 +211,9 @@
 /* Quiet secondary path beneath the hint: sign in with a passkey the
    platform picker offers, rather than the one this browser remembers. */
 .mnob-alt {
+  /* A 44 px tall target (2026/09/25): at 13 px type and 8 px of padding it
+     rendered 32 px tall, the last small target on the onboarding screens. */
+  min-height: 44px;
   margin-top: 14px;
   padding: 8px 2px;
   border: 0;

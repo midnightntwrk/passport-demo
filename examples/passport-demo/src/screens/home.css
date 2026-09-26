@@ -58,9 +58,9 @@
    scrolled sideways as a result. Nothing was ever clipped, so no screenshot
    looked broken; every screen could simply be dragged off-centre with a
    thumb. Below 460 px the actions take their own row, right-aligned under the
-   wordmark, and the segments narrow to keep that row on one line down to
-   about 380 px. Narrower still and the actions wrap again rather than pushing
-   the page out. */
+   wordmark. The theme segments no longer narrow here: they are 44 px touch
+   targets at every width (theme-toggle.css, 2026/09/25). Where the row does
+   not fit, the actions wrap again rather than pushing the page out. */
 @media (max-width: 460px) {
   .mnhome-bar {
     flex-wrap: wrap;
@@ -74,7 +74,6 @@
     flex-wrap: wrap;
     gap: 6px;
   }
-  .mnhome-bar-actions .mnthemetoggle-option { width: 26px; }
 }
 
 .mnhome-icon-button {
@@ -1653,3 +1652,222 @@ button.mnhome-support { font-family: inherit; cursor: pointer; }
 .mnhome-finish-error { margin: 0; font-size: 12px; color: var(--mn-danger, var(--mn-text-primary)); }
 .mnhome-finish-button { justify-self: start; min-height: 44px; }
 .mnhome-finish-button[disabled] { opacity: 0.7; cursor: progress; }
+
+/* --- A payment in flight (2026/09/25) ------------------------------------ */
+/* The pill above the tab bar and the live row at the head of the activity
+   list. See `SendProgress.tsx`. The pill is FIXED, so it arriving, changing
+   phase, and going never moves anything in the page; it sits above the Receive
+   sheet's scrim (119) and above the toasts (118), which measure it through
+   `data-toast-clear` and lift themselves clear of it. */
+.mnsendp-pill {
+  position: fixed;
+  left: 50%;
+  bottom: calc(var(--mn-nav-height) + max(16px, env(safe-area-inset-bottom)) + 12px);
+  z-index: 121;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: min(100% - 32px, 480px);
+  min-height: 48px;
+  padding: 6px 8px 6px 4px;
+  border: var(--mn-hairline) solid var(--mn-border-medium);
+  border-radius: var(--mn-radius-pill);
+  background: var(--mn-surface-raised);
+  color: var(--mn-text-primary);
+  box-shadow: var(--mn-shadow-md);
+  transform: translateX(-50%);
+  box-sizing: border-box;
+}
+/* Over the Receive sheet the foot of the screen is the sheet's own, so the
+   pill goes to the top instead. */
+.mnsendp-pill[data-placement='top'] {
+  top: calc(max(12px, env(safe-area-inset-top)) + 8px);
+  bottom: auto;
+}
+.mnsendp-pill[data-state='failed'] { border-color: var(--mn-border-strong); }
+
+.mnsendp-open {
+  appearance: none;
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: var(--mn-radius-pill);
+  background: transparent;
+  color: inherit;
+  font-family: var(--mn-font-body);
+  text-align: left;
+  cursor: pointer;
+}
+.mnsendp-open:focus-visible,
+.mnsendp-retry:focus-visible,
+.mnsendp-close:focus-visible,
+.mnsendp-link:focus-visible {
+  outline: 2px solid var(--mn-accent);
+  outline-offset: 2px;
+}
+
+.mnsendp-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--mn-accent-soft);
+  color: var(--mn-accent-ink);
+}
+[data-state='failed'] > .mnsendp-icon,
+[data-state='failed'] .mnsendp-open > .mnsendp-icon {
+  background: var(--mn-surface-sunken);
+  color: var(--mn-text-primary);
+}
+
+/* Two lines at most, each ONE line tall and clipped rather than wrapped, so a
+   phase changing its wording never changes the pill's height. */
+.mnsendp-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.3;
+}
+.mnsendp-title {
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.mnsendp-phase {
+  overflow: hidden;
+  color: var(--mn-text-secondary);
+  font-size: 12px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+/* The failure sentence is the whole message, so it may take two lines. */
+.mnsendp-pill[data-state='failed'] .mnsendp-title {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  font-weight: 500;
+  white-space: normal;
+}
+
+.mnsendp-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+}
+.mnsendp-link,
+.mnsendp-retry {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 32px;
+  padding: 0 4px;
+  border: 0;
+  background: transparent;
+  color: var(--mn-accent-ink);
+  font-family: var(--mn-font-body);
+  font-size: 12px;
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.mnsendp-link:hover,
+.mnsendp-retry:hover { text-decoration: underline; }
+.mnsendp-close {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--mn-text-secondary);
+  cursor: pointer;
+}
+.mnsendp-close:hover { background: var(--mn-surface-hover); }
+
+/* The live row: the activity list's own shape, with the spinner where the dot
+   would be. */
+.mnsendp-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 0 4px;
+  padding: 10px 12px;
+  border: var(--mn-hairline) solid var(--mn-border-hairline);
+  border-radius: var(--mn-radius-md);
+  background: var(--mn-surface-card);
+  scroll-margin: 96px;
+}
+.mnsendp-row .mnsendp-text { flex: 1 1 auto; }
+.mnsendp-row .mnsendp-title { white-space: normal; }
+.mnsendp-row .mnsendp-phase { white-space: normal; }
+
+/* The live row is PENDING, not a record: an accent edge and a small tag set it
+   apart from the calm rows under it, and the whole of it is a button. */
+.mnsendp-row {
+  border-color: var(--mn-accent);
+  border-left-width: 3px;
+  background: var(--mn-accent-soft);
+  padding: 4px 8px 4px 4px;
+}
+.mnsendp-row[data-state='failed'] {
+  border-color: var(--mn-border-strong);
+  background: var(--mn-surface-card);
+}
+.mnsendp-row .mnsendp-open { border-radius: var(--mn-radius-sm); }
+.mnsendp-tag {
+  color: var(--mn-accent-ink);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.mnsendp-row[data-state='failed'] .mnsendp-tag { color: var(--mn-text-secondary); }
+
+/* The payment, reopened: the five steps. */
+.mnsendp-steps {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0;
+  padding: 0;
+  list-style: none;
+}
+.mnsendp-step {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--mn-text-muted);
+  font-size: 13px;
+}
+.mnsendp-step[data-state='done'] { color: var(--mn-text-secondary); }
+.mnsendp-step[data-state='current'] { color: var(--mn-text-primary); font-weight: 600; }
+.mnsendp-step-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--mn-surface-sunken);
+}
+.mnsendp-step[data-state='done'] .mnsendp-step-mark,
+.mnsendp-step[data-state='current'] .mnsendp-step-mark {
+  background: var(--mn-accent-soft);
+  color: var(--mn-accent-ink);
+}
+.mnsendp-sheet-link { display: inline-flex; align-items: center; gap: 6px; text-decoration: none; }
