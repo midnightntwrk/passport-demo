@@ -22,11 +22,14 @@
  * because an app already handles them.
  */
 
+/* Not the wallet SDK's `address-format`, which statically imports the ledger:
+   this module is on the first render path through `txConsent.tsx`. See
+   `./midnightAddress.ts`; the send itself decodes with the SDK. */
 import {
   mainnet,
   MidnightBech32m,
   UnshieldedAddress,
-} from '@midnight-ntwrk/wallet-sdk/address-format'
+} from './midnightAddress.js'
 import type { PassportTxRequest, PassportTxResponse } from '../backend.js'
 import { explorerTxUrl } from './networks.js'
 

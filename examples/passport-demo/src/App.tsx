@@ -2243,6 +2243,13 @@ export default function PassportDemo() {
       scope: { appId: string; accountId: string },
       credentialId: string | null,
     ) => {
+      /* The two WASM runtimes first, in order (2026/09/25). The ledger is no
+         longer in the entry chunk, so after a ceremony this is the first thing
+         that reaches it; the landing started the download when it went idle,
+         and what is left of it is waited for here, under a line that says what
+         is happening. See `./lib/runtimeGate.ts`. */
+      setOnboardingBusyLabel('Opening your Passport');
+      await runtimesReady();
       const { createLocalMidnightWallet } = await import('./lib/localWallet.js');
       setLocalWalletStatus('opening');
       // §2.2 stopgap (see the banner near LOCAL_SCOPE): persist the wrapped
@@ -2309,6 +2316,9 @@ export default function PassportDemo() {
         setLocalWalletStatus('opening');
       setOnboardingBusyLabel('Reopening your Passport');
       try {
+        /* Behind the runtimes, for the reason `openLocalWalletWithSeed` gives:
+           this is the other way a wallet is first opened. */
+        await runtimesReady();
         const { createLocalMidnightWallet } = await import('./lib/localWallet.js');
         let wallet: LocalMidnightWallet;
         try {
