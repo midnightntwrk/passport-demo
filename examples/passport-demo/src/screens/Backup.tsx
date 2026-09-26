@@ -15,6 +15,8 @@ import {
   describeBackupCreatedAt,
   describeBackupPassword,
   describeExportOutcome,
+  describeViewingKeyRestore,
+  viewingKeyAccountCount,
 } from '../identity/backup.js'
 import type { PassportBackupExport, PassportBackupSummary } from '../identity/backup.js'
 import ThemeToggle from './ThemeToggle.js'
@@ -39,12 +41,25 @@ import './identity.css'
  * password-encrypted file, and restoring it. See `../identity/backup.ts` for
  * exactly what goes in the file, what deliberately does not, and why.
  *
- * The two sentences this screen must never soften:
+ * The sentences this screen must never soften:
  *
  *   - lose the password and the backup is gone. Nothing stores it, nothing
  *     escrows it, and no part of Passport ever sees it;
  *   - the passkey is NOT in the file and cannot be. The file restores what
- *     this Passport did; it does not restore the ability to act as it.
+ *     this Passport did; it does not restore the ability to act as it;
+ *   - since 2026/09/26 the file DOES hold the key that reads this Passport's
+ *     payments (`../identity/backup.ts`, "THE ONE KEY A BACKUP CARRIES"), so
+ *     whoever has the file and its password can see what it was paid — and
+ *     cannot spend any of it. Said on the screen in those words, beside the
+ *     password, because it is the reason the password matters.
+ *
+ * THE SAME SCREEN, ASKED ONCE AFTER A RECOVERY (2026/09/26). A Passport
+ * brought back on a new device through the sign-in cannot read the payments it
+ * was sent before, and its backup is what brings them back. So the recovery
+ * ends by asking for it (`../identity/viewingKeys.ts`), and this screen is the
+ * question: `purpose="earlier-payments"` leads with the restore, leaves out the
+ * export and the two reassurances that are about a device that still works,
+ * and offers "Not now" in place of "Done".
  *
  * There is still no cloud backup and no seed phrase, because neither exists.
  */
@@ -59,6 +74,12 @@ export interface BackupProps {
   onRestore: (file: File, password: string) => Promise<PassportBackupSummary>
   /** Leaves the screen. Nothing is uploaded, exported, or discarded by it. */
   onDone: () => void
+  /**
+   * Why the screen is open. `backup`, the default, is "Back up or restore"
+   * from Home. `earlier-payments` is the question a Passport is asked once,
+   * just after it comes back on a new device — see the header.
+   */
+  purpose?: 'backup' | 'earlier-payments'
 }
 
 type Busy = 'export' | 'restore' | null
@@ -72,10 +93,13 @@ interface Holdings {
   aliases: number
   passportContracts: number
   incentives: number
+  /** Accounts whose viewing key an export would carry. */
+  viewingKeyAccounts: number
 }
 
 export default function BackupScreen(props: BackupProps) {
   const { onExport, onRestore, onDone } = props
+  const earlierPayments = props.purpose === 'earlier-payments'
 
   const [busy, setBusy] = useState<Busy>(null)
 
@@ -114,6 +138,7 @@ export default function BackupScreen(props: BackupProps) {
           aliases: Object.keys(contents.aliases).length,
           passportContracts: Object.keys(contents.passportContracts).length,
           incentives: contents.incentives.length,
+          viewingKeyAccounts: viewingKeyAccountCount(contents),
         })
       })
       .catch((cause: unknown) => {
@@ -130,7 +155,12 @@ export default function BackupScreen(props: BackupProps) {
   }, [restored])
 
   const heldRecords =
-    holdings === null ? null : holdings.aliases + holdings.passportContracts + holdings.incentives
+    holdings === null
+      ? null
+      : holdings.aliases +
+        holdings.passportContracts +
+        holdings.incentives +
+        holdings.viewingKeyAccounts
 
   const hint = password ? describeBackupPassword(password) : null
   const mismatch = confirmation.length > 0 && confirmation !== password
@@ -182,186 +212,216 @@ export default function BackupScreen(props: BackupProps) {
       </header>
 
       <div className="mnid-body">
-        <p className="mnid-kicker">Optional</p>
-        <h1 className="mnid-title">Where your Passport lives</h1>
-        <p className="mnid-lede">
-          Two things already stand between you and losing access, and neither needs anything
-          from you. The third — a file you keep — is below.
-        </p>
+        {earlierPayments ? (
+          <>
+            <p className="mnid-kicker">One more thing</p>
+            <h1 className="mnid-title">Bring back your earlier payments</h1>
+            <p className="mnid-lede">
+              Payments you received before this device are still yours, but this device cannot
+              read them yet. If you made a backup on your old device, choose the file and type
+              its password, and they will show here, ready to spend.
+            </p>
+          </>
+        ) : (
+          <>
+            <p className="mnid-kicker">Optional</p>
+            <h1 className="mnid-title">Where your Passport lives</h1>
+            <p className="mnid-lede">
+              Two things already stand between you and losing access, and neither needs anything
+              from you. The third — a file you keep — is below.
+            </p>
 
-        <ul className="mnid-bullets">
-          <li className="mnid-bullet">
-            <span className="mnid-bullet-mark">
-              <KeyRound size={17} aria-hidden="true" />
-            </span>
-            <div>
-              <strong>Your passkey follows your devices</strong>
-              <small>
-                The passkey you created is a platform credential. If your device syncs
-                passkeys — iCloud Keychain on Apple devices, Google Password Manager on
-                Android and Chrome — it is already on your other devices, and signing in
-                there reopens the same Passport. Passport does not run that sync
-                and cannot see it: if your platform does not sync passkeys, this passkey
-                exists on this device only.
-              </small>
-            </div>
-          </li>
-          <li className="mnid-bullet">
-            <span className="mnid-bullet-mark">
-              <Database size={17} aria-hidden="true" />
-            </span>
-            <div>
-              <strong>Passport state is encrypted in this browser as you use it</strong>
-              <small>
-                Passport&apos;s private state is stored in this browser&apos;s IndexedDB,
-                encrypted under a key that only a live passkey assertion can produce.
-                Clearing this browser&apos;s site data deletes it. It is not copied
-                anywhere else — there is no server holding it for you.
-              </small>
-            </div>
-          </li>
-        </ul>
+            <ul className="mnid-bullets">
+              <li className="mnid-bullet">
+                <span className="mnid-bullet-mark">
+                  <KeyRound size={17} aria-hidden="true" />
+                </span>
+                <div>
+                  <strong>Your passkey follows your devices</strong>
+                  <small>
+                    The passkey you created is a platform credential. If your device syncs
+                    passkeys — iCloud Keychain on Apple devices, Google Password Manager on
+                    Android and Chrome — it is already on your other devices, and signing in
+                    there reopens the same Passport. Passport does not run that sync
+                    and cannot see it: if your platform does not sync passkeys, this passkey
+                    exists on this device only.
+                  </small>
+                </div>
+              </li>
+              <li className="mnid-bullet">
+                <span className="mnid-bullet-mark">
+                  <Database size={17} aria-hidden="true" />
+                </span>
+                <div>
+                  <strong>Passport state is encrypted in this browser as you use it</strong>
+                  <small>
+                    Passport&apos;s private state is stored in this browser&apos;s IndexedDB,
+                    encrypted under a key that only a live passkey assertion can produce.
+                    Clearing this browser&apos;s site data deletes it. It is not copied
+                    anywhere else — there is no server holding it for you.
+                  </small>
+                </div>
+              </li>
+            </ul>
+          </>
+        )}
 
         {/* --- Export ------------------------------------------------------ */}
-        <div className="mnid-card">
-          <div className="mnid-card-head">
-            <p className="mnid-kicker">Back up this Passport</p>
-          </div>
-          <p className="mnid-lede">
-            One encrypted file holding what this browser knows and cannot work out again:
-            the name you claimed, your account, and anything apps have granted you.
-            Chain sync state is left out — a new device rebuilds it from the
-            chain.
-          </p>
+        {/* Left out when the screen is the question asked after a recovery:
+            a device that has just come back has nothing of its own to back up
+            yet, and the one thing it needs is the restore below. */}
+        {earlierPayments ? null : (
+          <div className="mnid-card">
+            <div className="mnid-card-head">
+              <p className="mnid-kicker">Back up this Passport</p>
+            </div>
+            <p className="mnid-lede">
+              One encrypted file holding what this browser knows and cannot work out again:
+              the name you claimed, your account, anything apps have granted you, and the key
+              that lets your Passport read the payments sent to it. Chain sync state is left
+              out — a new device rebuilds it from the chain.
+            </p>
 
-          <div className="mnid-field">
-            <input
-              type="password"
-              autoComplete="new-password"
-              placeholder="Password for this backup"
-              value={password}
-              onChange={(event) => {
-                setPassword(event.target.value)
-                setExportError(null)
-              }}
-              disabled={busy !== null}
-              aria-label="Password for this backup"
-            />
-          </div>
-          <div className={mismatch ? 'mnid-field mnid-field-invalid' : 'mnid-field'}>
-            <input
-              type="password"
-              autoComplete="new-password"
-              placeholder="Type it again"
-              value={confirmation}
-              onChange={(event) => setConfirmation(event.target.value)}
-              disabled={busy !== null}
-              aria-label="Confirm the backup password"
-            />
-          </div>
+            <div className="mnid-field">
+              <input
+                type="password"
+                autoComplete="new-password"
+                placeholder="Password for this backup"
+                value={password}
+                onChange={(event) => {
+                  setPassword(event.target.value)
+                  setExportError(null)
+                }}
+                disabled={busy !== null}
+                aria-label="Password for this backup"
+              />
+            </div>
+            <div className={mismatch ? 'mnid-field mnid-field-invalid' : 'mnid-field'}>
+              <input
+                type="password"
+                autoComplete="new-password"
+                placeholder="Type it again"
+                value={confirmation}
+                onChange={(event) => setConfirmation(event.target.value)}
+                disabled={busy !== null}
+                aria-label="Confirm the backup password"
+              />
+            </div>
 
-          {mismatch ? (
-            <p className="mnid-status mnid-status-taken">
-              <span className="mnid-status-dot" aria-hidden="true" />
-              The two passwords do not match yet.
-            </p>
-          ) : hint ? (
-            <p className={`mnid-status mnid-hint-${hint.level}`}>
-              <span className="mnid-status-dot" aria-hidden="true" />
-              {hint.message}
-            </p>
-          ) : null}
+            {mismatch ? (
+              <p className="mnid-status mnid-status-taken">
+                <span className="mnid-status-dot" aria-hidden="true" />
+                The two passwords do not match yet.
+              </p>
+            ) : hint ? (
+              <p className={`mnid-status mnid-hint-${hint.level}`}>
+                <span className="mnid-status-dot" aria-hidden="true" />
+                {hint.message}
+              </p>
+            ) : null}
 
-          <div className="mnid-panel">
-            <p className="mnid-panel-head">
-              <TriangleAlert size={15} aria-hidden="true" />
-              Lose this password and the backup is gone
-            </p>
-            <p>
-              The password is used on this device and nowhere else. Passport does not store
-              it, cannot recover it, and never sends it anywhere. If you forget it, the file
-              is unreadable — by you and by everyone else.
-            </p>
-            <p>
-              Your passkey is not in this file and cannot be. The file restores what your
-              Passport did; it does not restore the ability to act as it. That still comes
-              from your passkey.
-            </p>
-          </div>
-
-          <div className="mnid-actions" data-toast-clear>
-            <button
-              type="button"
-              className="mnid-primary"
-              onClick={() => void runExport()}
-              disabled={!canExport}
-            >
-              {busy === 'export' ? (
-                <LoaderCircle className="mnid-spin" size={17} aria-hidden="true" />
-              ) : (
-                <Download size={17} aria-hidden="true" />
-              )}
-              {busy === 'export' ? 'Encrypting' : 'Export encrypted backup'}
-            </button>
-          </div>
-
-          {holdingsProblem ? (
-            <p className="mnid-foot">
-              <Info size={13} aria-hidden="true" />
-              What this browser holds could not be read, so there is nothing to seal:{' '}
-              {holdingsProblem}
-            </p>
-          ) : holdings === null ? null : heldRecords === 0 ? (
-            <p className="mnid-foot">
-              <Info size={13} aria-hidden="true" />
-              This browser holds no name, no account, and no rewards yet, so there
-              is nothing to back up.
-            </p>
-          ) : (
-            <p className="mnid-foot">
-              <Info size={13} aria-hidden="true" />
-              This browser holds {holdings.aliases}{' '}
-              {holdings.aliases === 1 ? 'name claim' : 'name claims'}, {holdings.passportContracts}{' '}
-              {holdings.passportContracts === 1 ? 'account record' : 'account records'}, and{' '}
-              {holdings.incentives} {holdings.incentives === 1 ? 'reward' : 'rewards'}.
-            </p>
-          )}
-
-          {exportError ? (
-            <p className="mnid-status mnid-status-error">
-              <span className="mnid-status-dot" aria-hidden="true" />
-              {exportError}
-            </p>
-          ) : null}
-
-          {exported ? (
             <div className="mnid-panel">
-              {/* The words come from `describeExportOutcome`, because the two
-                  write paths differ in the one thing a user acts on and this
-                  panel used to flatten them. `showSaveFilePicker` resolves only
-                  once the bytes are on disk; an `<a download>` click is the
-                  same non-event whether the file was written, the dialog
-                  cancelled, or the download blocked by policy. "Saved as" over
-                  the second is a claim this app cannot make, and a user may
-                  delete local data on the strength of it. The copy is a pure
-                  function in `../identity/backup.ts` so it can be drilled —
-                  there is no jsdom here to hold a `.tsx` to a test. */}
               <p className="mnid-panel-head">
-                <Info size={15} aria-hidden="true" />
-                {describeExportOutcome(exported.outcome).headline}
+                <TriangleAlert size={15} aria-hidden="true" />
+                Lose this password and the backup is gone
               </p>
               <p>
-                {describeExportOutcome(exported.outcome).detail} It carries{' '}
-                {exported.counts.aliases}{' '}
-                {exported.counts.aliases === 1 ? 'name claim' : 'name claims'},{' '}
-                {exported.counts.passportContracts}{' '}
-                {exported.counts.passportContracts === 1 ? 'account record' : 'account records'},
-                and {exported.counts.incentives}{' '}
-                {exported.counts.incentives === 1 ? 'reward' : 'rewards'}.
+                The password is used on this device and nowhere else. Passport does not store
+                it, cannot recover it, and never sends it anywhere. If you forget it, the file
+                is unreadable — by you and by everyone else.
+              </p>
+              <p>
+                Your passkey is not in this file and cannot be. The file restores what your
+                Passport did; it does not restore the ability to act as it. That still comes
+                from your passkey.
+              </p>
+              <p>
+                The file does hold the key that reads your payments, so a new device can show
+                what you were sent before it. Anyone with the file and this password could see
+                those payments. They could not spend any of them.
               </p>
             </div>
-          ) : null}
-        </div>
+
+            <div className="mnid-actions" data-toast-clear>
+              <button
+                type="button"
+                className="mnid-primary"
+                onClick={() => void runExport()}
+                disabled={!canExport}
+              >
+                {busy === 'export' ? (
+                  <LoaderCircle className="mnid-spin" size={17} aria-hidden="true" />
+                ) : (
+                  <Download size={17} aria-hidden="true" />
+                )}
+                {busy === 'export' ? 'Encrypting' : 'Export encrypted backup'}
+              </button>
+            </div>
+
+            {holdingsProblem ? (
+              <p className="mnid-foot">
+                <Info size={13} aria-hidden="true" />
+                What this browser holds could not be read, so there is nothing to seal:{' '}
+                {holdingsProblem}
+              </p>
+            ) : holdings === null ? null : heldRecords === 0 ? (
+              <p className="mnid-foot">
+                <Info size={13} aria-hidden="true" />
+                This browser holds no name, no account, and no rewards yet, so there
+                is nothing to back up.
+              </p>
+            ) : (
+              <p className="mnid-foot">
+                <Info size={13} aria-hidden="true" />
+                This browser holds {holdings.aliases}{' '}
+                {holdings.aliases === 1 ? 'name claim' : 'name claims'}, {holdings.passportContracts}{' '}
+                {holdings.passportContracts === 1 ? 'account record' : 'account records'}, and{' '}
+                {holdings.incentives} {holdings.incentives === 1 ? 'reward' : 'rewards'}.
+                {holdings.viewingKeyAccounts > 0
+                  ? ' It also holds the key that reads the payments sent to your Passport.'
+                  : ''}
+              </p>
+            )}
+
+            {exportError ? (
+              <p className="mnid-status mnid-status-error">
+                <span className="mnid-status-dot" aria-hidden="true" />
+                {exportError}
+              </p>
+            ) : null}
+
+            {exported ? (
+              <div className="mnid-panel">
+                {/* The words come from `describeExportOutcome`, because the two
+                    write paths differ in the one thing a user acts on and this
+                    panel used to flatten them. `showSaveFilePicker` resolves only
+                    once the bytes are on disk; an `<a download>` click is the
+                    same non-event whether the file was written, the dialog
+                    cancelled, or the download blocked by policy. "Saved as" over
+                    the second is a claim this app cannot make, and a user may
+                    delete local data on the strength of it. The copy is a pure
+                    function in `../identity/backup.ts` so it can be drilled —
+                    there is no jsdom here to hold a `.tsx` to a test. */}
+                <p className="mnid-panel-head">
+                  <Info size={15} aria-hidden="true" />
+                  {describeExportOutcome(exported.outcome).headline}
+                </p>
+                <p>
+                  {describeExportOutcome(exported.outcome).detail} It carries{' '}
+                  {exported.counts.aliases}{' '}
+                  {exported.counts.aliases === 1 ? 'name claim' : 'name claims'},{' '}
+                  {exported.counts.passportContracts}{' '}
+                  {exported.counts.passportContracts === 1 ? 'account record' : 'account records'},
+                  and {exported.counts.incentives}{' '}
+                  {exported.counts.incentives === 1 ? 'reward' : 'rewards'}.
+                  {exported.counts.viewingKeyAccounts > 0
+                    ? ' It also carries the key that reads the payments sent to your Passport.'
+                    : ''}
+                </p>
+              </div>
+            ) : null}
+          </div>
+        )}
 
         {/* --- Restore ----------------------------------------------------- */}
         <div className="mnid-card">
@@ -449,11 +509,27 @@ export default function BackupScreen(props: BackupProps) {
                   ? `Restored from the backup taken ${describeBackupCreatedAt(restored.createdAt)}`
                   : 'Restored from this backup file, which carries no readable date'}
               </p>
-              <p>
-                Names: {restored.aliases.restored} of {restored.aliases.found}. Accounts:{' '}
-                {restored.passportContracts.restored} of {restored.passportContracts.found}.
-                Rewards: {restored.incentives.restored} of {restored.incentives.found}.
-              </p>
+              {/* The line a recovered person is looking for, first. The words
+                  are `describeViewingKeyRestore`'s, for the reason the export's
+                  are a pure function: this is the sentence that says whether
+                  their money is back, and it has to be drillable. Null for a
+                  file with no viewing key in it, which says nothing here. */}
+              {describeViewingKeyRestore(restored.viewingKeys) ? (
+                <p data-testid="backup-earlier-payments">
+                  {describeViewingKeyRestore(restored.viewingKeys)}
+                </p>
+              ) : null}
+              {/* The record counts, where the file carried records. A backup
+                  that carries a viewing key and nothing else — a Passport on the
+                  account custody contract keeps its name and account elsewhere —
+                  would otherwise open with "Names: 0 of 0" three times over. */}
+              {restored.aliases.found + restored.passportContracts.found + restored.incentives.found > 0 ? (
+                <p>
+                  Names: {restored.aliases.restored} of {restored.aliases.found}. Accounts:{' '}
+                  {restored.passportContracts.restored} of {restored.passportContracts.found}.
+                  Rewards: {restored.incentives.restored} of {restored.incentives.found}.
+                </p>
+              ) : null}
               {[
                 ...restored.aliases.skipped,
                 ...restored.passportContracts.skipped,
@@ -475,7 +551,7 @@ export default function BackupScreen(props: BackupProps) {
                   only an indexer read turns it into evidence, and where that
                   read could not happen this says so rather than implying it
                   did. See `confirmRestoredContracts` in App.tsx. */}
-              {restored.ledgerCheck === undefined ? (
+              {restored.passportContracts.found === 0 ? null : restored.ledgerCheck === undefined ? (
                 <p>
                   The restored account records were not re-checked against the network, so
                   each is a record, not a proof.
@@ -547,7 +623,10 @@ export default function BackupScreen(props: BackupProps) {
         <div className="mnid-actions" data-toast-clear>
           <button type="button" className="mnid-secondary" onClick={onDone}>
             <ArrowRight size={17} aria-hidden="true" />
-            Done
+            {/* The question after a recovery is answered by this press as much
+                as by a restore, so it says so: "Not now" until something has
+                been restored, and the way on once it has. */}
+            {earlierPayments ? (restored ? 'Continue to my Passport' : 'Not now') : 'Done'}
           </button>
         </div>
       </div>

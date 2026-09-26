@@ -764,6 +764,17 @@
  * carry; all three are drilled in `custodyInboxIndex.test.ts`. It holds no
  * network: a GraphQL document out, somebody else's answer in.
  *
+ * `src/identity/viewingKeys.ts` went IN on 2026/09/26 with the module itself.
+ * It holds the EARLIER viewing keys a password backup gives back to a Passport
+ * recovered on a new device, and the one question that device is asked about
+ * them. A key this module drops is a set of payments that device can never see
+ * or spend, and a key it hands back for the wrong account is a walk that opens
+ * somebody else's notes, so every branch — the account key, the ceiling that
+ * keeps the oldest key, the read-back that decides whether a key was kept, and
+ * the question asked once — is drilled in `viewingKeys.test.ts` and
+ * `backup.viewingKeys.test.ts`. It holds no DOM, no React, and no network: the
+ * storage is handed in.
+ *
  * `src/lib/custodyAssets.ts` went IN on 2026/09/17 with the module itself. It is
  * what the Dynamic Passport's Home and Send read money through: which rows
  * exist, what each is called, how many decimal places an amount of it carries,
@@ -930,6 +941,7 @@ export default mergeConfig(
           'src/identity/k1CoinStore.ts',
           'src/identity/custodyInbox.ts',
           'src/identity/custodyInboxIndex.ts',
+          'src/identity/viewingKeys.ts',
           'src/identity/midnamesText.ts',
           'src/identity/sponsoredAlias.ts',
           'src/identity/timestamps.ts',

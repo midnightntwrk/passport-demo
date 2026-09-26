@@ -3841,9 +3841,15 @@ function deviceIsEnrolled(
  * were sealed to the old key and stay sealed to it; the contract's own note on
  * this circuit says a client SHOULD re-seal what it holds under the new key
  * afterwards, and a client that cannot READ them cannot re-seal them. That is
- * the honest limit of coming back on a new device today, it is on the screen in
- * one sentence, and closing it needs something the contract does not have —
- * see the pull request.
+ * the honest limit of this circuit on its own.
+ *
+ * WHAT READS THE PAST INSTEAD (2026/09/26), with no contract change: the old
+ * key itself, carried in the person's password backup (`./backup.ts`) and kept
+ * on the new device as an EARLIER key beside the new one (`./viewingKeys.ts`).
+ * The inbox walk tries both, so the rotation still does what it is for — every
+ * delivery from now on is readable by the new passkey alone — and the notes
+ * sealed before it are read with the key they were sealed to. Nothing is
+ * re-sealed and nothing is written to the account.
  *
  * JUBJUB ONLY, and not by preference. `challenge_rotate_enc_key_with_k256` is
  * not on the compiled build's pure-circuit surface this app declares

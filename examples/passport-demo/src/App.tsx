@@ -256,6 +256,7 @@ import type {
    already makes. See the `name-taken` branch in `runClaimBoundToAccount`. */
 import type { NameTakenReading } from './identity/sponsoredAlias.js';
 import { createClaimWarmup } from './identity/claimWarmup.js';
+import { answerEarlierPaymentsOffer, earlierPaymentsOfferDue } from './identity/viewingKeys.js';
 import {
   forgetPassportContractRecordsForCredential,
   loadPassportContractRecord,
@@ -1649,6 +1650,12 @@ export default function PassportDemo() {
   );
   const [incentives, setIncentives] = useState<PassportIncentiveRecord[]>(loadIncentives);
   const [identityStep, setIdentityStep] = useState<IdentityStep>(null);
+  /**
+   * Bumped when a recovered Passport answers "bring back your earlier
+   * payments?" (2026/09/26). The question lives in storage, which React does
+   * not watch, so the answer needs a render of its own to take the screen down.
+   */
+  const [, setEarlierPaymentsAnswers] = useState(0);
   /** See {@link AccountSearch}. `null` when nothing is being looked for. */
   const [accountSearch, setAccountSearch] = useState<AccountSearch | null>(null);
   /**
@@ -9368,7 +9375,14 @@ export default function PassportDemo() {
     const result = await exportPassportBackup(password);
     addActivity({
       label: 'Passport backup exported',
-      detail: `Saved as ${result.fileName}, encrypted under a password Passport never stores. No keys are in it.`,
+      /* "No keys are in it" until 2026/09/26. It now holds ONE — the key that
+         reads this Passport's payments — and the trail says so rather than
+         keeping a sentence that stopped being true. See `./identity/backup.ts`. */
+      detail: `Saved as ${result.fileName}, encrypted under a password Passport never stores. ${
+        result.counts.viewingKeyAccounts > 0
+          ? 'It holds the key that reads your payments, and nothing that can spend them.'
+          : 'No keys are in it.'
+      }`,
       status: 'complete',
       source: 'local',
     });
@@ -9496,6 +9510,10 @@ export default function PassportDemo() {
           ledgerCheck.ran
             ? ` ${ledgerCheck.confirmed} confirmed on ${ledgerCheck.network}, ${ledgerCheck.unconfirmed} not yet.`
             : ''
+        }${
+          /* The line that matters to a Passport that has just come back: the
+             key to what it was sent before this device (2026/09/26). */
+          summary.viewingKeys.restored > 0 ? ' Payments sent before this device can now be read.' : ''
         }`,
         status: 'complete',
         source: 'local',
@@ -10021,6 +10039,37 @@ export default function PassportDemo() {
    * may show.
    */
   const renderCustodyHome = (custody: CustodyHomeView) => {
+    /* THE BACKUP SCREEN, FOR THIS PASSPORT TOO (2026/09/26). It was withheld
+       from a custody Passport because the file restored none of its state; it
+       now carries the one thing such a Passport cannot get back any other way
+       — the key that reads the payments it was sent before a new device — so it
+       is offered here, and asked for once after a recovery. See
+       `./identity/viewingKeys.ts`. */
+    const custodyAccount = custody.accountAddress
+      ? { network: custody.network, address: custody.accountAddress }
+      : null;
+    const earlierPaymentsAsked =
+      custodyAccount !== null && earlierPaymentsOfferDue(window.localStorage, custodyAccount);
+    if (earlierPaymentsAsked || identityStep === 'backup') {
+      return (
+        <BackupScreen
+          purpose={earlierPaymentsAsked ? 'earlier-payments' : 'backup'}
+          onExport={exportPassportState}
+          onRestore={restorePassportState}
+          onDone={() => {
+            /* ANSWERED EITHER WAY. A restore and "Not now" both end the
+               question; "Back up or restore" on Home is the road back to it. */
+            if (custodyAccount !== null) answerEarlierPaymentsOffer(window.localStorage, custodyAccount);
+            setEarlierPaymentsAnswers((count) => count + 1);
+            setIdentityStep(null);
+            /* And read again at once, so a key that came back shows its
+               payments on the Home this press lands on rather than on the
+               next poll. */
+            custody.onRefresh();
+          }}
+        />
+      );
+    }
     const account = custodyHomeAccount(custody.holdings);
     /* The `Arriving` word, and `Transferring` on the asset a payment is moving
        while the pill says it is running — one projection for Home and the
@@ -10140,11 +10189,12 @@ export default function PassportDemo() {
         /* THE REST OF A SETUP NOTHING ELSE WILL FINISH, and the press that
            does (2026/09/24). Absent in the ordinary case. */
         finishSetup={custody.finishSetup ?? null}
-        /* NO BACK-UP FILE FOR THIS PASSPORT YET, so no control offering one.
-           `identity/backup.ts` exports the prototype's stores — the passkey
-           profile, the alias records, the prototype account — and none of them
-           is where a custody Passport's state lives; the file it would write
-           would restore nothing. Hidden rather than offered and broken. */
+        /* "Back up or restore", since 2026/09/26. Until then it was hidden
+           here, because the file held only the prototype's stores and would
+           have restored nothing of this Passport. It now carries the viewing
+           key, which is what a new device needs to read the payments this one
+           was sent — see `identity/backup.ts`. */
+        onOpenBackup={() => setIdentityStep('backup')}
         /* THE DEVELOPER PANEL IS OFF. It says "nothing in your Passport is held
            by this key", which is true of a prototype Passport and false of this
            one: here that key IS the device that approves. */
