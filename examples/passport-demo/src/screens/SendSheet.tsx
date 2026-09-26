@@ -13,12 +13,16 @@ import {
 /* The camera scanner, loaded only when opened — the camera stack and the jsQR
    fallback have no business in the Send chunk of a user who only pastes. */
 const QrScanSheet = lazy(() => import('./QrScanSheet.js'))
+/* The recipient codec, read WITHOUT the wallet SDK: its `address-format`
+   statically imports the ledger, and this sheet is on the first render path —
+   see `lib/midnightAddress.ts`. The send decodes the address again with the
+   SDK's own codec. */
 import {
   mainnet,
   MidnightBech32m,
   ShieldedAddress,
   UnshieldedAddress,
-} from '@midnight-ntwrk/wallet-sdk/address-format'
+} from '../lib/midnightAddress.js'
 
 /* The two names this screen shares with the transaction engine (Contract W) —
    both about the FEE, which the sponsor pays. Type-only, so nothing of
@@ -152,7 +156,9 @@ import './home.css'
  * `lib/sendAssets.ts`, where they can be drilled.
  *
  * The address taxonomy did NOT move. {@link classifyRecipient} still runs the
- * wallet SDK's own codec over whatever is in the field and still owns every
+ * wallet SDK's address rules — through `lib/midnightAddress.ts` since
+ * 2026/09/25, which is the same codec without the ledger it used to drag onto
+ * the first render path — over whatever is in the field and still owns every
  * sentence about what an address is, whose network it belongs to, and which
  * ledger it names. What changed is what happens to its verdict: it is now
  * CHECKED AGAINST the chosen asset rather than used to pick one. A shielded

@@ -250,7 +250,7 @@ const NO_CAPABILITIES: SendCapabilities = { shieldedToName: false };
 
 /** What a recipient field currently contains, as far as this rule cares. */
 export type SendRecipientKind =
-  /** An address the SDK's codec has already placed on one of the two ledgers. */
+  /** An address the recipient codec has already placed on one of the two ledgers. */
   | { kind: 'address'; mode: SendAssetMode }
   /** A `.night` name the registry has been asked about. */
   | { kind: 'name' }

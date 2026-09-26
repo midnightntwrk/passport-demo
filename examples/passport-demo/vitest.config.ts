@@ -336,6 +336,15 @@
  * consults it is four lines in `App.tsx` and stays out with the rest of the app
  * shell.
  *
+ * `src/lib/midnightAddress.ts` went IN on 2026/09/25, the day it was written.
+ * It is the bech32m reader the Send sheet and the approval ladder use in place
+ * of the wallet SDK's, whose `address-format` dragged the 10 MB ledger in front
+ * of the landing. Every branch in it is an address a screen would call valid
+ * when the send will refuse it, or refuse when the send would have paid it —
+ * so `src/lib/midnightAddress.test.ts` holds it to the SDK's own verdict on
+ * every address type the SDK writes, on six networks, and on each way a string
+ * can fail to be one. It is pure: a string in, a verdict or a throw out.
+ *
  * `src/lib/recipientName.ts` went IN on 2026/08/30, the day it was written. It
  * decides which of two completely different things happens to what somebody
  * typed into the recipient field — a `.night` registry read, or a bech32m
@@ -840,6 +849,7 @@ export default mergeConfig(
           'src/lib/walletSnapshotCheckpoint.ts',
           'src/lib/indexerFailover.ts',
           'src/lib/installPrompt.ts',
+          'src/lib/midnightAddress.ts',
           'src/lib/nameRecovery.ts',
           'src/lib/oneTxProbe.ts',
           'src/lib/networks.ts',

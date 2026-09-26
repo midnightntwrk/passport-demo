@@ -15,6 +15,7 @@ import '@fontsource/outfit/800.css';
 // idempotent — it exists so the module (and its system-preference listener) is
 // live before React mounts, whatever index.html happens to carry.
 import { initTheme } from './lib/theme.js';
+import { warmRuntimesWhenIdle } from './lib/runtimeGate.js';
 import PassportDemo from './App.js';
 import { PassportPwaShell } from './pwa.js';
 // Outside the shell, so a throw inside the shell itself still lands somewhere.
@@ -50,6 +51,14 @@ if (!import.meta.env.DEV || window.location.origin === requiredDevelopmentOrigin
       </ErrorBoundary>
     </React.StrictMode>,
   );
+
+  /* The two WebAssembly runtimes — the ledger alone is 10 MB — started once the
+     landing is up rather than in front of it (2026/09/25). Nothing on the first
+     render path imports either any more, so the landing no longer waits for
+     the download. The wallet a passkey opens still needs it, and it has been
+     arriving the whole time the person was reading the landing and making the
+     passkey. See `./lib/runtimeGate.ts`. */
+  warmRuntimesWhenIdle();
 
   /* Social sign-in, when this build has been given an environment id — which
      no build shipped today has.

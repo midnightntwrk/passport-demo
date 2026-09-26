@@ -68,24 +68,25 @@ const LEDGER_BEARING = [
  * the reason it is not a defect. Everything else under `@midnight-ntwrk/` and
  * `@midnightntwrk/` fails.
  *
- * `@midnight-ntwrk/wallet-sdk/address-format` is a KNOWN AND UNRESOLVED cost,
- * recorded here rather than quietly tolerated. The wallet SDK's own copy of
- * `wallet-sdk-address-format` statically imports `@midnightntwrk/ledger-v9` for
- * one class (`EncryptionSecretKey`, used by a codec neither call site touches),
- * so importing the bech32m address codec drags the whole ledger in. It is
- * reached twice — `lib/txApproval.ts` (through `txConsent.tsx`) and
- * `screens/SendSheet.tsx` (through `screens/Home.tsx`) — and both call sites are
- * SYNCHRONOUS validators, one of them inside a `useMemo`, so it cannot be
- * deferred without changing when a person sees a verdict about what they typed.
+ * It is EMPTY, and that is the point of it (2026/09/25). It used to carry
+ * `@midnight-ntwrk/wallet-sdk/address-format`, recorded as a known and
+ * unresolved cost: the wallet SDK's own copy of `wallet-sdk-address-format`
+ * statically imports `@midnightntwrk/ledger-v9` for one class
+ * (`EncryptionSecretKey`, used by a codec neither call site touches), so the
+ * bech32m codec dragged the whole ledger into the entry chunk through
+ * `lib/txApproval.ts` (via `txConsent.tsx`) and `screens/SendSheet.tsx` (via
+ * `screens/Home.tsx`). Measured on a Pixel 7 profile with the CPU slowed
+ * four-fold on 2026/09/25: the landing's "Sign up" became clickable 4.8 s after
+ * navigation on fast 4G and 25.0 s on slow 4G, each time just after the
+ * WebAssembly finished — and 0.7 s and 1.9 s once the edge was gone.
  *
- * Measured on 2026/09/01, on a production build over loopback: with this edge
- * present, first paint costs 10.07 MB and the ledger WASM sits in the entry
- * chunk; with it stubbed out, 0.19 MB, no WASM fetched at all, and the entry
- * chunk falls from 786 kB to 585 kB. Cutting it is worth roughly 9.9 MB and
- * needs a decision about the Send sheet's recipient validation, or an upstream
- * fix to the SDK — not a bundler setting.
+ * Both call sites are synchronous validators, so the decision the entry above
+ * asked for was made the other way round: they read addresses through
+ * `lib/midnightAddress.ts`, the same codec without the ledger, held to the
+ * SDK's verdict by `lib/midnightAddress.test.ts`. The send still decodes with
+ * the SDK, behind an `import()`.
  */
-const DECLARED_MIDNIGHT_IMPORTS = ['@midnight-ntwrk/wallet-sdk/address-format'];
+const DECLARED_MIDNIGHT_IMPORTS: readonly string[] = [];
 
 interface Edge {
   readonly from: string;
@@ -225,6 +226,21 @@ describe('the static path to createRoot', () => {
         edge.spec.endsWith('/midnames.js'),
       );
       expect(toMidnames.map(describeEdge)).toEqual([]);
+    }
+  });
+
+  it('keeps the two address validators on the light codec', () => {
+    /* The 2026/09/25 regression, named directly, as the one above names its
+       own: both files are on the first render path, and a re-import of the
+       SDK's codec in either puts the 10 MB ledger back in front of the
+       landing. */
+    expect(reached).toContain('src/lib/midnightAddress.ts');
+    for (const validator of ['src/lib/txApproval.ts', 'src/screens/SendSheet.tsx']) {
+      expect(reached, `${validator} should still be on the first render path`).toContain(validator);
+      const toSdkCodec = staticEdges(path.join(ROOT, validator)).filter((edge) =>
+        edge.spec.startsWith('@midnight-ntwrk/wallet-sdk'),
+      );
+      expect(toSdkCodec.map(describeEdge)).toEqual([]);
     }
   });
 
