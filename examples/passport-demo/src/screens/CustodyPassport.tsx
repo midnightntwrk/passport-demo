@@ -127,6 +127,7 @@ import {
   type CustodyHomeView,
 } from '../lib/custodyHome.js'
 import {
+  awaitCustodyTurn,
   custodyArrivingCount,
   custodyInFlightRefusal,
   custodyMayReadHoldings,
@@ -2094,16 +2095,11 @@ export default function CustodyPassport({
     }): Promise<void> => {
       /* Nothing to write down for a payment that kept no change. */
       if (params.change == null) return
-      const { readCustodyAccountView } = await import('../identity/accountCustody.js')
-      const view = await readCustodyAccountView(
-        { indexerHttpUrl: params.wallet.network.indexerHttpUrl },
-        params.record.address as string,
-      )
-      await appendChangeToInboxK1(
-        arm.session,
-        params.identity,
-        { change: params.change, ownEncKeyHex: view.encKeyHex },
-      )
+      await paymentEngine().keepChange(arm.session, params.identity, {
+        indexerHttpUrl: params.wallet.network.indexerHttpUrl,
+        accountAddress: params.record.address as string,
+        change: params.change,
+      })
     },
     [arm],
   )
@@ -2379,7 +2375,23 @@ export default function CustodyPassport({
          now, so this is the only thing on screen that says a payment is
          running — including the second or two before its record is written. */
       dispatchProgress({ type: 'start', subject: payment.subject, draft: payment.draft, at: Date.now() })
-      const refusal = custodyInFlightRefusal(inFlight.current)
+      /* A PAYMENT CONFIRMED WHILE THE LAST ONE IS STILL FINISHING WAITS FOR IT
+         (2026/09/26), before anything about it is read or planned, and says so
+         on the pill and the row. It used to be refused here on the spot, with
+         the pill already saying "Sent" over the last one. See
+         `awaitCustodyTurn`. The flag is raised by `runCustodyPayment` in the
+         same turn the wait ends, so two waiters can never both get in. */
+      const refusal = await awaitCustodyTurn(
+        {
+          busy: () => inFlight.current,
+          settling: () => holdingsInFlight.current !== null,
+          now: () => Date.now(),
+          sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+          onWait: () => dispatchProgress({ type: 'waiting' }),
+        },
+        custodyPrepareWaitMs(),
+      )
+      dispatchProgress({ type: 'turn' })
       if (refusal !== null) {
         dispatchProgress({ type: 'failed', sentence: refusal, handedOver: false })
         throw new Error(refusal)
@@ -4212,10 +4224,30 @@ function sameSendRecord(
 /* The payment engine, and the stand-in a browser walk may put in its place    */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * The tidy-up after a payment: this account's own note of the change it kept,
+ * sealed to its own key so a second device can find it. The account's key is
+ * read live, for the reason `sendShielded` reads a recipient's.
+ */
+async function engineKeepChange(
+  session: Parameters<typeof appendChangeToInboxK1>[0],
+  identity: CustodyCallDevice,
+  input: {
+    indexerHttpUrl: string
+    accountAddress: string
+    change: Parameters<typeof appendChangeToInboxK1>[2]['change']
+  },
+): Promise<void> {
+  const { readCustodyAccountView } = await import('../identity/accountCustody.js')
+  const view = await readCustodyAccountView({ indexerHttpUrl: input.indexerHttpUrl }, input.accountAddress)
+  await appendChangeToInboxK1(session, identity, { change: input.change, ownEncKeyHex: view.encKeyHex })
+}
+
 const PAYMENT_ENGINE = {
   withdrawShieldedK1: engineWithdrawShieldedK1,
   withdrawShieldedToContractK1: engineWithdrawShieldedToContractK1,
   withdrawUnshieldedK1: engineWithdrawUnshieldedK1,
+  keepChange: engineKeepChange,
 }
 
 /**
@@ -4226,9 +4258,11 @@ const PAYMENT_ENGINE = {
  * service and no chain to take a transaction, so a payment there always stops
  * at the proof — and the in-progress pill's whole job is what happens AFTER the
  * hand-over: the phases, "Sent" with its link, a failure's one sentence. A walk
- * sets `window.__passportWalkPayment = { stepMs, fail? }` before the app loads,
- * and the stand-in reports the same phases the engine reports, a step apart,
- * then answers or fails. Everything in front of it — the sheet, the plan, the
+ * sets `window.__passportWalkPayment = { stepMs, fail?, tidyUpMs? }` before the
+ * app loads, and the stand-in reports the same phases the engine reports, a
+ * step apart, then answers or fails. `tidyUpMs` (2026/09/26) is a payment
+ * that kept change, and whose note of it takes that long to write: the window
+ * a second payment confirmed straight after "Sent" lands in. Everything in front of it — the sheet, the plan, the
  * record written before the hand-over, the approval — is the shipped code.
  *
  * DEAD IN EVERY DEPLOYED BUILD. `VITE_PASSPORT_ACC_WALK` is set for the mocked
@@ -4239,9 +4273,10 @@ function paymentEngine(): typeof PAYMENT_ENGINE {
   if (import.meta.env.VITE_PASSPORT_ACC_WALK !== '1') return PAYMENT_ENGINE
   const hook = (globalThis as { __passportWalkPayment?: unknown }).__passportWalkPayment
   if (!hook || typeof hook !== 'object') return PAYMENT_ENGINE
-  const asked = hook as { stepMs?: unknown; fail?: unknown }
+  const asked = hook as { stepMs?: unknown; fail?: unknown; tidyUpMs?: unknown }
   const stepMs = typeof asked.stepMs === 'number' && asked.stepMs >= 0 ? asked.stepMs : 1_000
   const fail = typeof asked.fail === 'string' ? asked.fail : null
+  const tidyUpMs = typeof asked.tidyUpMs === 'number' && asked.tidyUpMs > 0 ? asked.tidyUpMs : 0
   const walk = async (onPhase?: (phase: CustodyPhase) => void): Promise<CustodyShieldedSpendResult> => {
     const wait = () => new Promise<void>((resolve) => setTimeout(resolve, stepMs))
     onPhase?.({ step: 'sign' })
@@ -4255,7 +4290,7 @@ function paymentEngine(): typeof PAYMENT_ENGINE {
     return {
       txHash,
       explorerUrl: null,
-      change: null,
+      change: tidyUpMs > 0 ? { outcome: 'none' } : null,
       changePosition: 'none',
       sent: null,
       blockHeight: null,
@@ -4267,5 +4302,6 @@ function paymentEngine(): typeof PAYMENT_ENGINE {
     withdrawShieldedToContractK1: (_session, _identity, _input, onPhase) => walk(onPhase),
     withdrawUnshieldedK1: async (_session, _identity, _input, onPhase): Promise<CustodyStepResult> =>
       walk(onPhase),
+    keepChange: () => new Promise<void>((resolve) => setTimeout(resolve, tidyUpMs)),
   }
 }

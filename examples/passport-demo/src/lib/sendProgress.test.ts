@@ -6,6 +6,7 @@ import {
   sendElapsed,
   sendProgressSteps,
   SEND_SENT_DISMISS_MS,
+  SEND_WAITING_STEP_LABEL,
   sendInFlightReason,
   sendingLine,
   sendProgressPhase,
@@ -21,7 +22,7 @@ import {
 const subject: SendProgressSubject = { amount: '10', symbol: 'mUSD', recipient: 'bob.night' };
 const draft: SendDraft = { assetId: 'ab'.repeat(32), recipient: 'bob.night', amount: '10' };
 const T0 = 1_000;
-const running: SendProgress = { kind: 'running', subject, draft, startedAt: T0 };
+const running: SendProgress = { kind: 'running', subject, draft, startedAt: T0, waiting: false };
 const link = { label: 'View transaction', href: 'https://explorer.example/tx/1' };
 
 describe('sendProgressPhase', () => {
@@ -44,6 +45,7 @@ describe('sendProgressPhase', () => {
 
   it('names every phase in a few words', () => {
     expect(SEND_PROGRESS_PHASE_LABEL).toEqual({
+      waiting: 'Waiting for your last payment to finish…',
       preparing: 'Preparing…',
       approving: 'Waiting for your approval…',
       proving: 'Proving…',
@@ -104,6 +106,23 @@ describe('sendProgressReduce', () => {
     expect(sendProgressReduce({ kind: 'sent', subject, link, startedAt: T0 }, { type: 'dismiss' })).toBeNull();
     expect(sendProgressReduce(null, { type: 'dismiss' })).toBeNull();
     expect(sendProgressReduce(running, { type: 'dismiss' })).toBe(running);
+  });
+
+  it('waits for the last payment, and then goes, only while it is running', () => {
+    const waiting = sendProgressReduce(running, { type: 'waiting' });
+    expect(waiting).toEqual({ ...running, waiting: true });
+    expect(sendProgressReduce(waiting, { type: 'turn' })).toEqual(running);
+    /* Nothing changes, so nothing is re-rendered, when it is already so. */
+    expect(sendProgressReduce(running, { type: 'turn' })).toBe(running);
+    expect(sendProgressReduce(waiting, { type: 'waiting' })).toBe(waiting);
+    /* A payment that is not running has nothing to wait for. */
+    expect(sendProgressReduce(null, { type: 'waiting' })).toBeNull();
+    const sent: SendProgress = { kind: 'sent', subject, link, startedAt: T0 };
+    expect(sendProgressReduce(sent, { type: 'turn' })).toBe(sent);
+    /* It can fail from there too — the wait ran out — with its sentence. */
+    expect(
+      sendProgressReduce(waiting, { type: 'failed', sentence: 'Still finishing.', handedOver: false }),
+    ).toEqual({ kind: 'failed', subject, sentence: 'Still finishing.', draft, startedAt: T0 });
   });
 
   it('goes Sent by itself after a few seconds', () => {
@@ -226,6 +245,28 @@ describe('the progress view', () => {
       'waiting',
       'waiting',
     ]);
+  });
+
+  it('puts the wait for the last payment in front of the five, as the step it is on', () => {
+    const waiting = sendProgressView({
+      progress: { ...running, waiting: true },
+      /* A step left over from the last payment says nothing about this one. */
+      step: 'confirm',
+      record: null,
+    })!;
+    expect(waiting.phase).toBe('waiting');
+    expect(waiting.detail).toBe('Waiting for your last payment to finish…');
+    expect(waiting.title).toBe('Sending 10 mUSD to bob.night');
+    expect(sendProgressSteps(waiting).map((step) => [step.label, step.state])).toEqual([
+      [SEND_WAITING_STEP_LABEL, 'current'],
+      ['Preparing', 'waiting'],
+      ['Waiting for your approval', 'waiting'],
+      ['Proving', 'waiting'],
+      ['Confirming', 'waiting'],
+      ['Sent', 'waiting'],
+    ]);
+    /* And a third payment waits behind it at Review, as behind any other. */
+    expect(sendInFlightReason(waiting)).toMatch(/still going through/);
   });
 
   it('marks every step done once Sent, and claims none for a failure', () => {
