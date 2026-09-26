@@ -632,10 +632,19 @@ export interface CustodyWalkResult {
  * `txIdFor` is how a caller says which transaction produced the entry at an
  * index. Where it answers null the coin is reported and not stored, which is
  * the honest outcome for an entry whose transaction this client never saw.
+ *
+ * ONE KEY OR SEVERAL (2026/09/26). A Passport brought back on a new device
+ * points its account at the new device's key, and every note delivered before
+ * that is sealed to the key on the device that is gone. When the person's
+ * password backup gives that earlier key back (`./viewingKeys.ts`), the walk is
+ * handed every key the account has had and tries each on each entry, in the
+ * order given — the current key first, because it opens most of them. A note
+ * sealed to one key fails authentication under every other, so a key that
+ * opens nothing costs one agreement per entry and changes no result.
  */
 export async function readInboxCustody(
   account: K1Account,
-  encSecretKeyHex: string,
+  encSecretKeyHex: string | readonly string[],
   reader: CustodyInboxReader,
   options: {
     txIdFor(index: bigint, coin: CustodyInboxCoin): string | null;
@@ -660,6 +669,7 @@ export async function readInboxCustody(
   },
 ): Promise<CustodyWalkResult> {
   const deps = options.deps ?? defaultCustodyInboxDeps();
+  const secrets = typeof encSecretKeyHex === 'string' ? [encSecretKeyHex] : encSecretKeyHex;
   const coins: CustodyWalkedCoin[] = [];
   const outcomes: CustodyWalkOutcome[] = [];
   let skipped = 0;
@@ -671,7 +681,11 @@ export async function readInboxCustody(
       skipped += 1;
       continue;
     }
-    const opened = await openCustodyInboxEntry(encSecretKeyHex, entry, deps);
+    let opened: CustodyInboxCoin | null = null;
+    for (const secret of secrets) {
+      opened = await openCustodyInboxEntry(secret, entry, deps);
+      if (opened !== null) break;
+    }
     if (opened === null) {
       skipped += 1;
       continue;

@@ -734,7 +734,13 @@ describe('export and import, end to end through a backend', () => {
       fileName: exported.fileName,
       location: 'in memory',
     });
-    expect(exported.counts).toEqual({ aliases: 1, passportContracts: 1, incentives: 1 });
+    expect(exported.counts).toEqual({
+      aliases: 1,
+      passportContracts: 1,
+      incentives: 1,
+      /* This browser holds no account custody account, so no viewing key. */
+      viewingKeyAccounts: 0,
+    });
     // The file is pretty-printed JSON and carries nothing readable of its own.
     expect(backend.written[0]).toMatch(/^\{\n/);
     expect(backend.written[0]).not.toContain('alice');
@@ -3220,9 +3226,12 @@ describe('an envelope handed over as an object, not as text', () => {
     /* The comment promised the object arm re-checked everything; it re-checked
        the KDF and the field lengths and never the version. A `v: 2` file built
        its AAD from that 2, failed the tag, and told the user their password was
-       wrong about a file no password would open here. */
+       wrong about a file no password would open here. (Format 2 is this
+       build's own since 2026/09/26, so the probe is one past it.) */
     const envelope = await sealPassportBackup(contents(), PASSWORD);
-    await expect(openPassportBackup({ ...envelope, v: 2 }, PASSWORD)).rejects.toMatchObject({
+    await expect(
+      openPassportBackup({ ...envelope, v: PASSPORT_BACKUP_VERSION + 1 }, PASSWORD),
+    ).rejects.toMatchObject({
       code: 'unsupported-version',
     });
     await expect(
@@ -3588,10 +3597,10 @@ describe('a format number this build does not read', () => {
   it('says which direction the mismatch goes, and refuses to guess when it goes neither', async () => {
     const older = { v: 0, kdf: PASSPORT_BACKUP_KDF, salt: 'a', nonce: 'b', ciphertext: 'c' };
     expect(() => parseBackupEnvelope(JSON.stringify(older))).toThrow(
-      /written by an older Passport \(format 0\); this one reads format 1 and cannot read older files/,
+      /written by an older Passport \(format 0\); this one reads formats 1 to 2 and cannot read older files/,
     );
-    expect(() => parseBackupEnvelope(JSON.stringify({ ...older, v: 2 }))).toThrow(
-      /written by a newer Passport \(format 2\)/,
+    expect(() => parseBackupEnvelope(JSON.stringify({ ...older, v: 3 }))).toThrow(
+      /written by a newer Passport \(format 3\); this one reads formats 1 to 2\./,
     );
     expect(() => parseBackupEnvelope(JSON.stringify({ ...older, v: 1.5 }))).toThrow(
       /is not a whole number, so this Passport cannot tell what wrote it/,

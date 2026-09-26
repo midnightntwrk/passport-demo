@@ -4,7 +4,10 @@
  * ---------------------------------------------------------------------------
  * WHAT IS IN THE FILE, AND WHY EACH THING IS OR IS NOT
  * ---------------------------------------------------------------------------
- * The rule this module is built around: a backup carries STATE, never KEYS.
+ * The rule this module is built around: a backup carries STATE, and never a
+ * key that can SPEND. Until 2026/09/26 that read "never KEYS", full stop; it
+ * now has exactly one named exception, the VIEWING key, and the section after
+ * this one says what it is, why it is admitted, and how narrowly.
  *
  *   INCLUDED — the per-credential records this browser holds that cannot be
  *   re-derived from anything else, because they record events that happened
@@ -32,10 +35,15 @@
  *   output (see `demo-backend/src/passkey.ts`), so they are not the app's to
  *   copy: on a device holding the passkey they are one assertion away, and on
  *   a device without it a backup file must not be the thing that hands them
- *   over. This is the hard invariant — no private key in the backup — and it
- *   is enforced by SHAPE, not by discipline: {@link collectPassportBackup}
- *   takes NO arguments and reads a fixed, typed allow-list of three stores, so
- *   there is no parameter through which a caller could pass key material in.
+ *   over. This is the hard invariant — no key that can spend, and no key that
+ *   unlocks this browser's private state, in the backup — and it is enforced
+ *   by SHAPE, not by discipline: {@link collectPassportBackup} takes NO
+ *   arguments and reads a fixed, typed allow-list of stores, so there is no
+ *   parameter through which a caller could pass key material in. (The viewing
+ *   key is derived from the same PRF on a passkey Passport, under a different
+ *   label, and it is the one named exception — see the next section. It reads
+ *   notes and does nothing else, and deriving it tells nobody anything about
+ *   the seed or the device key beside it.)
  *   {@link assertNoKeyMaterial} is the belt to that braces, and runs on both
  *   the export and the import path. It is STRUCTURAL: it walks the payload
  *   against the field lists of the three record types and refuses any field
@@ -94,6 +102,50 @@
  *   file never gets that far.
  *
  * ---------------------------------------------------------------------------
+ * THE ONE KEY A BACKUP CARRIES: THE VIEWING KEY (2026/09/26)
+ * ---------------------------------------------------------------------------
+ * An account custody Passport learns what shielded coin it holds from notes in
+ * its own inbox, sealed to the account's X25519 viewing key
+ * (`./custodyInbox.ts`). That key is derived from the passkey that made the
+ * Passport, so a Passport brought back on a new device through the sign-in
+ * cannot re-derive it, points its account at the new device's key instead, and
+ * — until this change — could never read, or spend, a coin delivered before
+ * that. The approved fix (Hector, 2026/09/26) is to put the viewing key in this
+ * file and to give it back on restore (`./viewingKeys.ts` says where it goes,
+ * and why it sits beside the new key rather than replacing it).
+ *
+ * WHY THIS KEY AND NO OTHER. A viewing key decrypts notes and authorises
+ * nothing: every spend is a signature by a device the account holds, checked by
+ * the account itself, and no device key, seed, or PRF output is in this file.
+ * Whoever holds the file AND its password can see what the Passport has been
+ * paid; they cannot move any of it. That is the whole trade, and the Backup
+ * screen says it in those words.
+ *
+ * HOW NARROW THE EXCEPTION IS. The guard below is still an allow-list on names,
+ * and still refuses every field nobody has justified. The exception is:
+ *
+ *   - ONE CONTAINER, `viewingKeys`, at the top of the payload and nowhere else.
+ *     A `viewingSecret` inside an alias, a contract, a reward, or at the top
+ *     level is refused exactly as it was before;
+ *   - THREE FIELDS per entry — `network`, `address`, `viewingSecret` — and the
+ *     VALUES are checked here too, which the rest of the allow-list does not
+ *     do: the secret must be 32 bytes of hex, the size an X25519 secret is, and
+ *     the address 64 hex characters. A field under this name carrying anything
+ *     else is not a viewing key and is refused as key material;
+ *   - FORMAT 2 ONLY. A format-1 file never carried one, so a format-1 file that
+ *     does is not a file this app wrote, and it is refused rather than read
+ *     (the format number is authenticated, so it cannot be rewritten to 1);
+ *   - ONE SOURCE. {@link collectPassportBackup} still takes no arguments. It
+ *     reads the viewing secrets through `k1ViewingSecrets` and
+ *     `listEarlierViewingKeys` — two readers that return a secret and the
+ *     account it belongs to, and can reach nothing else.
+ *
+ * A FILE WRITTEN BEFORE THIS CHANGE STILL RESTORES. Format 1 is read as it
+ * always was. A Passport made before this change gets its key into the file the
+ * next time the device that made it writes a backup; nothing has to be done
+ * about the files already written, which simply carry no key.
+ *
+ * ---------------------------------------------------------------------------
  * WHAT A RESTORE REFUSES TO BELIEVE
  * ---------------------------------------------------------------------------
  * A backup file is a CLAIM, and on a fresh device it is an unverifiable one.
@@ -124,8 +176,15 @@
  * Lose the password and the file is gone: it is never stored, never escrowed,
  * never recoverable, and no part of Passport ever sees it. The file also does
  * not contain the passkey and cannot. Restoring it onto a device with no
- * access to the passkey gives a readable history of what this Passport did and
- * no ability to act as it. That is the whole trade, stated plainly.
+ * access to the passkey gives a readable history of what this Passport did —
+ * and, since 2026/09/26, the key that reads the payments it was sent — and no
+ * ability to act as it. That is the whole trade, stated plainly.
+ *
+ * AND THE STRENGTH OF THE FILE IS NOW THE STRENGTH OF A PRIVACY BOUNDARY. With
+ * a viewing key inside it, somebody who takes the file and guesses the
+ * password sees the account's incoming payments. The KDF note below applies to
+ * that with full force: PBKDF2 is what WebCrypto offers, it is memory-cheap,
+ * and the passphrase is what stands between a stolen file and those payments.
  *
  * ---------------------------------------------------------------------------
  * CRYPTO, AND WHY THESE PARAMETERS
@@ -167,8 +226,13 @@
  *
  * Envelope, base64url-encoded fields in a JSON object:
  *
- *     { "v": 1, "kdf": "PBKDF2-SHA-256-600000",
+ *     { "v": 2, "kdf": "PBKDF2-SHA-256-600000",
  *       "salt": "...16 bytes...", "nonce": "...12 bytes...", "ciphertext": "..." }
+ *
+ * `v` is 2 since 2026/09/26, the format that may carry viewing keys; this build
+ * writes 2 and reads 1 and 2. The cipher, the KDF, and the header bytes are
+ * exactly what they were — only the number in the header moved, so a file of
+ * either format is opened by the same code.
  *
  * Those lengths are ENFORCED, not merely documented, and before any key is
  * derived. An empty or wrong-length salt or nonce is a structural fact about
@@ -201,8 +265,33 @@ import type { AliasRecord } from './aliasStore.js';
 import type { PassportContractRecord } from './passportContractStore.js';
 import type { PassportIncentiveRecord } from './incentiveStore.js';
 
-/** Bump when the shape of {@link PassportBackupContents} itself changes. */
-export const PASSPORT_BACKUP_VERSION = 1;
+/**
+ * Bump when the shape of {@link PassportBackupContents} itself changes.
+ *
+ * 2 since 2026/09/26: the format that may carry `viewingKeys`. See the header.
+ */
+export const PASSPORT_BACKUP_VERSION = 2;
+
+/**
+ * The oldest format this build still reads.
+ *
+ * Format 1 is every file written before the viewing key was added, and a file
+ * somebody kept is a file they expect to restore — so it is read, as it always
+ * was, and simply carries no viewing key.
+ */
+export const PASSPORT_BACKUP_OLDEST_READABLE_VERSION = 1;
+
+/** The first format a viewing key may appear in. A format-1 file carrying one is refused. */
+const VIEWING_KEYS_SINCE_VERSION = 2;
+
+/** Whether this build reads that format number. */
+function readableVersion(version: number): boolean {
+  return (
+    Number.isInteger(version) &&
+    version >= PASSPORT_BACKUP_OLDEST_READABLE_VERSION &&
+    version <= PASSPORT_BACKUP_VERSION
+  );
+}
 
 const PBKDF2_ITERATIONS = 600_000;
 const PBKDF2_HASH = 'SHA-256';
@@ -303,6 +392,29 @@ export interface PassportBackupContents {
   passportContracts: Record<string, PassportContractRecord>;
   /** Redeemed incentives, newest first. */
   incentives: PassportIncentiveRecord[];
+  /**
+   * The viewing keys this browser holds — each account's current key and any
+   * earlier one a previous restore gave back. The ONE key a backup carries;
+   * see the header. Format 2 only, and absent when the browser holds none, so
+   * a Passport with no account custody account writes exactly the file it
+   * always wrote.
+   */
+  viewingKeys?: PassportViewingKeyRecord[];
+}
+
+/**
+ * One viewing key, and the account it reads.
+ *
+ * Three fields, all plain values, and the guard checks the VALUES as well as
+ * the names — see {@link assertViewingKeyRecord}.
+ */
+export interface PassportViewingKeyRecord {
+  /** The network the account lives on, as `../lib/networks.ts` spells it. */
+  network: string;
+  /** The account, raw 64-hex. */
+  address: string;
+  /** The X25519 viewing secret, 32 bytes as lowercase hex. Reads; never spends. */
+  viewingSecret: string;
 }
 
 /** What a restore actually did, per store, in numbers the screen can show. */
@@ -417,6 +529,12 @@ export interface PassportBackupSummary {
   aliases: PassportBackupStoreSummary;
   passportContracts: PassportBackupStoreSummary;
   incentives: PassportBackupStoreSummary;
+  /**
+   * The viewing keys the file carried, and which of them this device now
+   * holds as earlier keys. `restoredKeys` are `network::address` — the
+   * accounts whose earlier payments this device can now read.
+   */
+  viewingKeys: PassportBackupStoreSummary;
   /** See {@link PassportBackupLedgerCheck}. Absent means "not re-checked". */
   ledgerCheck?: PassportBackupLedgerCheck;
   /** See {@link PassportBackupRegistryCheck}. Absent means "not re-checked". */
@@ -602,7 +720,19 @@ const FORBIDDEN_KEYS = [
  * so anything else in a payload arrived by accident or by design, and neither
  * belongs in a file the user will keep.
  */
-const BACKUP_FIELDS = ['version', 'createdAt', 'aliases', 'passportContracts', 'incentives'];
+const BACKUP_FIELDS = [
+  'version',
+  'createdAt',
+  'aliases',
+  'passportContracts',
+  'incentives',
+  /* THE NAMED EXCEPTION, and the only container on this list whose records
+     hold a key. It is admitted HERE and nowhere else — a `viewingSecret` in
+     any other container, or at this level, is refused by name as it always
+     was — and what it may hold is {@link VIEWING_KEY_FIELDS}, checked by value
+     as well as by name. See the header. */
+  'viewingKeys',
+];
 const ALIAS_FIELDS = [
   /* The credential the name was claimed under, on the list for exactly the
      reason `recovered` is below: without it an export drops the field, and
@@ -646,6 +776,18 @@ const CONTRACT_FIELDS = [
   'updatedAt',
 ];
 const INCENTIVE_FIELDS = ['id', 'app', 'label', 'txId', 'network', 'redeemedAt'];
+/**
+ * The three fields a viewing key record carries, and nothing else.
+ *
+ * `viewingSecret` is the one field anywhere in this module whose NAME reads as
+ * key material and is admitted anyway — which is why its VALUE is checked
+ * too ({@link assertViewingKeyRecord}): a name alone would admit any secret
+ * somebody chose to file under it, and this exception is for exactly one kind.
+ */
+const VIEWING_KEY_FIELDS = ['network', 'address', 'viewingSecret'];
+
+/** 32 bytes as lowercase hex: the size of an X25519 secret, and of an address. */
+const HEX_32_LOWER = /^[0-9a-f]{64}$/;
 
 /**
  * Keys a record CONTAINER may not carry, whatever the file says.
@@ -686,18 +828,18 @@ function refuseField(path: string, key: string, value: unknown): never {
   if (FORBIDDEN_KEYS.some((forbidden) => lowered.includes(forbidden))) {
     throw new PassportBackupError(
       'key-material-present',
-      `A Passport backup carries state, never keys, and "${path}.${key}" reads as key material. Refusing to continue.`,
+      `A Passport backup carries state, never keys that can spend, and "${path}.${key}" reads as key material. Refusing to continue.`,
     );
   }
   if (looksLikeSecret(value)) {
     throw new PassportBackupError(
       'key-material-present',
-      `A Passport backup carries state, never keys, and "${path}.${key}" is not a field a backup carries — and its value is the size of one. Refusing to continue.`,
+      `A Passport backup carries state, never keys that can spend, and "${path}.${key}" is not a field a backup carries — and its value is the size of one. Refusing to continue.`,
     );
   }
   throw new PassportBackupError(
     'key-material-present',
-    `A Passport backup carries state, never keys, and "${path}.${key}" is not a field a Passport backup carries. Refusing to continue.`,
+    `A Passport backup carries state, never keys that can spend, and "${path}.${key}" is not a field a Passport backup carries. Refusing to continue.`,
   );
 }
 
@@ -709,7 +851,7 @@ function assertRecordFields(value: unknown, allowed: string[], path: string): vo
     if (nested !== null && typeof nested === 'object') {
       throw new PassportBackupError(
         'key-material-present',
-        `A Passport backup carries state, never keys, and "${path}.${key}" holds a nested object where a plain value belongs. Refusing to continue.`,
+        `A Passport backup carries state, never keys that can spend, and "${path}.${key}" holds a nested object where a plain value belongs. Refusing to continue.`,
       );
     }
   }
@@ -779,6 +921,56 @@ export function assertNoKeyMaterial(value: unknown, path = 'backup'): void {
   if (Array.isArray(value.incentives)) {
     value.incentives.forEach((entry, index) =>
       assertRecordFields(entry, INCENTIVE_FIELDS, `${path}.incentives[${index}]`),
+    );
+  }
+  if (value.viewingKeys !== undefined) assertViewingKeys(value.viewingKeys, `${path}.viewingKeys`);
+}
+
+/**
+ * The named exception, checked as narrowly as it is described in the header:
+ * a list, of records, of exactly {@link VIEWING_KEY_FIELDS}, whose values are
+ * the shapes a viewing key and an account have.
+ *
+ * Every refusal here is `key-material-present`, not `corrupt-contents`: a
+ * `viewingKeys` entry that is not a viewing key is, by construction, a field
+ * under a key-reading name carrying something nobody justified — which is the
+ * case the guard exists for.
+ */
+function assertViewingKeys(value: unknown, path: string): void {
+  if (!Array.isArray(value)) {
+    throw new PassportBackupError(
+      'key-material-present',
+      `A Passport backup carries its viewing keys as a list, and "${path}" is not one. Refusing to continue.`,
+    );
+  }
+  value.forEach((entry, index) => assertViewingKeyRecord(entry, `${path}[${index}]`));
+}
+
+/** One viewing key record: the three names, and the values those names promise. */
+function assertViewingKeyRecord(value: unknown, path: string): void {
+  if (!isPlainObject(value)) {
+    throw new PassportBackupError(
+      'key-material-present',
+      `A Passport backup's viewing keys are records, and "${path}" is not one. Refusing to continue.`,
+    );
+  }
+  assertRecordFields(value, VIEWING_KEY_FIELDS, path);
+  if (typeof value.viewingSecret !== 'string' || !HEX_32_LOWER.test(value.viewingSecret)) {
+    throw new PassportBackupError(
+      'key-material-present',
+      `A Passport backup carries a viewing key and no other kind, and "${path}.viewingSecret" is not 32 bytes of hex. Refusing to continue.`,
+    );
+  }
+  if (typeof value.address !== 'string' || !HEX_32_LOWER.test(value.address)) {
+    throw new PassportBackupError(
+      'key-material-present',
+      `A Passport backup names the account each viewing key reads, and "${path}.address" is not one. Refusing to continue.`,
+    );
+  }
+  if (typeof value.network !== 'string' || value.network.trim() === '') {
+    throw new PassportBackupError(
+      'key-material-present',
+      `A Passport backup names the network each viewing key reads, and "${path}.network" does not. Refusing to continue.`,
     );
   }
 }
@@ -869,17 +1061,49 @@ function settledContractRecords(
 }
 
 /**
- * Reads the three allow-listed stores. Takes no arguments — that is the point.
+ * Every viewing key this browser holds, one record per key per account.
  *
- * The wallet sync snapshot and every passkey-derived secret are absent by
- * construction: this function does not know how to reach them.
+ * Two readers and nothing else: the coin store's CURRENT key per account
+ * (`k1ViewingSecrets`) and the EARLIER keys an earlier restore gave back
+ * (`listEarlierViewingKeys`). The earlier ones go in the file too, so a
+ * Passport that comes back a second time can still read what was delivered
+ * before the first.
+ */
+async function collectViewingKeys(): Promise<PassportViewingKeyRecord[]> {
+  const [{ k1ViewingSecrets }, { listEarlierViewingKeys }] = await Promise.all([
+    import('./k1CoinStore.js'),
+    import('./viewingKeys.js'),
+  ]);
+  const records: PassportViewingKeyRecord[] = [];
+  const seen = new Set<string>();
+  const add = (network: string, address: string, viewingSecret: string): void => {
+    const key = `${network}::${address}::${viewingSecret}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    records.push({ network, address, viewingSecret });
+  };
+  for (const held of k1ViewingSecrets()) add(held.network, held.address, held.encSecretKeyHex);
+  for (const earlier of listEarlierViewingKeys(window.localStorage)) {
+    for (const secret of earlier.secrets) add(earlier.network, earlier.address, secret);
+  }
+  return records;
+}
+
+/**
+ * Reads the allow-listed stores. Takes no arguments — that is the point.
+ *
+ * The wallet sync snapshot and every secret that can spend or unlock this
+ * browser's private state are absent by construction: this function does not
+ * know how to reach them. The viewing keys are the one key it does reach, and
+ * only through the two readers {@link collectViewingKeys} names.
  */
 export async function collectPassportBackup(): Promise<PassportBackupContents> {
-  const [{ loadAliasRecords }, { loadPassportContractRecords }, { loadIncentives }] =
+  const [{ loadAliasRecords }, { loadPassportContractRecords }, { loadIncentives }, viewingKeys] =
     await Promise.all([
       import('./aliasStore.js'),
       import('./passportContractStore.js'),
       import('./incentiveStore.js'),
+      collectViewingKeys(),
     ]);
   const contents: PassportBackupContents = {
     version: PASSPORT_BACKUP_VERSION,
@@ -899,6 +1123,9 @@ export async function collectPassportBackup(): Promise<PassportBackupContents> {
       CONTRACT_FIELDS,
     ),
     incentives: loadIncentives().map((record) => takeRecordFields(record, INCENTIVE_FIELDS)),
+    /* ABSENT, not empty, when there are none: a browser with no account custody
+       account writes exactly the payload it wrote before viewing keys existed. */
+    ...(viewingKeys.length > 0 ? { viewingKeys } : {}),
   };
   /* The belt to that: on a projected payload it can no longer fire, and it
      stays because a projection is only as good as the list it projects onto. */
@@ -988,13 +1215,15 @@ export async function sealPassportBackup(
  * cannot tell what wrote it.
  */
 function versionMismatch(version: number): string {
+  /* Two readable formats since 2026/09/26, so the sentence names the range. */
+  const reads = `formats ${PASSPORT_BACKUP_OLDEST_READABLE_VERSION} to ${PASSPORT_BACKUP_VERSION}`;
   if (!Number.isInteger(version)) {
     return `This backup's format number is "${version}", which is not a whole number, so this Passport cannot tell what wrote it.`;
   }
   if (version > PASSPORT_BACKUP_VERSION) {
-    return `This backup was written by a newer Passport (format ${version}); this one reads format ${PASSPORT_BACKUP_VERSION}.`;
+    return `This backup was written by a newer Passport (format ${version}); this one reads ${reads}.`;
   }
-  return `This backup was written by an older Passport (format ${version}); this one reads format ${PASSPORT_BACKUP_VERSION} and cannot read older files.`;
+  return `This backup was written by an older Passport (format ${version}); this one reads ${reads} and cannot read older files.`;
 }
 
 /** Parses whatever the file picker produced into a real envelope, or throws. */
@@ -1024,7 +1253,7 @@ export function parseBackupEnvelope(raw: string): PassportBackupEnvelope {
       'This file does not carry the five fields a Passport backup has.',
     );
   }
-  if (candidate.v !== PASSPORT_BACKUP_VERSION) {
+  if (!readableVersion(candidate.v)) {
     throw new PassportBackupError('unsupported-version', versionMismatch(candidate.v));
   }
   const envelope = candidate as PassportBackupEnvelope;
@@ -1061,7 +1290,7 @@ export async function openPassportBackup(
       'This envelope carries no format number, so it is not a Passport backup.',
     );
   }
-  if (parsed.v !== PASSPORT_BACKUP_VERSION) {
+  if (!readableVersion(parsed.v)) {
     throw new PassportBackupError('unsupported-version', versionMismatch(parsed.v));
   }
   const kdf = parseKdfDescriptor(parsed.kdf);
@@ -1134,7 +1363,19 @@ export async function openPassportBackup(
     aliases: candidate.aliases,
     passportContracts: candidate.passportContracts,
     incentives: candidate.incentives,
+    ...(candidate.viewingKeys === undefined ? {} : { viewingKeys: candidate.viewingKeys }),
   };
+  /* A FORMAT-1 FILE NEVER CARRIED A KEY. The number is the envelope's, which
+     the GCM tag covers, so a format-2 file cannot be relabelled 1 to get here
+     and a format-1 file carrying viewing keys was written by something that is
+     not this app. It is refused before anything is written, as key material —
+     which is what an unexpected key in a file is. */
+  if (parsed.v < VIEWING_KEYS_SINCE_VERSION && contents.viewingKeys !== undefined) {
+    throw new PassportBackupError(
+      'key-material-present',
+      `A format-${parsed.v} Passport backup never carried a viewing key, and this one does. Refusing to continue.`,
+    );
+  }
   /* A file we did not write is still a file we refuse to trust blindly, and
      the containers are checked HERE so a corrupt one is refused at the point
      the module promises — before a caller has written a single record. */
@@ -1816,7 +2057,58 @@ export async function applyPassportBackup(
   }
   settleDeferredReasons(incentives, incentiveDeferred);
 
-  return { createdAt: contents.createdAt, aliases, passportContracts, incentives };
+  /* --- viewing keys ------------------------------------------------------ */
+  const viewingKeys = await applyViewingKeys(contents.viewingKeys ?? []);
+
+  return { createdAt: contents.createdAt, aliases, passportContracts, incentives, viewingKeys };
+}
+
+/**
+ * Gives each viewing key in the file back to this device, as an EARLIER key of
+ * the account it reads.
+ *
+ * Earlier, never current: the current key is whatever the account is pointed
+ * at now, and on a device that has just come back that is the new device's own
+ * key — see `./viewingKeys.ts` for why the two sit side by side. A key equal to
+ * the one this device already reads with is the ordinary case of a backup
+ * restored onto the device that made it, and it is reported as already held.
+ *
+ * WHAT A HOSTILE FILE CAN DO WITH THIS, and it is nothing new. A key restored
+ * here is only ever used to TRY to open notes in an account's inbox — and
+ * anybody can already put a note in any account's inbox, sealed to the key the
+ * account advertises. A key the account never had opens nothing that anybody
+ * could not already have written.
+ */
+async function applyViewingKeys(
+  records: PassportViewingKeyRecord[],
+): Promise<PassportBackupStoreSummary> {
+  const summary = emptyStoreSummary();
+  if (records.length === 0) return summary;
+  const [{ loadK1CoinStore }, { rememberEarlierViewingKey, viewingKeyAccountKey }] =
+    await Promise.all([import('./k1CoinStore.js'), import('./viewingKeys.js')]);
+  for (const record of records) {
+    summary.found += 1;
+    const account = { network: record.network, address: record.address };
+    /* The guard has already held the address to 64 lowercase hex and the
+       network to a non-empty string, so the key always exists. */
+    const key = viewingKeyAccountKey(account) as string;
+    const outcome = rememberEarlierViewingKey(
+      window.localStorage,
+      account,
+      record.viewingSecret,
+      loadK1CoinStore(account).encSecretKeyHex,
+    );
+    if (outcome.kind === 'added') {
+      /* One entry per key written, so `restoredKeys.length === restored`
+         holds here as it does for every store; an account given back two
+         earlier keys appears twice. */
+      summary.restored += 1;
+      summary.restoredKeys.push(key);
+      continue;
+    }
+    summary.skipped.push({ key, reason: outcome.reason });
+  }
+  return summary;
 }
 
 /**
@@ -2296,7 +2588,13 @@ export interface PassportBackupExport {
   /** What the backend can honestly say about the write. */
   outcome: PassportBackupWriteOutcome;
   /** What went in, so the screen can say so without re-reading the stores. */
-  counts: { aliases: number; passportContracts: number; incentives: number };
+  counts: {
+    aliases: number;
+    passportContracts: number;
+    incentives: number;
+    /** Accounts whose viewing key went in, however many keys each has. */
+    viewingKeyAccounts: number;
+  };
 }
 
 /** The two sentences the export panel shows, in the order it shows them. */
@@ -2345,8 +2643,20 @@ export async function exportPassportBackup(
       aliases: Object.keys(contents.aliases).length,
       passportContracts: Object.keys(contents.passportContracts).length,
       incentives: contents.incentives.length,
+      viewingKeyAccounts: viewingKeyAccountCount(contents),
     },
   };
+}
+
+/**
+ * How many ACCOUNTS a payload carries a viewing key for.
+ *
+ * Accounts rather than keys, because that is what a person can picture: "the
+ * key that reads your payments" is one thing to them however many rotations
+ * are behind it.
+ */
+export function viewingKeyAccountCount(contents: Pick<PassportBackupContents, 'viewingKeys'>): number {
+  return new Set((contents.viewingKeys ?? []).map((record) => `${record.network}::${record.address}`)).size;
 }
 
 /**
@@ -2389,6 +2699,31 @@ export async function importPassportBackup(
 export function describeBackupCreatedAt(createdAt: string): string | null {
   const at = readTimestamp(createdAt);
   return at === null ? null : new Date(at).toLocaleString();
+}
+
+/**
+ * The one line a restore's summary says about earlier payments — or null when
+ * the file carried no viewing key, which is every file written before
+ * 2026/09/26 and every file from a Passport with no account custody account.
+ *
+ * A pure function for the reason {@link describeExportOutcome} is one: there is
+ * no jsdom here to hold the screen to a test, and this is the sentence a
+ * recovered person reads to learn whether their money is back.
+ */
+export function describeViewingKeyRestore(summary: PassportBackupStoreSummary): string | null {
+  if (summary.found === 0) return null;
+  const accounts = new Set(summary.restoredKeys).size;
+  if (accounts > 0) {
+    return accounts === 1
+      ? 'Earlier payments: this Passport can now read what it was sent before this device. They appear on Home, ready to spend, once they have been read.'
+      : `Earlier payments: ${accounts} Passports on this device can now read what they were sent before it. They appear on Home, ready to spend, once they have been read.`;
+  }
+  /* Nothing was added, and every key was one this device already reads with —
+     the backup restored onto the device that made it. */
+  if (summary.skipped.every((skip) => skip.reason.startsWith('this device already'))) {
+    return 'Earlier payments: this device already reads everything this backup can.';
+  }
+  return 'Earlier payments: the key in this backup could not be kept on this device, so payments from before it are still hidden.';
 }
 
 /* --- password guidance ---------------------------------------------------- */
