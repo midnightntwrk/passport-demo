@@ -1,7 +1,16 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import { Bell, Download, RefreshCw, Share, SquarePlus, WifiOff } from 'lucide-react';
+import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { Bell, Download, Share, SquarePlus, WifiOff } from 'lucide-react';
 
-import { criticalWorkInFlight } from './lib/appBusy.js';
+import {
+  askWorkerBuildId,
+  createSilentUpdater,
+  INTERACTION_EVENTS,
+  isTextEntry,
+  OPEN_SHEET_SELECTOR,
+  type SessionFlags,
+  WAITING_NUDGE_INTERVAL_MS,
+} from './lib/appUpdate.js';
+import { BUILD_ID } from './lib/buildId.js';
 import './pwa-install.css';
 
 interface BeforeInstallPromptEvent extends Event {
@@ -102,6 +111,19 @@ function hasPassportSession(): boolean {
   }
 }
 
+/**
+ * `sessionStorage`, or `null` where reading it throws — a sandboxed frame, or
+ * site data blocked outright. Without it the chunk reload has nowhere to note
+ * that it already happened, so it does not happen at all.
+ */
+function sessionFlags(): SessionFlags | null {
+  try {
+    return window.sessionStorage;
+  } catch {
+    return null;
+  }
+}
+
 function readFlag(key: string): boolean {
   try {
     return window.localStorage.getItem(key) === '1';
@@ -180,13 +202,7 @@ export async function requestPassportStoragePersistence(
 export function PassportPwaShell({ children }: { children: ReactNode }) {
   const [online, setOnline] = useState(() => navigator.onLine);
   const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null);
-  const [updateRegistration, setUpdateRegistration] = useState<ServiceWorkerRegistration | null>(null);
-  const [updateReady, setUpdateReady] = useState(false);
-  const [reloadingForUpdate, setReloadingForUpdate] = useState(false);
   const [standalone, setStandalone] = useState(isStandaloneDisplay);
-  /** Set by the banner's own button: an explicit ask overrides the busy check. */
-  const reloadRequested = useRef(false);
-  const reloadedForUpdate = useRef(false);
   const [installSheetOpen, setInstallSheetOpen] = useState(false);
   const [installSheetSettled, setInstallSheetSettled] = useState(() =>
     readFlag(INSTALL_DISMISSED_KEY),
@@ -231,70 +247,97 @@ export function PassportPwaShell({ children }: { children: ReactNode }) {
   /**
    * The whole update path, and the fix for the 2026/08/26 incident in which a
    * reviewer's installed PWA served a client build weeks out of date. The
-   * mechanism is written up in `public/sw.js`; the two halves that live here
-   * are:
+   * worker's half is written up in `public/sw.js`; the two halves that live
+   * here are:
    *
    *   ASK OFTEN ENOUGH. `registration.update()` runs when the app becomes
    *   visible and when a page is restored from the back/forward cache — i.e.
    *   every time somebody opens the installed app — not only on a timer in a
    *   document a phone stopped running hours ago.
    *
-   *   ACT WHEN IT LANDS. The new worker now calls `skipWaiting()` itself, so
-   *   it activates and claims this page without waiting for anything. That
-   *   fires `controllerchange`, and this page then reloads INTO the build the
-   *   new worker serves — automatically when Passport is idle, and behind a
-   *   visible banner when it is not. It never reloads out from under a
-   *   ceremony or a transaction: `criticalWorkInFlight()` is the app's own
-   *   answer to that, held by the screens in `App.tsx` and `txConsent.tsx`.
+   *   ACT WHEN IT LANDS, AND SAY NOTHING (2026/09/25). There is no update
+   *   button and no update bar any more: an "Update Passport" button sat across
+   *   the bottom of an Android phone offering a page its own build, and
+   *   pressing it could only spin. Every decision the button and the bar used
+   *   to put to the reader — whether a waiting worker is told to skip waiting,
+   *   whether this page needs reloading at all, and when it is safe to — is
+   *   `src/lib/appUpdate.ts`'s now. This effect only hands it the page's
+   *   events.
    */
   useEffect(() => {
-    if (!pwaRegistrationEnabled() || !('serviceWorker' in navigator)) return;
+    const serviceWorkers =
+      pwaRegistrationEnabled() && 'serviceWorker' in navigator ? navigator.serviceWorker : null;
+    const updates = createSilentUpdater({
+      pageBuildId: BUILD_ID,
+      /* A page with no controller is a FIRST install, and the
+         `clients.claim()` that follows it fires `controllerchange` on THIS
+         page. That one is not an update; the updater tells the two apart from
+         this starting point. */
+      controlled: Boolean(serviceWorkers?.controller),
+      isHidden: () => document.visibilityState === 'hidden',
+      isEngaged: () =>
+        isTextEntry(document.activeElement) ||
+        document.querySelector(OPEN_SHEET_SELECTOR) !== null,
+      now: () => Date.now(),
+      reload: () => window.location.reload(),
+      askBuildId: (worker) => askWorkerBuildId(worker),
+      session: sessionFlags(),
+    });
+
+    const onVisibility = () => updates.visibilityChanged();
+    const onInteraction = () => updates.interacted();
+    /* A lazy chunk the deployment no longer serves. Vite raises this for a
+       dynamic import that failed to load — the previous build's hashes are
+       gone from the alias the moment a new one is promoted — and the reload
+       is what brings the screen that import was for. */
+    const onChunkLoadFailed = () => {
+      updates.chunkLoadFailed();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('pageshow', onVisibility);
+    for (const type of INTERACTION_EVENTS) {
+      window.addEventListener(type, onInteraction, { capture: true, passive: true });
+    }
+    window.addEventListener('vite:preloadError', onChunkLoadFailed);
+
+    const stopListening = () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('pageshow', onVisibility);
+      for (const type of INTERACTION_EVENTS) {
+        window.removeEventListener(type, onInteraction, { capture: true });
+      }
+      window.removeEventListener('vite:preloadError', onChunkLoadFailed);
+      updates.dispose();
+    };
+    if (!serviceWorkers) return stopListening;
 
     let disposed = false;
     let updateTimer: number | undefined;
     let liveRegistration: ServiceWorkerRegistration | null = null;
     let lastCheckedAt = 0;
-    /* A page with no controller is a FIRST install, and the `clients.claim()`
-       that follows it fires `controllerchange` on THIS page. That one is not
-       an update and must not reload anything, or every first visit would
-       reload itself once for no reason.
-       It is a `let` rather than a captured constant: the effect runs once, so
-       a value frozen at mount would still read "never controlled" at the
-       second controllerchange — the real one — and swallow it. Measured on
-       2026/08/26 against two successive local builds: the worker rolled
-       forward and the page kept running the old bundle. */
-    let controlled = Boolean(navigator.serviceWorker.controller);
 
-    const reloadForUpdate = () => {
-      if (reloadedForUpdate.current) return;
-      reloadedForUpdate.current = true;
-      window.location.reload();
-    };
-
+    /* A worker that finishes installing while this page is open. The shipped
+       worker skips waiting on its own; telling it again costs nothing, and a
+       worker installed by an OLDER `sw.js` — one that never skips waiting on
+       its own — needs telling, which is precisely the state the 2026/08/26
+       incident was. */
     const inspectInstallingWorker = (registration: ServiceWorkerRegistration) => {
       const installing = registration.installing;
       if (!installing) return;
       installing.addEventListener('statechange', () => {
-        if (
-          !disposed &&
-          installing.state === 'installed' &&
-          navigator.serviceWorker.controller
-        ) {
-          setUpdateRegistration(registration);
+        if (!disposed && installing.state === 'installed') {
+          updates.waitingWorker(registration.waiting ?? installing);
         }
       });
     };
 
-    /* Belt and braces. The shipped worker skips waiting on its own, so this
-       should never find one parked — but a worker installed by an OLDER
-       `sw.js` can be, and that is precisely the state this incident was.
-       Offering it is how such a client gets out on the next visit. */
     const noteWaitingWorker = (registration: ServiceWorkerRegistration) => {
-      if (!disposed && registration.waiting) {
-        setUpdateRegistration(registration);
-        setUpdateReady(true);
-      }
+      if (!disposed && registration.waiting) updates.waitingWorker(registration.waiting);
     };
+    /* A worker still parked is told again, every few seconds, for as long as
+       it waits: see `WAITING_NUDGE_INTERVAL_MS` for the measurement. Reading
+       `registration.waiting` is all this costs while nothing is waiting. */
+    let nudgeTimer: number | undefined;
 
     const checkForUpdate = () => {
       const registration = liveRegistration;
@@ -321,25 +364,16 @@ export function PassportPwaShell({ children }: { children: ReactNode }) {
         inspectInstallingWorker(registration);
         registration.addEventListener('updatefound', () => inspectInstallingWorker(registration));
         updateTimer = window.setInterval(checkForUpdate, UPDATE_CHECK_INTERVAL_MS);
+        nudgeTimer = window.setInterval(
+          () => noteWaitingWorker(registration),
+          WAITING_NUDGE_INTERVAL_MS,
+        );
       } catch (error) {
         console.error('Midnight Passport service worker registration failed.', error);
       }
     };
 
-    const onControllerChange = () => {
-      if (!controlled) {
-        controlled = true;
-        return;
-      }
-      // An explicit "Reload" tap wins over everything: the user asked.
-      if (reloadRequested.current || !criticalWorkInFlight()) {
-        reloadForUpdate();
-        return;
-      }
-      // Mid-ceremony. The new worker is already in charge, but this document
-      // keeps running the build it loaded until the user is ready.
-      setUpdateReady(true);
-    };
+    const onControllerChange = () => updates.controllerChanged(navigator.serviceWorker.controller);
     navigator.serviceWorker.addEventListener('controllerchange', onControllerChange);
 
     /* The reviewer's question, answered: opening the app IS the update check. */
@@ -347,20 +381,25 @@ export function PassportPwaShell({ children }: { children: ReactNode }) {
     window.addEventListener('pageshow', checkForUpdate);
     window.addEventListener('focus', checkForUpdate);
 
-    if (document.readyState === 'complete') {
+    const onLoad = () => {
       void register();
+    };
+    if (document.readyState === 'complete') {
+      onLoad();
     } else {
-      window.addEventListener('load', register, { once: true });
+      window.addEventListener('load', onLoad, { once: true });
     }
 
     return () => {
       disposed = true;
       if (updateTimer) window.clearInterval(updateTimer);
-      window.removeEventListener('load', register);
+      if (nudgeTimer) window.clearInterval(nudgeTimer);
+      window.removeEventListener('load', onLoad);
       document.removeEventListener('visibilitychange', checkForUpdate);
       window.removeEventListener('pageshow', checkForUpdate);
       window.removeEventListener('focus', checkForUpdate);
       navigator.serviceWorker.removeEventListener('controllerchange', onControllerChange);
+      stopListening();
     };
   }, []);
 
@@ -456,27 +495,6 @@ export function PassportPwaShell({ children }: { children: ReactNode }) {
     }
   };
 
-  /**
-   * The banner's button. Two cases, and both end in this document running the
-   * deployed build:
-   *
-   *   - a worker is parked in `waiting` (only possible for one installed by an
-   *     older `sw.js`): tell it to skip waiting and reload on the
-   *     `controllerchange` that follows;
-   *   - the new worker already claimed this page and the reload was deferred
-   *     because Passport was busy: just reload.
-   */
-  const activateUpdate = () => {
-    reloadRequested.current = true;
-    setReloadingForUpdate(true);
-    const waiting = updateRegistration?.waiting;
-    if (!waiting) {
-      window.location.reload();
-      return;
-    }
-    waiting.postMessage({ type: 'SKIP_WAITING' });
-  };
-
   return (
     <>
       {children}
@@ -490,38 +508,18 @@ export function PassportPwaShell({ children }: { children: ReactNode }) {
         </div>
       )}
 
-      {/* Shown only when the reload could not simply happen: Passport was in
-          the middle of something, or the worker came from an older `sw.js`
-          and is parked in `waiting`. It is a bar, not a modal — nothing
-          behind it is blocked, and the flow underneath can be finished. */}
-      {updateReady && (
-        <div className="pwa-update-bar" role="status" aria-live="polite">
-          <RefreshCw className={reloadingForUpdate ? 'spin' : undefined} size={15} aria-hidden="true" />
-          <span>A new version of Passport is ready.</span>
-          <button type="button" onClick={activateUpdate} disabled={reloadingForUpdate}>
-            {reloadingForUpdate ? 'Reloading' : 'Reload'}
-          </button>
-        </div>
-      )}
+      {/* NO UPDATE BUTTON AND NO UPDATE BAR (2026/09/25). There used to be
+          both: a "Reload" bar when a reload had been deferred, and an "Update
+          Passport" button in the corner — full-width across the bottom on a
+          phone — whenever a new worker had installed. Updating is the app's
+          job, so it happens without either; see `src/lib/appUpdate.ts`.
+          Nothing is announced to a screen reader in their place, because
+          there is nothing for anybody to do: the reload happens only at a
+          moment when there is nothing on screen to lose.
 
-      <div className="pwa-actions" aria-live="polite">
-        {updateRegistration && !updateReady && (
-          <button
-            type="button"
-            className="pwa-action"
-            onClick={activateUpdate}
-            disabled={reloadingForUpdate}
-          >
-            <RefreshCw className={reloadingForUpdate ? 'spin' : undefined} size={15} />
-            {reloadingForUpdate ? 'Updating' : 'Update Passport'}
-          </button>
-        )}
-        {/* THE CORNER BUTTON WENT ON 2026/09/03. Installing is offered from
-            Home's top bar now (`screens/InstallPassport.tsx`), where a person
-            looks for it and on every browser that can do it rather than only a
-            desktop-width Chromium one. A second button saying the same thing
-            in the corner of the same screen is one too many. */}
-      </div>
+          The install button that shared the corner went on 2026/09/03.
+          Installing is offered from Home's top bar (`screens/InstallPassport.tsx`),
+          where a person looks for it, on every browser that can do it. */}
 
       {installSheetOpen && (
         <>

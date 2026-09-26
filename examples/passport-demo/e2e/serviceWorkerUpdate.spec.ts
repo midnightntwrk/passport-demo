@@ -31,11 +31,13 @@
  * network-first shell, the `/verify/` bypass — is the shipped worker's own
  * code running in a real Chromium.
  *
- * The PAGE side of the fix — reload when Passport is idle, offer a banner when
- * it is not — is deliberately NOT copied into this fixture, because a fixture
- * asserting against its own copy of a rule asserts nothing. Its decision lives
- * in `src/lib/appBusy.ts` and is drilled at 100% by `src/lib/appBusy.test.ts`;
- * its wiring is asserted against `src/pwa.tsx` by `scripts/check-pwa.mjs`.
+ * The PAGE side of the fix — reload into a new build at a safe moment, never
+ * reload a page already running it, and show nothing either way — is
+ * deliberately NOT copied into this fixture, because a fixture asserting
+ * against its own copy of a rule asserts nothing. Its decisions live in
+ * `src/lib/appUpdate.ts` and are drilled at 100% by `src/lib/appUpdate.test.ts`;
+ * the shipped build runs them end to end in `e2e/silent-update.spec.ts`. The
+ * one exception is stated where it is made, in the deadline test below.
  *
  * Every assertion below FAILS against the worker as it stood at 90381f0.
  */
@@ -84,9 +86,13 @@ interface Deployment {
 async function serveDeployment(initial: Deployment): Promise<{
   base: string;
   deploy: (next: Deployment) => void;
+  /** Requests for `pathname` are accepted and never answered: a dropped connection. */
+  neverAnswer: (pathname: string) => void;
   close: () => Promise<void>;
 }> {
   let current = initial;
+  const silent = new Set<string>();
+  const parked: http.ServerResponse[] = [];
 
   const shell = () =>
     `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Passport fixture</title>` +
@@ -105,6 +111,10 @@ async function serveDeployment(initial: Deployment): Promise<{
 
   const server = http.createServer((request, response) => {
     const url = new URL(request.url ?? '/', 'http://fixture');
+    if (silent.has(url.pathname)) {
+      parked.push(response);
+      return;
+    }
     const send = (body: string | Buffer, type: string, cacheControl: string) => {
       response.writeHead(200, { 'content-type': type, 'cache-control': cacheControl });
       response.end(body);
@@ -152,8 +162,12 @@ async function serveDeployment(initial: Deployment): Promise<{
     deploy: (next) => {
       current = next;
     },
+    neverAnswer: (pathname) => {
+      silent.add(pathname);
+    },
     close: () =>
       new Promise<void>((resolve) => {
+        for (const response of parked) response.destroy();
         server.close(() => resolve());
       }),
   };
@@ -302,6 +316,62 @@ test.describe('a deployed Passport reaches an installed client', () => {
       expect(await page.evaluate(() => caches.match('/assets/main-cafe0001.js').then(Boolean))).toBe(
         false,
       );
+    } finally {
+      await site.close();
+    }
+  });
+
+  test('a request that never answers holds the next worker no longer than the worker’s own deadline', async ({
+    page,
+  }) => {
+    /* THE ANDROID PHONE, 2026/09/25. A waiting worker that has called
+       `skipWaiting()` still activates only once the RUNNING worker has no
+       pending events, and every fetch the worker made was unbounded — so one
+       request that never answered, a connection dropped on a phone, parked the
+       next build in `waiting` for as long as it hung. Against the worker as it
+       stood before this test, the new worker never takes over here at all.
+
+       `SKIP_WAITING` is posted to the waiting worker on every poll. That is the
+       page's half — `src/lib/appUpdate.ts` does it every few seconds while a
+       worker waits, because Chromium does not always re-check a parked worker
+       once the running one goes idle — and it stands in for the page here so
+       that what is asserted is the worker's deadline and nothing else. It
+       cannot end the wait on its own: the first poll below shows it failing
+       to for as long as the request is still in flight. */
+    const site = await serveDeployment({ entryName: 'main-5ea10001' });
+    try {
+      await loadAndTakeControl(page, site.base);
+      site.neverAnswer('/never-answers.svg');
+      await page.evaluate(() => {
+        void fetch('/never-answers.svg').catch(() => undefined);
+      });
+
+      site.deploy({ entryName: 'main-5ea10002' });
+      await page.evaluate(async () => {
+        const registration = await navigator.serviceWorker.getRegistration('/');
+        await registration?.update();
+      });
+
+      const nudgeAndAsk = async () => {
+        await page.evaluate(async () => {
+          const registration = await navigator.serviceWorker.getRegistration('/');
+          registration?.waiting?.postMessage({ type: 'SKIP_WAITING' });
+        });
+        return controllingBuildId(page);
+      };
+
+      // Parked behind the request that has not answered…
+      await expect.poll(() => registrationState(page)).toMatchObject({ waiting: true });
+      for (let i = 0; i < 3; i += 1) {
+        expect(await nudgeAndAsk()).toBe(buildIdFor('main-5ea10001'));
+        await page.waitForTimeout(1_500);
+      }
+
+      // …until the worker's own deadline ends it, and the next build takes over.
+      await expect
+        .poll(nudgeAndAsk, { timeout: 45_000, intervals: [2_000] })
+        .toBe(buildIdFor('main-5ea10002'));
+      expect(await registrationState(page)).toMatchObject({ waiting: false });
     } finally {
       await site.close();
     }
