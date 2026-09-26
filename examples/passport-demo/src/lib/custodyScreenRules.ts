@@ -77,6 +77,81 @@ export function custodyMayReadHoldings(inFlight: boolean): boolean {
   return !inFlight;
 }
 
+/** How often a waiting payment looks again at whether the account is free. */
+export const CUSTODY_TURN_POLL_MS = 250;
+
+/** What {@link awaitCustodyTurn} is handed: the two questions, and a clock. */
+export interface CustodyTurnDeps {
+  /**
+   * Whether a payment, or the tidy-up that follows one, holds the account —
+   * the flag {@link custodyInFlightRefusal} reads.
+   */
+  busy(): boolean;
+  /**
+   * Whether the read that follows a payment is still putting the coin store in
+   * order. Waited for once there was a payment to wait for, and never a reason
+   * to refuse: see below.
+   */
+  settling(): boolean;
+  now(): number;
+  sleep(milliseconds: number): Promise<void>;
+  /** Called once, when the payment starts waiting, so the pill can say so. */
+  onWait(): void;
+}
+
+/**
+ * A SECOND PAYMENT WAITS FOR THE FIRST, RATHER THAN BEING REFUSED (2026/09/26).
+ *
+ * Live on stagenet on 2026/09/26 a Passport sent 10 mUSD to a name, the pill
+ * said "Sent", and a 5 mUSD payment confirmed straight after it went to "Not
+ * sent" with {@link custodyInFlightRefusal}'s sentence — and stayed there.
+ * "Sent" is said the moment the payment has its answer (see
+ * {@link runCustodyPayment}); the flag stays up after it, across the tidy-up
+ * that writes the change into the account's own inbox. So the Send sheet's
+ * Review was open while the account was still busy, and a payment confirmed
+ * in that window was refused on the spot, with nothing on screen to say it
+ * would have been fine a few seconds later.
+ *
+ * WHY THE WAIT IS HERE AND NOT IN THE ACCOUNT LOCK. The lock
+ * (`./custodyAccountLock.ts`) already waits, but it is taken inside the
+ * engine's call — after the screen has read the coin it will spend, planned
+ * the payment against it, written the payment down, and asked for an
+ * approval. A payment queued there is planned against a store the first
+ * payment's tidy-up and read have not finished with. So the wait comes first,
+ * before anything is read, and the lock stays exactly as it is below it: one
+ * transaction per account at a time, with the node's refusals (104 and 196)
+ * built again as they always were.
+ *
+ * WHY ALSO THE READ. The read after a payment is what makes the store agree
+ * with the chain, and a payment planned while it runs is planned against a
+ * store that is being rewritten. So once there WAS a payment to wait for, the
+ * read after it is waited for too. It is never a reason to refuse: a person
+ * who presses Send while a read is running is not held up by it today, and a
+ * wait that reaches its bound with only a read left goes ahead.
+ *
+ * BOUNDED, BY THE BOUND THE ENGINE ALREADY KEEPS before anything is handed
+ * over (`custodyPrepareWaitMs`, two minutes). Past it the answer is the one
+ * there always was — {@link custodyInFlightRefusal}'s sentence — and "Try
+ * again". Resolves to that sentence, or to null when the account is free.
+ *
+ * NOTHING WAITS WHEN NOTHING IS BUSY, and `onWait` is not called, so a
+ * payment with nothing in front of it starts exactly as it did before this
+ * existed.
+ */
+export async function awaitCustodyTurn(
+  deps: CustodyTurnDeps,
+  boundMs: number,
+): Promise<string | null> {
+  if (!deps.busy()) return null;
+  deps.onWait();
+  const deadline = deps.now() + Math.max(0, boundMs);
+  while (deps.busy() || deps.settling()) {
+    if (deps.now() >= deadline) return custodyInFlightRefusal(deps.busy());
+    await deps.sleep(CUSTODY_TURN_POLL_MS);
+  }
+  return null;
+}
+
 /** A mutable flag holder — React's `useRef` is one, and so is `{ current }`. */
 export interface CustodyInFlightFlag {
   current: boolean;
