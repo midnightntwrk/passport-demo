@@ -17,9 +17,10 @@ import { startBalanceWatch } from '../lib/balanceWatch.js'
  *     so there is only ever one watch);
  *   - the `visibilitychange` listener, so a backgrounded tab stops asking and
  *     reads once on the way back;
- *   - the latest `refresh` and `signature`, held in refs so a re-render does
- *     not tear down and restart the watch — restarting it would reset the
- *     chase, and a chase that restarts on every render never backs off.
+ *   - the latest `refresh`, `look`, and `signature`, held in refs so a
+ *     re-render does not tear down and restart the watch — restarting it would
+ *     reset the chase, and a chase that restarts on every render never backs
+ *     off.
  *
  * It lives beside the screens rather than in `src/lib` because it imports
  * React, and everything in the coverage denominator is deliberately free of
@@ -32,6 +33,13 @@ export interface BalanceWatchWiring {
   active: boolean
   /** Re-reads the account. Undefined where the screen was handed no refresh. */
   refresh: (() => void) | undefined
+  /**
+   * The cheap look — "has anything landed?" — where the screen was handed one,
+   * answering whether it went on to read. See `startBalanceWatch`'s `look`.
+   * Whether there is one decides the cadence, so the watch is restarted if that
+   * ever changes; which function it is does not, and is read from a ref.
+   */
+  look?: ((context: { chasing: boolean }) => Promise<boolean>) | undefined
   /** What the account holds right now — see `holdingsSignature`. */
   signature: string
   /**
@@ -42,11 +50,14 @@ export interface BalanceWatchWiring {
   chaseKey: string
 }
 
-export function useBalanceWatch({ active, refresh, signature, chaseKey }: BalanceWatchWiring): void {
+export function useBalanceWatch({ active, refresh, look, signature, chaseKey }: BalanceWatchWiring): void {
   const refreshRef = useRef(refresh)
+  const lookRef = useRef(look)
   const signatureRef = useRef(signature)
   refreshRef.current = refresh
+  lookRef.current = look
   signatureRef.current = signature
+  const hasLook = look !== undefined
 
   const watchRef = useRef<ReturnType<typeof startBalanceWatch> | null>(null)
 
@@ -54,6 +65,7 @@ export function useBalanceWatch({ active, refresh, signature, chaseKey }: Balanc
     if (!active) return undefined
     const watch = startBalanceWatch({
       refresh: () => refreshRef.current?.(),
+      ...(hasLook ? { look: (context: { chasing: boolean }) => lookRef.current?.(context) ?? false } : {}),
       signature: () => signatureRef.current,
       busy: criticalWorkInFlight,
     })
@@ -72,7 +84,7 @@ export function useBalanceWatch({ active, refresh, signature, chaseKey }: Balanc
       watch.stop()
       watchRef.current = null
     }
-  }, [active])
+  }, [active, hasLook])
 
   useEffect(() => {
     /* Fires on mount too, and that is wanted: a Passport opened with an

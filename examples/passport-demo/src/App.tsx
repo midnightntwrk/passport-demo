@@ -10034,6 +10034,9 @@ export default function PassportDemo() {
         passportContract={contractRecord ? { record: contractRecord } : null}
         network={custody.network as PassportNetwork}
         syncPercent={custody.syncPercent}
+        /* The watch's cheap look, so a Passport left open reads its account
+           only when something has landed on it. See `lib/balanceWatch.ts`. */
+        onWatch={custody.onWatch}
         account={account}
         /* The `Arriving` word under a figure with coins behind it that have no
            position yet. Never added to the figure itself. */
@@ -10137,6 +10140,7 @@ export default function PassportDemo() {
             network={custody.network as PassportNetwork}
             onRefresh={custody.onRefresh}
             activity={homeActivity}
+            onWatch={custody.onWatch}
           />
         ) : (
           /* The apps grid, with NO transfer seam. An app that asks this
