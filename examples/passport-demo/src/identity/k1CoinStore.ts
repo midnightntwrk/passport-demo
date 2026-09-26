@@ -2197,6 +2197,31 @@ export function rememberK1EncSecretKey(account: K1Account, encSecretKeyHex: stri
   });
 }
 
+/**
+ * Every account this browser holds a viewing secret for, with that secret.
+ *
+ * READ-ONLY, AND ITS ONE READER IS THE PASSWORD BACKUP (2026/09/26). The
+ * backup carries this secret so a Passport brought back on a new device can
+ * read the notes delivered before it came back (`./backup.ts`,
+ * `./viewingKeys.ts`). It is the ONLY field of this store the backup may see:
+ * this function returns the secret and the account it belongs to, and nothing
+ * else a coin store holds — no coin, no position, no spend.
+ *
+ * An account whose key or address this store cannot read is left out rather
+ * than listed with a guess, for the reason the store drops an unreadable coin.
+ */
+export function k1ViewingSecrets(): { network: string; address: string; encSecretKeyHex: string }[] {
+  const listed: { network: string; address: string; encSecretKeyHex: string }[] = [];
+  for (const [key, state] of Object.entries(readAll())) {
+    const separator = key.lastIndexOf('::');
+    const account = { network: key.slice(0, separator), address: key.slice(separator + 2) };
+    const secret = normalisedColourHex(state.encSecretKeyHex);
+    if (separator < 1 || secret === null || normalisedAccount(account) === null) continue;
+    listed.push({ network: account.network, address: normalisedColourHex(account.address)!, encSecretKeyHex: secret });
+  }
+  return listed;
+}
+
 /** Forgets everything this account holds. Used by a reset, never by a spend. */
 export function forgetK1Account(account: K1Account): void {
   const target = requireAccount(account);

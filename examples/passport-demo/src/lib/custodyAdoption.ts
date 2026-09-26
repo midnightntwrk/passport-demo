@@ -38,8 +38,13 @@
  * message is a different signature every time (audited 2026/09/16). So what
  * comes back here is AUTHORITY and not the view: the Passport can be opened,
  * paid, and spent from, and the descriptions of tokens it was sent before the
- * new device existed stay on the device that received them. That limitation is
- * on the screen, in one sentence, rather than left to be discovered.
+ * new device existed stay sealed to the key on the device that received them.
+ *
+ * The view comes back by another road (2026/09/26): the person's password
+ * backup carries that key, and once the recovery finishes the device asks for
+ * the backup once (`../identity/viewingKeys.ts`). This record still carries no
+ * key: a hand-off is a note about which account to join, and nothing it is
+ * used for needs one.
  *
  * NOTHING AT RUN TIME BUT THE STANDARD LIBRARY, for the reason
  * `./custodyRoute.ts` gives: `App.tsx` asks this question on every render, and

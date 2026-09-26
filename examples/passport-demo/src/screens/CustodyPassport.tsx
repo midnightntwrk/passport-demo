@@ -1403,13 +1403,25 @@ export default function CustodyPassport({
       wallet: { network: { indexerHttpUrl: string } },
       account: { network: string; address: string },
     ): Promise<number> => {
-      const [{ loadK1CoinStore }, { readInboxCustody }, accountModule, runtime] = await Promise.all([
-        import('../identity/k1CoinStore.js'),
-        import('../identity/custodyInbox.js'),
-        import('../identity/accountCustody.js'),
-        import('../identity/contractRuntime.js'),
-      ])
-      const encSecretKeyHex = loadK1CoinStore(account).encSecretKeyHex
+      const [{ loadK1CoinStore }, { readInboxCustody }, accountModule, runtime, { viewingSecretsFor }] =
+        await Promise.all([
+          import('../identity/k1CoinStore.js'),
+          import('../identity/custodyInbox.js'),
+          import('../identity/accountCustody.js'),
+          import('../identity/contractRuntime.js'),
+          import('../identity/viewingKeys.js'),
+        ])
+      /* EVERY KEY THIS ACCOUNT HAS HAD (2026/09/26): the one it is pointed at
+         now, then any earlier one a password backup gave back — which is how a
+         Passport brought back on a new device reads the payments it was sent
+         before. See `../identity/viewingKeys.ts`. Null when there is none, so
+         the test below and the walk's own argument read as they always have. */
+      const viewingKeys = viewingSecretsFor(
+        window.localStorage,
+        account,
+        loadK1CoinStore(account).encSecretKeyHex,
+      )
+      const encSecretKeyHex = viewingKeys.length > 0 ? viewingKeys : null
       const indexerHttpUrl = wallet.network.indexerHttpUrl
       /* The history is read first and kept for the opening rows' View links,
          whether or not there is a list to open below. */

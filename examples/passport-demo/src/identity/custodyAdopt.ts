@@ -14,6 +14,8 @@
  *      approving, so anything paid in from now on is readable here
  *   4. write the record, the name, and the pointer, so the next open goes
  *      straight to the Passport with no ceremony at all
+ *   5. record that this device should be asked for the person's password
+ *      backup, which is what brings back the payments sent before today
  *
  * The hand-off itself is cleared by the CALLER, once this resolves. Nothing
  * here clears it: a failure halfway through is a recovery to be resumed, and a
@@ -27,14 +29,19 @@
  * order: each step is safe to repeat, so a browser closed between any two of
  * them comes back and finishes rather than starting again.
  *
- * WHAT IT CANNOT DO, STATED ONCE. Deliveries the account already holds were
- * sealed to the key on the device that is gone, and step 3 does not open them:
- * a client that cannot read a delivery cannot re-seal it under a new key, and
- * there is nothing a social sign-in can reproduce on a new device that would
- * let it. So what comes back is the Passport, its name, its ability to be paid
- * and to pay — and not the descriptions of tokens it was sent before today.
- * That sentence is on the screen, and the pull request carries what would be
- * needed to close it.
+ * WHAT IT CANNOT DO BY ITSELF, STATED ONCE. Deliveries the account already
+ * holds were sealed to the key on the device that is gone, and step 3 does not
+ * open them: a client that cannot read a delivery cannot re-seal it under a new
+ * key, and there is nothing a social sign-in can reproduce on a new device that
+ * would let it. So what THIS function brings back is the Passport, its name,
+ * its ability to be paid and to pay — and not the descriptions of tokens it was
+ * sent before today.
+ *
+ * WHAT CLOSES IT (2026/09/26): the person's password backup. It carries the
+ * old device's viewing key (`./backup.ts`), and a restore gives it back as an
+ * EARLIER key of this account (`./viewingKeys.ts`), which the inbox walk then
+ * tries beside the new one. Step 5 below records that this device should be
+ * asked for that backup, and the screen asks once.
  */
 
 import { addDeviceK1, rotateEncKeyK1, defaultCustodyDeps, type CustodyPhase } from './custodyContractClient.js';
@@ -44,6 +51,7 @@ import { k1PrivateStateId, recoveredCustodyRecord, saveCustodyName } from './cus
 import { saveCustodyRecord, type CustodyStorage } from './custodyContractPlan.js';
 import { saveCustodyPasskeyPointer } from '../lib/custodyRoute.js';
 import { rememberK1EncSecretKey } from './k1CoinStore.js';
+import { offerEarlierPayments } from './viewingKeys.js';
 import type { CustodyDynamicSession } from './custodyContractClient.js';
 import type { K256DeviceIdentity } from './custodyContractSigning.js';
 import type { AdoptionHandoff } from '../lib/custodyAdoption.js';
@@ -143,6 +151,14 @@ export async function adoptDeviceKey(
   } catch (cause) {
     console.warn('[account-custody] this Passport is back, but its deliveries still point at the other device', cause);
   }
+
+  /* STEP 5 (2026/09/26). The payments this Passport was sent before today are
+     sealed to the key on the device that is gone, and the one thing that can
+     bring that key back is the person's own password backup. So the recovery
+     ends by recording the question — "do you have a backup?" — for the screen
+     to ask once. Written whether or not step 3 landed: the earlier key is
+     needed for the earlier notes either way. */
+  offerEarlierPayments(storage, account);
 
   made.forget();
   return { userKey, pointedAtNewKey };

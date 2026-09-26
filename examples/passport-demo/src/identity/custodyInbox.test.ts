@@ -535,6 +535,43 @@ describe('the inbox walk', () => {
     expect(k1ColourBalance(ALICE, COLOUR)).toBe(110n);
   });
 
+  /* A PASSPORT BROUGHT BACK ON A NEW DEVICE (2026/09/26). Its account was
+     pointed at the new device's key, and every note delivered before that is
+     sealed to the key on the device that is gone. Handed both keys — the
+     earlier one from the person's password backup — the walk reads both sets,
+     and a key that opens nothing changes nothing. */
+  it('tries every key it is handed on every entry, and reads notes sealed to an earlier key', async () => {
+    const before = generateCustodyEncKeyPair();
+    const after = generateCustodyEncKeyPair();
+    const early = await sealCustodyInboxEntry(before.publicKeyHex, coin({ value: 25n }));
+    const late = await sealCustodyInboxEntry(
+      after.publicKeyHex,
+      coin({ value: 7n, colour: '2b'.repeat(32), nonce: '6e'.repeat(32) }),
+    );
+    const options = { txIdFor: () => null, windows: () => Promise.resolve(WINDOW) };
+
+    const newKeyOnly = await readInboxCustody(ALICE, [after.secretKeyHex], reader([early, late]), options);
+    expect(newKeyOnly.coins.map((found) => found.value)).toEqual([7n]);
+    expect(newKeyOnly.skipped).toBe(1);
+
+    const both = await readInboxCustody(
+      ALICE,
+      [after.secretKeyHex, before.secretKeyHex],
+      reader([early, late]),
+      options,
+    );
+    expect(both.coins.map((found) => [found.inboxIndex, found.value])).toEqual([
+      [0n, 25n],
+      [1n, 7n],
+    ]);
+    expect(both.skipped).toBe(0);
+
+    /* No key at all opens nothing, and says so rather than failing. */
+    const none = await readInboxCustody(ALICE, [], reader([early]), options);
+    expect(none.coins).toEqual([]);
+    expect(none.skipped).toBe(1);
+  });
+
   it('walks past entries addressed to somebody else', async () => {
     const keys = generateCustodyEncKeyPair();
     const stranger = generateCustodyEncKeyPair();
