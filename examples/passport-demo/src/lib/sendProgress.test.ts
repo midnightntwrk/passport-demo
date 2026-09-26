@@ -13,6 +13,8 @@ import {
   sendProgressReduce,
   sendProgressView,
   sentLine,
+  sendClosingNote,
+  sendUnsent,
   type SendDraft,
   type SendProgress,
   type SendProgressRecord,
@@ -284,5 +286,67 @@ describe('the progress view', () => {
     expect(sendElapsed(1_000, 13_400)).toBe('12 s');
     expect(sendElapsed(0, 65_000)).toBe('1 min 05 s');
     expect(sendElapsed(5_000, 1_000)).toBe('0 s');
+  });
+});
+
+describe('what closing Passport does to a running payment (2026/09/26)', () => {
+  const at = (step: Parameters<typeof sendProgressView>[0]['step']) =>
+    sendProgressView({ progress: running, step, record: null })!;
+  /** The copy rule every screen on this path keeps. */
+  const FORBIDDEN = ['wallet address', 'DUST', 'contract', 'registry', 'indexer', 'resolver', 'sponsor', 'SDK', 'Dynamic'];
+
+  it('is unsent from the press until the payment is handed to the network', () => {
+    expect(sendUnsent(at(null))).toBe(true);
+    expect(sendUnsent(at('sign'))).toBe(true);
+    expect(sendUnsent(at('submit'))).toBe(true);
+    expect(sendUnsent(at('confirm'))).toBe(false);
+  });
+
+  it('is never unsent for an outcome, a record read back, or nothing', () => {
+    expect(sendUnsent(null)).toBe(false);
+    expect(
+      sendUnsent(sendProgressView({ progress: { kind: 'sent', subject, link, startedAt: T0 }, step: null, record: null })),
+    ).toBe(false);
+    expect(
+      sendUnsent(
+        sendProgressView({
+          progress: { kind: 'failed', subject, sentence: 'No.', draft, startedAt: T0 },
+          step: null,
+          record: null,
+        }),
+      ),
+    ).toBe(false);
+    const handedOver: SendProgressRecord = { subject, draft, startedAt: 7, submitted: true, sentence: 'x' };
+    expect(sendUnsent(sendProgressView({ progress: null, step: null, record: handedOver }))).toBe(false);
+  });
+
+  it('asks for Passport to be kept open while the payment is unsent, on all three surfaces', () => {
+    expect(sendClosingNote(at('submit'))).toEqual({
+      sheet: 'Keep Passport open until this is sent. You can close this sheet.',
+      row: 'Keep Passport open until this is sent.',
+      pill: 'Keep Passport open',
+    });
+  });
+
+  it('says closing will not stop it once it has been handed over, and the pill asks for nothing', () => {
+    const note = sendClosingNote(at('confirm'))!;
+    expect(note.sheet).toBe('It has been handed to the network. Closing Passport now will not stop it.');
+    expect(note.row).toBe('Closing Passport now will not stop it.');
+    expect(note.pill).toBeNull();
+  });
+
+  it('says nothing about closing once the payment has an outcome', () => {
+    expect(
+      sendClosingNote(sendProgressView({ progress: { kind: 'sent', subject, link, startedAt: T0 }, step: null, record: null })!),
+    ).toBeNull();
+  });
+
+  it('keeps to the copy rule', () => {
+    for (const step of [null, 'confirm'] as const) {
+      const note = sendClosingNote(at(step))!;
+      for (const line of [note.sheet, note.row, note.pill ?? '']) {
+        for (const word of FORBIDDEN) expect(line.toLowerCase()).not.toContain(word.toLowerCase());
+      }
+    }
   });
 });

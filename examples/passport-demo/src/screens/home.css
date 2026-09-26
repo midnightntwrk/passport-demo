@@ -1767,6 +1767,28 @@ button.mnhome-support { font-family: inherit; cursor: pointer; }
   white-space: nowrap;
   text-overflow: ellipsis;
 }
+/* THE PHASE AND "KEEP PASSPORT OPEN" SHARE ONE LINE on the pill (2026/09/26),
+   so the pill keeps its height; the phase gives way first, so the ask stays
+   whole. */
+.mnsendp-line {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+.mnsendp-line .mnsendp-phase { flex: 0 1 auto; min-width: 0; }
+.mnsendp-hold {
+  flex: 0 0 auto;
+  color: var(--mn-text-primary);
+  font-size: 12px;
+  font-weight: 600;
+}
+.mnsendp-line .mnsendp-hold::before {
+  content: '·';
+  margin-right: 6px;
+  color: var(--mn-text-secondary);
+  font-weight: 400;
+}
 /* The failure sentence is the whole message, so it may take two lines. */
 .mnsendp-pill[data-state='failed'] .mnsendp-title {
   display: -webkit-box;
@@ -1834,6 +1856,7 @@ button.mnhome-support { font-family: inherit; cursor: pointer; }
 .mnsendp-row .mnsendp-text { flex: 1 1 auto; }
 .mnsendp-row .mnsendp-title { white-space: normal; }
 .mnsendp-row .mnsendp-phase { white-space: normal; }
+.mnsendp-row .mnsendp-hold { white-space: normal; }
 
 /* The live row is PENDING, not a record: an accent edge and a small tag set it
    apart from the calm rows under it, and the whole of it is a button. */

@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 
 import {
+  sendClosingNote,
   sendElapsed,
   sendProgressSteps,
   type SendDraft,
@@ -27,6 +28,10 @@ import './home.css'
  *
  * Both paint ONE value, `SendProgressView`, and hold no decisions: which phase,
  * which sentence, and whether it can be put away are `../lib/sendProgress.ts`'s.
+ *
+ * WHAT CLOSING PASSPORT DOES is said on all three (2026/09/26): keep it open
+ * while the payment is unsent, and closing will not stop it once it has been
+ * handed over. The words are `sendClosingNote`'s.
  *
  * FIXED, SO NOTHING MOVES. The pill is positioned over the page rather than in
  * it, so it arriving, changing phase, and going never shifts anything under the
@@ -113,6 +118,7 @@ export function SendProgressPill(
   },
 ) {
   const { view, onOpen, placement = 'bottom' } = props
+  const keepOpen = sendClosingNote(view)?.pill ?? null
   return createPortal(
     <div
       className="mnsendp-pill"
@@ -131,8 +137,15 @@ export function SendProgressPill(
         <span className="mnsendp-text">
           <span className="mnsendp-title">{view.kind === 'failed' ? view.detail : view.title}</span>
           {view.kind === 'running' && view.detail ? (
-            <span className="mnsendp-phase" data-phase={view.phase ?? undefined}>
-              {view.detail}
+            <span className="mnsendp-line">
+              <span className="mnsendp-phase" data-phase={view.phase ?? undefined}>
+                {view.detail}
+              </span>
+              {keepOpen ? (
+                <span className="mnsendp-hold" data-testid="send-keep-open">
+                  {keepOpen}
+                </span>
+              ) : null}
             </span>
           ) : null}
         </span>
@@ -152,6 +165,7 @@ export function SendProgressRow(
   props: SendProgressHandlers & { view: SendProgressView; onOpen: () => void },
 ) {
   const { view, onOpen } = props
+  const closing = sendClosingNote(view)
   return (
     <div
       className="mnsendp-row"
@@ -172,6 +186,11 @@ export function SendProgressRow(
           <span className="mnsendp-tag">{view.kind === 'failed' ? 'Not sent' : 'Pending'}</span>
           <span className="mnsendp-title">{view.title}</span>
           {view.detail ? <span className="mnsendp-phase">{view.detail}</span> : null}
+          {closing ? (
+            <span className="mnsendp-hold" data-testid="send-keep-open">
+              {closing.row}
+            </span>
+          ) : null}
         </span>
       </button>
       <ProgressActions {...props} compact={false} />
@@ -210,6 +229,7 @@ export function SendProgressSheet(
   }, [onClose])
   useSheetBackButton('send-progress', true, onClose)
   const steps = sendProgressSteps(view)
+  const closing = sendClosingNote(view)
   const heading =
     view.kind === 'sent' ? 'Sent' : view.kind === 'failed' ? 'Not sent' : 'Sending'
   return createPortal(
@@ -228,9 +248,9 @@ export function SendProgressSheet(
             <h2 className="mnhome-surface-title" id="mnsendp-sheet-title">
               {heading}
             </h2>
-            <p className="mnhome-surface-description">
-              {view.kind === 'running'
-                ? 'You can close this and keep using your Passport. It carries on.'
+            <p className="mnhome-surface-description" data-testid="send-progress-closing">
+              {closing
+                ? closing.sheet
                 : view.kind === 'sent'
                   ? 'It has been handed to the network.'
                   : view.detail}

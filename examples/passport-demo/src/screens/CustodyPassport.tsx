@@ -24,6 +24,7 @@ import {
   saveRecoveryIntent,
 } from '../lib/recoveryStep.js'
 import { holdCriticalWork } from '../lib/appBusy.js'
+import { guardUnsentPayment } from '../lib/paymentLeaveGuard.js'
 import type { CustodyArm, CustodyIdentity } from '../lib/custodyArm.js'
 import { parseEndpointList } from '../lib/endpoints.js'
 import { type K256DeviceIdentity } from '../identity/custodyContractSigning.js'
@@ -196,6 +197,7 @@ import {
   sendInFlightReason,
   sendProgressReduce,
   sendProgressView,
+  sendUnsent,
   type SendDraft,
   type SendProgressLink,
   type SendProgressSubject,
@@ -606,6 +608,15 @@ export default function CustodyPassport({
     const timer = setTimeout(() => dispatchProgress({ type: 'dismiss' }), SEND_SENT_DISMISS_MS)
     return () => clearTimeout(timer)
   }, [progress])
+  /* KEEP PASSPORT OPEN UNTIL THE PAYMENT IS SENT (2026/09/26). From the press
+     until the payment is handed to the network, closing the tab or the app
+     stops it — so for exactly that window the browser is asked to warn before
+     the page goes, and the silent update is held back. Only THIS tab's payment
+     can be in the window: one read back from a record was handed over, or it
+     is a failure. The screens say the same in words — `sendClosingNote`. See
+     `../lib/paymentLeaveGuard.ts`. */
+  const paymentUnsent = sendUnsent(sendProgressView({ progress, step: sendStep, record: null }))
+  useEffect(() => (paymentUnsent ? guardUnsentPayment(window) : undefined), [paymentUnsent])
   /**
    * Whether the welcome page has been read in this session.
    *
