@@ -8,12 +8,20 @@ import {
   CUSTODY_STILL_FINISHING,
 } from '../identity/custodyContractPlan.js'
 import {
+  ADOPTION_NOT_ADDED,
+  ADOPTION_OTHER_PASSPORT,
+  ADOPTION_OTHER_SIGN_IN,
+  ADOPTION_PASSKEY_DECLINED,
+  ADOPTION_UNCONFIRMED,
+} from './custodyAdoption.js'
+import {
   RECOVERY_ADD_WAIT_MS,
   RECOVERY_FINISH_WAIT_MS,
   RECOVERY_KEY_NOT_READY,
   RECOVERY_KEY_RETRY_MS,
   RECOVERY_KEY_WAIT_MS,
   RECOVERY_PASSKEY_DECLINED,
+  adoptionFailureSentence,
   recoveryAddFailureSentence,
   recoveryAddNeedsReader,
   recoveryAddRows,
@@ -331,6 +339,53 @@ describe('the one sentence a failed add shows', () => {
   it('never shows a payment’s sentence, a library’s words, or nothing', () => {
     for (const cause of [new Error(CUSTODY_SEND_NOT_SENT), new Error('RpcError: 1010'), 'text', null]) {
       expect(recoveryAddFailureSentence(cause)).toBe(CUSTODY_KEY_NOT_ADDED)
+    }
+  })
+})
+
+/* -------------------------------------------------------------------------- */
+/* The same add, the other way round (2026/09/26)                             */
+/* -------------------------------------------------------------------------- */
+
+describe('the one sentence a hand-off that did not finish shows', () => {
+  it.each([
+    ADOPTION_NOT_ADDED,
+    ADOPTION_UNCONFIRMED,
+    ADOPTION_PASSKEY_DECLINED,
+    ADOPTION_OTHER_SIGN_IN,
+    ADOPTION_OTHER_PASSPORT,
+    CUSTODY_STILL_FINISHING,
+    RECOVERY_KEY_NOT_READY,
+  ])('shows "%s" as it is', (sentence) => {
+    expect(adoptionFailureSentence(new Error(sentence))).toBe(sentence)
+  })
+
+  it('says the add was not confirmed, about THIS device, when the chain did not answer', () => {
+    /* `addDeviceK1`'s own sentence is about a way back being added — the other
+       direction — so it is translated rather than shown to somebody holding
+       the device that was being added. */
+    expect(adoptionFailureSentence(new Error(CUSTODY_KEY_UNCONFIRMED))).toBe(ADOPTION_UNCONFIRMED)
+  })
+
+  it('says the passkey was not confirmed when its prompt was dismissed or aborted', () => {
+    const dismissed = Object.assign(new Error('The operation either timed out or was not allowed.'), {
+      name: 'NotAllowedError',
+    })
+    expect(adoptionFailureSentence(dismissed)).toBe(ADOPTION_PASSKEY_DECLINED)
+    const aborted = Object.assign(new Error('aborted'), { name: 'AbortError' })
+    expect(adoptionFailureSentence(aborted)).toBe(ADOPTION_PASSKEY_DECLINED)
+  })
+
+  it('says "not added" for everything else, which is true of it', () => {
+    for (const cause of [
+      new Error(CUSTODY_KEY_NOT_ADDED),
+      /* The sentence the live run of 2026/09/26 logged, and never showed. */
+      new Error('This Passport is not finished being set up yet.'),
+      new Error('RpcError: 1010'),
+      'text',
+      null,
+    ]) {
+      expect(adoptionFailureSentence(cause)).toBe(ADOPTION_NOT_ADDED)
     }
   })
 })

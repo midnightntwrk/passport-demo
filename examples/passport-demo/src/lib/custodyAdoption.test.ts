@@ -12,6 +12,11 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  ADOPTION_NOT_ADDED,
+  ADOPTION_OTHER_PASSPORT,
+  ADOPTION_OTHER_SIGN_IN,
+  ADOPTION_PASSKEY_DECLINED,
+  ADOPTION_UNCONFIRMED,
   CUSTODY_ADOPT_KEY,
   adoptionStage,
   clearAdoption,
@@ -162,3 +167,41 @@ describe('the hand-off', () => {
 /* -------------------------------------------------------------------------- */
 /* The words                                                                  */
 /* -------------------------------------------------------------------------- */
+
+describe('what a hand-off that did not finish says (2026/09/26)', () => {
+  const sentences = [
+    ADOPTION_NOT_ADDED,
+    ADOPTION_UNCONFIRMED,
+    ADOPTION_PASSKEY_DECLINED,
+    ADOPTION_OTHER_SIGN_IN,
+    ADOPTION_OTHER_PASSPORT,
+  ];
+
+  it('never says what holds the Passport', () => {
+    const everything = sentences.join(' ');
+    for (const banned of [
+      'wallet address',
+      'DUST',
+      'contract',
+      'registry',
+      'indexer',
+      'resolver',
+      'sponsor',
+      'SDK',
+      'Dynamic',
+    ]) {
+      expect(everything).not.toContain(banned);
+    }
+  });
+
+  it('is one plain sentence or two each, and every one says what the press will do or why not', () => {
+    for (const sentence of sentences) {
+      expect(sentence.length).toBeGreaterThan(0);
+      expect(sentence.endsWith('.')).toBe(true);
+    }
+    /* The three a press can cure point at it. */
+    for (const sentence of [ADOPTION_NOT_ADDED, ADOPTION_UNCONFIRMED, ADOPTION_PASSKEY_DECLINED]) {
+      expect(sentence).toContain('Try again');
+    }
+  });
+});
