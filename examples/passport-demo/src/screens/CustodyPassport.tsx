@@ -145,6 +145,7 @@ import {
   type CustodySetupSignal,
 } from '../lib/custodySetupProgress.js'
 import { LONG_WAIT_NOTE } from '../lib/claimSteps.js'
+import { accountReadDue, readAccountHead } from '../lib/balanceWatch.js'
 import { OFFER_AFTER_MS } from '../lib/waitingGame.js'
 import ProgressTimeline, { useTimelineClock, type TimelineRow } from './ProgressTimeline.js'
 import WaitingGame from './WaitingGame.js'
@@ -1402,6 +1403,7 @@ export default function CustodyPassport({
     async (
       wallet: { network: { indexerHttpUrl: string } },
       account: { network: string; address: string },
+      state: unknown,
     ): Promise<number> => {
       const [{ loadK1CoinStore }, { readInboxCustody }, accountModule, runtime] = await Promise.all([
         import('../identity/k1CoinStore.js'),
@@ -1420,7 +1422,15 @@ export default function CustodyPassport({
          restored from a name on a second device, and the sentence for it is not
          here — the row simply shows what the store holds. */
       if (encSecretKeyHex === null) return 0
-      const reader = await accountModule.readCustodyAccountView({ indexerHttpUrl }, account.address)
+      /* THE STATE THE BALANCE READ HAS JUST FETCHED, decoded again rather than
+         fetched again (2026/09/25). Every read used to ask the indexer for the
+         same account state twice within a second — 64 KB each on stagenet,
+         measured on a phone left on Home. A read whose balance half could not
+         fetch it still walks, from a fetch of its own. */
+      const reader =
+        state != null
+          ? await accountModule.custodyAccountViewFromState(state)
+          : await accountModule.readCustodyAccountView({ indexerHttpUrl }, account.address)
       const txIdFor =
         actions === null ? () => null : custodyTxIdForInboxIndex(actions)
       const walked = await readInboxCustody(account, encSecretKeyHex, reader, {
@@ -1471,6 +1481,18 @@ export default function CustodyPassport({
      the read after a payment all ask; the second of two overlapping asks waits
      for the first rather than opening the same questions again beside it. */
   const holdingsInFlight = useRef<Promise<void> | null>(null)
+  /* WHAT THE LAST READ KNEW, for the watch's cheap look (2026/09/25): the
+     account's head as it stood BEFORE the read fetched the state — so a head
+     that moves during the read is still news to the next look — when it
+     finished, whether its state answered, and the indexer it asked, so the look
+     asks the same one. See `watchHoldings`. */
+  const lastRead = useRef<{
+    address: string
+    head: string | null
+    at: number
+    ok: boolean
+    indexerHttpUrl: string
+  } | null>(null)
 
   /** What the Passport holds, in NIGHT and in every token it has been paid. */
   const readHoldings = useCallback((): Promise<void> => {
@@ -1493,6 +1515,10 @@ export default function CustodyPassport({
     const account = { network: record.network, address: record.address }
     const deps = defaultCustodyDeps()
     let opened: Awaited<ReturnType<typeof deps.wallet>> | null = null
+    /* The state the balance half fetched, handed to the delivery walk; and the
+       head read just before it. See `lastRead`. */
+    let fetchedState: unknown = null
+    let headBeforeRead: string | null = null
     setBalanceFailed(false)
     try {
       /* BOUNDED: a read that cannot open its connection says so and shows
@@ -1515,7 +1541,14 @@ export default function CustodyPassport({
           setSyncPercent(progress.percent)
         })
       }
-      const providers = await deps.providers(wallet, record.privateStateId)
+      /* The head FIRST, beside the providers and before the state: a head read
+         after the state could name an action the state does not have yet, and
+         the next look would then find nothing new and miss it. */
+      const [head, providers] = await Promise.all([
+        readAccountHead(wallet.network.indexerHttpUrl, record.address),
+        deps.providers(wallet, record.privateStateId),
+      ])
+      headBeforeRead = head
       const reader = providers.publicDataProvider as {
         queryContractState(address: string): Promise<{ data: unknown } | null>
       }
@@ -1525,6 +1558,7 @@ export default function CustodyPassport({
       )
       const state = answered.kind === 'done' ? answered.value : null
       if (!state) throw new Error('unreadable')
+      fetchedState = state
       const { nightColourBytes } = await import('../identity/accountCustody.js')
       /* `.data`, not the whole state. A compiled build's `ledger()` takes the
          StateValue; handing it the ContractState decodes nothing. Same call
@@ -1546,10 +1580,9 @@ export default function CustodyPassport({
        is put back, and a change coin that never existed stops reading as
        arriving. Only the indexer is asked, so it runs whether or not the
        connection above opened. See `reconcileCustodySpends`. */
+    let indexerHttpUrl: string | null = opened?.network.indexerHttpUrl ?? null
     try {
-      const indexerHttpUrl =
-        opened?.network.indexerHttpUrl ??
-        (await import('../lib/localWallet.js')).localWalletNetworkConfig().indexerHttpUrl
+      indexerHttpUrl ??= (await import('../lib/localWallet.js')).localWalletNetworkConfig().indexerHttpUrl
       await reconcileCustodySpends(account, indexerHttpUrl)
     } catch (cause) {
       console.info('[account-custody] the payments in flight could not be checked this time', cause)
@@ -1594,7 +1627,7 @@ export default function CustodyPassport({
       }
 
       try {
-        unplaced = await walkDeliveries(opened, account)
+        unplaced = await walkDeliveries(opened, account, fetchedState)
       } catch (cause) {
         /* QUIET ON PURPOSE, and not the same silence as above: this costs the
            descriptions that have not been filed YET, and the ones already
@@ -1639,7 +1672,49 @@ export default function CustodyPassport({
         accountAddress: record.address,
       }),
     )
+
+    if (indexerHttpUrl !== null) {
+      lastRead.current = {
+        address: record.address,
+        head: fetchedState === null ? null : headBeforeRead,
+        at: Date.now(),
+        ok: fetchedState !== null,
+        indexerHttpUrl,
+      }
+    }
   }
+
+  /**
+   * THE WATCH'S CHEAP LOOK (2026/09/25): has anything landed on this account
+   * since the last read? One request for the newest action's transaction
+   * hash — a hundred bytes — and the whole read only when the answer is yes,
+   * or when `accountReadDue` says one is owed anyway (a chase, a coin waiting
+   * for its position, the safety net). Answers whether it read.
+   *
+   * Home's watch calls this every few seconds while it is in front of somebody,
+   * where it used to read the whole account every thirty. A payment somebody
+   * else sends now shows in about five seconds instead of up to thirty, and a
+   * Passport left open asks the indexer for a fraction of the bytes.
+   */
+  const watchHoldings = useCallback(async (context: { chasing: boolean }): Promise<boolean> => {
+    const address = view?.record?.address ?? null
+    if (address == null) return false
+    const last = lastRead.current
+    if (last !== null && last.address === address) {
+      const head = await readAccountHead(last.indexerHttpUrl, address)
+      const due = accountReadDue({
+        head,
+        headAtLastRead: last.head,
+        sinceLastReadMs: Date.now() - last.at,
+        arriving: arriving > 0,
+        chasing: context.chasing,
+        lastReadFailed: !last.ok,
+      })
+      if (!due) return false
+    }
+    await readHoldings()
+    return true
+  }, [arriving, readHoldings, view])
 
   useEffect(() => {
     if (screen !== 'home') return
@@ -3039,27 +3114,30 @@ export default function CustodyPassport({
   /* the reader's hands, and it can be shut for the rest of this setup.      */
   /* ---------------------------------------------------------------------- */
   const setupRunning = setupPhase !== null && busy !== null
-  const [waitedMs, setWaitedMs] = useState(0)
+  const [offerDue, setOfferDue] = useState(false)
   const [gameOpen, setGameOpen] = useState(false)
   const [gameDismissed, setGameDismissed] = useState(false)
   useEffect(() => {
     if (!setupRunning) {
       // The setup ended, one way or the other. The next one is offered afresh.
-      setWaitedMs(0)
+      setOfferDue(false)
       setGameOpen(false)
       setGameDismissed(false)
       return undefined
     }
-    const startedAt = Date.now()
-    const timer = window.setInterval(() => setWaitedMs(Date.now() - startedAt), 1_000)
-    return () => window.clearInterval(timer)
+    /* ONE TIMER, NOT A CLOCK (2026/09/25). All the offer asks of the wait is
+       whether {@link OFFER_AFTER_MS} has passed; a once-a-second interval that
+       re-rendered this whole screen for the length of every setup was a clock
+       nobody read. The timeline keeps its own, for the seconds it shows. */
+    const timer = window.setTimeout(() => setOfferDue(true), OFFER_AFTER_MS)
+    return () => window.clearTimeout(timer)
   }, [setupRunning])
 
   /* The ceremony is a prompt over this screen — a passkey dialogue, or the
      provider's overlay — and the game goes away for it rather than competing
      with it. */
   const identityPromptUp = setupPhase === 'confirm-identity'
-  const offerGame = setupRunning && waitedMs >= OFFER_AFTER_MS && !gameDismissed
+  const offerGame = setupRunning && offerDue && !gameDismissed
 
   const setupProgress =
     setupRows === null || setupPhase === null ? null : (
@@ -3118,24 +3196,24 @@ export default function CustodyPassport({
   const recoveryRunningRow = recoveryRows?.find((row) => row.state === 'active') ?? null
   const recoveryElapsedFor = useTimelineClock(recoveryRunningRow?.id ?? null)
   const recoveryAdding = recoveryProgress !== null
-  const [recoveryWaitedMs, setRecoveryWaitedMs] = useState(0)
+  const [recoveryOfferDue, setRecoveryOfferDue] = useState(false)
   const [snakeOpen, setSnakeOpen] = useState(false)
   const [snakeDismissed, setSnakeDismissed] = useState(false)
   useEffect(() => {
     if (!recoveryAdding) {
-      setRecoveryWaitedMs(0)
+      setRecoveryOfferDue(false)
       setSnakeOpen(false)
       setSnakeDismissed(false)
       return undefined
     }
-    const startedAt = Date.now()
-    const timer = window.setInterval(() => setRecoveryWaitedMs(Date.now() - startedAt), 1_000)
-    return () => window.clearInterval(timer)
+    /* One timer, for the reason the setup's offer gives above. */
+    const timer = window.setTimeout(() => setRecoveryOfferDue(true), OFFER_AFTER_MS)
+    return () => window.clearTimeout(timer)
   }, [recoveryAdding])
   /* The passkey prompt, or the sign-in's own approval, has the reader's hands. */
   const recoveryNeedsReader = recoveryProgress !== null && recoveryAddNeedsReader(recoveryProgress.stage)
   const offerSnake =
-    recoveryAdding && recoveryProgress.stage !== 'done' && recoveryWaitedMs >= OFFER_AFTER_MS && !snakeDismissed
+    recoveryAdding && recoveryProgress.stage !== 'done' && recoveryOfferDue && !snakeDismissed
 
   const recoveryTimeline =
     recoveryRows === null ? null : (
@@ -3384,6 +3462,8 @@ export default function CustodyPassport({
         arriving,
       },
       syncPercent,
+      /* The watch's cheap look — see `watchHoldings`. */
+      onWatch: watchHoldings,
       /* ONE BANNER, TWO SOURCES. A refusal from a control on this screen and
          the sentence about a payment that stopped are both "something you
          should read", and Home has one place for that. The stopped payment's

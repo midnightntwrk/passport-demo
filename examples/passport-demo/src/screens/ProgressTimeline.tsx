@@ -190,10 +190,20 @@ export function useTimelineClock(
         done: { ...previous.done, [previous.rowId]: at - previous.startedAt },
       }
     })
-    const timer = window.setInterval(() => {
+    /* NOT WHILE NOBODY CAN SEE IT (2026/09/25). The tick re-renders whatever
+       screen holds the timeline, and a hidden tab's once-a-second render is
+       work for nobody. The clock is wall time, so nothing is lost: the first
+       tick back, fired by the page becoming visible, catches it up. */
+    const tick = () => {
+      if (document.visibilityState === 'hidden') return
       setClock((previous) => (previous === null ? previous : { ...previous, now: Date.now() }))
-    }, 1_000)
-    return () => window.clearInterval(timer)
+    }
+    const timer = window.setInterval(tick, 1_000)
+    document.addEventListener('visibilitychange', tick)
+    return () => {
+      window.clearInterval(timer)
+      document.removeEventListener('visibilitychange', tick)
+    }
   }, [activeRowId])
 
   return (row) => {
