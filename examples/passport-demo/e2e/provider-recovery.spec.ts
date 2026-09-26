@@ -637,13 +637,14 @@ test.describe('a Passport that has been paid', () => {
     await expect(page.locator('.mnid-alias')).toHaveText('walker.night');
     await expect(page.getByText('Your account is ready')).toBeVisible();
 
-    /* Everything down the page that a Passport has — and the one thing that
-       is deliberately NOT on it: the developer panel, whose own sentence
-       ("nothing in your Passport is held by this key") is false here. The
-       back-up file IS offered since 2026/09/26: it now carries the key that
-       reads this Passport's payments, which a new device cannot get back any
-       other way (the walk at the foot of this file). */
-    await expect(page.getByRole('button', { name: 'Back up or restore' })).toHaveCount(1);
+    /* Everything down the page that a Passport has — and the two things that
+       are deliberately NOT on it, because neither applies to a Passport on this
+       contract: a back-up file that would restore none of its state, and the
+       developer panel whose own sentence ("nothing in your Passport is held by
+       this key") is false here. The key that reads this Passport's payments
+       travels with its way back instead, since 2026/09/26 — with no file and
+       no password (the walk at the foot of this file). */
+    await expect(page.getByRole('button', { name: 'Back up or restore' })).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Sign a test message' })).toHaveCount(0);
     await expect(page.getByText('Ethereum address')).toHaveCount(0);
     await expect(page.locator('.mnhome-activity')).toBeVisible();
@@ -1040,25 +1041,39 @@ async function chooseAsset(page: Page, symbol: string): Promise<void> {
 /* -------------------------------------------------------------------------- */
 
 /**
- * THE WALK THIS BLOCK IS FOR. A Passport is paid mUSD, its person makes a
- * password backup, the phone is lost, and the Passport comes back on a new
- * device through the sign-in. Until this change the new device could never see
- * or spend that mUSD: the note describing it is sealed to the viewing key on
- * the device that is gone. The backup now carries that key, the new device is
- * asked for the backup once, and the earlier mUSD shows and can be sent.
+ * THE WALK THIS BLOCK IS FOR. A Passport is paid mUSD, its person adds Google
+ * as the way back, the phone is lost, and the Passport comes back on a new
+ * device through that sign-in. The note describing the mUSD is sealed to the
+ * viewing key on the device that is gone, so until 2026/09/26 the new device
+ * could never see or spend it. Now the key goes into the sign-in's own
+ * metadata when the way back is added, and comes back out on the new device —
+ * with no password, no file, and no question on the screen.
  *
  * WHAT IS REAL AND WHAT IS NOT, SAID PLAINLY
  * ------------------------------------------
- * Real: the shipped build, the Backup screen, the file it writes (read back
- * here and decrypted with Node's own WebCrypto), the restore, the inbox walk
- * with both keys, the coin store, Home, and the Send sheet.
+ * Real: the shipped build. On the old device, the whole "Add a way back" step —
+ * the press, the sign-in coming back from its overlay, the passkey, the
+ * sign-in's key recovered from its signatures, the timeline, "Recovery: on" —
+ * and the metadata write after it. On the new device, the read-back, the inbox
+ * walk with both keys, the coin store, Home, and the Send sheet.
+ *
+ * Stood in for: the provider, by `src/lib/dynamicWalk.ts` — its signatures are
+ * real secp256k1 ones, and its metadata is a store this file seeds and reads
+ * back (`window.__passportWalkSignIn`), carried from the old device's browser
+ * to the new one's the way the provider carries it. And the two chain calls:
+ * the add, by `window.__passportWalkRecoveryAdd`, and the payment, by
+ * `window.__passportWalkPayment`, as the payment walks in
+ * `passkey-custody.spec.ts` do — there is no proving service in a box.
  *
  * Seeded: the state the recovery leaves on the new device — the record, the
- * name, the new device's own viewing key, an empty coin store, and the question
- * `adoptDeviceKey` records — written exactly as the app's modules persist them.
- * The recovery's own chain calls cannot run in a box, for the reason the
- * whole-road walk above stops where it does: the recorded account's device set
- * holds the gate run's key, not this walk's stand-in signer.
+ * name, the pointer, the way back recorded as on, and the new device's own
+ * viewing key over an empty coin store — written exactly as the app's modules
+ * persist them. The recovery's own chain calls cannot run in a box on this
+ * build, for the reason the whole-road walk above stops where it does, so what
+ * the new device exercises here is the read-back every open makes when the way
+ * back is on and its sign-in is here. The read-back at the end of the recovery
+ * itself runs the same module and is drilled, through the real
+ * `adoptDeviceKey`, in `src/identity/custodyAdopt.signIn.test.ts`.
  *
  * Built here, and not recorded: ONE delivery. The recorded account is a real
  * stagenet account whose one note is sealed to a key nobody here holds, so the
@@ -1066,11 +1081,6 @@ async function chooseAsset(page: Page, symbol: string): Promise<void> {
  * in this file rather than imported from the module under test, to the OLD
  * device's key — and serves the transaction that wrote it and where its output
  * landed. Every other byte of the state is the recording's.
- *
- * The payment at the end runs on the walk's stand-in engine
- * (`window.__passportWalkPayment`), as the payment walks in
- * `passkey-custody.spec.ts` do: there is no proving service in a box. What it
- * proves is that the earlier mUSD is offered, planned against, and handed over.
  */
 
 /** The viewing key on the device that was lost, and the one on the new device. */
@@ -1080,17 +1090,13 @@ const NEW_VIEWING_SECRET = '6b'.repeat(32);
 const EARLIER_DELIVERY_TX = 'e4'.repeat(32);
 const EARLIER_NONCE = '4d'.repeat(32);
 const EARLIER_MUSD = 25n;
-const BACKUP_PASSWORD = 'correct horse battery staple';
 
 /**
  * One inbox note, sealed the way MIP-0012 §6.4 lays it out: X25519 with a
  * fresh ephemeral key, HKDF-SHA256 under `midnight:custody:inbox:v1`, and
  * AES-256-GCM over nonce ‖ colour ‖ value, padded to 192 bytes.
  */
-async function sealEarlierNote(
-  recipientSecretHex: string,
-  coin: { nonce: string; value: bigint } = { nonce: EARLIER_NONCE, value: EARLIER_MUSD },
-): Promise<Uint8Array> {
+async function sealEarlierNote(recipientSecretHex: string): Promise<Uint8Array> {
   const { x25519 } = await import('@noble/curves/ed25519.js');
   const recipient = x25519.getPublicKey(Buffer.from(recipientSecretHex, 'hex'));
   const ephemeral = crypto.getRandomValues(new Uint8Array(32));
@@ -1108,9 +1114,9 @@ async function sealEarlierNote(
   );
   const key = await crypto.subtle.importKey('raw', bits, 'AES-GCM', false, ['encrypt']);
   const plaintext = new Uint8Array(80);
-  plaintext.set(Buffer.from(coin.nonce, 'hex'), 0);
+  plaintext.set(Buffer.from(EARLIER_NONCE, 'hex'), 0);
   plaintext.set(Buffer.from(MUSD_COLOUR, 'hex'), 32);
-  let value = coin.value;
+  let value = EARLIER_MUSD;
   for (let index = 15; index >= 0; index -= 1) {
     plaintext[64 + index] = Number(value & 0xffn);
     value >>= 8n;
@@ -1140,34 +1146,27 @@ async function sealEarlierNote(
  * the ledger wrote: field 2 of the account's state is the inbox map and field 3
  * its count, which is the layout the compiled build's `ledger()` reads.
  */
-async function recordedStateWithEarlierNote(
-  notes: readonly { nonce: string; value: bigint }[] = [{ nonce: EARLIER_NONCE, value: EARLIER_MUSD }],
-): Promise<string> {
+async function recordedStateWithEarlierNote(): Promise<string> {
   const runtime = await import('@midnight-ntwrk/compact-runtime');
   const recorded = JSON.parse(ACCOUNT_CUSTODY_STATE) as { data: { contract: { state: string } } };
   const state = runtime.ContractState.deserialize(Buffer.from(recorded.data.contract.state, 'hex'));
   const fields = state.data.state.asArray()!;
-  let grown = fields[2].asMap()!;
-  let index = BigInt(grown.keys().length);
+  const inbox = fields[2].asMap()!;
+  const index = BigInt(inbox.keys().length);
   const u64 = new runtime.CompactTypeUnsignedInteger(18446744073709551615n, 8);
   const bytes192 = new runtime.CompactTypeBytes(192);
-  /* In the order given: the first note is the lowest index, as it would be if
-     its payment had arrived first. */
-  for (const coin of notes) {
-    const note = await sealEarlierNote(OLD_VIEWING_SECRET, coin);
-    grown = grown.insert(
-      { value: u64.toValue(index), alignment: u64.alignment() },
-      runtime.StateValue.newCell({ value: bytes192.toValue(note), alignment: bytes192.alignment() }),
-    );
-    index += 1n;
-  }
+  const note = await sealEarlierNote(OLD_VIEWING_SECRET);
+  const grown = inbox.insert(
+    { value: u64.toValue(index), alignment: u64.alignment() },
+    runtime.StateValue.newCell({ value: bytes192.toValue(note), alignment: bytes192.alignment() }),
+  );
   let next = runtime.StateValue.newArray();
   fields.forEach((field, position) => {
     next = next.arrayPush(
       position === 2
         ? runtime.StateValue.newMap(grown)
         : position === 3
-          ? runtime.StateValue.newCell({ value: u64.toValue(index), alignment: u64.alignment() })
+          ? runtime.StateValue.newCell({ value: u64.toValue(index + 1n), alignment: u64.alignment() })
           : field,
     );
   });
@@ -1218,89 +1217,6 @@ async function serveEarlierDelivery(page: Page, stateBody: string): Promise<void
   });
 }
 
-/**
- * A finished Passport on this device, as the app persists one — with the
- * viewing key given, an EMPTY coin store (what it holds is learned from the
- * inbox, as it would be), and, for the new device, the question the recovery
- * records.
- */
-async function seedPassportWithKey(
-  page: Page,
-  options: { viewingSecret: string; askAboutEarlierPayments: boolean },
-): Promise<void> {
-  const key = `${WALK_USER}|${WALK_NETWORK}`;
-  const accountKey = `${WALK_NETWORK}::${ACCOUNT_CUSTODY_ADDRESS}`;
-  const record = {
-    user: WALK_USER,
-    network: WALK_NETWORK,
-    address: ACCOUNT_CUSTODY_ADDRESS,
-    privateStateId: `passport-account-custody-${WALK_USER.slice(2, 10)}`,
-    saltHex: '',
-    pkXHex: null,
-    pkYHex: null,
-    wavesDone: 3,
-    totalWaves: 3,
-    activated: true,
-    txHashes: [],
-  };
-  const store = {
-    [accountKey]: {
-      encSecretKeyHex: options.viewingSecret,
-      coins: {},
-      queued: {},
-      spentNonces: [],
-      mtIndexCandidates: {},
-      awaiting: {},
-    },
-  };
-  const offer = options.askAboutEarlierPayments ? { [accountKey]: { at: 1_790_000_000_000 } } : null;
-  await page.addInitScript(
-    ([recordKey, seededRecord, seededStore, seededOffer]) => {
-      window.localStorage.setItem(
-        'passport-account-custody:v1',
-        JSON.stringify({ [recordKey as string]: seededRecord }),
-      );
-      window.localStorage.setItem(
-        'passport-account-custody-name:v1',
-        JSON.stringify({ [recordKey as string]: 'walker' }),
-      );
-      window.localStorage.setItem('passport-k1-coins:v1', JSON.stringify(seededStore));
-      if (seededOffer !== null) {
-        window.localStorage.setItem('passport-earlier-payments-offer:v1', JSON.stringify(seededOffer));
-      }
-      /* The download path, not the native save dialog: a headless browser has
-         no dialog to answer, and the download is what a phone does anyway. */
-      Object.defineProperty(window, 'showSaveFilePicker', { value: undefined, configurable: true });
-    },
-    [key, record, store, offer] as const,
-  );
-}
-
-/** Opens a backup file as Node's WebCrypto sees it: PBKDF2, AES-256-GCM, the header as AAD. */
-async function openBackupFile(raw: string, password: string): Promise<Record<string, unknown>> {
-  const envelope = JSON.parse(raw) as { v: number; kdf: string; salt: string; nonce: string; ciphertext: string };
-  const material = await crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, [
-    'deriveKey',
-  ]);
-  const key = await crypto.subtle.deriveKey(
-    { name: 'PBKDF2', hash: 'SHA-256', salt: Buffer.from(envelope.salt, 'base64url'), iterations: 600_000 },
-    material,
-    { name: 'AES-GCM', length: 256 },
-    false,
-    ['decrypt'],
-  );
-  const plaintext = await crypto.subtle.decrypt(
-    {
-      name: 'AES-GCM',
-      iv: Buffer.from(envelope.nonce, 'base64url'),
-      additionalData: new TextEncoder().encode(`midnight-passport:backup:v1 ${envelope.v} ${envelope.kdf}`),
-    },
-    key,
-    Buffer.from(envelope.ciphertext, 'base64url'),
-  );
-  return JSON.parse(new TextDecoder().decode(plaintext)) as Record<string, unknown>;
-}
-
 /** Everything a screen may not say. */
 const FORBIDDEN_ON_SCREEN = [
   'wallet address',
@@ -1314,132 +1230,224 @@ const FORBIDDEN_ON_SCREEN = [
   'dynamic',
 ];
 
-/**
- * The old device's half: a Passport paid 25 mUSD, backed up under a password.
- * Leaves the file at `backupPath` and checks what is in it.
- */
-async function backUpOnTheOldDevice(
-  browser: Browser,
-  stateBody: string,
-  backupPath: string,
-  moreHistory?: (page: Page) => Promise<void>,
-): Promise<void> {
-  const context = await browser.newContext(walkContextOptions({ viewport: { width: 420, height: 900 } }));
-  const old = await context.newPage();
-  await installNetworkBoundary(old);
-  await serveAccountCustodyState(old, [ACCOUNT_CUSTODY_ADDRESS, PASSPORT_ACCOUNT_ADDRESS]);
-  await serveEarlierDelivery(old, stateBody);
-  await moreHistory?.(old);
-  await seedPassportWithKey(old, { viewingSecret: OLD_VIEWING_SECRET, askAboutEarlierPayments: false });
-  await old.goto(WALK);
-  await expect(greeting(old)).toBeVisible({ timeout: 60_000 });
-  /* The payment arrived: read from the note with this device's key. */
-  await expect(assetRow(old, 'mUSD')).toContainText('25', { timeout: 60_000 });
+/** Where a passkey Passport on the account custody contract is walked. */
+const CUSTODY_WALK = '/?accwalk=1';
 
-  /* "Back up or restore" is offered to this Passport now. */
-  await old.getByRole('button', { name: 'Back up or restore' }).click();
-  await expect(old.getByRole('heading', { name: 'Where your Passport lives' })).toBeVisible();
-  /* What the file holds, said beside the password that protects it. */
-  await expect(old.getByText(/The file does hold the key that reads your payments/)).toBeVisible();
-  await expect(old.getByText(/They could not spend any of them\./)).toBeVisible();
-  await expect(old.getByText(/It also holds the key that reads the payments sent to your Passport\./)).toBeVisible();
-  const said = (await old.locator('.mnid-screen').innerText()).toLowerCase();
-  for (const forbidden of FORBIDDEN_ON_SCREEN) {
-    expect(said, `"${forbidden}" is on screen`).not.toContain(forbidden);
-  }
-  await old.getByLabel('Password for this backup').fill(BACKUP_PASSWORD);
-  await old.getByLabel('Confirm the backup password').fill(BACKUP_PASSWORD);
-  const [download] = await Promise.all([
-    old.waitForEvent('download'),
-    old.getByRole('button', { name: 'Export encrypted backup' }).click(),
-  ]);
-  await download.saveAs(backupPath);
-  await expect(old.getByText(/It also carries the key that reads the payments sent to your Passport\./)).toBeVisible();
-  await context.close();
+/** The name the sign-in files this Passport's keys under: network, then account. */
+const SIGN_IN_SLOT = `${WALK_NETWORK}:${ACCOUNT_CUSTODY_ADDRESS}`;
 
-  /* THE FILE: format 2, the viewing key and the account it reads, and no key
-     that can spend — opened here with Node's own WebCrypto. */
-  const raw = fs.readFileSync(backupPath, 'utf8');
-  expect((JSON.parse(raw) as { v: number }).v).toBe(2);
-  expect(raw).not.toContain(OLD_VIEWING_SECRET);
-  const contents = await openBackupFile(raw, BACKUP_PASSWORD);
-  expect(Object.keys(contents).sort()).toEqual(
-    ['aliases', 'createdAt', 'incentives', 'passportContracts', 'version', 'viewingKeys'].sort(),
-  );
-  expect(contents.viewingKeys).toEqual([
-    { network: WALK_NETWORK, address: ACCOUNT_CUSTODY_ADDRESS, viewingSecret: OLD_VIEWING_SECRET },
-  ]);
+/** What the provider holds for the stand-in sign-in, and every write it took. */
+interface SignInMetadataStore {
+  metadata?: unknown;
+  writes: unknown[];
 }
 
 /**
- * The new device's half, up to the page: the state the recovery leaves, the
- * earlier delivery served, and the walk's stand-in payment engine.
+ * A passkey Passport on the account custody contract — finished, named,
+ * holding `viewingSecret` over an empty coin store, with the earlier delivery
+ * served — in a browser of its own.
+ *
+ * Made the way `custodyWalk.ts` makes one: a real passkey through the landing
+ * and the name step, because that is what files the device point every store
+ * is keyed by, then the finished state written in the shape the app persists
+ * it. `wayBack` writes the way back as on, which is what a recovery through
+ * the sign-in leaves; `signIn` is the stand-in's state when the Passport opens;
+ * `metadata` is what the provider holds for the signed-in person; and
+ * `moreHistory` serves more of the account's history ahead of the earlier
+ * delivery — a spend the old device made, say.
  */
-async function openOnTheNewDevice(
+async function passkeyPassportHere(
   browser: Browser,
   stateBody: string,
-  askAboutEarlierPayments: boolean,
-  moreHistory?: (page: Page) => Promise<void>,
+  options: {
+    viewingSecret: string;
+    wayBack: boolean;
+    signIn: 'out' | 'in';
+    metadata: unknown;
+    moreHistory?: (page: Page) => Promise<void>;
+  },
 ): Promise<{ page: Page; close: () => Promise<void> }> {
   const context = await browser.newContext(walkContextOptions({ viewport: { width: 420, height: 900 } }));
   const page = await context.newPage();
   await installNetworkBoundary(page);
   await serveAccountCustodyState(page, [ACCOUNT_CUSTODY_ADDRESS, PASSPORT_ACCOUNT_ADDRESS]);
   await serveEarlierDelivery(page, stateBody);
-  await moreHistory?.(page);
-  await seedPassportWithKey(page, { viewingSecret: NEW_VIEWING_SECRET, askAboutEarlierPayments });
-  await page.addInitScript((asked) => {
-    (window as unknown as { __passportWalkPayment?: unknown }).__passportWalkPayment = asked;
-  }, { stepMs: 500 });
-  await page.goto(WALK);
-  return { page, close: () => context.close() };
-}
+  await options.moreHistory?.(page);
+  const authenticator = await installVirtualAuthenticator(context, page);
+  await page.addInitScript((metadata) => {
+    const walk = window as unknown as Record<string, unknown>;
+    walk.__passportWalkSignIn = { metadata, writes: [] };
+    walk.__passportWalkRecoveryAdd = { stepMs: 300 };
+    walk.__passportWalkPayment = { stepMs: 500 };
+  }, options.metadata);
 
-/** Chooses the file and types its password on the Backup screen's restore card. */
-async function restoreFrom(page: Page, backupPath: string): Promise<void> {
-  await page.locator('input[type="file"]').setInputFiles(backupPath);
-  await page.getByLabel('Password for the backup being restored').fill(BACKUP_PASSWORD);
-  await page.getByRole('button', { name: 'Restore from this file' }).click();
-  await expect(page.getByTestId('backup-earlier-payments')).toHaveText(
-    /^Earlier payments: this Passport can now read what it was sent before this device\./,
+  await page.goto(CUSTODY_WALK);
+  await page.getByRole('button', { name: SIGN_IN_BUTTON }).click();
+  await expect(page.getByRole('heading', { name: /Welcome to\s*Passport/ })).toBeVisible({ timeout: 60_000 });
+  await page.getByRole('button', { name: /^Choose my (\.night )?name$/ }).click();
+  await page.getByLabel('Your name').fill('walker');
+  await expect(page.getByRole('button', { name: 'Create my Passport' })).toBeEnabled({ timeout: 120_000 });
+  await page.getByRole('button', { name: 'Create my Passport' }).click();
+  const pointed = await page.waitForFunction(
+    () => {
+      const credentialId = window.localStorage.getItem('passport-last-passkey');
+      const raw = window.localStorage.getItem('passport-account-custody-passkey:v1');
+      if (credentialId === null || raw === null) return null;
+      const entry = Object.entries(JSON.parse(raw) as Record<string, string>)[0];
+      return entry === undefined ? null : { credentialId, userKey: entry[1] };
+    },
+    undefined,
     { timeout: 60_000 },
   );
-  const said = (await page.locator('.mnid-screen').innerText()).toLowerCase();
-  for (const forbidden of FORBIDDEN_ON_SCREEN) {
+  const identity = (await pointed.jsonValue()) as { credentialId: string; userKey: string };
+
+  const record = {
+    user: identity.userKey,
+    network: WALK_NETWORK,
+    address: ACCOUNT_CUSTODY_ADDRESS,
+    privateStateId: `passport-account-custody-${identity.userKey.slice(7, 15)}`,
+    saltHex: '',
+    pkXHex: null,
+    pkYHex: null,
+    wavesDone: 4,
+    totalWaves: 4,
+    activated: true,
+    txHashes: [],
+  };
+  const store = {
+    [`${WALK_NETWORK}::${ACCOUNT_CUSTODY_ADDRESS}`]: {
+      encSecretKeyHex: options.viewingSecret,
+      coins: {},
+      queued: {},
+      spentNonces: [],
+      mtIndexCandidates: {},
+      awaiting: {},
+    },
+  };
+  await page.addInitScript(
+    ([recordKey, seededRecord, seededStore, pointerKey, seededUser, wayBackSlot]) => {
+      window.localStorage.setItem('passport-account-custody:v1', JSON.stringify({ [recordKey]: seededRecord }));
+      window.localStorage.setItem('passport-account-custody-name:v1', JSON.stringify({ [recordKey]: 'walker' }));
+      window.localStorage.setItem('passport-k1-coins:v1', JSON.stringify(seededStore));
+      window.localStorage.setItem('passport-account-custody-passkey:v1', JSON.stringify({ [pointerKey]: seededUser }));
+      if (wayBackSlot !== null) {
+        window.localStorage.setItem(
+          'passport-account-custody-backup:v1',
+          JSON.stringify({ [wayBackSlot]: { doneAt: 1_790_000_000_000, provider: 'Google' } }),
+        );
+      }
+    },
+    [
+      `${identity.userKey}|${WALK_NETWORK}`,
+      record,
+      store,
+      `${identity.credentialId}|${WALK_NETWORK}`,
+      identity.userKey,
+      options.wayBack ? `${identity.userKey.toLowerCase()}|${WALK_NETWORK}` : null,
+    ] as const,
+  );
+  await page.goto(`${CUSTODY_WALK}&dynamicwalk=${options.signIn === 'in' ? '1' : 'out'}`);
+  return {
+    page,
+    close: async () => {
+      await authenticator.remove();
+      await context.close();
+    },
+  };
+}
+
+/** What the stand-in provider holds, and every write it took, as the page sees them. */
+async function signInMetadata(page: Page): Promise<SignInMetadataStore> {
+  return page.evaluate(
+    () => (window as unknown as { __passportWalkSignIn: SignInMetadataStore }).__passportWalkSignIn,
+  );
+}
+
+/**
+ * No question, no password, no file, and nothing about the machinery — over
+ * everything Home says about money and identity, its one-line notice included.
+ * The apps grid is left out for the reason the walk at the head of this file
+ * gives: it renders a third party's own words.
+ */
+async function saysNoMoreThanItShould(page: Page): Promise<void> {
+  await expect(page.getByRole('heading', { name: 'Bring back your earlier payments' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Back up or restore' })).toHaveCount(0);
+  await expect(page.locator('input[type="password"], input[type="file"]')).toHaveCount(0);
+  const said = (
+    await Promise.all(
+      ['.mnhome-notice', '.mnhome-identity', '.mnhome-assets', '.mnid-card', '.mnhome-activity'].map(
+        async (selector) => (await page.locator(selector).allInnerTexts()).join(' '),
+      ),
+    )
+  )
+    .join(' ')
+    .toLowerCase();
+  for (const forbidden of [...FORBIDDEN_ON_SCREEN, 'password', 'backup', 'back up']) {
     expect(said, `"${forbidden}" is on screen`).not.toContain(forbidden);
   }
 }
 
-test.describe('a Passport recovered on a new device (2026/09/26)', () => {
-  test('is asked for its backup once, and then sees and sends the mUSD it was paid before', async ({
+test.describe('a Passport brought back through its sign-in (2026/09/26)', () => {
+  test('keeps its key with the way back, and on a new device shows and sends the mUSD it was paid before', async ({
     browser,
-  }, testInfo) => {
-    test.setTimeout(240_000);
+  }) => {
+    test.setTimeout(300_000);
     const stateBody = await recordedStateWithEarlierNote();
-    const backupPath = testInfo.outputPath('passport-backup.json');
-    await backUpOnTheOldDevice(browser, stateBody, backupPath);
 
-    /* THE NEW DEVICE, back through the sign-in: asked once, before Home. */
-    const { page, close } = await openOnTheNewDevice(browser, stateBody, true);
-    await expect(page.getByRole('heading', { name: 'Bring back your earlier payments' })).toBeVisible({
-      timeout: 60_000,
+    /* THE OLD DEVICE. Paid 25 mUSD, named, and offered the way back. The
+       provider already holds something of its own for this person, which the
+       write must keep. */
+    const old = await passkeyPassportHere(browser, stateBody, {
+      viewingSecret: OLD_VIEWING_SECRET,
+      wayBack: false,
+      signIn: 'out',
+      metadata: { theme: 'dark' },
     });
-    /* Nothing to export on a device that has just come back — only the restore. */
-    await expect(page.getByRole('button', { name: 'Export encrypted backup' })).toHaveCount(0);
-    await expect(page.getByRole('button', { name: 'Not now' })).toBeVisible();
-    const asked = (await page.locator('.mnid-screen').innerText()).toLowerCase();
-    for (const forbidden of FORBIDDEN_ON_SCREEN) {
-      expect(asked, `"${forbidden}" is on screen`).not.toContain(forbidden);
-    }
+    await expect(old.page.getByRole('heading', { name: /Add a way\s*back/ })).toBeVisible({ timeout: 60_000 });
+    await old.page.getByTestId('add-recovery').click();
+    await expect(greeting(old.page)).toBeVisible({ timeout: 120_000 });
+    await expect(old.page.getByTestId('recovery-state')).toHaveText('Recovery: on');
+    /* The one line the add has always ended with, and nothing about keys. */
+    await expect(old.page.locator('.mnhome-notice')).toHaveText(/Your Passport has a way back, with Google\./);
+    /* The payment arrived: read from the note with this device's own key. */
+    await expect(assetRow(old.page, 'mUSD')).toContainText('25', { timeout: 60_000 });
 
-    await restoreFrom(page, backupPath);
-    await page.getByRole('button', { name: 'Continue to my Passport' }).click();
+    /* THE WRITE THE PROVIDER WAS ASKED FOR, once: this device's viewing key,
+       under this app's versioned name, beside what the provider already had. */
+    await expect.poll(async () => (await signInMetadata(old.page)).writes.length, { timeout: 60_000 }).toBe(1);
+    const kept = await signInMetadata(old.page);
+    expect(kept.writes).toEqual([
+      { theme: 'dark', passport: { v: 1, keys: { [SIGN_IN_SLOT]: [OLD_VIEWING_SECRET] } } },
+    ]);
+    expect(kept.metadata).toEqual(kept.writes[0]);
+    /* Small enough to travel in the sign-in's token without anybody noticing. */
+    expect(JSON.stringify(kept.metadata).length).toBeLessThan(512);
+    await saysNoMoreThanItShould(old.page);
+    await old.close();
 
-    /* HOME: the earlier mUSD, read with the key that came back. */
+    /* THE NEW DEVICE, back through the same sign-in: its own new key, an empty
+       coin store, and the provider holding what the old device wrote. */
+    const { page, close } = await passkeyPassportHere(browser, stateBody, {
+      viewingSecret: NEW_VIEWING_SECRET,
+      wayBack: true,
+      signIn: 'in',
+      metadata: kept.metadata,
+    });
     await expect(greeting(page)).toBeVisible({ timeout: 60_000 });
+    await expect(page.getByTestId('recovery-state')).toHaveText('Recovery: on');
+    /* HOME: the earlier mUSD, read with the key the sign-in gave back — and
+       nothing was asked for. */
     await expect(assetRow(page, 'mUSD')).toContainText('25', { timeout: 60_000 });
-    /* Asked once: the question does not come back. */
-    await expect(page.getByRole('heading', { name: 'Bring back your earlier payments' })).toHaveCount(0);
+    await expect(page.locator('.mnhome-notice')).toHaveCount(0);
+    await saysNoMoreThanItShould(page);
+    /* The sign-in now keeps both keys, oldest first, for the next device. */
+    await expect.poll(async () => (await signInMetadata(page)).writes.length, { timeout: 60_000 }).toBe(1);
+    expect((await signInMetadata(page)).writes).toEqual([
+      {
+        theme: 'dark',
+        passport: { v: 1, keys: { [SIGN_IN_SLOT]: [OLD_VIEWING_SECRET, NEW_VIEWING_SECRET] } },
+      },
+    ]);
 
     /* AND IT CAN BE SENT. */
     await openSend(page);
@@ -1455,253 +1463,38 @@ test.describe('a Passport recovered on a new device (2026/09/26)', () => {
     await close();
   });
 
-  test('without the backup the earlier mUSD stays hidden, and a restore from Home later brings it back', async ({
+  test('a sign-in that keeps nothing for it leaves a Passport that works, without the earlier mUSD, saying nothing new', async ({
     browser,
-  }, testInfo) => {
+  }) => {
     test.setTimeout(240_000);
     const stateBody = await recordedStateWithEarlierNote();
-    const backupPath = testInfo.outputPath('passport-backup.json');
-    await backUpOnTheOldDevice(browser, stateBody, backupPath);
-
-    const { page, close } = await openOnTheNewDevice(browser, stateBody, true);
-    await expect(page.getByRole('heading', { name: 'Bring back your earlier payments' })).toBeVisible({
-      timeout: 60_000,
+    const { page, close } = await passkeyPassportHere(browser, stateBody, {
+      viewingSecret: NEW_VIEWING_SECRET,
+      wayBack: true,
+      signIn: 'in',
+      metadata: { theme: 'dark' },
     });
-    /* "Not now" is an answer: the question goes, and Home comes. */
-    await page.getByRole('button', { name: 'Not now' }).click();
     await expect(greeting(page)).toBeVisible({ timeout: 60_000 });
+    await expect(page.getByTestId('recovery-state')).toHaveText('Recovery: on');
 
-    /* THE CONTROL. Home has read the account with this device's own key — the
-       read that follows the answer — and the earlier note is not one it can
-       open, so the earlier mUSD is not there. */
+    /* THE CONTROL. Home has read the account with this device's own key, and
+       the earlier note is not one it can open, so the earlier mUSD is not
+       there — and nothing on the screen says anything about it. */
     await page.waitForResponse(
       (response) => (response.request().postData() ?? '').includes('CustodyInboxActions'),
       { timeout: 60_000 },
     );
+    /* This device's own key goes to the sign-in for the next device all the
+       same, beside what the provider already held. */
+    await expect.poll(async () => (await signInMetadata(page)).writes.length, { timeout: 60_000 }).toBe(1);
+    expect((await signInMetadata(page)).writes).toEqual([
+      { theme: 'dark', passport: { v: 1, keys: { [SIGN_IN_SLOT]: [NEW_VIEWING_SECRET] } } },
+    ]);
     await page.waitForTimeout(2_000);
-    /* The row is there — the stablecoin's row is drawn at nought by design —
-       and what it says is not the earlier payment. */
     await expect(assetRow(page, 'mUSD')).toBeVisible();
     await expect(assetRow(page, 'mUSD')).not.toContainText('25');
-    await expect(page.getByRole('heading', { name: 'Bring back your earlier payments' })).toHaveCount(0);
-
-    /* The same file, later, from "Back up or restore". */
-    await page.getByRole('button', { name: 'Back up or restore' }).click();
-    await expect(page.getByRole('heading', { name: 'Where your Passport lives' })).toBeVisible();
-    await restoreFrom(page, backupPath);
-    await page.getByRole('button', { name: 'Done' }).click();
-    await expect(greeting(page)).toBeVisible({ timeout: 60_000 });
-    await expect(assetRow(page, 'mUSD')).toContainText('25', { timeout: 60_000 });
-    await close();
-  });
-});
-
-/* -------------------------------------------------------------------------- */
-/* A coin the old device had already spent (2026/09/26)                       */
-/* -------------------------------------------------------------------------- */
-
-/**
- * THE WALK THIS BLOCK IS FOR. The key a backup gives back opens EVERY note
- * sealed to it — including the notes for coins the old device had already
- * sent. Until this change each of them was counted on Home and offered to a
- * payment, which the node then refused (`NullifierAlreadyPresent`, 239). Home
- * now counts only the coins the chain says the account still holds.
- *
- * Built here, beside the earlier delivery above: a SECOND note sealed to the
- * old key — 40 mUSD, delivered first — and a spend of it by the old device,
- * served as the chain serves one: a `withdraw_shielded_with_jubjub` in the
- * account's history, and that transaction's `zswapInput` ledger event naming
- * the coin's nullifier and the account. The event's bytes are a real stagenet
- * spend's (`LIVE_SPEND_EVENT`) with the three fields put in, and the nullifier
- * is computed below with the Compact runtime, written out in this file rather
- * than imported from the module under test.
- */
-const SPENT_NONCE = '2b'.repeat(32);
-const SPENT_MUSD = 40n;
-const SPENT_DELIVERY_TX = 'e3'.repeat(32);
-const OLD_DEVICE_SPEND_TX = 'e2'.repeat(32);
-
-/**
- * A `zswapInput` event from stagenet — account `098b18f2…`'s coin going into
- * transaction `47e1d1c1…` at block 519072 — cut where its three fields sit, so
- * the walk can serve an event the ledger's own decoder reads.
- */
-const LIVE_SPEND_EVENT = {
-  head: '6d69646e696768743a6576656e745b7631345d3a080080',
-  afterContract: '04001901',
-  afterTransaction: '0000000000',
-  tail: '00',
-};
-
-function spendEvent(contract: string, transaction: string, nullifier: string): string {
-  return (
-    LIVE_SPEND_EVENT.head +
-    contract +
-    LIVE_SPEND_EVENT.afterContract +
-    transaction +
-    LIVE_SPEND_EVENT.afterTransaction +
-    nullifier +
-    LIVE_SPEND_EVENT.tail
-  );
-}
-
-/**
- * The nullifier a spend of a coin the account holds publishes: the compiled
- * build's `coinNullifier`, `persistentHash` over `midnight:zswap-cn[v1]`, the
- * coin, `false` (a contract holds it), and the account's address.
- */
-async function accountCoinNullifier(nonce: string, value: bigint): Promise<string> {
-  const runtime = await import('@midnight-ntwrk/compact-runtime');
-  const b32 = new runtime.CompactTypeBytes(32);
-  const b21 = new runtime.CompactTypeBytes(21);
-  const u128 = new runtime.CompactTypeUnsignedInteger(340282366920938463463374607431768211455n, 16);
-  const flag = runtime.CompactTypeBoolean;
-  const preimage = {
-    alignment: () => [
-      ...b21.alignment(),
-      ...b32.alignment(),
-      ...b32.alignment(),
-      ...u128.alignment(),
-      ...flag.alignment(),
-      ...b32.alignment(),
-    ],
-    toValue: () => [
-      ...b21.toValue(new TextEncoder().encode('midnight:zswap-cn[v1]')),
-      ...b32.toValue(Buffer.from(nonce, 'hex')),
-      ...b32.toValue(Buffer.from(MUSD_COLOUR, 'hex')),
-      ...u128.toValue(value),
-      ...flag.toValue(false),
-      ...b32.toValue(Buffer.from(ACCOUNT_CUSTODY_ADDRESS, 'hex')),
-    ],
-    fromValue: () => null,
-  };
-  return Buffer.from(
-    runtime.persistentHash(preimage as unknown as Parameters<typeof runtime.persistentHash>[0], null),
-  ).toString('hex');
-}
-
-/**
- * The history with the spent coin's delivery and its spend in it, where that
- * delivery landed, and the spend's ledger events. Registered after
- * `serveEarlierDelivery`, so it answers first.
- */
-function serveTheOldDeviceSpend(spentNullifier: string): (page: Page) => Promise<void> {
-  return async (page) => {
-    await page.route('**/indexer.stagenet.shielded.tools/**', async (route) => {
-      const body = route.request().postData() ?? '';
-      const aboutThisAccount = body.toLowerCase().includes(ACCOUNT_CUSTODY_ADDRESS);
-      if (aboutThisAccount && body.includes('CustodyInboxActions')) {
-        /* Newest first: the old device's spend, the 25, the 40 before it, the
-           recording's own delivery, and the deploy. */
-        const call = (entryPoint: string, hash: string) => ({
-          __typename: 'ContractCall',
-          entryPoint,
-          transaction: { hash, transactionResult: { status: 'SUCCESS' } },
-        });
-        return route.fulfill({
-          json: {
-            data: {
-              contract: {
-                actions: [
-                  call('withdraw_shielded_with_jubjub', OLD_DEVICE_SPEND_TX),
-                  call('deposit_shielded', EARLIER_DELIVERY_TX),
-                  call('deposit_shielded', SPENT_DELIVERY_TX),
-                  call('deposit_shielded', 'd1'.repeat(32)),
-                  { __typename: 'ContractDeploy', transaction: { hash: 'd0'.repeat(32) } },
-                ],
-              },
-            },
-          },
-        });
-      }
-      if (body.includes('CustodySpentCoins')) {
-        const query = (JSON.parse(body) as { query: string }).query;
-        const data: Record<string, unknown> = {};
-        for (const [, alias, hash] of query.matchAll(/(t\d+): transactions\(offset: \{ hash: "([0-9a-f]{64})" \}\)/g)) {
-          data[alias] =
-            hash === OLD_DEVICE_SPEND_TX
-              ? [
-                  {
-                    hash,
-                    zswapLedgerEvents: [
-                      { raw: spendEvent(ACCOUNT_CUSTODY_ADDRESS, OLD_DEVICE_SPEND_TX, spentNullifier) },
-                    ],
-                  },
-                ]
-              : [];
-        }
-        return route.fulfill({ json: { data } });
-      }
-      if (body.includes('transactions(offset') && body.includes(SPENT_DELIVERY_TX)) {
-        return route.fulfill({ json: { data: { transactions: [{ startIndex: 698, endIndex: 699 }] } } });
-      }
-      return route.fallback();
-    });
-  };
-}
-
-test.describe('a coin the old device had already spent (2026/09/26)', () => {
-  test('is not counted after the restore, and what is left can be sent', async ({ browser }, testInfo) => {
-    test.setTimeout(240_000);
-    /* Two notes to the old key: 40 mUSD first, which the old device then
-       spent, and the 25 mUSD after it, which it did not. */
-    const stateBody = await recordedStateWithEarlierNote([
-      { nonce: SPENT_NONCE, value: SPENT_MUSD },
-      { nonce: EARLIER_NONCE, value: EARLIER_MUSD },
-    ]);
-    const oldDeviceSpend = serveTheOldDeviceSpend(await accountCoinNullifier(SPENT_NONCE, SPENT_MUSD));
-    const backupPath = testInfo.outputPath('passport-backup.json');
-    /* The old device itself shows the 25 and not 65: the same check runs
-       there. */
-    await backUpOnTheOldDevice(browser, stateBody, backupPath, oldDeviceSpend);
-
-    const { page, close } = await openOnTheNewDevice(browser, stateBody, true, oldDeviceSpend);
-    await expect(page.getByRole('heading', { name: 'Bring back your earlier payments' })).toBeVisible({
-      timeout: 60_000,
-    });
-    const asked = page.waitForRequest((request) => (request.postData() ?? '').includes('CustodySpentCoins'), {
-      timeout: 60_000,
-    });
-    await restoreFrom(page, backupPath);
-    await page.getByRole('button', { name: 'Continue to my Passport' }).click();
-
-    /* HOME: the key opens both notes, the chain is asked about the old
-       device's spend, and only the 25 is counted. */
-    await expect(greeting(page)).toBeVisible({ timeout: 60_000 });
-    await asked;
-    await expect(assetRow(page, 'mUSD')).toContainText('25', { timeout: 60_000 });
-    await expect(assetRow(page, 'mUSD')).not.toContainText('65');
-    const store = await page.evaluate(
-      () => JSON.parse(window.localStorage.getItem('passport-k1-coins:v1') ?? '{}') as Record<string, unknown>,
-    );
-    const held = store[`${WALK_NETWORK}::${ACCOUNT_CUSTODY_ADDRESS}`] as {
-      coins: Record<string, { nonceHex: string; value: string }>;
-      queued: Record<string, unknown[]>;
-      spentNonces: string[];
-    };
-    /* The 25 is the coin a payment is offered, the 40 is nowhere, and it is
-       remembered as spent so the next walk cannot file it again. */
-    expect(held.coins[MUSD_COLOUR]).toMatchObject({ nonceHex: EARLIER_NONCE, value: '25' });
-    expect(held.queued[MUSD_COLOUR] ?? []).toEqual([]);
-    expect(held.spentNonces).toContain(SPENT_NONCE);
-    /* Nothing new is said about it: the balance strip shows a figure, and no
-       word of the machinery that decided it. */
-    const said = (await page.locator('.mnhome-assets').innerText()).toLowerCase();
-    for (const forbidden of FORBIDDEN_ON_SCREEN) {
-      expect(said, `"${forbidden}" is on screen`).not.toContain(forbidden);
-    }
-
-    /* AND ALL OF IT CAN BE SENT. */
-    await openSend(page);
-    await chooseAsset(page, 'mUSD');
-    await sendRecipient(page).fill(RESOLVABLE_NAME);
-    await sendAmount(page).fill('25');
-    await expect(page.getByRole('button', { name: /^Review$/ })).toBeEnabled({ timeout: 30_000 });
-    await page.getByRole('button', { name: /^Review$/ }).click();
-    await page.locator('.mnhome-send-primary').click();
-    const pill = page.getByTestId('send-progress');
-    await expect(pill).toHaveAttribute('data-state', 'sent', { timeout: 60_000 });
-    await expect(pill).toContainText(/Sent 25 mUSD to /);
+    await expect(page.locator('.mnhome-notice')).toHaveCount(0);
+    await saysNoMoreThanItShould(page);
     await close();
   });
 });

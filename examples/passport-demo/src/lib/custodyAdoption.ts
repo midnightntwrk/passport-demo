@@ -40,11 +40,12 @@
  * paid, and spent from, and the descriptions of tokens it was sent before the
  * new device existed stay sealed to the key on the device that received them.
  *
- * The view comes back by another road (2026/09/26): the person's password
- * backup carries that key, and once the recovery finishes the device asks for
- * the backup once (`../identity/viewingKeys.ts`). This record still carries no
- * key: a hand-off is a note about which account to join, and nothing it is
- * used for needs one.
+ * The view comes back by another road (2026/09/26): the old device kept that
+ * key in the sign-in's own metadata when it added the sign-in as its way back,
+ * and the last step of the recovery reads it from there
+ * (`../identity/signInViewingKeys.ts`). This record still carries no key: a
+ * hand-off is a note about which account to join, and nothing it is used for
+ * needs one.
  *
  * NOTHING AT RUN TIME BUT THE STANDARD LIBRARY, for the reason
  * `./custodyRoute.ts` gives: `App.tsx` asks this question on every render, and

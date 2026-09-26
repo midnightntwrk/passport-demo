@@ -635,8 +635,9 @@ export interface CustodyWalkResult {
  *
  * ONE KEY OR SEVERAL (2026/09/26). A Passport brought back on a new device
  * points its account at the new device's key, and every note delivered before
- * that is sealed to the key on the device that is gone. When the person's
- * password backup gives that earlier key back (`./viewingKeys.ts`), the walk is
+ * that is sealed to the key on the device that is gone. When the sign-in it
+ * came back through gives that earlier key back (`./signInViewingKeys.ts`,
+ * `./viewingKeys.ts`), the walk is
  * handed every key the account has had and tries each on each entry, in the
  * order given — the current key first, because it opens most of them. A note
  * sealed to one key fails authentication under every other, so a key that
