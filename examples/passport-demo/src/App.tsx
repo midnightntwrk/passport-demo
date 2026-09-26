@@ -206,10 +206,17 @@ import { useDynamicCustodyArm, usePasskeyCustodyArm } from './lib/custodyArms.js
 /* The way-back hand-off, and what Home may say about a way back. Nothing at run
    time but the standard library, which is why both may be reached statically
    from here — see their module headers. */
-import { adoptionStage, clearAdoption, loadAdoption } from './lib/custodyAdoption.js';
+import {
+  ADOPTION_NOT_ADDED,
+  adoptionStage,
+  clearAdoption,
+  loadAdoption,
+} from './lib/custodyAdoption.js';
 import { RECOVERY_COPY } from './lib/recoveryStep.js';
 /* A TYPE, which is erased: naming it here pulls nothing into the entry chunk. */
 import type { K256DeviceIdentity } from './identity/custodyContractSigning.js';
+/* The same, for the seams the mocked walk hands the second half. */
+import type { CustodyDeps } from './identity/custodyContractClient.js';
 const RecoverWithProvider = lazy(() =>
   runtimesReady().then(() => import('./screens/RecoverWithProvider.js')),
 );
@@ -860,6 +867,22 @@ const ACCOUNT_CUSTODY_ON = accountCustodyEnabled({
   walkFlag: import.meta.env.VITE_PASSPORT_ACC_WALK as string | undefined,
   search: window.location.search,
 });
+
+/**
+ * THE MOCKED WALK'S STAND-IN FOR THE CHAIN, for bringing a Passport to a new
+ * device (2026/09/26) — and in every deployed build a function that returns no
+ * seams at all. See `./lib/walkChain.ts`.
+ *
+ * AT MODULE LEVEL AND WRITTEN OUT, as the stand-in sign-in is in `main.tsx`:
+ * Vite turns the flag into a literal, and Rollup deletes the branch, the
+ * `import()`, and the module behind it. Inside a callback the minifier still
+ * dropped the call, but Rollup had already emitted the module as a chunk of
+ * its own that nothing referenced.
+ */
+let walkChainOverrides = (): Promise<Partial<CustodyDeps>> => Promise.resolve({});
+if (import.meta.env.VITE_PASSPORT_ACC_WALK === '1') {
+  walkChainOverrides = () => import('./lib/walkChain.js').then((walk) => walk.walkChainOverrides());
+}
 
 /**
  * The onboarding steps that follow a successful passkey + wallet open.
@@ -6451,42 +6474,104 @@ export default function PassportDemo() {
     alreadyAdopted: passkeyCustodyUser !== null,
   });
 
+  /**
+   * The one sentence a second half that did not finish is shown with, or null
+   * while it runs (2026/09/26).
+   *
+   * THERE WAS NONE. A failure was a console line; the effect below never ran
+   * again, because nothing it depends on changes when a run fails; and
+   * "Adding this device to …" stayed on screen for ever over a flow that had
+   * already stopped — live on a new device on 2026/09/26. A failure now says
+   * so and offers the press that runs it again, which is safe because every
+   * step of it is.
+   */
+  const [adoptFailure, setAdoptFailure] = useState<string | null>(null);
+
   /* One at a time, and never restarted by a re-render. A second run would ask
      for a second approval for a transaction that is already away. */
   const adoptRunning = useRef(false);
-  useEffect(() => {
+  /**
+   * Runs the second half. The effect below makes the first attempt on its
+   * own; "Try again" makes every later one, from the press itself, so the
+   * passkey prompt it opens is as close to the gesture as it can be.
+   */
+  const runAdoption = useCallback(() => {
     if (adoptStage !== 'adopt' || adoptRunning.current) return;
     const handoff = adoption;
     const credentialId = profile?.passkey.credentialId;
     const session = dynamicArm.session;
     if (handoff === null || !credentialId || session === null) return;
     adoptRunning.current = true;
+    setAdoptFailure(null);
     void (async () => {
       try {
-        const [{ adoptDeviceKey }, identity] = await Promise.all([
+        /* No seams in any deployed build; the mocked walk's stand-in for the
+           chain in its own. See `walkChainOverrides` above. */
+        const [overrides, { bringPassportHere }] = await Promise.all([
+          walkChainOverrides(),
           import('./identity/custodyAdopt.js'),
-          dynamicArm.ensureIdentity(),
         ]);
-        await adoptDeviceKey({
+        /* BOUNDED, AND IT NEVER REJECTS: every way it ends is either the
+           Passport or one sentence. The sign-in's key is asked for inside the
+           bound, because a sign-in can hang as well as a chain. */
+        const outcome = await bringPassportHere({
           handoff,
           contractRoot: passportContractRoot,
           credentialId,
           session,
-          socialDevice: identity.device as K256DeviceIdentity,
+          socialDevice: async () => (await dynamicArm.ensureIdentity()).device as K256DeviceIdentity,
+          provider: dynamicSession.provider,
           storage: window.localStorage,
+          overrides,
         });
+        if (outcome.kind === 'failed') {
+          console.warn('[account-custody] this Passport could not be brought here yet', outcome.cause);
+          setAdoptFailure(outcome.sentence);
+          return;
+        }
         /* CLEARED ONLY ON SUCCESS. A failure is a hand-off to be resumed, and
-           the next open resumes it — every step of it is safe to repeat. */
+           the next press — or the next open — resumes it. */
         clearAdoption(window.localStorage);
         setAdoption(null);
         setRecoverWithProvider(false);
       } catch (cause) {
+        /* Only a module that would not load reaches here; the run itself
+           answers in words. */
         console.warn('[account-custody] this Passport could not be brought here yet', cause);
+        setAdoptFailure(ADOPTION_NOT_ADDED);
       } finally {
         adoptRunning.current = false;
       }
     })();
-  }, [adoptStage, adoption, dynamicArm, passportContractRoot, profile]);
+  }, [adoptStage, adoption, dynamicArm, dynamicSession.provider, passportContractRoot, profile]);
+  useEffect(() => {
+    /* The first attempt, and never a second one on its own: after a failure
+       the next run is the person's press, not a re-render's. */
+    if (adoptFailure !== null) return;
+    runAdoption();
+  }, [adoptFailure, runAdoption]);
+  /**
+   * THE WAY OUT of a second half that did not finish: this recovery is put
+   * down, and the person is back where a sign-in is chosen.
+   *
+   * The key made on this device for it is signed out as well, because it
+   * holds no Passport yet, and a device with a key on it is shown that key's
+   * own screens rather than the way back. Nothing on the Passport changes:
+   * either the add never landed, or it did and this device's key is on the
+   * account unused — and the way back finds it there next time without a
+   * second approval.
+   */
+  const leaveAdoption = () => {
+    if (adoptRunning.current) return;
+    void (async () => {
+      await signOutPassport();
+      clearAdoption(window.localStorage);
+      setAdoption(null);
+      setAdoptFailure(null);
+      setRecoverWithProvider(true);
+      void dynamicSession.signOut();
+    })();
+  };
 
   const showOnboarding =
     !sessionActive ||
@@ -10327,9 +10412,11 @@ export default function PassportDemo() {
           takes one approval from the sign-in and no press at all here, so what
           is on screen is a line saying what is happening — not the welcome page
           the custody screen would otherwise paint over it, and not the
-          dead-end card this road replaced. */}
+          dead-end card this road replaced. Unless it does not finish: then it
+          says so in one sentence, with "Try again" and a way out
+          (2026/09/26). */}
       {adoptStage === 'adopt' ? (
-        <section className="mnob-screen" aria-busy="true">
+        <section className="mnob-screen" aria-busy={adoptFailure === null}>
           <header className="mnob-bar">
             <img className="mnob-wordmark" src="/midnight-wordmark.svg" alt="Midnight" />
             <span className="mnob-bar-label">Passport</span>
@@ -10340,10 +10427,34 @@ export default function PassportDemo() {
               <span>Opening your</span>
               <span>Passport</span>
             </h1>
-            <p className="mnob-lede" role="status" data-testid="adopting">
-              Adding this device to {adoption?.name ?? 'your Passport'}.night. Approve it with the
-              account you just signed in with.
-            </p>
+            {adoptFailure === null ? (
+              <p className="mnob-lede" role="status" data-testid="adopting">
+                Adding this device to {adoption?.name ?? 'your Passport'}.night. Approve it with the
+                account you just signed in with.
+              </p>
+            ) : (
+              /* A SECOND HALF THAT DID NOT FINISH ENDS HERE, NOT IN A SPINNER
+                 (2026/09/26): one sentence, the press that runs it again, and
+                 the way out. */
+              <>
+                <div className="mnob-unusable" role="alert" data-testid="adopt-failed">
+                  <p className="mnob-unusable-copy">{adoptFailure}</p>
+                </div>
+                <div className="mnob-stage">
+                  <button
+                    type="button"
+                    className="mnob-primary"
+                    onClick={runAdoption}
+                    data-testid="adopt-retry"
+                  >
+                    <span className="mnob-primary-copy">{RECOVERY_COPY.adoptRetry}</span>
+                  </button>
+                  <button type="button" className="mnob-alt" onClick={leaveAdoption}>
+                    {RECOVERY_COPY.adoptLeave}
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </section>
       ) : recoverWithProvider && custodyArm === null ? (

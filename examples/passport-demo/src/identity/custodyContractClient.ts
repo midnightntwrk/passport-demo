@@ -3879,6 +3879,13 @@ export async function rotateEncKeyK1(
     {
       operation: 'rotate_enc_key',
       args: [newKey],
+      /* BOUNDED (2026/09/26), for the reason `add_device` became so on
+         2026/09/24. The one caller is the last step of bringing a Passport to a
+         new device, and the screen waits on it: through midnight-js's own
+         `callTx` its wait for finality has no end, so a rotation the chain never
+         recorded would have held "Adding this device" on screen for ever over a
+         Passport that was already back. */
+      bounded: true,
       challenge: (pure, context, pk) => jubjubChallenges.rotateEncKey(pure, context, pk, newKey),
     },
     onPhase,
