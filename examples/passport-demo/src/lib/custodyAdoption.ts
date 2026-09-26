@@ -183,3 +183,66 @@ export function adoptionStage(input: AdoptionStageInput): AdoptionStage {
   if (!input.hasDeviceKey) return 'enrol';
   return input.socialSignedIn ? 'adopt' : 'blocked';
 }
+
+/* -------------------------------------------------------------------------- */
+/* What a second half that did not finish says                                */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * THE SENTENCES A FAILED HAND-OFF IS SHOWN WITH (2026/09/26).
+ *
+ * Until today there were none. A second half that failed was caught, written
+ * to the console, and never run again, so "Adding this device to …" stayed on
+ * screen for ever over a flow that had already stopped — which is what a live
+ * recovery on a new device met on 2026/09/26. Every failure now ends in one of
+ * these and a press that runs the second half again, which is safe because
+ * every step of it is.
+ *
+ * HERE, AND NOT BESIDE THE CODE THAT RAISES THEM, because the host has to be
+ * able to say the first one even when the module that raises the others never
+ * loaded: `App.tsx` imports this file on every render, and this file imports
+ * nothing at run time. Which failure earns which sentence is
+ * `./recoveryAdd.ts#adoptionFailureSentence`.
+ *
+ * None of them names what holds the Passport, and none of them blames the
+ * person: each says what is true of the Passport and what the press will do.
+ */
+
+/**
+ * Not added, and nothing changed. TRUE of every failure that is not one of the
+ * sentences below: each of those is raised before anything is handed over, or
+ * is the answer a handed-over add was definitely refused with.
+ */
+export const ADOPTION_NOT_ADDED =
+  'This device was not added to your Passport, and nothing on it changed. Try again.';
+
+/**
+ * Handed over, and not seen to land. The add is idempotent, so the press it
+ * points at is safe: a key that did land is found and nothing is asked for.
+ */
+export const ADOPTION_UNCONFIRMED =
+  'We could not confirm that this device was added. Try again to check: it is never added twice.';
+
+/** The passkey prompt was dismissed or refused. */
+export const ADOPTION_PASSKEY_DECLINED =
+  'This device was not added because the passkey was not confirmed. Try again.';
+
+/**
+ * Signed in as somebody other than the account that found the Passport.
+ *
+ * The recovery was CHECKED against one sign-in's key: the name resolved and
+ * that key was in the account's device set. A different sign-in would be asked
+ * to approve an addition it has no part in, and the account would refuse it.
+ */
+export const ADOPTION_OTHER_SIGN_IN =
+  'This is not the account that found your Passport. Sign in with the one you added as your way back.';
+
+/**
+ * This sign-in already opens a DIFFERENT Passport in this browser.
+ *
+ * A sign-in's record on a device is one per network, so bringing a second
+ * Passport here through it would write over the first. It is said and refused
+ * rather than done.
+ */
+export const ADOPTION_OTHER_PASSPORT =
+  'This account already opens a different Passport in this browser, so this one cannot be added here.';
