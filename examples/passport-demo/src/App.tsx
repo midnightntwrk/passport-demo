@@ -1866,11 +1866,18 @@ export default function PassportDemo() {
    * Cancels the in-flight §2.2 session restore, if any. A user-initiated
    * ceremony calls it before touching the wallet so the two never both replace
    * `localWalletRef`.
+   *
+   * It also ends the restoring answer (2026/09/26). The restore's own `finally`
+   * leaves that to a run that replaced it, which is right for StrictMode's
+   * remount and wrong here: nothing replaces a restore that a ceremony or a
+   * sign-out cancelled, so the flag stayed up for the rest of the page load,
+   * and the landing now waits on it.
    */
   const sessionRestoreCancel = useRef<(() => void) | null>(null);
   const cancelSessionRestore = useCallback(() => {
     sessionRestoreCancel.current?.();
     sessionRestoreCancel.current = null;
+    setPasskeyRestoring(false);
   }, []);
   const onboardingRunning = useRef(false);
   // The live handle is held in a ref, not in state: it is an object with a
@@ -6483,12 +6490,28 @@ export default function PassportDemo() {
     unusableCredential !== null;
   // The §2.2 session restore opens the wallet with no onboarding intent set,
   // so an opening local wallet also reads as the working stage.
+  //
+  // NO LANDING UNTIL THE RESTORE HAS ANSWERED (2026/09/26). The restore reads
+  // its stored session before it marks the wallet as opening, and in that beat
+  // this used to be the welcome stage: Sign up, Log in, and — since Sign up
+  // stopped signing anybody back in — "Already have a Passport on this device?
+  // Log in to carry on with it." over a Passport a few awaits from reopening by
+  // itself. A slow phone showed it for long enough to read, and a press on it
+  // took the reader somewhere they never meant to go: "Log in" raised the
+  // passkey picker for a Passport that needed no ceremony, and "Sign up" made a
+  // second Passport. `passkeyRestoring` is up from the first render on a device
+  // that has signed in before, and comes down on every way out of the restore,
+  // so the welcome stage is painted only once there is nothing to reopen.
+  // (It covers `passkeyProfilePending`, the later beat of the same restore.)
   const onboardingStage: 'welcome' | 'working' =
-    onboardingIntent !== null || localWalletStatus === 'opening' || passkeyProfilePending
+    onboardingIntent !== null || localWalletStatus === 'opening' || passkeyRestoring
       ? 'working'
       : 'welcome';
   const onboardingLabel =
-    onboardingBusyLabel ?? 'Follow the passkey prompt on this device';
+    onboardingBusyLabel ??
+    (passkeyRestoring && onboardingIntent === null
+      ? 'Reopening your Passport'
+      : 'Follow the passkey prompt on this device');
   /**
    * The press that finishes an enrolment the platform could not finish on its
    * own — and the gesture the assertion behind it is spent from.
