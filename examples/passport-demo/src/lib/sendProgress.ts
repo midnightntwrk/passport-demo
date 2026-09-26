@@ -373,3 +373,60 @@ export function sendElapsed(startedAt: number, now: number): string {
 
 /** How long "Sent" stays on the pill before it goes by itself. */
 export const SEND_SENT_DISMISS_MS = 6_000;
+
+/**
+ * Whether the payment on screen is running and has NOT yet been handed to the
+ * network (2026/09/26) — the window in which closing Passport stops it.
+ *
+ * `confirming` is the first moment the transaction has left this tab (see
+ * {@link sendProgressPhase}); every phase before it is work this tab is still
+ * doing. A view read back from a record is either confirming — it was handed
+ * over — or a failure, so a reload is never inside the window: whatever that
+ * payment came to, it came to without this tab.
+ */
+export function sendUnsent(view: SendProgressView | null): boolean {
+  return view !== null && view.kind === 'running' && view.phase !== 'confirming';
+}
+
+/** What the progress surfaces say about closing Passport. */
+export interface SendClosingNote {
+  /** The progress sheet's line under "Sending". */
+  readonly sheet: string;
+  /** The live row's line under the phase. */
+  readonly row: string;
+  /** The pill's few words beside the phase, or null for none. */
+  readonly pill: string | null;
+}
+
+/**
+ * WHAT CLOSING PASSPORT DOES TO A RUNNING PAYMENT, SAID PLAINLY (2026/09/26).
+ *
+ * Hector: people should be asked to keep Passport open while a payment is being
+ * made. The sheet used to say "You can close this and keep using your
+ * Passport. It carries on." — true of the SHEET, and read as true of the app.
+ * Closing the app before the payment is handed over stops it.
+ *
+ * ONCE IT HAS BEEN HANDED OVER, the opposite is true and is said: the
+ * transaction is the network's, and the next open of Passport reads its record
+ * back and asks the chain what it came to (`e2e/provider-recovery.spec.ts`, "a
+ * Passport opened again after a payment"). Closing Passport does not stop it.
+ * The pill says nothing then — it is the compact surface, and it only ever
+ * asks for something.
+ *
+ * Null for an outcome: there is nothing left to keep open for.
+ */
+export function sendClosingNote(view: SendProgressView): SendClosingNote | null {
+  if (view.kind !== 'running') return null;
+  if (sendUnsent(view)) {
+    return {
+      sheet: 'Keep Passport open until this is sent. You can close this sheet.',
+      row: 'Keep Passport open until this is sent.',
+      pill: 'Keep Passport open',
+    };
+  }
+  return {
+    sheet: 'It has been handed to the network. Closing Passport now will not stop it.',
+    row: 'Closing Passport now will not stop it.',
+    pill: null,
+  };
+}

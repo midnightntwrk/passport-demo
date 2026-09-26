@@ -123,6 +123,14 @@
  * fake that closes the way polkadot-js does. The SDK glue that opens the real
  * client stays in `src/lib/localWallet.ts`, which is out below.
  *
+ * `src/lib/paymentLeaveGuard.ts` went IN on 2026/09/26, the day it was
+ * written. It asks the browser to warn before the page goes while a payment has
+ * not been handed to the network, and holds the silent update back for the
+ * same window. Both of its wrong answers are silent: a listener left on the
+ * page keeps it out of the back/forward cache for good, and a hold released
+ * before the listener comes off lets an update reload the page into the
+ * browser's own warning. Each is drilled in `src/lib/paymentLeaveGuard.test.ts`.
+ *
  * `src/lib/sendProgress.ts` went IN on 2026/09/25, the day it was written. It
  * decides what the in-progress pill and the live activity row say while a
  * payment runs behind the Passport instead of in front of it: which of four
@@ -870,6 +878,7 @@ export default mergeConfig(
           'src/lib/notifications.ts',
           'src/lib/passkeyRecovery.ts',
           'src/lib/passportIdentity.ts',
+          'src/lib/paymentLeaveGuard.ts',
           'src/lib/qrPayload.ts',
           'src/lib/qrScan.ts',
           'src/lib/recipientName.ts',

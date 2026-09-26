@@ -2067,6 +2067,92 @@ test.describe('a payment that runs behind the Passport (2026/09/25)', () => {
     await close();
   });
 
+  /* KEEP PASSPORT OPEN UNTIL IT IS SENT (2026/09/26). Closing the tab or the
+     app before a payment is handed to the network stops it, so the three
+     surfaces say so, and the browser is asked to warn — only for that window,
+     because a `beforeunload` listener keeps the page out of the back/forward
+     cache. Once handed over, they say closing will not stop it. */
+  test('asks for Passport to be kept open until the payment is sent, and the browser warns only then', async ({
+    browser,
+  }) => {
+    const { page, close } = await passkeyPassportOnHome(browser, {
+      beforeOpen: async (page) => {
+        await walkPayment({ stepMs: 4_000 })(page);
+        /* Counts the page's live `beforeunload` listeners, from the first line. */
+        await page.addInitScript(() => {
+          const live = new Set<unknown>();
+          (window as unknown as { __leaveListeners: () => number }).__leaveListeners = () => live.size;
+          const add = window.addEventListener.bind(window);
+          const remove = window.removeEventListener.bind(window);
+          window.addEventListener = ((type: string, listener: unknown, options?: unknown) => {
+            if (type === 'beforeunload') live.add(listener);
+            return add(type, listener as EventListener, options as AddEventListenerOptions);
+          }) as typeof window.addEventListener;
+          window.removeEventListener = ((type: string, listener: unknown, options?: unknown) => {
+            if (type === 'beforeunload') live.delete(listener);
+            return remove(type, listener as EventListener, options as EventListenerOptions);
+          }) as typeof window.removeEventListener;
+        });
+      },
+    });
+    /* Whether the browser would warn now, and how many listeners are on the page. */
+    const leaving = () =>
+      page.evaluate(() => {
+        const event = new Event('beforeunload', { cancelable: true });
+        window.dispatchEvent(event);
+        return {
+          warns: event.defaultPrevented,
+          listeners: (window as unknown as { __leaveListeners: () => number }).__leaveListeners(),
+        };
+      });
+    expect(await leaving()).toEqual({ warns: false, listeners: 0 });
+
+    await payTenMusd(page);
+    await expect(sendPill(page)).toHaveAttribute('data-state', 'running');
+    await expect(sendPill(page).getByTestId('send-keep-open')).toHaveText('Keep Passport open');
+    await expect(page.getByTestId('send-progress-row')).toContainText('Keep Passport open until this is sent.');
+    expect(await leaving()).toEqual({ warns: true, listeners: 1 });
+    await page.getByRole('button', { name: /^Sending 10 mUSD to .+ — view progress$/ }).click();
+    await expect(page.getByTestId('send-progress-closing')).toHaveText(
+      'Keep Passport open until this is sent. You can close this sheet.',
+    );
+    await page.getByTestId('send-progress-sheet').getByRole('button', { name: 'Close' }).first().click();
+
+    /* Handed over: the ask goes, the listener comes off, and the words change. */
+    await expect(sendPill(page).locator('.mnsendp-phase')).toHaveText('Confirming…', { timeout: 30_000 });
+    await expect(sendPill(page).getByTestId('send-keep-open')).toHaveCount(0);
+    await expect(page.getByTestId('send-progress-row')).toContainText('Closing Passport now will not stop it.');
+    expect(await leaving()).toEqual({ warns: false, listeners: 0 });
+    await sendPill(page).locator('.mnsendp-open').click();
+    await expect(page.getByTestId('send-progress-closing')).toHaveText(
+      'It has been handed to the network. Closing Passport now will not stop it.',
+    );
+    await page.getByTestId('send-progress-sheet').getByRole('button', { name: 'Close' }).first().click();
+
+    await expect(sendPill(page)).toHaveAttribute('data-state', 'sent', { timeout: 30_000 });
+    expect(await leaving()).toEqual({ warns: false, listeners: 0 });
+    await close();
+  });
+
+  test('takes the warning off again when a payment fails before it is sent', async ({ browser }) => {
+    const { page, close } = await passkeyPassportOnHome(browser, {
+      beforeOpen: walkPayment({ stepMs: 1_500, fail: 'That payment did not go through. Nothing left your Passport.' }),
+    });
+    const warns = () =>
+      page.evaluate(() => {
+        const event = new Event('beforeunload', { cancelable: true });
+        window.dispatchEvent(event);
+        return event.defaultPrevented;
+      });
+    await payTenMusd(page);
+    await expect(sendPill(page).getByTestId('send-keep-open')).toBeVisible();
+    expect(await warns()).toBe(true);
+    await expect(sendPill(page)).toHaveAttribute('data-state', 'failed', { timeout: 30_000 });
+    await expect(sendPill(page).getByTestId('send-keep-open')).toHaveCount(0);
+    expect(await warns()).toBe(false);
+    await close();
+  });
+
   test('a reload in the middle of a payment shows the same pill, from the record', async ({
     browser,
   }) => {
@@ -2090,6 +2176,11 @@ test.describe('a payment that runs behind the Passport (2026/09/25)', () => {
     await expect(sendPill(page)).toContainText(/Sending 10 mUSD to /);
     await expect(sendPill(page).locator('.mnsendp-phase')).toHaveText('Confirming…');
     await expect(page.getByTestId('send-progress-row')).toContainText('Confirming…');
+    /* It was handed over before the reload, and the chain — not this tab — says
+       what it came to, so closing Passport now cannot stop it, and nothing asks
+       the browser to warn. */
+    await expect(page.getByTestId('send-progress-row')).toContainText('Closing Passport now will not stop it.');
+    await expect(sendPill(page).getByTestId('send-keep-open')).toHaveCount(0);
     await close();
   });
 });
