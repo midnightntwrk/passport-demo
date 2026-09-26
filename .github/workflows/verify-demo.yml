@@ -36,10 +36,15 @@ name: Verify Passport demo
 # Keep them identical.
 on:
   # A pull request runs the quick checks: type-check, unit tests, and the
-  # connect and release-naming suites. The heavy ones (the 100% coverage gate,
-  # the PWA build, and the tier-1 end-to-end walks) run only when the pull
-  # request carries the `full-ci` label, on every push to main, and on a manual
-  # run. Adding the label starts a full run; any other label is ignored.
+  # connect and release-naming suites. The 100% coverage gate runs only when the
+  # pull request carries the `full-ci` label, on every push to main, and on a
+  # manual run. Adding the label starts a full run; any other label is ignored.
+  #
+  # THE PWA BUILD AND THE TIER-1 WALKS RUN AT RELEASE (2026/09/26). They take
+  # twenty minutes, and a failure there blocked every open pull request at once
+  # (two walks #98 left behind held up #99, #103 and #104 for a day). So the
+  # `bundle` job runs when a release is published and on a manual run, and is
+  # skipped everywhere else; a skipped job does not block a merge.
   pull_request:
     types: [opened, synchronize, reopened, labeled]
     paths:
@@ -70,6 +75,9 @@ on:
       - 'package-lock.json'
       - '.github/workflows/verify-demo.yml'
       - '.github/workflows/scripts/**'
+  # The release a deploy is made from gets the full run, tier-1 included.
+  release:
+    types: [published]
   workflow_dispatch:
 
 permissions:
@@ -262,10 +270,11 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # The gates that need a real `vite build`, and therefore the ZK artefacts.
+  # Run when a release is published and on a manual run only; see `on:` above.
   # ---------------------------------------------------------------------------
   bundle:
     name: PWA checks and tier-1 end-to-end
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci')
+    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     needs: gates
     timeout-minutes: 40
