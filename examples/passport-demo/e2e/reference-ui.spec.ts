@@ -8,6 +8,25 @@ import { SIGN_IN_BUTTON } from './walkContext.js';
 // Use recorded network responses and a virtual passkey; never submit to a chain.
 const NAME = 'referencewalk';
 
+const REGISTRY_URL =
+  'https://raw.githubusercontent.com/webisoftSoftware/1AM-app-registery/main/registry.json';
+
+/** A neutral, featured stagenet entry — nothing Passport adds by itself. */
+const FIXTURE_APP = {
+  id: 'fixture-app',
+  name: 'Fixture App',
+  url: 'https://fixture-app.example.test',
+  description: 'A registry entry the walk serves itself',
+  category: 'other',
+  networks: ['stagenet'],
+  featured: true,
+};
+
+/** Answers the app registry with exactly these entries. */
+async function serveRegistry(page: Page, apps: readonly Record<string, unknown>[]): Promise<void> {
+  await page.route(REGISTRY_URL, (route) => route.fulfill({ json: { apps } }));
+}
+
 async function capture(page: Page, info: TestInfo, name: string) {
   await expect(page.locator('#mn-splash')).toHaveCount(0);
   await page.evaluate(() => document.fonts.ready);
@@ -61,15 +80,10 @@ for (const theme of ['Light', 'Dark'] as const) {
       const errors: string[] = [];
       page.on('pageerror', error => errors.push(error.message));
       await installNetworkBoundary(page);
-      // A deterministic directory entry exercises the illustrated/featured
-      // state from the reference without depending on a live app directory.
-      await page.route('https://raw.githubusercontent.com/webisoftSoftware/1AM-app-registery/main/registry.json', route => route.fulfill({
-        json: { apps: [{
-          id: 'raffle-demo', name: 'Midnight Raffle', url: 'https://raffle.example.test',
-          description: 'Connect your Passport to claim a race-weekend perk and a demo raffle ticket',
-          category: 'other', networks: ['stagenet'], featured: true,
-        }] },
-      }));
+      // A deterministic directory entry exercises the featured state from the
+      // reference without depending on a live app directory. A neutral one:
+      // the Midnight Raffle is no longer in Passport's UI (2026/09/25).
+      await serveRegistry(page, [FIXTURE_APP]);
       await installVirtualAuthenticator(context, page);
       try {
         await page.goto('/');
@@ -126,7 +140,8 @@ for (const theme of ['Light', 'Dark'] as const) {
           expect(funds!.y).toBeGreaterThan(identity!.y);
           expect(overview!.width).toBeLessThan(viewport.width);
         }
-        await expect(page.getByRole('button', { name: /Midnight Raffle/ })).toBeVisible();
+        await expect(page.getByRole('button', { name: /Fixture App/ })).toBeVisible();
+        await expect(page.getByRole('button', { name: /Midnight Raffle/ })).toHaveCount(0);
         for (const notice of await page.getByRole('button', { name: 'Dismiss notification' }).all()) {
           await notice.click();
         }
@@ -151,7 +166,8 @@ for (const theme of ['Light', 'Dark'] as const) {
         await page.locator('.mnnav-tab').filter({ hasText: 'Apps' }).click();
         await expect(page.getByRole('heading', { name: 'Apps', exact: true })).toBeVisible();
         await expect(page.locator('.mnapps-screen')).toHaveCSS('background-image', 'none');
-        await expect(page.getByRole('button', { name: /Midnight Raffle/ })).toBeVisible();
+        await expect(page.getByRole('button', { name: /Fixture App/ })).toBeVisible();
+        await expect(page.getByRole('button', { name: /Midnight Raffle/ })).toHaveCount(0);
         await capture(page, info, 'apps');
         await page.getByPlaceholder('Search apps').fill('no-such-app');
         await expect(page.locator('.mnapps-empty')).toHaveText('No app matches “no-such-app”.');
@@ -216,3 +232,43 @@ for (const theme of ['Light', 'Dark'] as const) {
     });
   }
 }
+
+/* THE MIDNIGHT RAFFLE IS GONE, AND SO IS AN EMPTY "APPS" HEADING (2026/09/25).
+   Passport used to add a featured raffle entry of its own, so on stagenet —
+   where no registry entry is listed — it was the only app there was. With it
+   gone, a registry that lists nothing for this network must leave Home without
+   an "Apps" heading over an empty grid, with the activity feed taking the whole
+   row, and the Apps tab must say plainly that nothing is listed. */
+test('with nothing listed for this network, Home shows no Apps heading and no raffle', async ({ browser }) => {
+  const viewport = { width: 1440, height: 1000 };
+  const context = await browser.newContext({ viewport, serviceWorkers: 'block', reducedMotion: 'reduce' });
+  const page = await context.newPage();
+  const errors: string[] = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await installNetworkBoundary(page);
+  await serveRegistry(page, [{ ...FIXTURE_APP, id: 'elsewhere-app', name: 'Elsewhere App', networks: ['preprod'] }]);
+  await installVirtualAuthenticator(context, page);
+  try {
+    await page.goto('/');
+    await page.getByRole('button', { name: SIGN_IN_BUTTON }).click();
+    await expect(page.locator('.mnid-title')).toHaveText('Welcome to Passport.', { timeout: 60_000 });
+    await completedPassport(page);
+
+    await expect(page.locator('.mnhome-activity')).toBeVisible({ timeout: 30_000 });
+    await expect(page.locator('#mnapps-home-label')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: /Midnight Raffle/ })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: /Elsewhere App/ })).toHaveCount(0);
+    /* The feed fills the row the empty grid would have shared. */
+    const discover = await page.locator('.mnhome-discover').boundingBox();
+    const feed = await page.locator('.mnhome-activity').boundingBox();
+    expect(Math.abs(feed!.width - discover!.width)).toBeLessThanOrEqual(1);
+
+    await page.locator('.mnnav-tab').filter({ hasText: 'Apps' }).click();
+    await expect(page.getByRole('heading', { name: 'Apps', exact: true })).toBeVisible();
+    await expect(page.getByText('No apps are listed right now.')).toBeVisible();
+    await expect(page.getByRole('button', { name: /Midnight Raffle/ })).toHaveCount(0);
+    expect(errors).toEqual([]);
+  } finally {
+    await context.close();
+  }
+});

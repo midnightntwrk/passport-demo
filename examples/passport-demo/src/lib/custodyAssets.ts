@@ -46,7 +46,6 @@ import {
 } from './colour.js';
 import {
   custodyShieldedSendOutcome,
-  nextCustodyShieldedSendStep,
   type CustodyShieldedSendRecord,
 } from '../identity/custodyContractSend.js';
 
@@ -271,8 +270,10 @@ export function custodyResumeOffer(
   record: CustodyShieldedSendRecord | null,
 ): CustodyResumeOffer {
   if (record === null) return { kind: 'none' };
-  if (nextCustodyShieldedSendStep(record) === 'nothing') return { kind: 'none' };
-  return { kind: 'report', sentence: custodyShieldedSendOutcome(record) };
+  /* A payment that landed has no sentence (`null`), and so nothing to report. */
+  const sentence = custodyShieldedSendOutcome(record);
+  if (sentence === null) return { kind: 'none' };
+  return { kind: 'report', sentence };
 }
 
 /**

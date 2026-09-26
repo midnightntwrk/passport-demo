@@ -1866,11 +1866,18 @@ export default function PassportDemo() {
    * Cancels the in-flight §2.2 session restore, if any. A user-initiated
    * ceremony calls it before touching the wallet so the two never both replace
    * `localWalletRef`.
+   *
+   * It also ends the restoring answer (2026/09/26). The restore's own `finally`
+   * leaves that to a run that replaced it, which is right for StrictMode's
+   * remount and wrong here: nothing replaces a restore that a ceremony or a
+   * sign-out cancelled, so the flag stayed up for the rest of the page load,
+   * and the landing now waits on it.
    */
   const sessionRestoreCancel = useRef<(() => void) | null>(null);
   const cancelSessionRestore = useCallback(() => {
     sessionRestoreCancel.current?.();
     sessionRestoreCancel.current = null;
+    setPasskeyRestoring(false);
   }, []);
   const onboardingRunning = useRef(false);
   // The live handle is held in a ref, not in state: it is an object with a
@@ -2920,7 +2927,7 @@ export default function PassportDemo() {
          user would loop. Both controls the screen already carries do lead
          somewhere from here, and the sentence names them. */
       throw new Error(
-        'You already have a Passport on this device. Choose "Log in" to pick it, or "Sign up" to try again.',
+        'You already have a Passport on this device. Choose "Log in" to pick it, or "Sign up" to make another one.',
       );
     }
     try {
@@ -3097,6 +3104,49 @@ export default function PassportDemo() {
     } catch (cause) {
       if (!(cause instanceof PassportEnrolmentConflictError)) throw enrolmentCeremonyFailure(cause);
       return signInAfterEnrolmentConflict();
+    }
+    return { profile: await adoptEnrolledPasskey(enrolled), created: true };
+  };
+
+  /**
+   * "Sign up" — ALWAYS a new passkey and a new Passport (2026/09/25).
+   *
+   * Until today Sign up ran the old single button's guess: a browser that held
+   * a Passport profile was signed back into it, and even the create path
+   * discovered first, refused outright where a profile existed, and excluded
+   * every known credential — which the platform authenticator answers by
+   * refusing the create whenever it holds ANY of them, and that refusal was
+   * turned into a sign-in. So on a browser that had been used once, Sign up
+   * could only ever reopen the first Passport, unfinished setup and all.
+   *
+   * None of those guards protects anything any more. The user handle has been
+   * random per enrolment since 2026/09/03 (`newUserHandle` in
+   * `demo-backend/src/passkey.ts`), so a create cannot replace a credential; and
+   * every record a Passport keeps here — profile, encrypted state, custody
+   * pointer, name — is keyed by the credential, so the new passkey starts a
+   * Passport of its own beside the old one, which stays exactly as it was and
+   * is reached by "Log in".
+   *
+   * So: ONE enrolment, no discovery, no existing-profile check, no exclusion
+   * list. A dismissed sheet or a device that cannot make a usable passkey is
+   * reported as on every other enrolment.
+   */
+  const signUpNewLocalPassport = async (): Promise<{
+    profile: DemoPassportProfile;
+    created: boolean;
+  }> => {
+    setOnboardingBusyLabel('Creating your Passport passkey');
+    let enrolled: import('./backend.js').EnrolledPassportPasskey;
+    try {
+      enrolled = await withPasskeyWatchdog(() =>
+        WebAuthnPrfKeyProvider.enrollWithPrf({
+          label: 'Midnight Passport',
+          userId: LOCAL_ACCOUNT_ID,
+          knownCredentialIds: [],
+        }),
+      );
+    } catch (cause) {
+      throw enrolmentCeremonyFailure(cause);
     }
     return { profile: await adoptEnrolledPasskey(enrolled), created: true };
   };
@@ -3365,7 +3415,7 @@ export default function PassportDemo() {
   };
 
   const runLocalOnboarding = async (
-    requested: 'create' | 'signin' | 'auto' | 'enrol-new',
+    requested: 'create' | 'signin' | 'auto' | 'enrol-new' | 'signup',
   ) => {
     if (onboardingRunning.current) return;
     onboardingRunning.current = true;
@@ -3386,10 +3436,13 @@ export default function PassportDemo() {
     // the resolved journey below corrects the label.
     setOnboardingIntent(requested === 'signin' ? 'local-signin' : 'local-create');
     setOnboardingBusyLabel('Checking this browser for a Passport');
-    // One button, both journeys (2026/08/05): a stored local profile means the
-    // existing sign-in/unlock flow runs; a clean browser means enrolment.
-    // WebAuthn discoverable credentials mean the assertion path also finds a
-    // passkey synced from another device once a profile exists here.
+    // `signup` is the landing's "Sign up" and always enrols (2026/09/25);
+    // "Log in" is `runDiscoverableSignIn`, and the way-out panels run
+    // `enrol-new`. `auto`, `create`, and `signin` are the old single button's
+    // journeys (a stored profile meant sign-in, a clean browser enrolment):
+    // no control reaches them since Sign up stopped guessing, and they are
+    // left in place until the account-blob write that rides on the targeted
+    // unlock has another home.
     let intent: 'create' | 'signin' = requested === 'signin' ? 'signin' : 'create';
     let activeProfile: DemoPassportProfile | null = null;
     /* What the create journey DID, not what it set out to do: the
@@ -3407,7 +3460,13 @@ export default function PassportDemo() {
       );
       // Both journeys now open the wallet from the SAME ceremony that unlocked
       // the profile — no second passkey prompt to derive the seed.
-      if (requested === 'enrol-new') {
+      if (requested === 'signup') {
+        /* "Sign up": always a new passkey and a new Passport, whatever this
+           browser already holds. See `signUpNewLocalPassport`. */
+        const outcome = await signUpNewLocalPassport();
+        activeProfile = outcome.profile;
+        created = outcome.created;
+      } else if (requested === 'enrol-new') {
         /* The `unusable-credential` recovery, and the ONE path that enrols
            without discovering first. Everything the discover-before-create
            guard protects has already been established here: a credential
@@ -6431,12 +6490,28 @@ export default function PassportDemo() {
     unusableCredential !== null;
   // The §2.2 session restore opens the wallet with no onboarding intent set,
   // so an opening local wallet also reads as the working stage.
+  //
+  // NO LANDING UNTIL THE RESTORE HAS ANSWERED (2026/09/26). The restore reads
+  // its stored session before it marks the wallet as opening, and in that beat
+  // this used to be the welcome stage: Sign up, Log in, and — since Sign up
+  // stopped signing anybody back in — "Already have a Passport on this device?
+  // Log in to carry on with it." over a Passport a few awaits from reopening by
+  // itself. A slow phone showed it for long enough to read, and a press on it
+  // took the reader somewhere they never meant to go: "Log in" raised the
+  // passkey picker for a Passport that needed no ceremony, and "Sign up" made a
+  // second Passport. `passkeyRestoring` is up from the first render on a device
+  // that has signed in before, and comes down on every way out of the restore,
+  // so the welcome stage is painted only once there is nothing to reopen.
+  // (It covers `passkeyProfilePending`, the later beat of the same restore.)
   const onboardingStage: 'welcome' | 'working' =
-    onboardingIntent !== null || localWalletStatus === 'opening' || passkeyProfilePending
+    onboardingIntent !== null || localWalletStatus === 'opening' || passkeyRestoring
       ? 'working'
       : 'welcome';
   const onboardingLabel =
-    onboardingBusyLabel ?? 'Follow the passkey prompt on this device';
+    onboardingBusyLabel ??
+    (passkeyRestoring && onboardingIntent === null
+      ? 'Reopening your Passport'
+      : 'Follow the passkey prompt on this device');
   /**
    * The press that finishes an enrolment the platform could not finish on its
    * own — and the gesture the assertion behind it is spent from.
@@ -6455,7 +6530,9 @@ export default function PassportDemo() {
   };
 
   /** The one onboarding route, plus the `unusable-credential` recovery. */
-  const startPasskeyOnboarding = (intent: 'create' | 'signin' | 'auto' | 'enrol-new') => {
+  const startPasskeyOnboarding = (
+    intent: 'create' | 'signin' | 'auto' | 'enrol-new' | 'signup',
+  ) => {
     void runLocalOnboarding(intent);
   };
 
@@ -10299,7 +10376,7 @@ export default function PassportDemo() {
           busyLabel={onboardingLabel}
           error={onboardingError}
           hasExistingPassport={localPassportKnown}
-          onContinue={() => startPasskeyOnboarding('auto')}
+          onContinue={() => startPasskeyOnboarding('signup')}
           onUseDifferentPasskey={() => void runDiscoverableSignIn()}
           /* "Lost your device? Recover with …" — and nothing else on this screen is a
              provider sign-in any more. Absent where the build has none, which

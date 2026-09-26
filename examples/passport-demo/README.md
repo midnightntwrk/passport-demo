@@ -103,7 +103,8 @@ never cached, queued, or presented as available offline.
 Passport is a counterparty other origins may ask for a profile or a payment,
 over the `postMessage` bridge or, on phones, a signed URL-callback redirect.
 The examples in this repository are
-[`examples/raffle-demo`](../raffle-demo/) (in the Apps grid by default),
+[`examples/raffle-demo`](../raffle-demo/) (not listed in the Apps grid; point
+`VITE_LOCAL_APP_URL` at it to list it),
 [`examples/passport-app-template`](../passport-app-template/) (the starter to
 copy — point Passport at it with `VITE_LOCAL_APP_URL`), and
 [`examples/clubcoin-mock`](../clubcoin-mock/) (the URL-callback connector).

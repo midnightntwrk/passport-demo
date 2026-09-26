@@ -82,9 +82,9 @@ import {
   custodyShieldedAddressSendRefusal,
   custodyStoppedSendSentence,
   custodyStoppedSendVerdict,
-  custodyShieldedSendOutcome,
   custodyShieldedSendRefusal,
   custodyUnshieldedBalance,
+  custodyShieldedSendOutcome,
   loadCustodyShieldedSend,
   newCustodyShieldedSend,
   planCustodyShieldedAddressSend,
@@ -121,6 +121,7 @@ import {
   custodyHomeSendableHoldings,
   custodySendPhase,
   custodySentEntry,
+  custodyLandedSendEntry,
   custodyStablecoinHeld,
   type CustodyActivityEntry,
   type CustodyHomeView,
@@ -1909,7 +1910,17 @@ export default function CustodyPassport({
    * and the record cleared). Only while neither is known — inside the wait, or
    * an indexer that cannot be reached — does the line say it is checking, and
    * it asks again.
+   *
+   * A PAYMENT THAT LANDED IS RECORDED, NOT ANNOUNCED (2026/09/25). It used to
+   * put "Sent. … has it." in Home's alert strip, styled as an error; it now
+   * writes the activity row the payment would have written had its tab stayed
+   * open, and the strip is left for the one verdict somebody has to read —
+   * that it did not go through.
    */
+  const onActivityRef = useRef(onActivity)
+  useEffect(() => {
+    onActivityRef.current = onActivity
+  }, [onActivity])
   useEffect(() => {
     const record = stopped
     if (record === null || record.stage !== 'sending' || record.sendTxId === null) return
@@ -1948,8 +1959,12 @@ export default function CustodyPassport({
         accountAddress: record.accountAddress,
       })
       setStopped(null)
+      if (verdict === 'landed') {
+        onActivityRef.current?.(custodyLandedSendEntry(record))
+        return
+      }
       setNotice(custodyStoppedSendSentence(record, verdict))
-      if (verdict === 'not-landed') void readHoldings()
+      void readHoldings()
     }
     void check()
     return () => {
@@ -2208,7 +2223,11 @@ export default function CustodyPassport({
         accountAddress: account.address,
       })
       setStopped(null)
-      setNotice(custodyShieldedSendOutcome({ ...stoppedRecord, stage: 'done' }))
+      /* NO BANNER FOR A PAYMENT THAT WENT THROUGH (2026/09/25). This used to
+         write "Sent. … has it." into Home's one alert strip — the error
+         styling, a warning triangle, and a "Dismiss error" cross — which read
+         as something having gone wrong. The activity row and the toast that
+         `reportSent` writes are the record of it. */
       /* THE TIDY-UP IS HANDED BACK, NOT AWAITED. It is a gated call of its own,
          so it still runs under the payment's flag — two gated calls against one
          account must never sign against the same `auth_nonce` — but the sheet
@@ -2302,7 +2321,11 @@ export default function CustodyPassport({
         accountAddress: account.address,
       })
       setStopped(null)
-      setNotice(custodyShieldedSendOutcome({ ...stoppedRecord, stage: 'done' }))
+      /* NO BANNER FOR A PAYMENT THAT WENT THROUGH (2026/09/25). This used to
+         write "Sent. … has it." into Home's one alert strip — the error
+         styling, a warning triangle, and a "Dismiss error" cross — which read
+         as something having gone wrong. The activity row and the toast that
+         `reportSent` writes are the record of it. */
       /* As above: under the payment's flag, and not holding the sheet. */
       return () => backfillChange({ wallet, record, identity, change: sent.change })
     },
@@ -3433,7 +3456,10 @@ export default function CustodyPassport({
               },
               startedAt: stopped.startedAt,
               submitted: stopped.sendTxId !== null,
-              sentence: custodyShieldedSendOutcome(stopped),
+              /* A stopped payment that landed never reaches this view (the
+                 screen settles it first), so an empty answer is not a
+                 success here; say plainly that it did not go through. */
+              sentence: custodyShieldedSendOutcome(stopped) ?? CUSTODY_SEND_NOT_SENT,
             },
     })
     const finishState = custodyFinishSetupCard({

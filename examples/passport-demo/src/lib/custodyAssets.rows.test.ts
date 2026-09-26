@@ -294,7 +294,8 @@ describe('every sentence this screen can show', () => {
     ];
 
     for (const stage of ['sending', 'done'] as CustodyShieldedSendStage[]) {
-      sentences.push(custodyShieldedSendOutcome(record({ stage })));
+      const outcome = custodyShieldedSendOutcome(record({ stage }));
+      if (outcome !== null) sentences.push(outcome);
       const offer = custodyResumeOffer(record({ stage }));
       if (offer.kind === 'report') sentences.push(offer.sentence);
     }
