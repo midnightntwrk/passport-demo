@@ -775,6 +775,18 @@
  * `backup.viewingKeys.test.ts`. It holds no DOM, no React, and no network: the
  * storage is handed in.
  *
+ * `src/identity/custodySpentCoins.ts` went IN on 2026/09/26 with the module
+ * itself. It decides which coins a Passport stops counting because the chain
+ * says another device already spent them — the notes an earlier viewing key
+ * reveals include those coins, and they were shown and then refused at the end
+ * of a proof. A branch too many here takes money off the screen that is still
+ * there, and one too few leaves a balance that cannot be sent, so every branch
+ * — the nullifier, held to the compiled build's own method and to the ledger's
+ * own input; which transactions are asked about; every way an answer can fail
+ * to be one; the batching and the memory of what has been read — is drilled in
+ * `custodySpentCoins.test.ts`. It holds no DOM, no React, no `fetch`, and no
+ * ledger: the question, the decoder, and the hash are handed in.
+ *
  * `src/lib/custodyAssets.ts` went IN on 2026/09/17 with the module itself. It is
  * what the Dynamic Passport's Home and Send read money through: which rows
  * exist, what each is called, how many decimal places an amount of it carries,
@@ -942,6 +954,7 @@ export default mergeConfig(
           'src/identity/custodyInbox.ts',
           'src/identity/custodyInboxIndex.ts',
           'src/identity/viewingKeys.ts',
+          'src/identity/custodySpentCoins.ts',
           'src/identity/midnamesText.ts',
           'src/identity/sponsoredAlias.ts',
           'src/identity/timestamps.ts',

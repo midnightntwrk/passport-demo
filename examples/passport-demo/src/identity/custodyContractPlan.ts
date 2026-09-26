@@ -439,6 +439,28 @@ export function custodyRebuildRefusal(cause: unknown): boolean {
 }
 
 /**
+ * Whether the node refused because a coin the transaction spends has ALREADY
+ * been spent: `NullifierAlreadyPresent`, which it reports as `1010: Invalid
+ * Transaction: Custom error: 239` (2026/09/26).
+ *
+ * The one coin a Passport's payment spends is the account's held coin, so this
+ * is the chain saying that coin is gone — sent by another device that read the
+ * same notes, before this one knew. Nothing was applied, and the coin can never
+ * be spent by anybody; building the same payment again cannot cure it, but
+ * building it on the NEXT coin can (`./custodyContractClient.ts`).
+ */
+export function custodyCoinAlreadySpent(cause: unknown): boolean {
+  return /Custom error:\s*239\b|NullifierAlreadyPresent/.test(custodyFailureChainText(cause));
+}
+
+/**
+ * How many coins one payment moves on to after the node said the coin it was
+ * built on had already been spent. Each is one more approval, so the bound is
+ * small; each also takes a coin off the screen that was never really there.
+ */
+export const CUSTODY_SPENT_COIN_RETRIES = 3;
+
+/**
  * Run a setup step, and run it AGAIN, a bounded number of times, when the node
  * refused it in a way {@link custodyRebuildRefusal} says can be cured.
  *

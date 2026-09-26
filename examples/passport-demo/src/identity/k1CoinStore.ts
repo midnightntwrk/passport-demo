@@ -1047,6 +1047,64 @@ export function isK1NonceSpent(account: K1Account, nonce: string): boolean {
 }
 
 /**
+ * Every coin this account COUNTS — the held slot of each colour and the queue
+ * behind it — oldest first within a colour. What {@link k1ColourHoldings} adds
+ * up, one coin at a time, so a caller can ask the chain about each.
+ */
+export function k1CountedCoins(account: K1Account): K1HeldCoin[] {
+  const state = loadK1CoinStore(account);
+  const colours = new Set([...Object.keys(state.coins), ...Object.keys(state.queued)]);
+  return [...colours].sort().flatMap((colour) => [
+    ...(Object.hasOwn(state.coins, colour) ? [coinFromStoredRow(state.coins[colour])] : []),
+    ...(Object.hasOwn(state.queued, colour) ? state.queued[colour].map(coinFromStoredRow) : []),
+  ]);
+}
+
+/**
+ * Forgets coins the CHAIN says this account has already spent, wherever the
+ * store holds them, and remembers their nonces as spent (2026/09/26).
+ *
+ * WHY THE STORE CAN HOLD A SPENT COIN AT ALL. The inbox is append-only: a note
+ * stays after the coin it describes is spent. A device that walks the inbox
+ * from the start — a Passport recovered on a new device and given its earlier
+ * viewing key back by a password backup, or a second device whose synced
+ * passkey derives the same key — files every note it can open, including the
+ * notes for coins another device has already sent. Those were counted on Home
+ * and offered to a payment, and the payment was refused by the node
+ * (`NullifierAlreadyPresent`, 239) at the end of a whole proof.
+ *
+ * Same bookkeeping as a spend that returned no change: the coin leaves its
+ * slot, the next queued coin of its colour is promoted, and the nonce is
+ * remembered so the next inbox walk cannot file it again. Only a nonce the
+ * store holds is touched, and nothing is written when none is. Returns the
+ * coins it forgot.
+ */
+export function forgetSpentK1Coins(account: K1Account, nonces: readonly string[]): K1HeldCoin[] {
+  const target = requireAccount(account);
+  const wanted = new Set(
+    nonces.map((nonce) => normalisedColourHex(nonce)).filter((nonce): nonce is string => nonce !== null),
+  );
+  const forgotten = k1CountedCoins(target).filter((coin) => wanted.has(coin.nonce));
+  if (forgotten.length === 0) return [];
+  editStore(target, (draft) => {
+    for (const coin of forgotten) {
+      rememberSpentNonce(draft, coin.nonce);
+      if (Object.hasOwn(draft.coins, coin.colour) && draft.coins[coin.colour].nonceHex === coin.nonce) {
+        delete draft.coins[coin.colour];
+        delete draft.mtIndexCandidates[coin.colour];
+      }
+      if (Object.hasOwn(draft.queued, coin.colour)) {
+        const rest = draft.queued[coin.colour].filter((row) => row.nonceHex !== coin.nonce);
+        if (rest.length === 0) delete draft.queued[coin.colour];
+        else draft.queued[coin.colour] = rest;
+      }
+    }
+    for (const coin of forgotten) promoteQueued(draft, coin.colour);
+  });
+  return forgotten;
+}
+
+/**
  * Remembers a coin WITHOUT displacing the one already held in its colour.
  *
  * The rule an inbox walk and a deposit both want: the first coin of a colour
