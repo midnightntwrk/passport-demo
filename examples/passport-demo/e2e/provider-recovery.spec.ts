@@ -130,6 +130,16 @@ const sendPicker = (page: Page) => page.locator('.mnhome-send-asset');
 const sendRecipient = (page: Page) => page.locator('.mnhome-send').getByRole('textbox').first();
 const sendAmount = (page: Page) => page.locator('.mnhome-send-amount input');
 
+/**
+ * The pill a payment in flight is shown by, above the tab bar, and the live row
+ * at the head of the activity list (2026/09/25). The Send sheet closes once a
+ * payment is handed over, so what a payment came to — its phase, or its one
+ * sentence — is read here rather than in the sheet. The same two surfaces
+ * `passkey-custody.spec.ts` reads for the other arm.
+ */
+const sendPill = (page: Page) => page.getByTestId('send-progress');
+const sendLiveRow = (page: Page) => page.getByTestId('send-progress-row');
+
 /* -------------------------------------------------------------------------- */
 /* The landing, where a build with a provider sign-in behind it is entered     */
 /* -------------------------------------------------------------------------- */
@@ -748,16 +758,35 @@ test.describe('a Passport that has been paid', () => {
     await expect(page.getByText('Review transfer')).toBeVisible();
     await page.locator('.mnhome-send-primary').click();
 
+    /* HANDED OVER, AND THE SHEET GETS OUT OF THE WAY (2026/09/25). The payment
+       runs behind the Passport from here, and its answer is said on the pill
+       and the live row rather than on the sheet. */
+    await expect(page.locator('.mnhome-send')).toHaveCount(0);
+
     /* ONE SENTENCE, AND THE CONTROL BACK. Where this run stops is worth being
        exact about: the account it is driving is a REAL one, and its device set
        holds the key the gate run enrolled rather than this walk's stand-in, so
        the refusal is the account's own. What is asserted is the property that
-       holds whatever the refusal is — one plain sentence on the sheet, the
-       control back, and the money accounted for. */
-    const failure = page.locator('.mnhome-send').locator('.mnhome-notice[role="alert"]');
-    await expect(failure.first()).toBeVisible({ timeout: 60_000 });
-    expect((await failure.first().innerText()).trim()).not.toContain('not built yet');
-    await expect(page.locator('.mnhome-send-primary')).toBeEnabled();
+       holds whatever the refusal is — one plain sentence on the pill, the same
+       sentence in full on the live row, the control back, and the money
+       accounted for. */
+    await expect(sendPill(page)).toHaveAttribute('data-state', 'failed', { timeout: 60_000 });
+    const sentence = (await sendPill(page).locator('.mnsendp-title').innerText()).trim();
+    expect(sentence.length).toBeGreaterThan(0);
+    expect(sentence).not.toContain('not built yet');
+    await expect(sendLiveRow(page)).toContainText('Not sent');
+    await expect(sendLiveRow(page)).toContainText(sentence);
+
+    /* The money accounted for: nothing went out, so nothing is shown moving. */
+    await expect(assetRow(page, 'mUSD')).toContainText('40');
+    await expect(assetRow(page, 'mUSD')).not.toContainText(/Transferring/i);
+
+    /* The control back: nothing is left in flight to hold a second payment, so
+       Try again reopens Send on the same payment with Review there to press. */
+    await sendPill(page).getByRole('button', { name: 'Try again' }).click();
+    await expect(page.locator('.mnhome-send')).toBeVisible();
+    await expect(sendAmount(page)).toHaveValue('10');
+    await expect(page.getByRole('button', { name: /^Review$/ })).toBeEnabled({ timeout: 30_000 });
 
     await context.close();
   });
@@ -877,25 +906,33 @@ test.describe('a Passport opened again after a payment', () => {
        2026/09/18 a tab closed mid-payment left value in the sender's own
        wallet with a leg still to run, so the offer was a sentence AND a
        "Finish this payment" button. There is now no such leg: the transaction
-       either landed or it did not, so what is owed is the sentence and a way
-       to put it away. A button would be a button offering to pay twice. */
-    /* IT IS SAID WHERE HOME SAYS EVERYTHING ELSE THAT WANTS READING — the
-       banner at the top, with the one control that puts it away. */
+       either landed or it did not, so what is owed is the sentence. A button
+       would be a button offering to pay twice. */
+    /* IT IS SAID WHERE EVERY PAYMENT IN FLIGHT IS SAID (2026/09/25) — the pill
+       above the tab bar and the live row at the head of the activity list,
+       read back from the record. It used to be Home's banner, with a control
+       that put it away; a payment the chain has not yet answered for is not
+       put away any more, because it is still in flight. */
     /* THE CHAIN IS ASKED (2026/09/22), and this boundary cannot answer, so
-       the line says it is checking — never the old hedge that left the reader
-       to work it out from the balance. */
-    const offer = page.locator('.mnhome-notice[role="alert"]');
-    await expect(offer).toBeVisible({ timeout: 60_000 });
-    await expect(offer).toContainText(
-      `Checking whether your payment to ${RESOLVABLE_NAME}.night went through…`,
-    );
-    await expect(offer).not.toContainText('Your balance below says which.');
+       the line says it is confirming — never the old hedge that left the
+       reader to work it out from the balance. */
+    await expect(sendPill(page)).toHaveAttribute('data-state', 'running', { timeout: 60_000 });
+    await expect(sendPill(page)).toContainText(`Sending 10 mUSD to ${RESOLVABLE_NAME}.night`);
+    await expect(sendPill(page).locator('.mnsendp-phase')).toHaveText('Confirming…');
+    await expect(sendLiveRow(page).locator('.mnsendp-tag')).toHaveText('Pending');
+    await expect(sendLiveRow(page)).toContainText(`Sending 10 mUSD to ${RESOLVABLE_NAME}.night`);
+    await expect(sendLiveRow(page)).toContainText('Confirming…');
+    await expect(page.getByText('Your balance below says which.')).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Finish this payment' })).toHaveCount(0);
-    await expect(page.getByRole('button', { name: 'Dismiss error' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Try again' })).toHaveCount(0);
+    await expect(sendPill(page).getByRole('button', { name: /^Dismiss/ })).toHaveCount(0);
+    await expect(sendLiveRow(page).getByRole('button', { name: /^Dismiss/ })).toHaveCount(0);
 
-    /* And the sentence points at a balance that is really on the screen
-       beside it — the sentence is only the truth if the figure is there. */
+    /* And the line points at a balance that is really on the screen beside
+       it, saying the same thing — the line is only the truth if the figure is
+       there. */
     await expect(assetRow(page, 'mUSD')).toContainText('30');
+    await expect(assetRow(page, 'mUSD')).toContainText(/Transferring/i);
 
     await context.close();
   });
