@@ -374,6 +374,11 @@ export interface CustodyHomeView {
   /** A payment that stopped and has nothing left to press, or null. */
   readonly stoppedSentence: string | null;
   readonly onRefresh: () => void;
+  /**
+   * The account watch's cheap look: reads in full only when something has
+   * landed since the last read, and answers whether it did (2026/09/25).
+   */
+  readonly onWatch?: (context: { chasing: boolean }) => Promise<boolean>;
   readonly onDismissError: () => void;
   readonly onDismissStopped: () => void;
   /**

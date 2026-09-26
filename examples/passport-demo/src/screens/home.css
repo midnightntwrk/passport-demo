@@ -1265,10 +1265,12 @@ button.mnhome-support { font-family: inherit; cursor: pointer; }
 .mnhome-activity-dot[data-tone='complete'] { background: var(--mn-accent); }
 /* Filled, but muted rather than accent: a still frame has to distinguish "in
    flight" from "done" on its own, and the pulse only helps a reader who is
-   watching. */
+   watching. So it pulses a handful of times when the row appears and then
+   holds that still frame (2026/09/25): an endless pulse kept the compositor
+   drawing every frame for as long as a payment sat pending on an open Home. */
 .mnhome-activity-dot[data-tone='pending'] {
   background: var(--mn-text-muted);
-  animation: mnhome-activity-pulse 1.8s ease-in-out infinite;
+  animation: mnhome-activity-pulse 1.8s ease-in-out 6;
 }
 /* Attention is a hollow ring rather than another fill: the palette carries no
    red, and a ring reads as "unfinished" at a glance without inventing one. */
@@ -1611,20 +1613,36 @@ button.mnhome-support { font-family: inherit; cursor: pointer; }
   background: var(--mn-accent-soft);
 }
 .mnhome-onway-dot {
+  position: relative;
   flex: 0 0 auto;
   width: 8px;
   height: 8px;
   margin-top: 6px;
   border-radius: 50%;
   background: var(--mn-accent);
-  box-shadow: 0 0 0 0 color-mix(in srgb, var(--mn-accent) 45%, transparent);
-  animation: mnhome-onway-pulse 1.6s ease-out infinite;
+}
+/* THE PULSE, COMPOSITED AND FINITE (2026/09/25). It was a box-shadow keyframe
+   that ran for as long as the card was up, and a box-shadow is repainted on
+   every frame: in the Pixel 7 profile at a sixfold CPU slowdown an idle Home
+   with the Companion's face removed was busy 2.7 s in every 20 with it and
+   0.4 s without. The same widening, fading disc is now a layer the compositor
+   scales and fades without a repaint, and it pulses a few times when the card
+   appears and then rests. The card's own words say the balance is on its way;
+   a still dot says it as well as a moving one. */
+.mnhome-onway-dot::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: var(--mn-accent);
+  opacity: 0;
+  animation: mnhome-onway-pulse 1.6s ease-out 4;
 }
 @keyframes mnhome-onway-pulse {
-  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--mn-accent) 45%, transparent); }
-  100% { box-shadow: 0 0 0 10px color-mix(in srgb, var(--mn-accent) 0%, transparent); }
+  0% { opacity: .45; transform: scale(1); }
+  100% { opacity: 0; transform: scale(3.5); }
 }
-@media (prefers-reduced-motion: reduce) { .mnhome-onway-dot { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .mnhome-onway-dot::after { animation: none; } }
 .mnhome-onway-copy { display: grid; gap: 6px; min-width: 0; }
 .mnhome-onway-title { margin: 0; font-size: 14px; font-weight: 600; color: var(--mn-text-primary); }
 .mnhome-onway-pills { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; }

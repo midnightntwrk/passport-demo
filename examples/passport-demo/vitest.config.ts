@@ -63,13 +63,17 @@
  * stale, one that never ends turns a Passport left open into a load generator,
  * one that mistakes a failed read for an arrival stops early, and one that runs
  * in a backgrounded tab is a schedule the browser will throttle into
- * dishonesty. It holds no DOM, no React, no `fetch`, and no clock of its own —
- * the timers and the clock are injected — so all of it is drilled on a
- * hand-wound clock in `src/lib/balanceWatch.test.ts`. Its React wiring is
+ * dishonesty. Since 2026/09/25 it also decides when a cheap look at the
+ * account's newest action is enough and when the whole read is owed, and it
+ * builds and reads that look; one wrong answer there is a payment nobody sees.
+ * It holds no DOM, no React, and no clock of its own — the timers, the clock,
+ * and the look's `fetch` are injected, the browser's being only the default —
+ * so all of it is drilled on a hand-wound clock in
+ * `src/lib/balanceWatch.test.ts`. Its React wiring is
  * `src/screens/useBalanceWatch.ts`, which is out for the same reason every
  * other module in `src/screens` is: it imports React, and there is no jsdom
  * here to render a hook into. That file holds the watch's lifetime, a
- * `visibilitychange` listener, and two refs — no decisions.
+ * `visibilitychange` listener, and three refs — no decisions.
  *
  * `src/lib/buildId.ts` went IN on 2026/09/14, the day it was written. It is
  * one string rewrite, and that rewrite is the whole of the repair for a
@@ -283,6 +287,14 @@
  * directly in `src/lib/companionLink.test.ts`. The two shapes the control is
  * painted in, `src/screens/Companion.tsx`, stay out with the rest of the
  * `.tsx`.
+ *
+ * `src/lib/companionMotion.ts` went IN on 2026/09/25, the day it was written.
+ * It decides when the Companion's face moves — a few seconds on arriving, a few
+ * more when pressed or focused, while a pointer rests on it, and never for
+ * somebody who asked for reduced motion — and when it holds a still frame. The
+ * face left moving was the largest single cost of an idle Home on a phone, so
+ * each answer is a battery answer, and each is drilled on a hand-wound clock in
+ * `src/lib/companionMotion.test.ts`. Its wiring stays in `Companion.tsx`.
  *
  * `src/lib/endpoints.ts` went IN on 2026/08/31, the day it was written, and it
  * belongs in the denominator because it is the rule that decides WHERE a
@@ -823,6 +835,7 @@ export default mergeConfig(
           'src/lib/claimRetry.ts',
           'src/lib/claimSteps.ts',
           'src/lib/companionLink.ts',
+          'src/lib/companionMotion.ts',
           'src/lib/colour.ts',
           'src/lib/custodyAdoption.ts',
           'src/lib/custodyAccountLock.ts',

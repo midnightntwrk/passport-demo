@@ -271,6 +271,13 @@ export interface HomeScreenProps {
   onDismissError?: () => void
   onRefresh: () => void
   /**
+   * The account watch's cheap look: asks whether anything has landed since the
+   * last read and reads only if so, answering whether it read. Hosts that can
+   * ask cheaply pass it; without it the watch re-reads in full on its steady
+   * cadence. See `lib/balanceWatch.ts` (2026/09/25).
+   */
+  onWatch?: (context: { chasing: boolean }) => Promise<boolean>
+  /**
    * The Send seam — a withdrawal from the account contract, plus the
    * fee-readiness probe whose answer the sheet quotes.
    *
@@ -495,6 +502,7 @@ export default function HomeScreen(props: HomeScreenProps) {
     error,
     onDismissError,
     onRefresh,
+    onWatch,
     send,
     activity,
     appsProfile,
@@ -653,6 +661,7 @@ export default function HomeScreen(props: HomeScreenProps) {
   useBalanceWatch({
     active: Boolean(account),
     refresh: onRefresh,
+    look: onWatch,
     signature: holdingsSignature(account ?? null),
     /* Anything announced starts a chase: a change in what is on the way, or a
        new row at the head of the trail (a send that just completed, a grant

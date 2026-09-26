@@ -904,6 +904,27 @@ export async function readCustodyAccountView(
       { cause },
     );
   }
+  return custodyAccountViewOf(state, module);
+}
+
+/**
+ * The same view, decoded from a state somebody has ALREADY read.
+ *
+ * For the owner's own delivery walk, which runs straight after the balance
+ * read has fetched exactly this state: fetching it a second time, moments
+ * later, doubled the largest thing a Passport left open on Home asks the
+ * indexer for — 64 KB each on stagenet — for the same answer (measured on a
+ * phone, 2026/09/25). Payers do not use this: the key a delivery is sealed to
+ * is read fresh by {@link readCustodyAccountView}, for the reason it gives.
+ */
+export async function custodyAccountViewFromState(state: unknown): Promise<CustodyAccountView> {
+  return custodyAccountViewOf(state, await loadContractModule('account-custody'));
+}
+
+function custodyAccountViewOf(
+  state: unknown,
+  module: Awaited<ReturnType<typeof loadContractModule>>,
+): CustodyAccountView {
   if (!state) {
     throw new AccountCustodyError(
       'contract-not-found',
