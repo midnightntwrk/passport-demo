@@ -14,8 +14,8 @@
  *      approving, so anything paid in from now on is readable here
  *   4. write the record, the name, and the pointer, so the next open goes
  *      straight to the Passport with no ceremony at all
- *   5. record that this device should be asked for the person's password
- *      backup, which is what brings back the payments sent before today
+ *   5. read back, from the sign-in, the key the payments sent before today
+ *      were sealed to, and give it this device's new key to keep beside it
  *
  * The hand-off itself is cleared by the CALLER, once this resolves. Nothing
  * here clears it: a failure halfway through is a recovery to be resumed, and a
@@ -37,11 +37,11 @@
  * its ability to be paid and to pay — and not the descriptions of tokens it was
  * sent before today.
  *
- * WHAT CLOSES IT (2026/09/26): the person's password backup. It carries the
- * old device's viewing key (`./backup.ts`), and a restore gives it back as an
- * EARLIER key of this account (`./viewingKeys.ts`), which the inbox walk then
- * tries beside the new one. Step 5 below records that this device should be
- * asked for that backup, and the screen asks once.
+ * WHAT CLOSES IT (2026/09/26): the sign-in itself. When it was added as the
+ * way back, the old device wrote its viewing key into the sign-in's metadata
+ * with the provider (`./signInViewingKeys.ts`); step 5 reads it back and keeps
+ * it as an EARLIER key of this account (`./viewingKeys.ts`), which the inbox
+ * walk then tries beside the new one. Nothing is asked of the person.
  */
 
 import { addDeviceK1, rotateEncKeyK1, defaultCustodyDeps, type CustodyPhase } from './custodyContractClient.js';
@@ -51,7 +51,7 @@ import { k1PrivateStateId, recoveredCustodyRecord, saveCustodyName } from './cus
 import { saveCustodyRecord, type CustodyStorage } from './custodyContractPlan.js';
 import { saveCustodyPasskeyPointer } from '../lib/custodyRoute.js';
 import { rememberK1EncSecretKey } from './k1CoinStore.js';
-import { offerEarlierPayments } from './viewingKeys.js';
+import { restoreViewingKeyFromSignIn } from './signInViewingKeys.js';
 import type { CustodyDynamicSession } from './custodyContractClient.js';
 import type { K256DeviceIdentity } from './custodyContractSigning.js';
 import type { AdoptionHandoff } from '../lib/custodyAdoption.js';
@@ -153,12 +153,14 @@ export async function adoptDeviceKey(
   }
 
   /* STEP 5 (2026/09/26). The payments this Passport was sent before today are
-     sealed to the key on the device that is gone, and the one thing that can
-     bring that key back is the person's own password backup. So the recovery
-     ends by recording the question — "do you have a backup?" — for the screen
-     to ask once. Written whether or not step 3 landed: the earlier key is
-     needed for the earlier notes either way. */
-  offerEarlierPayments(storage, account);
+     sealed to the key on the device that is gone, and the sign-in that has
+     just approved this device keeps that key for it — written when it was
+     added as the way back. So it is read back and kept as an earlier key, and
+     this device's new key goes in beside it for the next one. Run whether or
+     not step 3 landed: the earlier key is needed for the earlier notes either
+     way. Bounded, and never a failure of the recovery — a sign-in with nothing
+     kept for this Passport leaves one that works, and says nothing new. */
+  await restoreViewingKeyFromSignIn({ storage, account, signInUser: options.session.address });
 
   made.forget();
   return { userKey, pointedAtNewKey };

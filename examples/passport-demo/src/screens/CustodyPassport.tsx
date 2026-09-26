@@ -17,6 +17,7 @@ import {
   consumeRecoveryIntent,
   loadRecoveryIntent,
   loadRecoveryRecord,
+  recoveryHeld,
   recoveryHomeEntry,
   recoveryRefusal,
   recoveryResumes,
@@ -61,6 +62,7 @@ import {
   nextCustodyStep,
   resolveCustodyUseCounter,
   saveCustodyRecord,
+  CUSTODY_PHASE_PROVED,
   CUSTODY_SETUP_INTERRUPTED,
   CUSTODY_SUBMIT_WAIT_MS,
   CUSTODY_UNDONE_KEEP_MS,
@@ -1427,7 +1429,7 @@ export default function CustodyPassport({
           import('../identity/viewingKeys.js'),
         ])
       /* EVERY KEY THIS ACCOUNT HAS HAD (2026/09/26): the one it is pointed at
-         now, then any earlier one a password backup gave back — which is how a
+         now, then any earlier one its sign-in gave back — which is how a
          Passport brought back on a new device reads the payments it was sent
          before. See `../identity/viewingKeys.ts`. Null when there is none, so
          the test below and the walk's own argument read as they always have. */
@@ -2940,6 +2942,75 @@ export default function CustodyPassport({
   )
 
   /* ---------------------------------------------------------------------- */
+  /* The key that reads this Passport's payments, kept with its way back     */
+  /* ---------------------------------------------------------------------- */
+
+  /** The sign-in this tab has already brought level, for which account. */
+  const keysKeptWith = useRef<string | null>(null)
+
+  /**
+   * Brings this device and its way back level for this Passport's viewing keys
+   * (2026/09/26). This device's key goes to the sign-in's metadata, so a new
+   * device brought back through it can read what was paid in before; a key the
+   * sign-in keeps that this device does not is kept here, and the balance is
+   * read again with it.
+   *
+   * AWAITED BY NOTHING, AND A FAILURE OF NOTHING. A write that does not land is
+   * logged by `keepViewingKeysWithSignIn` and tried again on the next open.
+   * Once per sign-in, per account, per tab. See
+   * `../identity/signInViewingKeys.ts`.
+   */
+  const keepKeysWithSignIn = useCallback(
+    (signInUser: string): void => {
+      const record = view?.record ?? null
+      if (record === null || record.address === null || signInUser.trim() === '') return
+      const once = `${signInUser.trim().toLowerCase()}|${record.network}|${record.address}`
+      if (keysKeptWith.current === once) return
+      keysKeptWith.current = once
+      const account = { network: record.network, address: record.address }
+      void (async () => {
+        const [{ keepViewingKeysWithSignIn, signInFromSession }, { loadK1CoinStore }] =
+          await Promise.all([
+            import('../identity/signInViewingKeys.js'),
+            import('../identity/k1CoinStore.js'),
+          ])
+        const signIn = signInFromSession(signInUser)
+        if (signIn === null) return
+        const outcome = await keepViewingKeysWithSignIn({
+          signIn,
+          storage: window.localStorage,
+          account,
+          current: loadK1CoinStore(account).encSecretKeyHex,
+        })
+        /* A key that came back opens notes the last read could not. Read again
+           — after any read already running, which started without it. */
+        if (outcome.restored > 0) {
+          await holdingsInFlight.current?.catch(() => undefined)
+          await readHoldings()
+        }
+      })().catch((cause: unknown) => {
+        console.warn('[account-custody] the way back could not be brought level with this device', cause)
+      })
+    },
+    [readHoldings, view],
+  )
+
+  /* THE SAME, ON EVERY OPEN THAT CAN (2026/09/26): a Passport whose way back
+     was added before its key went with it, or whose last write did not land.
+     Only when Home is up, the way back is on, and a sign-in is here — and not
+     a sign-in from another provider than the one the way back was added with,
+     which is not this Passport's way back. Never for a Passport HELD by a
+     sign-in: it has no way back to keep anything with. */
+  useEffect(() => {
+    if (screen !== 'home' || heldBySocial || !recoveryHeld(recoveryRecord)) return
+    if (social === null || social.status !== 'signed-in' || !social.address) return
+    const addedWith = recoveryRecord?.provider?.trim().toLowerCase() ?? ''
+    const signedInWith = social.provider?.trim().toLowerCase() ?? ''
+    if (addedWith !== '' && signedInWith !== '' && addedWith !== signedInWith) return
+    keepKeysWithSignIn(social.address)
+  }, [heldBySocial, keepKeysWithSignIn, recoveryRecord, screen, social])
+
+  /* ---------------------------------------------------------------------- */
   /* Adding the way back                                                     */
   /* ---------------------------------------------------------------------- */
 
@@ -2988,7 +3059,7 @@ export default function CustodyPassport({
           finishWaves: (held) => finishInBackground(held, setupClock.current),
           recoveryKey: () => signIn.device(),
           addKey: async (held, spare, onPhase) => {
-            await addDeviceK1(arm.session, held.device, spare, onPhase)
+            await recoveryAddEngine()(arm.session, held.device, spare, onPhase)
           },
           onProgress: setRecoveryProgress,
           wait,
@@ -3000,6 +3071,11 @@ export default function CustodyPassport({
             ...(signIn.provider === null ? {} : { provider: signIn.provider }),
           })
         }
+        /* THE KEY THAT READS THIS PASSPORT'S PAYMENTS GOES WITH THE WAY BACK
+           (2026/09/26), so a device brought back through this sign-in can read
+           what was paid in before it. Not awaited, and never a failure of the
+           add: see `keepKeysWithSignIn`. */
+        keepKeysWithSignIn(signIn.address ?? '')
         setNotice(RECOVERY_COPY.done(signIn.provider))
         /* "Recovery is on", ticked, long enough to be read. */
         await wait(RECOVERY_DONE_HOLD_MS)
@@ -3017,7 +3093,7 @@ export default function CustodyPassport({
         refresh()
       }
     },
-    [arm.session, ensureIdentity, finishInBackground, network, refresh],
+    [arm.session, ensureIdentity, finishInBackground, keepKeysWithSignIn, network, refresh],
   )
 
   /** The press on the offer. */
@@ -4326,5 +4402,39 @@ function paymentEngine(): typeof PAYMENT_ENGINE {
     withdrawUnshieldedK1: async (_session, _identity, _input, onPhase): Promise<CustodyStepResult> =>
       walk(onPhase),
     keepChange: () => new Promise<void>((resolve) => setTimeout(resolve, tidyUpMs)),
+  }
+}
+
+/**
+ * The add of a way back — the real one, or, in a walk build, a stand-in the
+ * walk asked for (2026/09/26).
+ *
+ * WHY, FOR THE REASON {@link paymentEngine} GIVES. The mocked tier has no
+ * proving service and no chain, so an add there always stops at the proof —
+ * and what a walk of the way back needs to see is what happens once it lands:
+ * the way back recorded as on, and the key that reads this Passport's payments
+ * kept with the sign-in. A walk sets `window.__passportWalkRecoveryAdd =
+ * { stepMs }` before the app loads, and the stand-in reports the phases the add
+ * reports, a step apart, then answers. Everything in front of it — the passkey,
+ * the sign-in's key recovered from its signatures, the timeline — and
+ * everything after it is the shipped code.
+ *
+ * DEAD IN EVERY DEPLOYED BUILD, for the reason {@link paymentEngine} is.
+ */
+function recoveryAddEngine(): typeof addDeviceK1 {
+  if (import.meta.env.VITE_PASSPORT_ACC_WALK !== '1') return addDeviceK1
+  const hook = (globalThis as { __passportWalkRecoveryAdd?: unknown }).__passportWalkRecoveryAdd
+  if (!hook || typeof hook !== 'object') return addDeviceK1
+  const asked = hook as { stepMs?: unknown }
+  const stepMs = typeof asked.stepMs === 'number' && asked.stepMs >= 0 ? asked.stepMs : 500
+  return async (_session, _device, _newDevice, onPhase) => {
+    const wait = () => new Promise<void>((resolve) => setTimeout(resolve, stepMs))
+    onPhase?.({ step: 'submit' })
+    await wait()
+    onPhase?.({ step: 'submit', detail: CUSTODY_PHASE_PROVED })
+    await wait()
+    onPhase?.({ step: 'confirm' })
+    await wait()
+    return { txHash: 'e6'.repeat(32), explorerUrl: null } as unknown as CustodyStepResult
   }
 }

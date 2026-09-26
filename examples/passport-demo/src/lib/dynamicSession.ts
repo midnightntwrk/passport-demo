@@ -87,6 +87,23 @@ export interface DynamicActions {
   signRaw: (digestHex: string) => Promise<string>
   /** Ends the Dynamic session. The Passport passkey is untouched. */
   signOut: () => Promise<void>
+  /**
+   * The signed-in person's metadata with the provider (2026/09/26) — where the
+   * key that reads a Passport's payments is kept beside its way back. See
+   * `../identity/signInViewingKeys.ts`.
+   *
+   * `fresh: false` answers from this browser's copy of the user, which the
+   * sign-in itself filled; `fresh: true` asks the provider first. Resolves with
+   * whatever is there, `undefined` included, and rejects when nobody is signed
+   * in.
+   */
+  readMetadata: (options: { readonly fresh: boolean }) => Promise<unknown>
+  /**
+   * Stores `metadata` as the signed-in person's metadata and resolves with what
+   * the provider then holds. It writes what it is given: merging with what was
+   * there is the caller's job, done on a fresh read.
+   */
+  writeMetadata: (metadata: Readonly<Record<string, unknown>>) => Promise<unknown>
 }
 
 /**

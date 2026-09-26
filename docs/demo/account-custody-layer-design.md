@@ -806,6 +806,18 @@ and Dynamic still exports nothing it can be derived from, so "restorable" still
 means "can receive" until that is solved. What changed is the size of what a
 viewing key would recover, not whether one can be had.
 
+**For the demo, 2026/09/26: the key travels with the way back.** When a passkey
+Passport adds a social sign-in as its way back, the app writes the account's
+viewing secret into that sign-in's Dynamic user metadata
+(`{ passport: { v: 1, keys: { "<network>:<account>": [secret, …] } } }`); a
+Passport brought back on a new device through the same sign-in reads it back
+and keeps it as an earlier key beside the new device's own, so the inbox walk
+opens the notes delivered before the recovery. No password and no file
+(`src/identity/signInViewingKeys.ts`). The cost is stated plainly: Dynamic, and
+anyone holding an admin API key for the environment, can read the viewing key
+and so see what the Passport is paid, never spend it. Accepted for the demo; it
+does not close §6 for a production Passport.
+
 ## 4. Migration, through `accountUpgrade.ts`
 
 Extend the machine, do not rewrite it. Drain → deploy → re-point → refund → switch, with
@@ -878,7 +890,8 @@ third is the hard one. The inbox is the contract's own answer — walk it from o
 decrypt each entry with the X25519 viewing key — but **the viewing key is itself private**,
 and Dynamic exports nothing it could be derived from. Derived from the passkey ladder, it
 is unavailable on exactly the device that needs it. This is open, and it decides whether
-"restorable" means "can send" or only "can receive".
+"restorable" means "can send" or only "can receive". (The demo carries the key in the
+sign-in's user metadata — see "On §6" in §3 for what that costs.)
 
 ## 7. PR sequence
 

@@ -1,24 +1,18 @@
 /**
- * Drills for the earlier viewing keys a Passport holds, and the one question a
- * recovered device is asked about them (2026/09/26).
+ * Drills for the earlier viewing keys a Passport holds (2026/09/26).
  *
  * The storage is a map with the three behaviours a browser's has — it answers,
  * it refuses, and (for one drill) it accepts a write and keeps nothing — so
  * every rule in `./viewingKeys.ts` is held without a browser.
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
 import {
-  EARLIER_PAYMENTS_OFFER_KEY,
   EARLIER_VIEWING_KEYS_KEY,
   EARLIER_VIEWING_KEYS_PER_ACCOUNT,
-  answerEarlierPaymentsOffer,
-  earlierPaymentsOfferDue,
-  listEarlierViewingKeys,
   loadEarlierViewingKeys,
   normalisedViewingSecret,
-  offerEarlierPayments,
   rememberEarlierViewingKey,
   viewingKeyAccountKey,
   viewingSecretsFor,
@@ -69,19 +63,17 @@ describe('the account a key belongs to', () => {
 });
 
 describe('keeping an earlier key', () => {
-  it('keeps a restored key beside the current one, and lists it', () => {
+  it('keeps a restored key beside the current one, for its own account only', () => {
     const { storage } = fakeStorage();
     expect(rememberEarlierViewingKey(storage, ACCOUNT, OLD_KEY, NEW_KEY)).toEqual({ kind: 'added' });
     expect(loadEarlierViewingKeys(storage, ACCOUNT)).toEqual([OLD_KEY]);
     expect(loadEarlierViewingKeys(storage, OTHER)).toEqual([]);
-    expect(listEarlierViewingKeys(storage)).toEqual([
-      { network: 'stagenet', address: ACCOUNT.address, secrets: [OLD_KEY] },
-    ]);
   });
 
   it('says a key it already reads with is held, rather than writing it twice', () => {
     const { storage, map } = fakeStorage();
-    /* The backup restored onto the device that made it: the key IS the current one. */
+    /* The sign-in handing back the key of the device that put it there: the
+       key IS the current one. */
     expect(rememberEarlierViewingKey(storage, ACCOUNT, NEW_KEY, NEW_KEY)).toEqual({
       kind: 'held',
       reason: 'this device already reads this account with that key',
@@ -98,10 +90,10 @@ describe('keeping an earlier key', () => {
   it('refuses what is not a key, or not an account', () => {
     const { storage } = fakeStorage();
     expect(rememberEarlierViewingKey(storage, { network: '', address: ACCOUNT.address }, OLD_KEY, null))
-      .toMatchObject({ kind: 'refused', reason: 'the file names an account this Passport cannot read' });
+      .toMatchObject({ kind: 'refused', reason: 'the account is not one this Passport can read' });
     expect(rememberEarlierViewingKey(storage, ACCOUNT, 'short', null)).toMatchObject({
       kind: 'refused',
-      reason: 'the file\'s key is not the size a viewing key is',
+      reason: 'the key is not the size a viewing key is',
     });
   });
 
@@ -139,9 +131,9 @@ describe('keeping an earlier key', () => {
     map.set(EARLIER_VIEWING_KEYS_KEY, 'not json');
     expect(loadEarlierViewingKeys(storage, ACCOUNT)).toEqual([]);
     map.set(EARLIER_VIEWING_KEYS_KEY, '[1,2]');
-    expect(listEarlierViewingKeys(storage)).toEqual([]);
+    expect(loadEarlierViewingKeys(storage, ACCOUNT)).toEqual([]);
     map.set(EARLIER_VIEWING_KEYS_KEY, 'null');
-    expect(listEarlierViewingKeys(storage)).toEqual([]);
+    expect(loadEarlierViewingKeys(storage, ACCOUNT)).toEqual([]);
     map.set(
       EARLIER_VIEWING_KEYS_KEY,
       JSON.stringify({
@@ -154,9 +146,7 @@ describe('keeping an earlier key', () => {
       }),
     );
     expect(loadEarlierViewingKeys(storage, ACCOUNT)).toEqual([OLD_KEY, NEW_KEY]);
-    expect(listEarlierViewingKeys(storage)).toEqual([
-      { network: 'stagenet', address: ACCOUNT.address, secrets: [OLD_KEY, NEW_KEY] },
-    ]);
+    expect(loadEarlierViewingKeys(storage, OTHER)).toEqual([]);
     expect(loadEarlierViewingKeys(storage, { network: 'stagenet', address: 'zz' })).toEqual([]);
     /* A storage that refuses to be read holds nothing. */
     expect(loadEarlierViewingKeys(fakeStorage({ denyReads: true }).storage, ACCOUNT)).toEqual([]);
@@ -174,47 +164,5 @@ describe('the keys an inbox walk tries', () => {
     /* No current key: the earlier ones alone. */
     expect(viewingSecretsFor(storage, ACCOUNT, null)).toEqual([OLD_KEY, '33'.repeat(32)]);
     expect(viewingSecretsFor(storage, OTHER, null)).toEqual([]);
-  });
-});
-
-describe('the question a recovered device is asked', () => {
-  it('is asked once the recovery records it, and not after it is answered', () => {
-    const { storage, map } = fakeStorage();
-    expect(earlierPaymentsOfferDue(storage, ACCOUNT)).toBe(false);
-    offerEarlierPayments(storage, ACCOUNT, 1_790_000_000_000);
-    expect(JSON.parse(map.get(EARLIER_PAYMENTS_OFFER_KEY)!)).toEqual({
-      [`stagenet::${ACCOUNT.address}`]: { at: 1_790_000_000_000 },
-    });
-    expect(earlierPaymentsOfferDue(storage, ACCOUNT)).toBe(true);
-    expect(earlierPaymentsOfferDue(storage, OTHER)).toBe(false);
-    answerEarlierPaymentsOffer(storage, ACCOUNT);
-    expect(earlierPaymentsOfferDue(storage, ACCOUNT)).toBe(false);
-    /* Answering a question nobody asked writes nothing. */
-    map.delete(EARLIER_PAYMENTS_OFFER_KEY);
-    answerEarlierPaymentsOffer(storage, ACCOUNT);
-    expect(map.has(EARLIER_PAYMENTS_OFFER_KEY)).toBe(false);
-  });
-
-  it('ignores an account it cannot name, and a row that is not a record', () => {
-    const { storage, map } = fakeStorage();
-    const nobody = { network: '', address: ACCOUNT.address };
-    offerEarlierPayments(storage, nobody);
-    expect(map.size).toBe(0);
-    expect(earlierPaymentsOfferDue(storage, nobody)).toBe(false);
-    answerEarlierPaymentsOffer(storage, nobody);
-    map.set(EARLIER_PAYMENTS_OFFER_KEY, JSON.stringify({ [`stagenet::${ACCOUNT.address}`]: true }));
-    expect(earlierPaymentsOfferDue(storage, ACCOUNT)).toBe(false);
-    map.set(EARLIER_PAYMENTS_OFFER_KEY, JSON.stringify({ [`stagenet::${ACCOUNT.address}`]: [1] }));
-    expect(earlierPaymentsOfferDue(storage, ACCOUNT)).toBe(false);
-    map.set(EARLIER_PAYMENTS_OFFER_KEY, JSON.stringify({ [`stagenet::${ACCOUNT.address}`]: null }));
-    expect(earlierPaymentsOfferDue(storage, ACCOUNT)).toBe(false);
-  });
-
-  it('says so in one line, and does not throw, when the question cannot be written down', () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    const { storage } = fakeStorage({ denyWrites: true });
-    offerEarlierPayments(storage, ACCOUNT);
-    expect(warn).toHaveBeenCalledWith('[account-custody] could not remember to ask about earlier payments');
-    warn.mockRestore();
   });
 });

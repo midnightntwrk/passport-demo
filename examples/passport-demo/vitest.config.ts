@@ -764,15 +764,28 @@
  * carry; all three are drilled in `custodyInboxIndex.test.ts`. It holds no
  * network: a GraphQL document out, somebody else's answer in.
  *
+ * `src/identity/signInViewingKeys.ts` went IN on 2026/09/26 with the module
+ * itself. It keeps a Passport's viewing keys in its sign-in's metadata, beside
+ * the way back, and reads them back when the Passport is brought to a new
+ * device through that sign-in. A key it fails to keep is a set of payments a
+ * recovered device can never see or spend, and a write that replaced rather
+ * than merged would take away whatever else the sign-in keeps — another
+ * account's keys among it — so every branch is drilled in
+ * `signInViewingKeys.test.ts`: the versioned shape and the rows it will not
+ * read, the merge that keeps every other key, the ceiling and the byte budget,
+ * the fresh read a write is built on, the read-back that decides whether a
+ * write counted, and the sign-in that is not this Passport's. It holds no DOM,
+ * no React, and no SDK: the sign-in is two calls, injected or read from the
+ * `dynamicSession.ts` store.
+ *
  * `src/identity/viewingKeys.ts` went IN on 2026/09/26 with the module itself.
- * It holds the EARLIER viewing keys a password backup gives back to a Passport
- * recovered on a new device, and the one question that device is asked about
- * them. A key this module drops is a set of payments that device can never see
- * or spend, and a key it hands back for the wrong account is a walk that opens
- * somebody else's notes, so every branch — the account key, the ceiling that
- * keeps the oldest key, the read-back that decides whether a key was kept, and
- * the question asked once — is drilled in `viewingKeys.test.ts` and
- * `backup.viewingKeys.test.ts`. It holds no DOM, no React, and no network: the
+ * It holds the EARLIER viewing keys a Passport recovered on a new device is
+ * given back by its sign-in (`signInViewingKeys.ts`). A key this module drops
+ * is a set of payments that device can never see or spend, and a key it hands
+ * back for the wrong account is a walk that opens somebody else's notes, so
+ * every branch — the account key, the ceiling that keeps the oldest key, and
+ * the read-back that decides whether a key was kept — is drilled in
+ * `viewingKeys.test.ts`. It holds no DOM, no React, and no network: the
  * storage is handed in.
  *
  * `src/lib/custodyAssets.ts` went IN on 2026/09/17 with the module itself. It is
@@ -940,6 +953,7 @@ export default mergeConfig(
           'src/identity/claimWarmup.ts',
           'src/identity/k1CoinStore.ts',
           'src/identity/custodyInbox.ts',
+          'src/identity/signInViewingKeys.ts',
           'src/identity/custodyInboxIndex.ts',
           'src/identity/viewingKeys.ts',
           'src/identity/midnamesText.ts',

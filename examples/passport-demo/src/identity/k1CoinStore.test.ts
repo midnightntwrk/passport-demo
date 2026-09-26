@@ -44,7 +44,6 @@ import {
   refuseK1Account,
   refuseK1Coin,
   rememberK1EncSecretKey,
-  k1ViewingSecrets,
   rememberK1ChangeCoin,
   replaceK1Coin,
   undoK1ChangeCoin,
@@ -197,39 +196,6 @@ describe('a coin survives the thing that loses it today', () => {
     forgetK1Account(ALICE);
     expect(listK1Coins(ALICE)).toEqual([]);
     expect(listK1Coins(BOB)).toHaveLength(1);
-  });
-
-  /* THE BACKUP'S ONE READER OF THIS STORE (2026/09/26): each account's
-     viewing secret and the account it reads, and nothing else a store holds. */
-  it('lists every account it holds a viewing secret for, and only those', () => {
-    expect(k1ViewingSecrets()).toEqual([]);
-    putK1Coin(ALICE, coin());
-    rememberK1EncSecretKey(ALICE, 'FF'.repeat(32));
-    rememberK1EncSecretKey(ALICE_ON_PREVIEW, 'ee'.repeat(32));
-    /* An account holding coins and no key is not listed. */
-    putK1Coin(BOB, coin({ value: 5n }));
-    expect(k1ViewingSecrets()).toEqual([
-      { network: 'stagenet', address: ALICE.address, encSecretKeyHex: 'ff'.repeat(32) },
-      { network: 'preview', address: ALICE.address, encSecretKeyHex: 'ee'.repeat(32) },
-    ]);
-    /* Nothing about the coins comes with it. */
-    expect(JSON.stringify(k1ViewingSecrets())).not.toContain(NONCE);
-  });
-
-  it('leaves out a key it cannot read, and a row filed under a key it would not write', () => {
-    storage.set(
-      STORAGE_KEY,
-      JSON.stringify({
-        [`stagenet::${ALICE.address}`]: { ...EMPTY_STORE, encSecretKeyHex: 'short' },
-        [`stagenet::${'zz'.repeat(32)}`]: { ...EMPTY_STORE, encSecretKeyHex: 'aa'.repeat(32) },
-        [`::${BOB.address}`]: { ...EMPTY_STORE, encSecretKeyHex: 'aa'.repeat(32) },
-        nokey: { ...EMPTY_STORE, encSecretKeyHex: 'aa'.repeat(32) },
-        [`preview::${BOB.address}`]: { ...EMPTY_STORE, encSecretKeyHex: 'bb'.repeat(32) },
-      }),
-    );
-    expect(k1ViewingSecrets()).toEqual([
-      { network: 'preview', address: BOB.address, encSecretKeyHex: 'bb'.repeat(32) },
-    ]);
   });
 
   it('remembers the account viewing secret beside the coins, and clears it', () => {

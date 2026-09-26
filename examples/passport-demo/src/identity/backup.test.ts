@@ -410,6 +410,33 @@ describe('a file that decrypts and still is not a backup', () => {
     }
   });
 
+  /* RELEASE v4.0 WROTE FORMAT 2 WITH A VIEWING KEY IN IT, for the few hours
+     of 2026/09/26 the file carried one (#108). The key travels with the way
+     back now (`./signInViewingKeys.ts`), and a file from those hours is a file
+     somebody may keep: it restores its records, and the key is left behind
+     unread — never returned, so never applied. */
+  it('opens a format-2 file from release v4.0 and leaves the viewing key in it behind', async () => {
+    const secret = 'cd'.repeat(32);
+    const envelope = await sealRaw(
+      JSON.stringify({
+        ...contents(),
+        viewingKeys: [{ network: 'stagenet', address: 'ab'.repeat(32), viewingSecret: secret }],
+      }),
+      PASSWORD,
+    );
+    expect(envelope.v).toBe(2);
+    const opened = await openPassportBackup(envelope, PASSWORD);
+    expect(opened.aliases['AQIDBA==::preview']?.alias).toBe('alice');
+    expect(Object.keys(opened).sort()).toEqual([
+      'aliases',
+      'createdAt',
+      'incentives',
+      'passportContracts',
+      'version',
+    ]);
+    expect(JSON.stringify(opened)).not.toContain(secret);
+  });
+
   it('supplies this build’s format number when the file omits one', async () => {
     const envelope = await sealRaw(
       JSON.stringify({ createdAt: 'now', aliases: {}, passportContracts: {}, incentives: [] }),
@@ -734,13 +761,7 @@ describe('export and import, end to end through a backend', () => {
       fileName: exported.fileName,
       location: 'in memory',
     });
-    expect(exported.counts).toEqual({
-      aliases: 1,
-      passportContracts: 1,
-      incentives: 1,
-      /* This browser holds no account custody account, so no viewing key. */
-      viewingKeyAccounts: 0,
-    });
+    expect(exported.counts).toEqual({ aliases: 1, passportContracts: 1, incentives: 1 });
     // The file is pretty-printed JSON and carries nothing readable of its own.
     expect(backend.written[0]).toMatch(/^\{\n/);
     expect(backend.written[0]).not.toContain('alice');
