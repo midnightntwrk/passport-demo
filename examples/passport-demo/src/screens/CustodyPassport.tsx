@@ -1614,6 +1614,19 @@ export default function CustodyPassport({
            their money was missing when it is on the screen underneath. */
         console.info('[account-custody] the deliveries could not be read this time', cause)
       }
+
+      /* ONLY WHAT THE CHAIN SAYS IS STILL HERE IS COUNTED (2026/09/26). A walk
+         with an earlier key — a restore, a synced passkey — files the notes of
+         coins another device has already sent, and they were shown and offered
+         to a payment the node then refused. Asked of the history the walk has
+         just read, so nothing is fetched twice; silent when it cannot be
+         asked, so what is shown is what was shown before. See
+         `forgetCoinsTheChainSpent`. */
+      try {
+        await forgetCoinsTheChainSpent(opened.network.indexerHttpUrl, account, lastActionsRef.current)
+      } catch (cause) {
+        console.info('[account-custody] which coins are still held could not be checked this time', cause)
+      }
     }
 
     try {
@@ -4078,6 +4091,43 @@ async function reconcileCustodySpends(
     result.landed.length + result.undone.length + result.reapplied.length + result.orphansDropped.length
   if (moved > 0) console.info('[account-custody] payments in flight, answered from the chain', result)
   return result
+}
+
+/**
+ * THE HELD-COIN CHECK, WIRED (2026/09/26): the indexer, the ledger's event
+ * decoder, and the Compact runtime's hash, handed to
+ * `../identity/custodySpentCoins.ts`, which decides. One POST for the spends
+ * this tab has not read yet, none when there are none, and the same ten-second
+ * ceiling as every other indexer read here.
+ */
+async function forgetCoinsTheChainSpent(
+  indexerHttpUrl: string,
+  account: { network: string; address: string },
+  actions: Awaited<ReturnType<typeof readCustodyActions>>,
+): Promise<void> {
+  const [spentCoins, ledger, runtime] = await Promise.all([
+    import('../identity/custodySpentCoins.js'),
+    import('@midnightntwrk/ledger-v9'),
+    import('@midnight-ntwrk/compact-runtime'),
+  ])
+  const result = await spentCoins.forgetSpentCustodyCoins(account, actions, {
+    ask: async (query) => {
+      const response = await fetch(indexerHttpUrl, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ query }),
+        signal: AbortSignal.timeout(10_000),
+      })
+      return (await response.json()) as unknown
+    },
+    decode: (raw) => ledger.Event.deserialize(hexToBytes(raw)).content,
+    nullifierOf: (coin) => spentCoins.custodyCoinNullifier(runtime, coin, account.address),
+  })
+  if (result.forgotten.length > 0) {
+    console.info(
+      `[account-custody] ${result.forgotten.length} coin(s) described here were already spent on the chain; no longer counted`,
+    )
+  }
 }
 
 async function readCustodyActions(indexerHttpUrl: string, address: string) {
