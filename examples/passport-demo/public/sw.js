@@ -32,11 +32,26 @@
  * A worker that claims a page mid-session can leave that page's lazily
  * imported chunks 404ing, because `activate` deletes the previous build's
  * caches and the alias no longer serves the previous build's hashes. That is
- * why `src/pwa.tsx` reloads an IDLE page the instant this worker claims it,
- * and shows a banner instead of reloading when Passport is in the middle of
- * something. The exposure is one flow's dynamic import inside that window,
- * and it is worth it: an installed client that cannot update itself is worse
- * than one that reloads a beat early.
+ * why `src/pwa.tsx` reloads a page that is not already running this build at
+ * the first safe moment after this worker claims it — at once when Passport is
+ * idle, later when it is in the middle of something — and why a lazy chunk
+ * that 404s reloads the page once (`src/lib/appUpdate.ts`). Nothing about any
+ * of it is shown or offered: updating is the app's job, not the reader's. The
+ * exposure is one flow's dynamic import inside that window, and it is worth
+ * it: an installed client that cannot update itself is worse than one that
+ * reloads a beat early.
+ *
+ * `skipWaiting()` IS NOT THE WHOLE OF ACTIVATION (2026/09/25)
+ * ----------------------------------------------------------
+ * A waiting worker with the skip-waiting flag set still activates only once
+ * the ACTIVE worker has no pending events — the Service Worker spec's "Try
+ * Activate" asks both. Every fetch this file made used to be unbounded, so one
+ * request that never answered kept the running worker "busy" and parked its
+ * successor in `waiting` for as long as it hung. Measured on an Android phone
+ * on 2026/09/25: the page was already on the new build, the new worker sat
+ * `installed` behind the old one, and the "Update Passport" button that parked
+ * state produced could only spin. See "NO NETWORK WAIT IN THIS WORKER IS
+ * UNBOUNDED" below for the bounds.
  */
 
 /**
@@ -80,6 +95,90 @@ const SHELL_ASSETS = [
 const REQUIRED_SHELL_ASSETS = ['/index.html', '/offline.html'];
 
 /**
+ * NO NETWORK WAIT IN THIS WORKER IS UNBOUNDED (2026/09/25)
+ * --------------------------------------------------------
+ * A `respondWith` or `waitUntil` promise that never settles is a pending event,
+ * and a worker with a pending event cannot be replaced: the next build's
+ * worker installs, calls `skipWaiting()`, and still waits (see the header).
+ * On a phone — a connection dropped mid-request, a page frozen or parked in
+ * the back/forward cache — a `fetch()` with no deadline can hang for minutes.
+ * So every fetch below carries one, sized to what it fetches:
+ *
+ *   NAVIGATION_TIMEOUT_MS         the app shell. After it, the precached shell
+ *                                 is served (or the offline page when there is
+ *                                 none), so a slow network still opens the app.
+ *   REFRESH_TIMEOUT_MS            the background refresh of a stable-url asset,
+ *                                 its first fetch, and each shell precache —
+ *                                 all small files, bounded headers and body.
+ *   RESPONSE_HEADERS_TIMEOUT_MS   `/assets/**`, `/zk/**`, and `/zk-params/**`.
+ *                                 ONLY the wait for response headers is bounded.
+ *                                 A prover key is tens of megabytes and a phone
+ *                                 on a slow link can take minutes to receive it
+ *                                 honestly; cutting that off mid-transfer would
+ *                                 turn slow into broken. What is not allowed is
+ *                                 a request that never starts answering.
+ */
+const NAVIGATION_TIMEOUT_MS = 10_000;
+const REFRESH_TIMEOUT_MS = 15_000;
+const RESPONSE_HEADERS_TIMEOUT_MS = 30_000;
+
+/**
+ * A signal that aborts after `ms`. `AbortSignal.timeout` is Safari 16 and
+ * Chrome 103 onwards, so an older engine gets the same thing from a controller
+ * and a timer rather than no deadline at all.
+ */
+function deadlineSignal(ms) {
+  if (typeof AbortSignal.timeout === 'function') return AbortSignal.timeout(ms);
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), ms);
+  return controller.signal;
+}
+
+/**
+ * `request`, carrying `deadline` as well as its own signal.
+ *
+ * A request the page cancels — a navigation away, a reload — aborts
+ * `request.signal`, and a plain `fetch(request)` follows it. Replacing the
+ * signal outright would drop that, so the two are combined where
+ * `AbortSignal.any` exists (Chrome 116, Safari 17.4) and the deadline alone is
+ * used where it does not. Should an engine refuse to copy the request at all,
+ * the fetch goes ahead unbounded, as it always did, rather than failing: a
+ * `TypeError` here would reach `networkNavigation` as "offline" and show the
+ * offline page to somebody who is online.
+ */
+function withDeadline(request, deadline) {
+  const signal =
+    typeof AbortSignal.any === 'function' && request.signal
+      ? AbortSignal.any([request.signal, deadline])
+      : deadline;
+  try {
+    return new Request(request, { signal });
+  } catch {
+    return request;
+  }
+}
+
+/** `fetch`, with the whole exchange — headers and body — bounded by `ms`. */
+function fetchWithin(request, ms) {
+  return fetch(withDeadline(request, deadlineSignal(ms)));
+}
+
+/**
+ * `fetch`, with only the wait for response headers bounded by `ms`. The timer
+ * is disarmed the moment headers arrive, so the body streams for as long as it
+ * takes. See {@link RESPONSE_HEADERS_TIMEOUT_MS}.
+ */
+async function fetchHeadersWithin(request, ms) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+  try {
+    return await fetch(withDeadline(request, controller.signal));
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * Precaches the shell ONE ASSET AT A TIME, and why that is not fussiness.
  *
  * This used to be a single `cache.addAll(SHELL_ASSETS)`. `addAll` is all or
@@ -104,8 +203,9 @@ async function precacheShell() {
     SHELL_ASSETS.map(async (asset) => {
       // `cache: 'reload'` and not a plain URL: precaching the shell through
       // the HTTP cache is how a worker installs a copy of the deploy it is
-      // replacing. Every one of these is fetched from the network.
-      const response = await fetch(new Request(asset, { cache: 'reload' }));
+      // replacing. Every one of these is fetched from the network, within a
+      // deadline, so an install cannot hang on one asset either.
+      const response = await fetchWithin(new Request(asset, { cache: 'reload' }), REFRESH_TIMEOUT_MS);
       // A 404 resolves rather than throwing, and caching it would put the
       // "not found" page under the shell's own address.
       if (!response.ok) throw new Error(`${asset} answered ${response.status}`);
@@ -179,13 +279,23 @@ self.addEventListener('notificationclick', (event) => {
 
 async function networkNavigation(request) {
   try {
-    const response = await fetch(request);
+    const response = await fetchWithin(request, NAVIGATION_TIMEOUT_MS);
     if (response.ok) {
       const cache = await caches.open(SHELL_CACHE);
       await cache.put('/index.html', response.clone());
     }
     return response;
-  } catch {
+  } catch (error) {
+    /* A navigation that ran out of time HAS a network, just not a quick one,
+       so this build's precached shell is served and the app opens and says
+       for itself what it cannot reach. A navigation that failed outright has
+       no network, and the offline page is the honest answer — as it is when
+       there is no shell to serve. */
+    if (error?.name === 'TimeoutError' || error?.name === 'AbortError') {
+      const cache = await caches.open(SHELL_CACHE).catch(() => null);
+      const shell = await cache?.match('/index.html');
+      if (shell) return shell;
+    }
     return (await caches.match('/offline.html')) || Response.error();
   }
 }
@@ -223,7 +333,9 @@ async function immutableAsset(request) {
   const cache = await caches.open(STATIC_CACHE).catch(() => null);
   const cached = await cache?.match(request);
   if (cached) return cached;
-  const response = await fetch(request).catch(() => null);
+  /* Headers within RESPONSE_HEADERS_TIMEOUT_MS, the body for as long as it
+     takes — see that constant for why a prover key is never cut off. */
+  const response = await fetchHeadersWithin(request, RESPONSE_HEADERS_TIMEOUT_MS).catch(() => null);
   if (response?.ok && response.type === 'basic') {
     /* THE CACHE WRITE MAY NOT DECIDE WHETHER THE DOWNLOAD SUCCEEDED
        (2026/09/05). `dist/zk` and `dist/zk-params` are 144 MB across a build
@@ -266,7 +378,10 @@ async function staticAsset(request, event) {
      the reloaded page reads decides which icons an installed Passport shows. */
   const cache = await caches.open(STATIC_CACHE).catch(() => null);
   const cached = await cache?.match(request);
-  const network = fetch(request)
+  /* Bounded, headers and body: this promise is what `event.waitUntil` below
+     holds the worker open on, and an unbounded one is exactly the pending
+     event that parked the next build in `waiting` (see the header). */
+  const network = fetchWithin(request, REFRESH_TIMEOUT_MS)
     .then(async (response) => {
       if (response.ok && response.type === 'basic') {
         /* Best effort, for the reason spelled out in `immutableAsset`: a
@@ -304,7 +419,8 @@ self.addEventListener('fetch', (event) => {
 
   // The app shell, and the one request that decides which build runs: always
   // from the network, so a new deploy's asset hashes are seen. The cached copy
-  // exists for `/offline.html`'s sake and is never preferred to a live answer.
+  // is served only when the network is too slow to answer within
+  // NAVIGATION_TIMEOUT_MS, and is never preferred to a live answer.
   if (request.mode === 'navigate') {
     event.respondWith(networkNavigation(request));
     return;
