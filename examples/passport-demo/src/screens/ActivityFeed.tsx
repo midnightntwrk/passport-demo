@@ -1,5 +1,5 @@
 import { ChevronDown, ExternalLink, RotateCcw } from 'lucide-react'
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 
 import {
   activityDot,
@@ -83,10 +83,17 @@ export interface ActivityFeedItem extends ActivityFeedEntry {
 
 export interface ActivityFeedProps {
   entries: readonly ActivityFeedItem[]
+  /**
+   * A payment still in flight, painted at the head of the list above every
+   * recorded row (2026/09/25). It is not a trail entry — nothing is written
+   * down until the payment has an answer — so it is handed in as a node and
+   * the paging below never counts it. See `SendProgress.tsx`.
+   */
+  live?: ReactNode
 }
 
 export default function ActivityFeed(props: ActivityFeedProps) {
-  const { entries } = props
+  const { entries, live } = props
   /* How far down the trail the reader has asked to go. Collapsed on every
      visit and never remembered, on the rule the balance list already keeps: a
      trail is opened to see what just happened, and a Passport that reopened
@@ -101,6 +108,7 @@ export default function ActivityFeed(props: ActivityFeedProps) {
       <p className="mnhome-micro" id="mnhome-activity-title">
         Activity
       </p>
+      {live ?? null}
       {groups.length === 0 ? (
         /* One quiet line, not a box. An empty trail is not a problem to be
            announced — it is a Passport that has not done anything yet, and a

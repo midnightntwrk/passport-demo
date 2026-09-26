@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState, type FormEvent } from 'react'
 import {
   ArrowRight,
   Gamepad2,
@@ -33,12 +33,14 @@ import {
   freshCustodyWallet,
   startCustodyAccountAgain,
   warmCustodySetup,
-  withdrawShieldedK1,
-  withdrawShieldedToContractK1,
-  withdrawUnshieldedK1,
+  withdrawShieldedK1 as engineWithdrawShieldedK1,
+  withdrawShieldedToContractK1 as engineWithdrawShieldedToContractK1,
+  withdrawUnshieldedK1 as engineWithdrawUnshieldedK1,
   custodyPrepareWaitMs,
   type CustodyCallDevice,
   type CustodyPhase,
+  type CustodyShieldedSpendResult,
+  type CustodyStepResult,
 } from '../identity/custodyContractClient.js'
 import {
   hexToBytes,
@@ -96,7 +98,7 @@ import {
 import {
   custodyAssetRow,
   custodyAssetRows,
-  custodyResumeOffer,
+  formatCustodyAmount,
   custodyStablecoinColour,
   type CustodyAssetRow,
 } from '../lib/custodyAssets.js'
@@ -178,6 +180,18 @@ import { pushToast } from './ToastStack.js'
 /* The explorer link a finished payment's toast and trail row carry. Pure, and
    free of the wallet SDK — see `../lib/networks.ts`. */
 import { txReceiptLink } from '../lib/networks.js'
+/* A payment that runs behind the Passport rather than in front of it: the one
+   transition function, and the view the pill and the live row paint. Pure —
+   see `../lib/sendProgress.ts`. */
+import {
+  SEND_SENT_DISMISS_MS,
+  sendInFlightReason,
+  sendProgressReduce,
+  sendProgressView,
+  type SendDraft,
+  type SendProgressLink,
+  type SendProgressSubject,
+} from '../lib/sendProgress.js'
 import ThemeToggle from './ThemeToggle'
 import NameArtwork from './NameArtwork.js'
 import { WELCOME_BENEFITS } from './Welcome.js'
@@ -497,7 +511,14 @@ export default function CustodyPassport({
   /* Every token the coin store holds of a colour — held and queued together,
      which is what the account HOLDS as opposed to what one payment can draw
      on (`../identity/k1CoinStore.ts`). */
-  const [tokens, setTokens] = useState<{ colourHex: string; amount: bigint }[]>([])
+  const [tokens, setTokensState] = useState<{ colourHex: string; amount: bigint }[]>([])
+  /* THE SAME FIGURES ARE NOT NEWS (2026/09/25). Every read of the holdings
+     rebuilt this list, so every read re-rendered Home and everything the list
+     is threaded into — the Send sheet's seams among them — whether or not a
+     single figure had moved. A list equal to the one held is kept. */
+  const setTokens = useCallback((next: { colourHex: string; amount: bigint }[]) => {
+    setTokensState((held) => (sameTokenList(held, next) ? held : next))
+  }, [])
   /* Coins that are demonstrably here and have no position yet. Counted, never
      added to a figure: see the header. */
   const [arriving, setArriving] = useState(0)
@@ -505,7 +526,13 @@ export default function CustodyPassport({
      as a failure and a failure does not read as a receipt. */
   const [notice, setNotice] = useState<string | null>(null)
   /* A shielded payment that stopped between its legs, read on open. */
-  const [stopped, setStopped] = useState<CustodyShieldedSendRecord | null>(null)
+  const [stopped, setStoppedState] = useState<CustodyShieldedSendRecord | null>(null)
+  /* Read back from storage on every holdings read, which makes a new object
+     each time for the same record. The record held is kept when nothing in it
+     changed, for the reason `setTokens` gives. */
+  const setStopped = useCallback((next: CustodyShieldedSendRecord | null) => {
+    setStoppedState((held) => (sameSendRecord(held, next) ? held : next))
+  }, [])
   /* A setup whose remaining steps can never be signed. The offer below turns
      into the one thing that can be done about it.
 
@@ -535,6 +562,21 @@ export default function CustodyPassport({
   /* Which step of a PAYMENT is running, in the Send sheet's four words.
      Separate from `busy`, which is the onboarding steps' line. */
   const [sendStep, setSendStep] = useState<CustodyPhase['step'] | null>(null)
+  /* THE PAYMENT THIS TAB IS RUNNING, OR HAS JUST FINISHED (2026/09/25). Not a
+     second record of it: the record on disk (`stopped`) is what a reload
+     reads, and this holds only what a record cannot — who it is for before
+     the record is written, and the one-sentence answer it came to. See
+     `../lib/sendProgress.ts`. */
+  const [progress, dispatchProgress] = useReducer(sendProgressReduce, null)
+  /* Where the finished payment can be looked at, written by `reportSent` and
+     read by the runner that reports it, in the same tick. */
+  const lastSentLink = useRef<SendProgressLink | null>(null)
+  /* "Sent" goes by itself after a few seconds; the trail keeps the row. */
+  useEffect(() => {
+    if (progress?.kind !== 'sent') return undefined
+    const timer = setTimeout(() => dispatchProgress({ type: 'dismiss' }), SEND_SENT_DISMISS_MS)
+    return () => clearTimeout(timer)
+  }, [progress])
   /**
    * Whether the welcome page has been read in this session.
    *
@@ -792,7 +834,7 @@ export default function CustodyPassport({
       saveCustodyShieldedSend(window.localStorage, away)
       setStopped(away)
     },
-    [],
+    [setStopped],
   )
 
   /** The transaction the last payment went out in, for its trail row. */
@@ -819,7 +861,7 @@ export default function CustodyPassport({
         throw cause
       }
     },
-    [],
+    [setStopped],
   )
 
   /**
@@ -847,6 +889,10 @@ export default function CustodyPassport({
           txHash,
         }),
       )
+      /* The explorer where the id is a ledger hash, and otherwise the step
+         verifier, which finds the payment by this Passport's name. */
+      const receipt = txHash ? txReceiptLink(sent.network, txHash, view?.name ?? null) : null
+      lastSentLink.current = receipt ? { label: 'View', href: receipt.href } : null
       pushToast({
         tone: 'success',
         /* Accepted, not yet included — the same claim every other send on this
@@ -857,7 +903,7 @@ export default function CustodyPassport({
       })
       sentTxId.current = null
     },
-    [onActivity],
+    [onActivity, view],
   )
 
   /**
@@ -1389,7 +1435,7 @@ export default function CustodyPassport({
       k1ColourHoldings(account).map((holding) => ({ colourHex: holding.colour, amount: holding.value })),
     )
     setArriving(custodyArrivingCount({ awaitingRows: awaitingK1Coins(account).length, unplaced: null }))
-  }, [view])
+  }, [setTokens, view])
 
   /* ONE READ AT A TIME. Home's effect, the Send sheet opening, a refresh, and
      the read after a payment all ask; the second of two overlapping asks waits
@@ -1805,7 +1851,7 @@ export default function CustodyPassport({
       live = false
       clearTimeout(timer)
     }
-  }, [readHoldings, stopped])
+  }, [readHoldings, setStopped, stopped])
 
   /* ---------------------------------------------------------------------- */
   /* The trail                                                              */
@@ -1926,6 +1972,8 @@ export default function CustodyPassport({
       identity: CustodyCallDevice
       change: CustodyChangeCoin
     }): Promise<void> => {
+      /* Nothing to write down for a payment that kept no change. */
+      if (params.change == null) return
       const { readCustodyAccountView } = await import('../identity/accountCustody.js')
       const view = await readCustodyAccountView(
         { indexerHttpUrl: params.wallet.network.indexerHttpUrl },
@@ -2030,7 +2078,7 @@ export default function CustodyPassport({
          so that neither reader is shown the other's. */
       setBusy(arm.approvalPrompt)
       const { device: identity } = await ensureIdentity()
-      const sent = await settleNotSent(stoppedRecord, () => withdrawShieldedToContractK1(
+      const sent = await settleNotSent(stoppedRecord, () => paymentEngine().withdrawShieldedToContractK1(
         arm.session,
         identity,
         {
@@ -2062,7 +2110,7 @@ export default function CustodyPassport({
          is not held on it. See `runCustodyPayment`. */
       return () => backfillChange({ wallet, record, identity, change: sent.change })
     },
-    [arm, backfillChange, ensureIdentity, sendPhase, settleNotSent],
+    [arm, backfillChange, ensureIdentity, sendPhase, setStopped, settleNotSent],
   )
 
   /**
@@ -2133,7 +2181,7 @@ export default function CustodyPassport({
 
       setBusy(arm.approvalPrompt)
       const { device: identity } = await ensureIdentity()
-      const sent = await settleNotSent(stoppedRecord, () => withdrawShieldedK1(
+      const sent = await settleNotSent(stoppedRecord, () => paymentEngine().withdrawShieldedK1(
         arm.session,
         identity,
         {
@@ -2153,7 +2201,7 @@ export default function CustodyPassport({
       /* As above: under the payment's flag, and not holding the sheet. */
       return () => backfillChange({ wallet, record, identity, change: sent.change })
     },
-    [arm, backfillChange, ensureIdentity, sendPhase, settleNotSent],
+    [arm, backfillChange, ensureIdentity, sendPhase, setStopped, settleNotSent],
   )
 
   /* ---------------------------------------------------------------------- */
@@ -2195,10 +2243,21 @@ export default function CustodyPassport({
    * from before it.
    */
   const runPayment = useCallback(
-    async (work: () => Promise<(() => Promise<void>) | void>): Promise<void> => {
+    async (
+      payment: { subject: SendProgressSubject; draft: SendDraft },
+      work: () => Promise<(() => Promise<void>) | void>,
+    ): Promise<void> => {
+      /* THE PILL IS UP FROM THE PRESS (2026/09/25). The Send sheet has closed by
+         now, so this is the only thing on screen that says a payment is
+         running — including the second or two before its record is written. */
+      dispatchProgress({ type: 'start', subject: payment.subject, draft: payment.draft, at: Date.now() })
       const refusal = custodyInFlightRefusal(inFlight.current)
-      if (refusal !== null) throw new Error(refusal)
+      if (refusal !== null) {
+        dispatchProgress({ type: 'failed', sentence: refusal, handedOver: false })
+        throw new Error(refusal)
+      }
       setError(null)
+      lastSentLink.current = null
       /* THE SHEET HAS ITS ANSWER THE MOMENT THE PAYMENT HAS ONE (2026/09/22):
          the tidy-up and the read that follow run on without it — see
          `runCustodyPayment` — and the figures are redrawn from the store at
@@ -2207,15 +2266,67 @@ export default function CustodyPassport({
       void showStoreHoldings()
       setBusy(null)
       setSendStep(null)
-      if (failure === null) return
+      if (failure === null) {
+        dispatchProgress({ type: 'sent', link: lastSentLink.current })
+        lastSentLink.current = null
+        return
+      }
       console.warn('[account-custody] that payment did not finish', failure)
-      /* THE SHEET GETS A SENTENCE, THE CONSOLE GETS THE CAUSE — the same rule
+      /* THE PILL GETS A SENTENCE, THE CONSOLE GETS THE CAUSE — the same rule
          `run` follows, and for the same reason: a cause from a vendor, a WASM
          deserialiser, or a node carries exactly the words this app keeps off
          its screens. */
-      throw new Error(custodyFailureSentence(failure))
+      const sentence = custodyFailureSentence(failure)
+      /* WHICH OF TWO FAILURES THIS IS, and the record says. A payment that has
+         a transaction id was handed to the network, and whether it landed is
+         the chain's to say: the record stays, and the pill shows it as
+         confirming until the chain answers. One with no id never left — the
+         approval was refused, the proof never came — so the record has nothing
+         more to tell anybody, and the sentence is the whole answer. */
+      const record = view?.record ?? null
+      const written =
+        record?.address == null
+          ? null
+          : loadCustodyShieldedSend(window.localStorage, {
+              network: record.network,
+              accountAddress: record.address,
+            })
+      const handedOver = written !== null && written.sendTxId !== null
+      if (written !== null && !handedOver) {
+        clearCustodyShieldedSend(window.localStorage, {
+          network: written.network,
+          accountAddress: written.accountAddress,
+        })
+        setStopped(null)
+      }
+      dispatchProgress({ type: 'failed', sentence, handedOver })
+      throw new Error(sentence)
     },
-    [readHoldings, showStoreHoldings],
+    [readHoldings, setStopped, showStoreHoldings, view],
+  )
+
+  /**
+   * Who a payment is for and how much, in the pill's words, and the draft that
+   * "Try again" reopens the sheet on — both built from exactly what the sheet
+   * handed over, before anything is awaited.
+   */
+  const paymentOf = useCallback(
+    (input: {
+      asset: CustodyAssetRow | null
+      amount: bigint
+      recipient: string
+      /** The recipient as the pill names it; the typed text when omitted. */
+      recipientLabel?: string
+      assetId: string
+    }): { subject: SendProgressSubject; draft: SendDraft } => ({
+      subject: {
+        amount: input.asset ? formatCustodyAmount(input.amount, input.asset.decimals) : input.amount.toString(),
+        symbol: input.asset?.symbol ?? '',
+        recipient: input.recipientLabel ?? input.recipient,
+      },
+      draft: { assetId: input.assetId, recipient: input.recipient, amount: input.amount.toString() },
+    }),
+    [],
   )
 
   /**
@@ -2270,7 +2381,13 @@ export default function CustodyPassport({
       tokenType: string
       amount: bigint
     }): Promise<void> => {
-      await runPayment(async () => {
+      const payment = paymentOf({
+        asset: custodyAssetRow(assetRows, params.tokenType),
+        amount: params.amount,
+        recipient: params.domain,
+        assetId: params.tokenType,
+      })
+      await runPayment(payment, async () => {
         setNotice(null)
         const { account, record, wallet } = await beforePayment(custodyContext(), 'opening this Passport')
         const asset = custodyAssetRow(assetRows, params.tokenType)
@@ -2300,7 +2417,7 @@ export default function CustodyPassport({
         return tidyUp
       })
     },
-    [assetRows, custodyContext, reportSent, runPayment, sendShielded],
+    [assetRows, custodyContext, paymentOf, reportSent, runPayment, sendShielded],
   )
 
   /**
@@ -2314,9 +2431,19 @@ export default function CustodyPassport({
    */
   const sendNightToAddress = useCallback(
     async (params: { recipientAddress: string; amount: bigint }): Promise<void> => {
-      await runPayment(async () => {
+      const address = params.recipientAddress.trim()
+      const payment = paymentOf({
+        asset: assetRows.find((row) => row.mode === 'unshielded') ?? null,
+        amount: params.amount,
+        recipient: address,
+        recipientLabel: shortHex(address),
+        /* The sheet's own id for NIGHT — `NIGHT_ASSET_ID` in
+           `../lib/sendAssets.ts`. */
+        assetId: 'night',
+      })
+      await runPayment(payment, async () => {
         setNotice(null)
-        const { record, wallet } = await beforePayment(custodyContext(), 'opening this Passport')
+        const { account, record, wallet } = await beforePayment(custodyContext(), 'opening this Passport')
         if (!record.activated) {
           throw new Error('Your Passport is still being set up. Try again once it is ready.')
         }
@@ -2327,19 +2454,39 @@ export default function CustodyPassport({
         if (asset.amount !== null && params.amount > asset.amount) {
           throw new Error('You do not hold enough to send that.')
         }
-        const address = params.recipientAddress.trim()
         const recipient = accountModule.unshieldedAddressBytes(address, wallet.network.networkId)
+        /* WRITTEN DOWN BEFORE IT GOES OUT, as a shielded payment is (2026/09/25),
+           so a reload in the middle of one shows the same pill — confirming,
+           once the transaction has an id — rather than nothing at all. It is
+           the same one-per-account record; there is no coin to take back for
+           NIGHT, so it carries no undo, and the chain's answer is all it waits
+           for. */
+        const stoppedRecord = newCustodyShieldedSend({
+          network: record.network,
+          accountAddress: account.address,
+          colourHex: asset.colourHex,
+          amount: params.amount,
+          recipientLabel: shortHex(address),
+          recipientAccountAddress: '',
+          now: Date.now(),
+        })
+        saveCustodyShieldedSend(window.localStorage, stoppedRecord)
+        setStopped(stoppedRecord)
         setBusy(arm.approvalPrompt)
         const { device: identity } = await ensureIdentity()
-        const sent = await withdrawUnshieldedK1(
-          arm.session,
-          identity,
-          { recipient, colourHex: accountModule.nightColourHex(), amount: params.amount },
-          (phase) => {
-            setBusy(PHASE_LABELS[phase.step])
-            setSendStep(phase.step)
-          },
+        const sent = await settleNotSent(stoppedRecord, () =>
+          paymentEngine().withdrawUnshieldedK1(
+            arm.session,
+            identity,
+            { recipient, colourHex: accountModule.nightColourHex(), amount: params.amount },
+            sendPhase(stoppedRecord),
+          ),
         )
+        clearCustodyShieldedSend(window.localStorage, {
+          network: stoppedRecord.network,
+          accountAddress: stoppedRecord.accountAddress,
+        })
+        setStopped(null)
         sentTxId.current = sent.txHash
         reportSent({
           asset,
@@ -2349,7 +2496,18 @@ export default function CustodyPassport({
         })
       })
     },
-    [arm, assetRows, custodyContext, ensureIdentity, reportSent, runPayment],
+    [
+      arm,
+      assetRows,
+      custodyContext,
+      ensureIdentity,
+      paymentOf,
+      reportSent,
+      runPayment,
+      sendPhase,
+      setStopped,
+      settleNotSent,
+    ],
   )
 
   /**
@@ -2381,7 +2539,14 @@ export default function CustodyPassport({
       tokenType: string
       amount: bigint
     }): Promise<void> => {
-      await runPayment(async () => {
+      const payment = paymentOf({
+        asset: custodyAssetRow(assetRows, params.tokenType),
+        amount: params.amount,
+        recipient: params.recipientAddress.trim(),
+        recipientLabel: shortHex(params.recipientAddress.trim()),
+        assetId: params.tokenType,
+      })
+      await runPayment(payment, async () => {
         setNotice(null)
         const { account, record, wallet } = await beforePayment(custodyContext(), 'opening this Passport')
         const asset = custodyAssetRow(assetRows, params.tokenType)
@@ -2403,7 +2568,7 @@ export default function CustodyPassport({
         return tidyUp
       })
     },
-    [assetRows, custodyContext, reportSent, runPayment, sendShieldedToAddress],
+    [assetRows, custodyContext, paymentOf, reportSent, runPayment, sendShieldedToAddress],
   )
 
   /**
@@ -2414,20 +2579,33 @@ export default function CustodyPassport({
    * send is enabled against. Both come out of `../lib/custodyHome.ts`, so the
    * strip, the shelf, and the picker cannot disagree.
    */
+  /* ONE SEAM FOR THE LIFE OF THE SCREEN (2026/09/25). It used to close over
+     the four figures below, so the read it starts — which sets those figures —
+     handed the open Send sheet a NEW seam every time it answered, and the
+     sheet asked again: an endless loop of account reads, and Home re-rendered
+     around every one of them, for as long as Send was open. The figures are
+     read through a ref instead, after the read has had a turn to land. */
+  const sendableRef = useRef({ arriving, balance, balanceFailed, tokens })
+  sendableRef.current = { arriving, balance, balanceFailed, tokens }
+  const readHoldingsRef = useRef(readHoldings)
+  readHoldingsRef.current = readHoldings
   const readShieldedHoldings = useCallback(async (): Promise<
     { tokenType: string; amount: bigint }[]
   > => {
     /* Bounded: the picker opens on what is known rather than waiting on a
        read that may not come back. */
-    await withinCustodyBound(readHoldings(), HOLDINGS_READ_WAIT_MS)
+    await withinCustodyBound(readHoldingsRef.current(), HOLDINGS_READ_WAIT_MS)
+    /* One turn for React to commit what the read set, so the ref holds it. */
+    await new Promise<void>((resolve) => setTimeout(resolve, 0))
+    const latest = sendableRef.current
     return custodyHomeSendableHoldings({
-      night: balance,
-      shielded: tokens,
-      balanceFailed,
+      night: latest.balance,
+      shielded: latest.tokens,
+      balanceFailed: latest.balanceFailed,
       stablecoinColourHex: STABLECOIN_COLOUR,
-      arriving,
+      arriving: latest.arriving,
     })
-  }, [arriving, balance, balanceFailed, readHoldings, tokens])
+  }, [])
 
   /** Forgets a payment the person has been told about. */
   const dismissStoppedSend = useCallback(() => {
@@ -2438,7 +2616,7 @@ export default function CustodyPassport({
       accountAddress: record.address,
     })
     setStopped(null)
-  }, [view])
+  }, [setStopped, view])
 
   /* ---------------------------------------------------------------------- */
   /* Coming back on a new device                                            */
@@ -3086,7 +3264,39 @@ export default function CustodyPassport({
        Receive, the asset rows, the name card, "Your account is ready", the
        apps, the trail, and the bottom bar — painted by `App.tsx` from this
        value. See `CustodyPassportProps.renderHome`. */
-    const offer = custodyResumeOffer(stopped)
+    /* THE PAYMENT IN FLIGHT, AS THE PILL AND THE LIVE ROW SAY IT (2026/09/25):
+       this tab's own payment while there is one, and otherwise the record an
+       earlier visit left — confirming when it was handed over, and the plain
+       "nothing was sent" when it was not. It replaces the banner that used to
+       carry the stopped payment's sentence; one surface says it now. */
+    const stoppedAsset = stopped === null ? null : custodyAssetRow(assetRows, stopped.colourHex)
+    const sendView = sendProgressView({
+      progress,
+      step: sendStep,
+      record:
+        stopped === null || stopped.stage !== 'sending'
+          ? null
+          : {
+              subject: {
+                amount: stoppedAsset
+                  ? formatCustodyAmount(BigInt(stopped.amount), stoppedAsset.decimals)
+                  : stopped.amount,
+                symbol: stoppedAsset?.symbol ?? '',
+                recipient: stopped.recipientLabel,
+              },
+              draft: {
+                assetId: stoppedAsset?.mode === 'unshielded' ? 'night' : stopped.colourHex,
+                /* A name goes back into the field as a name; an address was
+                   only ever kept shortened, so the field is left for the
+                   person to paste it again. */
+                recipient: stopped.recipientAccountAddress.length > 0 ? stopped.recipientLabel : '',
+                amount: stopped.amount,
+              },
+              startedAt: stopped.startedAt,
+              submitted: stopped.sendTxId !== null,
+              sentence: custodyShieldedSendOutcome(stopped),
+            },
+    })
     const finishState = custodyFinishSetupCard({
       wavesPending: view?.record != null && custodyWavesPending(view.record),
       keyHeld: identityHeld,
@@ -3118,8 +3328,8 @@ export default function CustodyPassport({
          should read", and Home has one place for that. The stopped payment's
          sentence wins only when there is no live failure, because a failure is
          about the press that just happened. */
-      error: error ?? notice ?? (offer.kind === 'report' ? offer.sentence : null),
-      stoppedSentence: offer.kind === 'report' ? offer.sentence : null,
+      error: error ?? notice,
+      stoppedSentence: sendView?.kind === 'failed' ? sendView.detail : null,
       onRefresh: () => void readHoldings(),
       /* PUTS AWAY EXACTLY WHAT IS ON SCREEN, in the order the banner shows
          them. Clearing all three on one press would discard the record of a
@@ -3135,9 +3345,30 @@ export default function CustodyPassport({
           setNotice(null)
           return
         }
-        dismissStoppedSend()
       },
       onDismissStopped: dismissStoppedSend,
+      /* The pill and the live row. Dismissing puts away a finished payment's
+         outcome, and the record of one an earlier visit never handed over. */
+      sendProgress:
+        sendView === null
+          ? null
+          : {
+              view: sendView,
+              /* The balance that is moving says so, in the same word the
+                 prototype's rows use. */
+              sendingAssetId:
+                sendView.kind !== 'running'
+                  ? null
+                  : progress?.kind === 'running'
+                    ? progress.draft.assetId
+                    : stoppedAsset?.mode === 'unshielded'
+                      ? 'night'
+                      : (stopped?.colourHex ?? null),
+              onDismiss: () => {
+                dispatchProgress({ type: 'dismiss' })
+                if (progress === null) dismissStoppedSend()
+              },
+            },
       /* WHETHER THIS PASSPORT CAN BE OPENED ANYWHERE ELSE — one line where it
          can, one small entry where it cannot yet. The offer after the name is
          asked once; this is where somebody who said "not now", or whose
@@ -3164,6 +3395,10 @@ export default function CustodyPassport({
         onSendShieldedToName: sendShieldedToName,
         readShieldedHoldings,
         phase: custodySendPhase(sendStep),
+        /* The sheet closes once the payment is handed over; the pill carries
+           it from there. And a second payment waits for the first. */
+        background: true,
+        inFlightReason: sendInFlightReason(sendView),
       },
     })
   }
@@ -3784,5 +4019,86 @@ async function readCustodyActions(indexerHttpUrl: string, address: string) {
   } catch (cause) {
     console.info('[account-custody] the history of this Passport could not be read', cause)
     return null
+  }
+}
+
+/** Whether two holdings lists say the same thing, colour for colour. */
+function sameTokenList(
+  a: readonly { colourHex: string; amount: bigint }[],
+  b: readonly { colourHex: string; amount: bigint }[],
+): boolean {
+  if (a.length !== b.length) return false
+  return a.every((row, index) => row.colourHex === b[index]?.colourHex && row.amount === b[index]?.amount)
+}
+
+/** Whether two readings of the in-flight payment record are the same record. */
+function sameSendRecord(
+  a: CustodyShieldedSendRecord | null,
+  b: CustodyShieldedSendRecord | null,
+): boolean {
+  if (a === b) return true
+  if (a === null || b === null) return false
+  return JSON.stringify(a) === JSON.stringify(b)
+}
+
+/* -------------------------------------------------------------------------- */
+/* The payment engine, and the stand-in a browser walk may put in its place    */
+/* -------------------------------------------------------------------------- */
+
+const PAYMENT_ENGINE = {
+  withdrawShieldedK1: engineWithdrawShieldedK1,
+  withdrawShieldedToContractK1: engineWithdrawShieldedToContractK1,
+  withdrawUnshieldedK1: engineWithdrawUnshieldedK1,
+}
+
+/**
+ * The three calls that move value out of the account — the real ones, or, in a
+ * walk build, a stand-in the walk asked for.
+ *
+ * WHY A STAND-IN EXISTS AT ALL (2026/09/25). The mocked tier has no proving
+ * service and no chain to take a transaction, so a payment there always stops
+ * at the proof — and the in-progress pill's whole job is what happens AFTER the
+ * hand-over: the phases, "Sent" with its link, a failure's one sentence. A walk
+ * sets `window.__passportWalkPayment = { stepMs, fail? }` before the app loads,
+ * and the stand-in reports the same phases the engine reports, a step apart,
+ * then answers or fails. Everything in front of it — the sheet, the plan, the
+ * record written before the hand-over, the approval — is the shipped code.
+ *
+ * DEAD IN EVERY DEPLOYED BUILD. `VITE_PASSPORT_ACC_WALK` is set for the mocked
+ * tier's preview build and for no deployment, and Vite writes it in as a
+ * literal, so the bundler sees this branch cannot be taken and drops it.
+ */
+function paymentEngine(): typeof PAYMENT_ENGINE {
+  if (import.meta.env.VITE_PASSPORT_ACC_WALK !== '1') return PAYMENT_ENGINE
+  const hook = (globalThis as { __passportWalkPayment?: unknown }).__passportWalkPayment
+  if (!hook || typeof hook !== 'object') return PAYMENT_ENGINE
+  const asked = hook as { stepMs?: unknown; fail?: unknown }
+  const stepMs = typeof asked.stepMs === 'number' && asked.stepMs >= 0 ? asked.stepMs : 1_000
+  const fail = typeof asked.fail === 'string' ? asked.fail : null
+  const walk = async (onPhase?: (phase: CustodyPhase) => void): Promise<CustodyShieldedSpendResult> => {
+    const wait = () => new Promise<void>((resolve) => setTimeout(resolve, stepMs))
+    onPhase?.({ step: 'sign' })
+    await wait()
+    onPhase?.({ step: 'submit' })
+    await wait()
+    if (fail !== null) throw new Error(fail)
+    const txHash = 'e5'.repeat(32)
+    onPhase?.({ step: 'confirm', txId: `00${txHash}` })
+    await wait()
+    return {
+      txHash,
+      explorerUrl: null,
+      change: null,
+      changePosition: 'none',
+      sent: null,
+      blockHeight: null,
+      candidate: 0,
+    } as unknown as CustodyShieldedSpendResult
+  }
+  return {
+    withdrawShieldedK1: (_session, _identity, _input, onPhase) => walk(onPhase),
+    withdrawShieldedToContractK1: (_session, _identity, _input, onPhase) => walk(onPhase),
+    withdrawUnshieldedK1: async (_session, _identity, _input, onPhase): Promise<CustodyStepResult> =>
+      walk(onPhase),
   }
 }

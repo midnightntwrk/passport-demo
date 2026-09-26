@@ -111,6 +111,16 @@
  * fake that closes the way polkadot-js does. The SDK glue that opens the real
  * client stays in `src/lib/localWallet.ts`, which is out below.
  *
+ * `src/lib/sendProgress.ts` went IN on 2026/09/25, the day it was written. It
+ * decides what the in-progress pill and the live activity row say while a
+ * payment runs behind the Passport instead of in front of it: which of four
+ * phases the engine's step is, when a running payment becomes Sent or its one
+ * failure sentence, that a payment still moving cannot be put away, and that a
+ * record left by an earlier visit reads as confirming or as nothing sent. Each
+ * wrong answer is a pill that lies about somebody's money, and each is drilled
+ * in `src/lib/sendProgress.test.ts`. The painting is `src/screens/SendProgress.tsx`,
+ * which holds no decisions.
+ *
  * `src/lib/sheetHistory.ts` went IN on 2026/09/04, the day it was written. It
  * decides which history entry belongs to which of Passport's sheets, and
  * whether a closing sheet still owes the stack an entry — three answers, and
@@ -854,6 +864,7 @@ export default mergeConfig(
           'src/lib/recoveryStep.ts',
           'src/lib/sendAssets.ts',
           'src/lib/sendLegs.ts',
+          'src/lib/sendProgress.ts',
           'src/lib/sheetHistory.ts',
           'src/lib/snakeGame.ts',
           'src/lib/shieldedNote.ts',

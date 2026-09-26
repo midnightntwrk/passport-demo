@@ -668,10 +668,12 @@ test('a sender whose account can pay in one transaction is reviewed as one trans
   const review = await page.locator('.mnhome-send-rows').innerText();
   expect(review).toContain('1 mUSD');
   expect(review).toContain(`${RESOLVABLE_NAME}.night`);
-  /* ONE WORD, AND NOT A COUNT. "the copy for the in-between state should simply
-     say Transferring" (reviewer, 2026/09/08) — and the row that promises what
-     somebody is about to wait through says the same word for the same reason. */
-  expect(review).toContain('Transferring');
+  /* NOTHING TO COUNT, SO NO ROW (2026/09/25). A one-transaction payment used
+     to read "How it goes — Transferring", and the review named the network too;
+     "they add nothing" (product owner). Both rows are gone. */
+  expect(review).not.toContain('How it goes');
+  expect(review).not.toContain('Transferring');
+  expect(review).not.toMatch(/Network/);
   /* The explainer under it is gone (2026/09/22): the word says enough. */
   expect(review).not.toContain('in one network transaction');
   /* THE DEFECT THIS GUARDS. Nothing on this path is two steps, and a row that
