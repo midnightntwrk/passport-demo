@@ -19,6 +19,7 @@ import {
   loadCustodyPasskeyPointer,
   loadCustodyPasskeyPointers,
   passkeyPassportRoute,
+  passkeyWalletFollowsChain,
   saveCustodyPasskeyPointer,
 } from './custodyRoute.js';
 import type { CustodyStorage } from '../identity/custodyContractPlan.js';
@@ -138,6 +139,44 @@ describe('passkeyPassportRoute', () => {
     expect(
       passkeyPassportRoute({ hasPrototypeAccount: true, custodyUser: 'jubjub:2a1f' }),
     ).toBe('legacy');
+  });
+});
+
+describe('whether the wallet a passkey opens walks the chain', () => {
+  /* WHAT IS AT STAKE EITHER WAY (2026/09/27). A prototype Passport's wallet
+     holds money its flows spend, so one that does not walk cannot pay; a
+     custody Passport's wallet holds nothing, so one that walks spends minutes
+     of a phone's CPU, memory, and data on a sync nobody reads. */
+
+  it('walks for a prototype Passport, which spends what its wallet has synced', () => {
+    expect(passkeyWalletFollowsChain({ custodyOn: true, route: 'legacy' })).toBe(true);
+  });
+
+  it('does not walk for a Passport on the account custody contract', () => {
+    expect(passkeyWalletFollowsChain({ custodyOn: true, route: 'custody' })).toBe(false);
+  });
+
+  it('does not walk for a passkey about to make one', () => {
+    /* `new` is a Passport made on the account custody contract, and nothing
+       on the way there — the name, the setup, the claim — reads the wallet. */
+    expect(passkeyWalletFollowsChain({ custodyOn: true, route: 'new' })).toBe(false);
+  });
+
+  it('walks for a credential it cannot place, which is what every wallet did before', () => {
+    expect(passkeyWalletFollowsChain({ custodyOn: true, route: null })).toBe(true);
+  });
+
+  it('walks in a build that makes no custody Passports, whatever is stored', () => {
+    for (const route of ['legacy', 'custody', 'new', null] as const) {
+      expect(passkeyWalletFollowsChain({ custodyOn: false, route })).toBe(true);
+    }
+  });
+
+  it('follows the route rule, so a prototype record beside a pointer still walks', () => {
+    /* The prototype record wins the route, and so it wins the walk: the wallet
+       of a Passport whose money is in the prototype account must follow it. */
+    const route = passkeyPassportRoute({ hasPrototypeAccount: true, custodyUser: 'jubjub:2a1f' });
+    expect(passkeyWalletFollowsChain({ custodyOn: true, route })).toBe(true);
   });
 });
 

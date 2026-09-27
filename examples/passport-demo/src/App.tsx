@@ -244,6 +244,7 @@ import {
   loadCustodyPasskeyPointer,
   loadCustodyPasskeyPointers,
   passkeyPassportRoute,
+  passkeyWalletFollowsChain,
   saveCustodyPasskeyPointer,
 } from './lib/custodyRoute.js';
 /* The one-off account upgrade's SCREEN, statically — it is a stepper and a
@@ -885,6 +886,29 @@ const ACCOUNT_CUSTODY_ON = accountCustodyEnabled({
   walkFlag: import.meta.env.VITE_PASSPORT_ACC_WALK as string | undefined,
   search: window.location.search,
 });
+
+/**
+ * WHETHER THE WALLET A PASSKEY OPENS WALKS THE CHAIN (2026/09/27), for
+ * `createLocalMidnightWallet`'s `chainSync`: asked with the network id the
+ * wallet really opens on, from the same two stored facts `passkeyRoute` is
+ * decided from below. A prototype Passport's wallet walks, exactly as it always
+ * has; a Passport on the account custody contract, or one about to be made on
+ * it, gets a wallet that never starts its sync. See
+ * `./lib/custodyRoute.ts#passkeyWalletFollowsChain`.
+ */
+function passkeyWalletChainSync(credentialId: string | null): (networkId: string) => boolean {
+  return (networkId) =>
+    passkeyWalletFollowsChain({
+      custodyOn: ACCOUNT_CUSTODY_ON,
+      route:
+        credentialId === null
+          ? null
+          : passkeyPassportRoute({
+              hasPrototypeAccount: loadPassportContractRecord(credentialId, networkId) !== null,
+              custodyUser: loadCustodyPasskeyPointer(window.localStorage, credentialId, networkId),
+            }),
+    });
+}
 
 /**
  * THE MOCKED WALK'S STAND-IN FOR THE CHAIN, for bringing a Passport to a new
@@ -2277,6 +2301,11 @@ export default function PassportDemo() {
     void refreshAccountBalances();
     const handle = localWalletRef.current;
     if (!handle) return;
+    /* A wallet that does not walk the chain has no balance of its own to read
+       (2026/09/27): it is only ever opened for a Passport on the account
+       custody contract, which has no legacy-funds card either. Its surfaces
+       keep their addresses and are left alone. */
+    if (!handle.chainSync) return;
     setLocalSurfaces((current) =>
       current ? { ...current, balanceStatus: 'loading', balanceError: null } : current,
     );
@@ -2320,7 +2349,11 @@ export default function PassportDemo() {
       let wallet: LocalMidnightWallet;
       try {
         setOnboardingBusyLabel('Opening your Passport');
-        wallet = await createLocalMidnightWallet(seed);
+        /* Walking the chain only for a prototype Passport — see
+           `passkeyWalletChainSync`. */
+        wallet = await createLocalMidnightWallet(seed, {
+          chainSync: passkeyWalletChainSync(credentialId),
+        });
       } finally {
         // The seed's only job is done. Nothing retains it past this point.
         seed.fill(0);
@@ -2379,7 +2412,9 @@ export default function PassportDemo() {
         const { createLocalMidnightWallet } = await import('./lib/localWallet.js');
         let wallet: LocalMidnightWallet;
         try {
-          wallet = await createLocalMidnightWallet(seed);
+          wallet = await createLocalMidnightWallet(seed, {
+            chainSync: passkeyWalletChainSync(restored.credentialId),
+          });
         } finally {
           seed.fill(0);
         }
@@ -3789,6 +3824,74 @@ export default function PassportDemo() {
     [closeLocalWallet, refreshLocalBalances],
   );
 
+  /** The wallet {@link reopenWalletWalking} has already tried to replace. */
+  const reopenedToWalk = useRef<LocalMidnightWallet | null>(null);
+
+  /**
+   * Reopens a wallet that does not walk the chain as one that does.
+   *
+   * FOR THE ONE PASSPORT THAT NEEDS IT AFTER THE FACT (2026/09/27). Whether a
+   * passkey's wallet walks is decided when it opens, from what is stored — see
+   * `passkeyWalletChainSync`. A prototype Passport signed into on a new device
+   * has nothing stored yet: its account is read back off the passkey a moment
+   * AFTER the wallet opened, and a backup can restore one the same way. From
+   * then on the route is `legacy`, and that Passport's flows spend what its
+   * wallet has synced, so the wallet is reopened walking — resuming from its
+   * snapshot where there is one, exactly as a reload would.
+   *
+   * The same silent replacement as the indexer rebuild above, from the same
+   * persisted seed, once per wallet. With no seed it stays as it is and says
+   * so in the console: the next sign-in decides afresh, from a record that is
+   * then there.
+   */
+  const reopenWalletWalking = useCallback(
+    async (handle: LocalMidnightWallet): Promise<void> => {
+      if (handle.chainSync || reopenedToWalk.current === handle) return;
+      if (localWalletRef.current !== handle || onboardingRunning.current) return;
+      reopenedToWalk.current = handle;
+      const restored = await loadPersistedWalletSession();
+      if (!restored) {
+        console.info(
+          '[passport] a prototype account arrived with no session to reopen its wallet from; the next sign-in will open it walking',
+        );
+        return;
+      }
+      const seed = restored.seed;
+      let reopened: LocalMidnightWallet;
+      try {
+        const { createLocalMidnightWallet } = await import('./lib/localWallet.js');
+        try {
+          reopened = await createLocalMidnightWallet(seed, { chainSync: true });
+        } finally {
+          seed.fill(0);
+        }
+      } catch (cause) {
+        console.info('[passport] the wallet could not be reopened to follow the chain', cause);
+        return;
+      }
+      if (localWalletRef.current !== handle || onboardingRunning.current) {
+        void reopened.close().catch(() => undefined);
+        /* A ceremony took over while this opened. If it leaves this wallet in
+           place, the effect below asks again when it ends. */
+        reopenedToWalk.current = null;
+        return;
+      }
+      await closeLocalWallet();
+      localWalletRef.current = reopened;
+      /* Held only while it can still matter: a wallet that failed to reopen
+         keeps its mark, so it is not tried again on every render. */
+      reopenedToWalk.current = null;
+      setLocalWalletNetworkId(reopened.network.networkId);
+      setLocalWalletProvingMode(reopened.provingMode);
+      setLocalSurfaces(initialLocalSurfaceState(reopened));
+      /* The status stays 'ready', so this is what moves the sync and balance
+         subscriptions onto the wallet that now walks. */
+      setLocalWalletEpoch((epoch) => epoch + 1);
+      void refreshLocalBalances();
+    },
+    [closeLocalWallet, refreshLocalBalances],
+  );
+
   // Live sync progress from the local wallet's state stream. Resubscribes per
   // wallet handle; on the transition to fully synced, refresh balances once so
   // the surfaces settle the moment the chain walk completes. It is also where
@@ -3802,6 +3905,11 @@ export default function PassportDemo() {
     }
     const handle = localWalletRef.current;
     if (!handle) return;
+    /* NOTHING IS WALKING (2026/09/27), so there is no percentage to show, no
+       "Passport synced" to announce, and above all no stall watch: it would
+       read the silence of a wallet that never subscribed as an indexer that
+       stopped serving, and rebuild the wallet onto the next one. */
+    if (!handle.chainSync) return;
     let wasSynced = false;
     const stallWatch = watchIndexerStall({
       onStalled: () => {
@@ -3850,7 +3958,9 @@ export default function PassportDemo() {
   useEffect(() => {
     if (localWalletStatus !== 'ready') return;
     const handle = localWalletRef.current;
-    if (!handle) return;
+    /* No walk, no stream (2026/09/27). What such a Passport is paid arrives in
+       its account, and the account's own watch is what notices it. */
+    if (!handle?.chainSync) return;
 
     let pending: LocalWalletBalances | null = null;
     /** Last unshielded NIGHT this watch has seen, in whole micro-NIGHT. */
@@ -4129,6 +4239,31 @@ export default function PassportDemo() {
     if (localWalletStatus !== 'ready' || !accountContractAddress) return;
     void refreshAccountBalances();
   }, [accountContractAddress, localWalletStatus, refreshAccountBalances]);
+
+  /**
+   * A prototype account under a wallet that does not walk the chain: any
+   * record here makes the route `legacy` (the prototype record wins), and that
+   * Passport's flows spend what its wallet has synced. See
+   * {@link reopenWalletWalking} for when this happens and what it does.
+   */
+  useEffect(() => {
+    const handle = localWalletRef.current;
+    if (localWalletStatus !== 'ready' || !activeContractRecord || !handle || handle.chainSync) {
+      return;
+    }
+    /* Not under a ceremony, which owns the wallet until it ends. A sign-in on a
+       new device reads the account back INSIDE its own run, so this is where
+       the record usually lands — and the run's end, the intent going back to
+       null, is what brings this round again. */
+    if (onboardingIntent !== null) return;
+    void reopenWalletWalking(handle);
+  }, [
+    activeContractRecord,
+    localWalletEpoch,
+    localWalletStatus,
+    onboardingIntent,
+    reopenWalletWalking,
+  ]);
 
   /**
    * Which colour the sponsor calls its stablecoin. Asked once a session, and
@@ -10426,7 +10561,9 @@ export default function PassportDemo() {
         /* "Your account is ready", and the address Receive offers. */
         passportContract={contractRecord ? { record: contractRecord } : null}
         network={custody.network as PassportNetwork}
-        syncPercent={custody.syncPercent}
+        /* NO SYNC STRIP (2026/09/27): nothing behind this Passport walks the
+           chain. The one thing still loading is the first read of the
+           account, and the figures carry their own state while it runs. */
         /* The watch's cheap look, so a Passport left open reads its account
            only when something has landed on it. See `lib/balanceWatch.ts`. */
         onWatch={custody.onWatch}

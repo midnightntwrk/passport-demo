@@ -584,9 +584,6 @@ export default function CustodyPassport({
      render would read "you have been paid nothing" and write no trail row for
      the deposit when it landed. See `custodyStablecoinHeld`. */
   const [holdingsRead, setHoldingsRead] = useState(false)
-  /* The wallet's own chain position, for the hairline bar under Home's top
-     bar. Null until the wallet has published one. */
-  const [syncPercent, setSyncPercent] = useState<number | null>(null)
   /* The transaction the name registration landed in, where THIS session
      watched it happen. It is not stored: the trail keeps it, and the name card
      does not need it to say the name is registered. */
@@ -667,15 +664,6 @@ export default function CustodyPassport({
   const device = useRef<CustodyIdentity | null>(null)
   /* Whether a payment or a setup is running. See {@link run}. */
   const inFlight = useRef(false)
-  /* The sync subscription's own handle — see {@link readHoldings}. */
-  const syncOff = useRef<(() => void) | null>(null)
-  useEffect(
-    () => () => {
-      syncOff.current?.()
-      syncOff.current = null
-    },
-    [],
-  )
 
   /* ---------------------------------------------------------------------- */
   /* The way back                                                            */
@@ -1566,18 +1554,11 @@ export default function CustodyPassport({
       )
       if (openedPair.kind === 'timeout') throw new Error('the connection did not open in time')
       const [wallet, contractModule] = openedPair.value
+      /* NO SYNC BAR (2026/09/27). The connection never walks the chain — see
+         `defaultCustodyDeps` — so there is no progress to paint, and nothing a
+         payment waits on. What is still loading is this read, and Home says so
+         on the figures themselves. */
       opened = wallet
-      /* THE SYNC BAR, SUBSCRIBED ONCE. Home paints a hairline strip while the
-         wallet walks the chain, and it is the one thing about the wallet a
-         person needs: nothing can be signed until it has caught up. Subscribed
-         on the first read rather than per read, because the facade republishes
-         on every applied index and a second listener would double the renders
-         it causes. The handle is dropped when this screen goes. */
-      if (syncOff.current === null) {
-        syncOff.current = wallet.subscribeSyncProgress((progress) => {
-          setSyncPercent(progress.percent)
-        })
-      }
       /* The head FIRST, beside the providers and before the state: a head read
          after the state could name an action the state does not have yet, and
          the next look would then find nothing new and miss it. */
@@ -3542,7 +3523,6 @@ export default function CustodyPassport({
         stablecoinColourHex: STABLECOIN_COLOUR,
         arriving,
       },
-      syncPercent,
       /* The watch's cheap look — see `watchHoldings`. */
       onWatch: watchHoldings,
       /* ONE BANNER, TWO SOURCES. A refusal from a control on this screen and
