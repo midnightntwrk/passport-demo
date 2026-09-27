@@ -46,16 +46,10 @@
  * break-glass only — see docs/demo/deployment.md. `npm run deploy:raffle` and
  * the other deploy:* scripts are still the normal path for their apps.
  *
- * One of those values reads like a special case and is not. The Passport
- * deployment sets `VITE_RAFFLE_URL` — not `VITE_LOCAL_APP_URL`, the variable third-party
- * developers are handed for the same grid slot. The two are deliberately
- * separate entries in `examples/passport-demo/src/lib/registry.ts`: the raffle
- * one carries the id `raffle-demo`, its own description, and the illustrated
- * card the Apps grid keys off that id, none of which the generic local slot
- * has. Moving the deployed raffle onto `VITE_LOCAL_APP_URL` would therefore
- * change what ships, so the two variables stay distinct and this script's
- * callers keep naming the raffle one. Nothing here reads either variable —
- * both are consumed by `vite build` before this script runs.
+ * The Passport deployment no longer sets `VITE_RAFFLE_URL` (2026/09/25): the
+ * Midnight Raffle was taken out of the Passport UI, and nothing in the app reads
+ * that variable any more. `examples/raffle-demo` is still deployed on its own by
+ * `npm run deploy:raffle`.
  *
  * Each app directory must be linked to its Vercel project once, first:
  *

@@ -17,6 +17,7 @@ import {
   consumeRecoveryIntent,
   loadRecoveryIntent,
   loadRecoveryRecord,
+  recoveryHeld,
   recoveryHomeEntry,
   recoveryRefusal,
   recoveryResumes,
@@ -24,6 +25,7 @@ import {
   saveRecoveryIntent,
 } from '../lib/recoveryStep.js'
 import { holdCriticalWork } from '../lib/appBusy.js'
+import { guardUnsentPayment } from '../lib/paymentLeaveGuard.js'
 import type { CustodyArm, CustodyIdentity } from '../lib/custodyArm.js'
 import { parseEndpointList } from '../lib/endpoints.js'
 import { type K256DeviceIdentity } from '../identity/custodyContractSigning.js'
@@ -60,6 +62,7 @@ import {
   nextCustodyStep,
   resolveCustodyUseCounter,
   saveCustodyRecord,
+  CUSTODY_PHASE_PROVED,
   CUSTODY_SETUP_INTERRUPTED,
   CUSTODY_SUBMIT_WAIT_MS,
   CUSTODY_UNDONE_KEEP_MS,
@@ -82,9 +85,9 @@ import {
   custodyShieldedAddressSendRefusal,
   custodyStoppedSendSentence,
   custodyStoppedSendVerdict,
-  custodyShieldedSendOutcome,
   custodyShieldedSendRefusal,
   custodyUnshieldedBalance,
+  custodyShieldedSendOutcome,
   loadCustodyShieldedSend,
   newCustodyShieldedSend,
   planCustodyShieldedAddressSend,
@@ -121,11 +124,13 @@ import {
   custodyHomeSendableHoldings,
   custodySendPhase,
   custodySentEntry,
+  custodyLandedSendEntry,
   custodyStablecoinHeld,
   type CustodyActivityEntry,
   type CustodyHomeView,
 } from '../lib/custodyHome.js'
 import {
+  awaitCustodyTurn,
   custodyArrivingCount,
   custodyInFlightRefusal,
   custodyMayReadHoldings,
@@ -145,6 +150,7 @@ import {
   type CustodySetupSignal,
 } from '../lib/custodySetupProgress.js'
 import { LONG_WAIT_NOTE } from '../lib/claimSteps.js'
+import { accountReadDue, readAccountHead } from '../lib/balanceWatch.js'
 import { OFFER_AFTER_MS } from '../lib/waitingGame.js'
 import ProgressTimeline, { useTimelineClock, type TimelineRow } from './ProgressTimeline.js'
 import WaitingGame from './WaitingGame.js'
@@ -193,6 +199,7 @@ import {
   sendInFlightReason,
   sendProgressReduce,
   sendProgressView,
+  sendUnsent,
   type SendDraft,
   type SendProgressLink,
   type SendProgressSubject,
@@ -603,6 +610,15 @@ export default function CustodyPassport({
     const timer = setTimeout(() => dispatchProgress({ type: 'dismiss' }), SEND_SENT_DISMISS_MS)
     return () => clearTimeout(timer)
   }, [progress])
+  /* KEEP PASSPORT OPEN UNTIL THE PAYMENT IS SENT (2026/09/26). From the press
+     until the payment is handed to the network, closing the tab or the app
+     stops it — so for exactly that window the browser is asked to warn before
+     the page goes, and the silent update is held back. Only THIS tab's payment
+     can be in the window: one read back from a record was handed over, or it
+     is a failure. The screens say the same in words — `sendClosingNote`. See
+     `../lib/paymentLeaveGuard.ts`. */
+  const paymentUnsent = sendUnsent(sendProgressView({ progress, step: sendStep, record: null }))
+  useEffect(() => (paymentUnsent ? guardUnsentPayment(window) : undefined), [paymentUnsent])
   /**
    * Whether the welcome page has been read in this session.
    *
@@ -1402,6 +1418,7 @@ export default function CustodyPassport({
     async (
       wallet: { network: { indexerHttpUrl: string } },
       account: { network: string; address: string },
+      state: unknown,
     ): Promise<number> => {
       const [{ loadK1CoinStore }, { readInboxCustody }, accountModule, runtime, { viewingSecretsFor }] =
         await Promise.all([
@@ -1412,7 +1429,7 @@ export default function CustodyPassport({
           import('../identity/viewingKeys.js'),
         ])
       /* EVERY KEY THIS ACCOUNT HAS HAD (2026/09/26): the one it is pointed at
-         now, then any earlier one a password backup gave back — which is how a
+         now, then any earlier one its sign-in gave back — which is how a
          Passport brought back on a new device reads the payments it was sent
          before. See `../identity/viewingKeys.ts`. Null when there is none, so
          the test below and the walk's own argument read as they always have. */
@@ -1432,7 +1449,15 @@ export default function CustodyPassport({
          restored from a name on a second device, and the sentence for it is not
          here — the row simply shows what the store holds. */
       if (encSecretKeyHex === null) return 0
-      const reader = await accountModule.readCustodyAccountView({ indexerHttpUrl }, account.address)
+      /* THE STATE THE BALANCE READ HAS JUST FETCHED, decoded again rather than
+         fetched again (2026/09/25). Every read used to ask the indexer for the
+         same account state twice within a second — 64 KB each on stagenet,
+         measured on a phone left on Home. A read whose balance half could not
+         fetch it still walks, from a fetch of its own. */
+      const reader =
+        state != null
+          ? await accountModule.custodyAccountViewFromState(state)
+          : await accountModule.readCustodyAccountView({ indexerHttpUrl }, account.address)
       const txIdFor =
         actions === null ? () => null : custodyTxIdForInboxIndex(actions)
       const walked = await readInboxCustody(account, encSecretKeyHex, reader, {
@@ -1483,6 +1508,18 @@ export default function CustodyPassport({
      the read after a payment all ask; the second of two overlapping asks waits
      for the first rather than opening the same questions again beside it. */
   const holdingsInFlight = useRef<Promise<void> | null>(null)
+  /* WHAT THE LAST READ KNEW, for the watch's cheap look (2026/09/25): the
+     account's head as it stood BEFORE the read fetched the state — so a head
+     that moves during the read is still news to the next look — when it
+     finished, whether its state answered, and the indexer it asked, so the look
+     asks the same one. See `watchHoldings`. */
+  const lastRead = useRef<{
+    address: string
+    head: string | null
+    at: number
+    ok: boolean
+    indexerHttpUrl: string
+  } | null>(null)
 
   /** What the Passport holds, in NIGHT and in every token it has been paid. */
   const readHoldings = useCallback((): Promise<void> => {
@@ -1505,6 +1542,10 @@ export default function CustodyPassport({
     const account = { network: record.network, address: record.address }
     const deps = defaultCustodyDeps()
     let opened: Awaited<ReturnType<typeof deps.wallet>> | null = null
+    /* The state the balance half fetched, handed to the delivery walk; and the
+       head read just before it. See `lastRead`. */
+    let fetchedState: unknown = null
+    let headBeforeRead: string | null = null
     setBalanceFailed(false)
     try {
       /* BOUNDED: a read that cannot open its connection says so and shows
@@ -1527,7 +1568,14 @@ export default function CustodyPassport({
           setSyncPercent(progress.percent)
         })
       }
-      const providers = await deps.providers(wallet, record.privateStateId)
+      /* The head FIRST, beside the providers and before the state: a head read
+         after the state could name an action the state does not have yet, and
+         the next look would then find nothing new and miss it. */
+      const [head, providers] = await Promise.all([
+        readAccountHead(wallet.network.indexerHttpUrl, record.address),
+        deps.providers(wallet, record.privateStateId),
+      ])
+      headBeforeRead = head
       const reader = providers.publicDataProvider as {
         queryContractState(address: string): Promise<{ data: unknown } | null>
       }
@@ -1537,6 +1585,7 @@ export default function CustodyPassport({
       )
       const state = answered.kind === 'done' ? answered.value : null
       if (!state) throw new Error('unreadable')
+      fetchedState = state
       const { nightColourBytes } = await import('../identity/accountCustody.js')
       /* `.data`, not the whole state. A compiled build's `ledger()` takes the
          StateValue; handing it the ContractState decodes nothing. Same call
@@ -1558,10 +1607,9 @@ export default function CustodyPassport({
        is put back, and a change coin that never existed stops reading as
        arriving. Only the indexer is asked, so it runs whether or not the
        connection above opened. See `reconcileCustodySpends`. */
+    let indexerHttpUrl: string | null = opened?.network.indexerHttpUrl ?? null
     try {
-      const indexerHttpUrl =
-        opened?.network.indexerHttpUrl ??
-        (await import('../lib/localWallet.js')).localWalletNetworkConfig().indexerHttpUrl
+      indexerHttpUrl ??= (await import('../lib/localWallet.js')).localWalletNetworkConfig().indexerHttpUrl
       await reconcileCustodySpends(account, indexerHttpUrl)
     } catch (cause) {
       console.info('[account-custody] the payments in flight could not be checked this time', cause)
@@ -1606,7 +1654,7 @@ export default function CustodyPassport({
       }
 
       try {
-        unplaced = await walkDeliveries(opened, account)
+        unplaced = await walkDeliveries(opened, account, fetchedState)
       } catch (cause) {
         /* QUIET ON PURPOSE, and not the same silence as above: this costs the
            descriptions that have not been filed YET, and the ones already
@@ -1664,7 +1712,49 @@ export default function CustodyPassport({
         accountAddress: record.address,
       }),
     )
+
+    if (indexerHttpUrl !== null) {
+      lastRead.current = {
+        address: record.address,
+        head: fetchedState === null ? null : headBeforeRead,
+        at: Date.now(),
+        ok: fetchedState !== null,
+        indexerHttpUrl,
+      }
+    }
   }
+
+  /**
+   * THE WATCH'S CHEAP LOOK (2026/09/25): has anything landed on this account
+   * since the last read? One request for the newest action's transaction
+   * hash — a hundred bytes — and the whole read only when the answer is yes,
+   * or when `accountReadDue` says one is owed anyway (a chase, a coin waiting
+   * for its position, the safety net). Answers whether it read.
+   *
+   * Home's watch calls this every few seconds while it is in front of somebody,
+   * where it used to read the whole account every thirty. A payment somebody
+   * else sends now shows in about five seconds instead of up to thirty, and a
+   * Passport left open asks the indexer for a fraction of the bytes.
+   */
+  const watchHoldings = useCallback(async (context: { chasing: boolean }): Promise<boolean> => {
+    const address = view?.record?.address ?? null
+    if (address == null) return false
+    const last = lastRead.current
+    if (last !== null && last.address === address) {
+      const head = await readAccountHead(last.indexerHttpUrl, address)
+      const due = accountReadDue({
+        head,
+        headAtLastRead: last.head,
+        sinceLastReadMs: Date.now() - last.at,
+        arriving: arriving > 0,
+        chasing: context.chasing,
+        lastReadFailed: !last.ok,
+      })
+      if (!due) return false
+    }
+    await readHoldings()
+    return true
+  }, [arriving, readHoldings, view])
 
   useEffect(() => {
     if (screen !== 'home') return
@@ -1859,7 +1949,17 @@ export default function CustodyPassport({
    * and the record cleared). Only while neither is known — inside the wait, or
    * an indexer that cannot be reached — does the line say it is checking, and
    * it asks again.
+   *
+   * A PAYMENT THAT LANDED IS RECORDED, NOT ANNOUNCED (2026/09/25). It used to
+   * put "Sent. … has it." in Home's alert strip, styled as an error; it now
+   * writes the activity row the payment would have written had its tab stayed
+   * open, and the strip is left for the one verdict somebody has to read —
+   * that it did not go through.
    */
+  const onActivityRef = useRef(onActivity)
+  useEffect(() => {
+    onActivityRef.current = onActivity
+  }, [onActivity])
   useEffect(() => {
     const record = stopped
     if (record === null || record.stage !== 'sending' || record.sendTxId === null) return
@@ -1898,8 +1998,12 @@ export default function CustodyPassport({
         accountAddress: record.accountAddress,
       })
       setStopped(null)
+      if (verdict === 'landed') {
+        onActivityRef.current?.(custodyLandedSendEntry(record))
+        return
+      }
       setNotice(custodyStoppedSendSentence(record, verdict))
-      if (verdict === 'not-landed') void readHoldings()
+      void readHoldings()
     }
     void check()
     return () => {
@@ -2029,16 +2133,11 @@ export default function CustodyPassport({
     }): Promise<void> => {
       /* Nothing to write down for a payment that kept no change. */
       if (params.change == null) return
-      const { readCustodyAccountView } = await import('../identity/accountCustody.js')
-      const view = await readCustodyAccountView(
-        { indexerHttpUrl: params.wallet.network.indexerHttpUrl },
-        params.record.address as string,
-      )
-      await appendChangeToInboxK1(
-        arm.session,
-        params.identity,
-        { change: params.change, ownEncKeyHex: view.encKeyHex },
-      )
+      await paymentEngine().keepChange(arm.session, params.identity, {
+        indexerHttpUrl: params.wallet.network.indexerHttpUrl,
+        accountAddress: params.record.address as string,
+        change: params.change,
+      })
     },
     [arm],
   )
@@ -2158,7 +2257,11 @@ export default function CustodyPassport({
         accountAddress: account.address,
       })
       setStopped(null)
-      setNotice(custodyShieldedSendOutcome({ ...stoppedRecord, stage: 'done' }))
+      /* NO BANNER FOR A PAYMENT THAT WENT THROUGH (2026/09/25). This used to
+         write "Sent. … has it." into Home's one alert strip — the error
+         styling, a warning triangle, and a "Dismiss error" cross — which read
+         as something having gone wrong. The activity row and the toast that
+         `reportSent` writes are the record of it. */
       /* THE TIDY-UP IS HANDED BACK, NOT AWAITED. It is a gated call of its own,
          so it still runs under the payment's flag — two gated calls against one
          account must never sign against the same `auth_nonce` — but the sheet
@@ -2252,7 +2355,11 @@ export default function CustodyPassport({
         accountAddress: account.address,
       })
       setStopped(null)
-      setNotice(custodyShieldedSendOutcome({ ...stoppedRecord, stage: 'done' }))
+      /* NO BANNER FOR A PAYMENT THAT WENT THROUGH (2026/09/25). This used to
+         write "Sent. … has it." into Home's one alert strip — the error
+         styling, a warning triangle, and a "Dismiss error" cross — which read
+         as something having gone wrong. The activity row and the toast that
+         `reportSent` writes are the record of it. */
       /* As above: under the payment's flag, and not holding the sheet. */
       return () => backfillChange({ wallet, record, identity, change: sent.change })
     },
@@ -2306,7 +2413,23 @@ export default function CustodyPassport({
          now, so this is the only thing on screen that says a payment is
          running — including the second or two before its record is written. */
       dispatchProgress({ type: 'start', subject: payment.subject, draft: payment.draft, at: Date.now() })
-      const refusal = custodyInFlightRefusal(inFlight.current)
+      /* A PAYMENT CONFIRMED WHILE THE LAST ONE IS STILL FINISHING WAITS FOR IT
+         (2026/09/26), before anything about it is read or planned, and says so
+         on the pill and the row. It used to be refused here on the spot, with
+         the pill already saying "Sent" over the last one. See
+         `awaitCustodyTurn`. The flag is raised by `runCustodyPayment` in the
+         same turn the wait ends, so two waiters can never both get in. */
+      const refusal = await awaitCustodyTurn(
+        {
+          busy: () => inFlight.current,
+          settling: () => holdingsInFlight.current !== null,
+          now: () => Date.now(),
+          sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+          onWait: () => dispatchProgress({ type: 'waiting' }),
+        },
+        custodyPrepareWaitMs(),
+      )
+      dispatchProgress({ type: 'turn' })
       if (refusal !== null) {
         dispatchProgress({ type: 'failed', sentence: refusal, handedOver: false })
         throw new Error(refusal)
@@ -2832,6 +2955,75 @@ export default function CustodyPassport({
   )
 
   /* ---------------------------------------------------------------------- */
+  /* The key that reads this Passport's payments, kept with its way back     */
+  /* ---------------------------------------------------------------------- */
+
+  /** The sign-in this tab has already brought level, for which account. */
+  const keysKeptWith = useRef<string | null>(null)
+
+  /**
+   * Brings this device and its way back level for this Passport's viewing keys
+   * (2026/09/26). This device's key goes to the sign-in's metadata, so a new
+   * device brought back through it can read what was paid in before; a key the
+   * sign-in keeps that this device does not is kept here, and the balance is
+   * read again with it.
+   *
+   * AWAITED BY NOTHING, AND A FAILURE OF NOTHING. A write that does not land is
+   * logged by `keepViewingKeysWithSignIn` and tried again on the next open.
+   * Once per sign-in, per account, per tab. See
+   * `../identity/signInViewingKeys.ts`.
+   */
+  const keepKeysWithSignIn = useCallback(
+    (signInUser: string): void => {
+      const record = view?.record ?? null
+      if (record === null || record.address === null || signInUser.trim() === '') return
+      const once = `${signInUser.trim().toLowerCase()}|${record.network}|${record.address}`
+      if (keysKeptWith.current === once) return
+      keysKeptWith.current = once
+      const account = { network: record.network, address: record.address }
+      void (async () => {
+        const [{ keepViewingKeysWithSignIn, signInFromSession }, { loadK1CoinStore }] =
+          await Promise.all([
+            import('../identity/signInViewingKeys.js'),
+            import('../identity/k1CoinStore.js'),
+          ])
+        const signIn = signInFromSession(signInUser)
+        if (signIn === null) return
+        const outcome = await keepViewingKeysWithSignIn({
+          signIn,
+          storage: window.localStorage,
+          account,
+          current: loadK1CoinStore(account).encSecretKeyHex,
+        })
+        /* A key that came back opens notes the last read could not. Read again
+           — after any read already running, which started without it. */
+        if (outcome.restored > 0) {
+          await holdingsInFlight.current?.catch(() => undefined)
+          await readHoldings()
+        }
+      })().catch((cause: unknown) => {
+        console.warn('[account-custody] the way back could not be brought level with this device', cause)
+      })
+    },
+    [readHoldings, view],
+  )
+
+  /* THE SAME, ON EVERY OPEN THAT CAN (2026/09/26): a Passport whose way back
+     was added before its key went with it, or whose last write did not land.
+     Only when Home is up, the way back is on, and a sign-in is here — and not
+     a sign-in from another provider than the one the way back was added with,
+     which is not this Passport's way back. Never for a Passport HELD by a
+     sign-in: it has no way back to keep anything with. */
+  useEffect(() => {
+    if (screen !== 'home' || heldBySocial || !recoveryHeld(recoveryRecord)) return
+    if (social === null || social.status !== 'signed-in' || !social.address) return
+    const addedWith = recoveryRecord?.provider?.trim().toLowerCase() ?? ''
+    const signedInWith = social.provider?.trim().toLowerCase() ?? ''
+    if (addedWith !== '' && signedInWith !== '' && addedWith !== signedInWith) return
+    keepKeysWithSignIn(social.address)
+  }, [heldBySocial, keepKeysWithSignIn, recoveryRecord, screen, social])
+
+  /* ---------------------------------------------------------------------- */
   /* Adding the way back                                                     */
   /* ---------------------------------------------------------------------- */
 
@@ -2880,7 +3072,7 @@ export default function CustodyPassport({
           finishWaves: (held) => finishInBackground(held, setupClock.current),
           recoveryKey: () => signIn.device(),
           addKey: async (held, spare, onPhase) => {
-            await addDeviceK1(arm.session, held.device, spare, onPhase)
+            await recoveryAddEngine()(arm.session, held.device, spare, onPhase)
           },
           onProgress: setRecoveryProgress,
           wait,
@@ -2892,6 +3084,11 @@ export default function CustodyPassport({
             ...(signIn.provider === null ? {} : { provider: signIn.provider }),
           })
         }
+        /* THE KEY THAT READS THIS PASSPORT'S PAYMENTS GOES WITH THE WAY BACK
+           (2026/09/26), so a device brought back through this sign-in can read
+           what was paid in before it. Not awaited, and never a failure of the
+           add: see `keepKeysWithSignIn`. */
+        keepKeysWithSignIn(signIn.address ?? '')
         setNotice(RECOVERY_COPY.done(signIn.provider))
         /* "Recovery is on", ticked, long enough to be read. */
         await wait(RECOVERY_DONE_HOLD_MS)
@@ -2909,7 +3106,7 @@ export default function CustodyPassport({
         refresh()
       }
     },
-    [arm.session, ensureIdentity, finishInBackground, network, refresh],
+    [arm.session, ensureIdentity, finishInBackground, keepKeysWithSignIn, network, refresh],
   )
 
   /** The press on the offer. */
@@ -3064,27 +3261,30 @@ export default function CustodyPassport({
   /* the reader's hands, and it can be shut for the rest of this setup.      */
   /* ---------------------------------------------------------------------- */
   const setupRunning = setupPhase !== null && busy !== null
-  const [waitedMs, setWaitedMs] = useState(0)
+  const [offerDue, setOfferDue] = useState(false)
   const [gameOpen, setGameOpen] = useState(false)
   const [gameDismissed, setGameDismissed] = useState(false)
   useEffect(() => {
     if (!setupRunning) {
       // The setup ended, one way or the other. The next one is offered afresh.
-      setWaitedMs(0)
+      setOfferDue(false)
       setGameOpen(false)
       setGameDismissed(false)
       return undefined
     }
-    const startedAt = Date.now()
-    const timer = window.setInterval(() => setWaitedMs(Date.now() - startedAt), 1_000)
-    return () => window.clearInterval(timer)
+    /* ONE TIMER, NOT A CLOCK (2026/09/25). All the offer asks of the wait is
+       whether {@link OFFER_AFTER_MS} has passed; a once-a-second interval that
+       re-rendered this whole screen for the length of every setup was a clock
+       nobody read. The timeline keeps its own, for the seconds it shows. */
+    const timer = window.setTimeout(() => setOfferDue(true), OFFER_AFTER_MS)
+    return () => window.clearTimeout(timer)
   }, [setupRunning])
 
   /* The ceremony is a prompt over this screen — a passkey dialogue, or the
      provider's overlay — and the game goes away for it rather than competing
      with it. */
   const identityPromptUp = setupPhase === 'confirm-identity'
-  const offerGame = setupRunning && waitedMs >= OFFER_AFTER_MS && !gameDismissed
+  const offerGame = setupRunning && offerDue && !gameDismissed
 
   const setupProgress =
     setupRows === null || setupPhase === null ? null : (
@@ -3143,24 +3343,24 @@ export default function CustodyPassport({
   const recoveryRunningRow = recoveryRows?.find((row) => row.state === 'active') ?? null
   const recoveryElapsedFor = useTimelineClock(recoveryRunningRow?.id ?? null)
   const recoveryAdding = recoveryProgress !== null
-  const [recoveryWaitedMs, setRecoveryWaitedMs] = useState(0)
+  const [recoveryOfferDue, setRecoveryOfferDue] = useState(false)
   const [snakeOpen, setSnakeOpen] = useState(false)
   const [snakeDismissed, setSnakeDismissed] = useState(false)
   useEffect(() => {
     if (!recoveryAdding) {
-      setRecoveryWaitedMs(0)
+      setRecoveryOfferDue(false)
       setSnakeOpen(false)
       setSnakeDismissed(false)
       return undefined
     }
-    const startedAt = Date.now()
-    const timer = window.setInterval(() => setRecoveryWaitedMs(Date.now() - startedAt), 1_000)
-    return () => window.clearInterval(timer)
+    /* One timer, for the reason the setup's offer gives above. */
+    const timer = window.setTimeout(() => setRecoveryOfferDue(true), OFFER_AFTER_MS)
+    return () => window.clearTimeout(timer)
   }, [recoveryAdding])
   /* The passkey prompt, or the sign-in's own approval, has the reader's hands. */
   const recoveryNeedsReader = recoveryProgress !== null && recoveryAddNeedsReader(recoveryProgress.stage)
   const offerSnake =
-    recoveryAdding && recoveryProgress.stage !== 'done' && recoveryWaitedMs >= OFFER_AFTER_MS && !snakeDismissed
+    recoveryAdding && recoveryProgress.stage !== 'done' && recoveryOfferDue && !snakeDismissed
 
   const recoveryTimeline =
     recoveryRows === null ? null : (
@@ -3380,7 +3580,10 @@ export default function CustodyPassport({
               },
               startedAt: stopped.startedAt,
               submitted: stopped.sendTxId !== null,
-              sentence: custodyShieldedSendOutcome(stopped),
+              /* A stopped payment that landed never reaches this view (the
+                 screen settles it first), so an empty answer is not a
+                 success here; say plainly that it did not go through. */
+              sentence: custodyShieldedSendOutcome(stopped) ?? CUSTODY_SEND_NOT_SENT,
             },
     })
     const finishState = custodyFinishSetupCard({
@@ -3409,6 +3612,8 @@ export default function CustodyPassport({
         arriving,
       },
       syncPercent,
+      /* The watch's cheap look — see `watchHoldings`. */
+      onWatch: watchHoldings,
       /* ONE BANNER, TWO SOURCES. A refusal from a control on this screen and
          the sentence about a payment that stopped are both "something you
          should read", and Home has one place for that. The stopped payment's
@@ -4168,10 +4373,30 @@ function sameSendRecord(
 /* The payment engine, and the stand-in a browser walk may put in its place    */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * The tidy-up after a payment: this account's own note of the change it kept,
+ * sealed to its own key so a second device can find it. The account's key is
+ * read live, for the reason `sendShielded` reads a recipient's.
+ */
+async function engineKeepChange(
+  session: Parameters<typeof appendChangeToInboxK1>[0],
+  identity: CustodyCallDevice,
+  input: {
+    indexerHttpUrl: string
+    accountAddress: string
+    change: Parameters<typeof appendChangeToInboxK1>[2]['change']
+  },
+): Promise<void> {
+  const { readCustodyAccountView } = await import('../identity/accountCustody.js')
+  const view = await readCustodyAccountView({ indexerHttpUrl: input.indexerHttpUrl }, input.accountAddress)
+  await appendChangeToInboxK1(session, identity, { change: input.change, ownEncKeyHex: view.encKeyHex })
+}
+
 const PAYMENT_ENGINE = {
   withdrawShieldedK1: engineWithdrawShieldedK1,
   withdrawShieldedToContractK1: engineWithdrawShieldedToContractK1,
   withdrawUnshieldedK1: engineWithdrawUnshieldedK1,
+  keepChange: engineKeepChange,
 }
 
 /**
@@ -4182,9 +4407,11 @@ const PAYMENT_ENGINE = {
  * service and no chain to take a transaction, so a payment there always stops
  * at the proof — and the in-progress pill's whole job is what happens AFTER the
  * hand-over: the phases, "Sent" with its link, a failure's one sentence. A walk
- * sets `window.__passportWalkPayment = { stepMs, fail? }` before the app loads,
- * and the stand-in reports the same phases the engine reports, a step apart,
- * then answers or fails. Everything in front of it — the sheet, the plan, the
+ * sets `window.__passportWalkPayment = { stepMs, fail?, tidyUpMs? }` before the
+ * app loads, and the stand-in reports the same phases the engine reports, a
+ * step apart, then answers or fails. `tidyUpMs` (2026/09/26) is a payment
+ * that kept change, and whose note of it takes that long to write: the window
+ * a second payment confirmed straight after "Sent" lands in. Everything in front of it — the sheet, the plan, the
  * record written before the hand-over, the approval — is the shipped code.
  *
  * DEAD IN EVERY DEPLOYED BUILD. `VITE_PASSPORT_ACC_WALK` is set for the mocked
@@ -4195,9 +4422,10 @@ function paymentEngine(): typeof PAYMENT_ENGINE {
   if (import.meta.env.VITE_PASSPORT_ACC_WALK !== '1') return PAYMENT_ENGINE
   const hook = (globalThis as { __passportWalkPayment?: unknown }).__passportWalkPayment
   if (!hook || typeof hook !== 'object') return PAYMENT_ENGINE
-  const asked = hook as { stepMs?: unknown; fail?: unknown }
+  const asked = hook as { stepMs?: unknown; fail?: unknown; tidyUpMs?: unknown }
   const stepMs = typeof asked.stepMs === 'number' && asked.stepMs >= 0 ? asked.stepMs : 1_000
   const fail = typeof asked.fail === 'string' ? asked.fail : null
+  const tidyUpMs = typeof asked.tidyUpMs === 'number' && asked.tidyUpMs > 0 ? asked.tidyUpMs : 0
   const walk = async (onPhase?: (phase: CustodyPhase) => void): Promise<CustodyShieldedSpendResult> => {
     const wait = () => new Promise<void>((resolve) => setTimeout(resolve, stepMs))
     onPhase?.({ step: 'sign' })
@@ -4211,7 +4439,7 @@ function paymentEngine(): typeof PAYMENT_ENGINE {
     return {
       txHash,
       explorerUrl: null,
-      change: null,
+      change: tidyUpMs > 0 ? { outcome: 'none' } : null,
       changePosition: 'none',
       sent: null,
       blockHeight: null,
@@ -4223,5 +4451,40 @@ function paymentEngine(): typeof PAYMENT_ENGINE {
     withdrawShieldedToContractK1: (_session, _identity, _input, onPhase) => walk(onPhase),
     withdrawUnshieldedK1: async (_session, _identity, _input, onPhase): Promise<CustodyStepResult> =>
       walk(onPhase),
+    keepChange: () => new Promise<void>((resolve) => setTimeout(resolve, tidyUpMs)),
+  }
+}
+
+/**
+ * The add of a way back — the real one, or, in a walk build, a stand-in the
+ * walk asked for (2026/09/26).
+ *
+ * WHY, FOR THE REASON {@link paymentEngine} GIVES. The mocked tier has no
+ * proving service and no chain, so an add there always stops at the proof —
+ * and what a walk of the way back needs to see is what happens once it lands:
+ * the way back recorded as on, and the key that reads this Passport's payments
+ * kept with the sign-in. A walk sets `window.__passportWalkRecoveryAdd =
+ * { stepMs }` before the app loads, and the stand-in reports the phases the add
+ * reports, a step apart, then answers. Everything in front of it — the passkey,
+ * the sign-in's key recovered from its signatures, the timeline — and
+ * everything after it is the shipped code.
+ *
+ * DEAD IN EVERY DEPLOYED BUILD, for the reason {@link paymentEngine} is.
+ */
+function recoveryAddEngine(): typeof addDeviceK1 {
+  if (import.meta.env.VITE_PASSPORT_ACC_WALK !== '1') return addDeviceK1
+  const hook = (globalThis as { __passportWalkRecoveryAdd?: unknown }).__passportWalkRecoveryAdd
+  if (!hook || typeof hook !== 'object') return addDeviceK1
+  const asked = hook as { stepMs?: unknown }
+  const stepMs = typeof asked.stepMs === 'number' && asked.stepMs >= 0 ? asked.stepMs : 500
+  return async (_session, _device, _newDevice, onPhase) => {
+    const wait = () => new Promise<void>((resolve) => setTimeout(resolve, stepMs))
+    onPhase?.({ step: 'submit' })
+    await wait()
+    onPhase?.({ step: 'submit', detail: CUSTODY_PHASE_PROVED })
+    await wait()
+    onPhase?.({ step: 'confirm' })
+    await wait()
+    return { txHash: 'e6'.repeat(32), explorerUrl: null } as unknown as CustodyStepResult
   }
 }

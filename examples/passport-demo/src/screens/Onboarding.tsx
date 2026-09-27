@@ -11,16 +11,19 @@ import './onboarding.css'
  * From 2026/08/05 to 2026/09/22 this was ONE button, "Continue with Passkey",
  * whose behaviour the integrator resolved. It is now two, ported from the
  * mobile-first layout: "Log in" is the platform's picker of passkeys already
- * held (see {@link OnboardingProps.onUseDifferentPasskey}), and "Sign up" is
- * the old button's behaviour unchanged: if a local Passport profile exists in
- * this browser the existing sign-in/unlock flow runs, otherwise the
- * create flow runs — and that flow ASKS THE AUTHENTICATOR before it enrols
- * anything. "No local profile" is not "no passkey": site data cleared with the
- * passkey still in the keychain looks exactly like a first visit, and creating
- * there would replace the surviving credential and make its wallet seed
- * underivable. So a resident credential that answers is signed in to instead.
- * WebAuthn discoverable credentials mean the assertion path also covers a
- * passkey synced from another device.
+ * held (see {@link OnboardingProps.onUseDifferentPasskey}), and "Sign up"
+ * makes a new passkey and a new Passport.
+ *
+ * SIGN UP ALWAYS CREATES (2026/09/25). Until then "Sign up" kept the old single
+ * button's guess — a browser that held a Passport was signed back into it — so
+ * somebody who had signed up once on a device could never start a second
+ * Passport there, and was put back into the first one's unfinished setup
+ * instead. A create can no longer replace a surviving passkey (the user handle
+ * is random per enrolment since 2026/09/03), and every record a Passport keeps
+ * here is keyed by its passkey, so the new Passport sits beside the old one.
+ * "Log in" is the one way back into a Passport that already exists, finished
+ * or not; WebAuthn discoverable credentials mean it also covers a passkey
+ * synced from another device.
  *
  * Nothing here waits on a vendor, and the boot cannot be held hostage to one.
  *
@@ -43,16 +46,16 @@ export interface OnboardingProps {
    * while the lookup is still running; the button works in every case — this
    * only tunes the sentence beneath it.
    *
-   * `false` means only that this BROWSER holds no record. The device may still
-   * hold the passkey, which is why the copy below promises a sign-in rather
-   * than a creation, and why the flow behind the button discovers first.
+   * `true` puts one line under the two buttons pointing a returning reader at
+   * "Log in", because "Sign up" always makes a new Passport. `false` means only
+   * that this BROWSER holds no record; the device may still hold a passkey,
+   * which "Log in" reaches either way.
    */
   hasExistingPassport: boolean | null
   /**
-   * "Sign up". Signs in when a local Passport exists here; otherwise
-   * discovers first and enrols only when no passkey answers. A refused
-   * enrolment (the authenticator already holds the credential) must route
-   * into sign-in, never into an error.
+   * "Sign up". Always enrols ONE new passkey and opens a new Passport with it,
+   * whatever this browser already holds — no discovery first, and nothing
+   * already here is signed in to or touched.
    */
   onContinue: () => void
   /**
@@ -360,9 +363,9 @@ export default function OnboardingScreen(props: OnboardingProps) {
             <div className="mnob-stage" key="welcome">
               {/* TWO DOORS, NOT ONE (2026/09/22). The single "Continue with
                   Passkey" guessed which of two things the reader wanted; these
-                  ask. Both still end somewhere safe whichever one is pressed:
-                  Log in raises the platform's own picker, and Sign up asks the
-                  authenticator before it enrols anything. */}
+                  ask. Log in raises the platform's own picker of passkeys this
+                  device holds; Sign up makes a new passkey and a new Passport,
+                  and leaves everything already here alone. */}
               <div className="mnob-auth-actions">
                 <button
                   type="button"
@@ -372,8 +375,6 @@ export default function OnboardingScreen(props: OnboardingProps) {
                   <UserRoundPlus size={20} strokeWidth={1.8} aria-hidden="true" />
                   <span>Sign up</span>
                 </button>
-                {/* Discover before enrolling, so sign-up cannot overwrite a
-                    surviving Passport whose browser records were cleared. */}
                 <button
                   type="button"
                   className="mnob-auth-button mnob-auth-login"
@@ -384,6 +385,15 @@ export default function OnboardingScreen(props: OnboardingProps) {
                   <span>Log in</span>
                 </button>
               </div>
+              {/* WHICH DOOR FOR A RETURNING READER. Sign up makes a new Passport
+                  every time, so a browser that already holds one says, once,
+                  where the one it holds is — including one whose setup was
+                  never finished. */}
+              {hasExistingPassport === true && !wayOutShown ? (
+                <p className="mnob-hint" data-testid="login-to-carry-on">
+                  Already have a Passport on this device? Log in to carry on with it.
+                </p>
+              ) : null}
               {/* THE WAY BACK, and the only entry on this screen that a provider
                   sign-in is behind. It is not a way to start — see the header —
                   so it sits under the two doors as a quiet link. Absent in every

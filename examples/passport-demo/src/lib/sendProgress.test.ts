@@ -6,12 +6,15 @@ import {
   sendElapsed,
   sendProgressSteps,
   SEND_SENT_DISMISS_MS,
+  SEND_WAITING_STEP_LABEL,
   sendInFlightReason,
   sendingLine,
   sendProgressPhase,
   sendProgressReduce,
   sendProgressView,
   sentLine,
+  sendClosingNote,
+  sendUnsent,
   type SendDraft,
   type SendProgress,
   type SendProgressRecord,
@@ -21,7 +24,7 @@ import {
 const subject: SendProgressSubject = { amount: '10', symbol: 'mUSD', recipient: 'bob.night' };
 const draft: SendDraft = { assetId: 'ab'.repeat(32), recipient: 'bob.night', amount: '10' };
 const T0 = 1_000;
-const running: SendProgress = { kind: 'running', subject, draft, startedAt: T0 };
+const running: SendProgress = { kind: 'running', subject, draft, startedAt: T0, waiting: false };
 const link = { label: 'View transaction', href: 'https://explorer.example/tx/1' };
 
 describe('sendProgressPhase', () => {
@@ -44,6 +47,7 @@ describe('sendProgressPhase', () => {
 
   it('names every phase in a few words', () => {
     expect(SEND_PROGRESS_PHASE_LABEL).toEqual({
+      waiting: 'Waiting for your last payment to finish…',
       preparing: 'Preparing…',
       approving: 'Waiting for your approval…',
       proving: 'Proving…',
@@ -104,6 +108,23 @@ describe('sendProgressReduce', () => {
     expect(sendProgressReduce({ kind: 'sent', subject, link, startedAt: T0 }, { type: 'dismiss' })).toBeNull();
     expect(sendProgressReduce(null, { type: 'dismiss' })).toBeNull();
     expect(sendProgressReduce(running, { type: 'dismiss' })).toBe(running);
+  });
+
+  it('waits for the last payment, and then goes, only while it is running', () => {
+    const waiting = sendProgressReduce(running, { type: 'waiting' });
+    expect(waiting).toEqual({ ...running, waiting: true });
+    expect(sendProgressReduce(waiting, { type: 'turn' })).toEqual(running);
+    /* Nothing changes, so nothing is re-rendered, when it is already so. */
+    expect(sendProgressReduce(running, { type: 'turn' })).toBe(running);
+    expect(sendProgressReduce(waiting, { type: 'waiting' })).toBe(waiting);
+    /* A payment that is not running has nothing to wait for. */
+    expect(sendProgressReduce(null, { type: 'waiting' })).toBeNull();
+    const sent: SendProgress = { kind: 'sent', subject, link, startedAt: T0 };
+    expect(sendProgressReduce(sent, { type: 'turn' })).toBe(sent);
+    /* It can fail from there too — the wait ran out — with its sentence. */
+    expect(
+      sendProgressReduce(waiting, { type: 'failed', sentence: 'Still finishing.', handedOver: false }),
+    ).toEqual({ kind: 'failed', subject, sentence: 'Still finishing.', draft, startedAt: T0 });
   });
 
   it('goes Sent by itself after a few seconds', () => {
@@ -228,6 +249,28 @@ describe('the progress view', () => {
     ]);
   });
 
+  it('puts the wait for the last payment in front of the five, as the step it is on', () => {
+    const waiting = sendProgressView({
+      progress: { ...running, waiting: true },
+      /* A step left over from the last payment says nothing about this one. */
+      step: 'confirm',
+      record: null,
+    })!;
+    expect(waiting.phase).toBe('waiting');
+    expect(waiting.detail).toBe('Waiting for your last payment to finish…');
+    expect(waiting.title).toBe('Sending 10 mUSD to bob.night');
+    expect(sendProgressSteps(waiting).map((step) => [step.label, step.state])).toEqual([
+      [SEND_WAITING_STEP_LABEL, 'current'],
+      ['Preparing', 'waiting'],
+      ['Waiting for your approval', 'waiting'],
+      ['Proving', 'waiting'],
+      ['Confirming', 'waiting'],
+      ['Sent', 'waiting'],
+    ]);
+    /* And a third payment waits behind it at Review, as behind any other. */
+    expect(sendInFlightReason(waiting)).toMatch(/still going through/);
+  });
+
   it('marks every step done once Sent, and claims none for a failure', () => {
     const sent = sendProgressView({ progress: { kind: 'sent', subject, link, startedAt: T0 }, step: null, record: null })!;
     expect(states(sent)).toEqual(['done', 'done', 'done', 'done', 'done']);
@@ -243,5 +286,67 @@ describe('the progress view', () => {
     expect(sendElapsed(1_000, 13_400)).toBe('12 s');
     expect(sendElapsed(0, 65_000)).toBe('1 min 05 s');
     expect(sendElapsed(5_000, 1_000)).toBe('0 s');
+  });
+});
+
+describe('what closing Passport does to a running payment (2026/09/26)', () => {
+  const at = (step: Parameters<typeof sendProgressView>[0]['step']) =>
+    sendProgressView({ progress: running, step, record: null })!;
+  /** The copy rule every screen on this path keeps. */
+  const FORBIDDEN = ['wallet address', 'DUST', 'contract', 'registry', 'indexer', 'resolver', 'sponsor', 'SDK', 'Dynamic'];
+
+  it('is unsent from the press until the payment is handed to the network', () => {
+    expect(sendUnsent(at(null))).toBe(true);
+    expect(sendUnsent(at('sign'))).toBe(true);
+    expect(sendUnsent(at('submit'))).toBe(true);
+    expect(sendUnsent(at('confirm'))).toBe(false);
+  });
+
+  it('is never unsent for an outcome, a record read back, or nothing', () => {
+    expect(sendUnsent(null)).toBe(false);
+    expect(
+      sendUnsent(sendProgressView({ progress: { kind: 'sent', subject, link, startedAt: T0 }, step: null, record: null })),
+    ).toBe(false);
+    expect(
+      sendUnsent(
+        sendProgressView({
+          progress: { kind: 'failed', subject, sentence: 'No.', draft, startedAt: T0 },
+          step: null,
+          record: null,
+        }),
+      ),
+    ).toBe(false);
+    const handedOver: SendProgressRecord = { subject, draft, startedAt: 7, submitted: true, sentence: 'x' };
+    expect(sendUnsent(sendProgressView({ progress: null, step: null, record: handedOver }))).toBe(false);
+  });
+
+  it('asks for Passport to be kept open while the payment is unsent, on all three surfaces', () => {
+    expect(sendClosingNote(at('submit'))).toEqual({
+      sheet: 'Keep Passport open until this is sent. You can close this sheet.',
+      row: 'Keep Passport open until this is sent.',
+      pill: 'Keep Passport open',
+    });
+  });
+
+  it('says closing will not stop it once it has been handed over, and the pill asks for nothing', () => {
+    const note = sendClosingNote(at('confirm'))!;
+    expect(note.sheet).toBe('It has been handed to the network. Closing Passport now will not stop it.');
+    expect(note.row).toBe('Closing Passport now will not stop it.');
+    expect(note.pill).toBeNull();
+  });
+
+  it('says nothing about closing once the payment has an outcome', () => {
+    expect(
+      sendClosingNote(sendProgressView({ progress: { kind: 'sent', subject, link, startedAt: T0 }, step: null, record: null })!),
+    ).toBeNull();
+  });
+
+  it('keeps to the copy rule', () => {
+    for (const step of [null, 'confirm'] as const) {
+      const note = sendClosingNote(at(step))!;
+      for (const line of [note.sheet, note.row, note.pill ?? '']) {
+        for (const word of FORBIDDEN) expect(line.toLowerCase()).not.toContain(word.toLowerCase());
+      }
+    }
   });
 });

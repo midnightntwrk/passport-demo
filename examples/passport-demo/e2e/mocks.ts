@@ -45,6 +45,11 @@
  *                          balance read decode a `.night` TLD as an account and
  *                          fail with a `TypeError` no user should ever meet.
  *
+ *                          And `PassportAccountHead`, the account watch's cheap
+ *                          look (2026/09/25): one fixed transaction hash for
+ *                          every address. The recorded states never change, so
+ *                          neither does the newest action behind them.
+ *
  * WebSockets are answered by accepting and saying nothing, so the run makes no
  * outbound connection at all: the wallet facade subscribes to the indexer and
  * the node relay on start-up, and a spec that let those through would be a
@@ -131,6 +136,9 @@ export const RECIPIENT_ACCOUNT_ADDRESS =
  * that is not something a service really said.
  */
 const MOCK_CHAIN_HEIGHT = 120;
+
+/** The newest action on every mocked contract — see `PassportAccountHead` above. */
+const MOCK_ACCOUNT_HEAD = '7'.repeat(64);
 
 /**
  * The host the funder and primary fee sponsor live on, and the ONE place it is
@@ -346,6 +354,12 @@ export async function installNetworkBoundary(page: Page): Promise<NetworkBoundar
     if (body.includes('BlockHeight')) {
       calls.push('POST indexer BlockHeight');
       return route.fulfill({ json: { data: { block: { height: MOCK_CHAIN_HEIGHT } } } });
+    }
+    if (body.includes('PassportAccountHead')) {
+      calls.push('POST indexer PassportAccountHead');
+      return route.fulfill({
+        json: { data: { contractAction: { transaction: { hash: MOCK_ACCOUNT_HEAD } } } },
+      });
     }
     if (body.includes('CONTRACT_STATE_QUERY')) {
       calls.push('POST indexer CONTRACT_STATE_QUERY');

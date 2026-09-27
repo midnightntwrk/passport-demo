@@ -43,8 +43,7 @@ You need two dev servers on two different origins.
 
    Add `VITE_LOCAL_APP_NAME="My App"` to label it; without one the grid calls
    it *Local app*. The entry is prepended to the fetched registry, not swapped
-   in for it. (`VITE_RAFFLE_URL` is the legacy name for the same slot and
-   still works; setting both gives you two local entries.)
+   in for it.
 4. **In Passport:** create a passkey, open the apps grid, and tap your entry.
    The app loads in the in-app browser, the header chip flips to **Inside
    Passport**, and Passport posts the handshake down automatically — the

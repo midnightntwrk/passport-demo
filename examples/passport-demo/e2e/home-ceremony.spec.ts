@@ -121,25 +121,6 @@ async function mark(label: string): Promise<void> {
   }, label);
 }
 
-/** The stored profile records, read out of the app's own IndexedDB. */
-async function storedProfiles(): Promise<{ accountOnPasskey?: { written?: boolean } }[]> {
-  return page.evaluate(
-    () =>
-      new Promise((resolve, reject) => {
-        const request = indexedDB.open('midnight-passport');
-        request.onerror = () => reject(request.error);
-        request.onsuccess = () => {
-          const all = request.result
-            .transaction('public-profile', 'readonly')
-            .objectStore('public-profile')
-            .getAll();
-          all.onerror = () => reject(all.error);
-          all.onsuccess = () => resolve(all.result);
-        };
-      }),
-  );
-}
-
 test.beforeAll(async ({ browser }) => {
   const context = await browser.newContext(walkContextOptions({ viewport: { width: 420, height: 900 } }));
   page = await context.newPage();
@@ -252,12 +233,19 @@ test('a finished claim lands on Home without asking for anything', async () => {
   expect((await ceremonies()).filter((entry) => entry.mark === 'home')).toEqual([]);
 });
 
-test('the account reaches the passkey on the next sign-in, for no extra prompt', async () => {
-  /* The other half of the fix, and the reason the claim may drop the write
-     without dropping the capability. The account note goes onto the credential
-     in the largeBlob slice of the sign-in assertion — which was going to
-     happen anyway — so the whole of what a second device needs to find this
-     Passport is written, and the count for that sign-in is still ONE. */
+test('the next sign-in is one prompt, and nothing after it', async () => {
+  /* The other half of the fix: the claim dropped its blob write, and the
+     sign-in after it is still ONE ceremony.
+
+     WHAT THIS NO LONGER ASSERTS (2026/09/25). Until today the account note
+     went onto the credential in the largeBlob slice of the sign-in assertion,
+     because the landing's main button ran the targeted unlock of this
+     browser's Passport. Sign up now always makes a new Passport, and the way
+     back in is "Log in" — the platform's picker, a discoverable assertion that
+     deliberately carries no largeBlob slice (see `relogin.spec.ts`). So the
+     note stays owed on the profile and nothing on the landing writes it; that
+     ride-along needs a new home, and it is recorded as a follow-up rather than
+     asserted either way here. */
   test.setTimeout(200_000);
 
   /* A signed-out browser, made the way the app makes one: the persisted
@@ -280,7 +268,7 @@ test('the account reaches the passkey on the next sign-in, for no extra prompt',
   );
 
   await page.reload();
-  const signIn = page.getByRole('button', { name: SIGN_IN_BUTTON });
+  const signIn = page.getByRole('button', { name: 'Log in', exact: true });
   await expect(signIn).toBeVisible({ timeout: 60_000 });
   await mark('signin');
   await signIn.click();
@@ -293,14 +281,6 @@ test('the account reaches the passkey on the next sign-in, for no extra prompt',
   const signInLeg = await ceremonies();
   expect(signInLeg).toHaveLength(1);
   expect(signInLeg[0]?.kind).toBe('get');
-
-  /* The blob landed, and the profile says so — which is what stops the next
-     sign-in spending its largeBlob slice on a write it no longer owes. */
-  await expect
-    .poll(async () => (await storedProfiles()).some((one) => one.accountOnPasskey?.written === true), {
-      timeout: 20_000,
-    })
-    .toBe(true);
 
   // Still nothing after Home, on this leg either.
   await page.waitForTimeout(10_000);

@@ -712,16 +712,14 @@ describe('the record a stopped send leaves behind', () => {
   });
 
   it('says where the value is, and never claims more than it can see', () => {
-    expect(custodyShieldedSendOutcome(send({ stage: 'done' }))).toMatch(/alice\.night has it/);
+    /* A payment that landed is an activity row, never a sentence (2026/09/25). */
+    expect(custodyShieldedSendOutcome(send({ stage: 'done' }))).toBeNull();
     const inFlight = custodyShieldedSendOutcome(send({ sendTxId: 'cc'.repeat(32) }));
     /* ASKED OF THE CHAIN, and until it answers the line says so (2026/09/22). */
     expect(inFlight).toBe('Checking whether your payment to alice.night went through…');
     /* AND IT PROMISES NOTHING NOBODY WROTE: no resume, no button, no wait. */
     expect(inFlight).not.toMatch(/by itself|on its own|Finish/);
     /* With no name to use, the sentence still has to work. */
-    expect(custodyShieldedSendOutcome(send({ stage: 'done', recipientLabel: '  ' }))).toMatch(
-      /them has it/,
-    );
     expect(
       custodyShieldedSendOutcome(send({ recipientLabel: '', sendTxId: 'cc'.repeat(32) })),
     ).toMatch(/payment to them went through/);
@@ -752,9 +750,10 @@ describe('the record a stopped send leaves behind', () => {
   it('answers a stopped payment from the chain: sent, not sent, or still checking', () => {
     const now = 1_800_000_000_000;
     const away = send({ sendTxId: 'cc'.repeat(32), startedAt: now - 60_000 });
-    /* The indexer has it: sent, whenever it is asked. */
+    /* The indexer has it: sent, whenever it is asked. There is no sentence for
+       it — the type of `custodyStoppedSendSentence` refuses 'landed', because a
+       landed payment is recorded as activity, not announced (2026/09/25). */
     expect(custodyStoppedSendVerdict({ record: away, onChain: true, now })).toBe('landed');
-    expect(custodyStoppedSendSentence(away, 'landed')).toBe('Sent. alice.night has it.');
     /* Answered and absent, but still inside the wait: not yet a verdict. */
     expect(custodyStoppedSendVerdict({ record: away, onChain: false, now })).toBe('checking');
     /* Answered and absent, and the wait has passed since it was SENT. */

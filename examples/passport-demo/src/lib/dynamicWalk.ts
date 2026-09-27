@@ -47,6 +47,7 @@
 import {
   publishDynamicActions,
   publishDynamicSession,
+  readDynamicSession,
   type DynamicActions,
 } from './dynamicSession.js';
 
@@ -171,6 +172,24 @@ export function seedDynamicWalk(search: string): boolean {
       });
       return Promise.resolve();
     },
+    /* The provider's copy of the person's metadata, which the walk plays. See
+       {@link WalkSignInMetadata}. `fresh` changes nothing here: the stand-in IS
+       the provider, so its copy is always the latest. */
+    readMetadata: () => {
+      if (readDynamicSession().status !== 'signed-in') {
+        return Promise.reject(new Error('Sign in first — there is nobody to read.'));
+      }
+      return Promise.resolve(overTheWire(walkSignInMetadata().metadata));
+    },
+    writeMetadata: (metadata) => {
+      if (readDynamicSession().status !== 'signed-in') {
+        return Promise.reject(new Error('Sign in first — there is nobody to write to.'));
+      }
+      const store = walkSignInMetadata();
+      store.metadata = overTheWire(metadata);
+      store.writes.push(overTheWire(metadata));
+      return Promise.resolve(overTheWire(store.metadata));
+    },
   };
 
   publishDynamicActions(actions);
@@ -180,6 +199,37 @@ export function seedDynamicWalk(search: string): boolean {
       : signedIn,
   );
   return true;
+}
+
+/**
+ * WHAT THE PROVIDER KEEPS FOR THE SIGNED-IN PERSON, played by the walk
+ * (2026/09/26) — the metadata a Passport's viewing keys are kept in beside its
+ * way back (`../identity/signInViewingKeys.ts`).
+ *
+ * The walk is the provider's side of it: it puts `window.__passportWalkSignIn =
+ * { metadata }` on the page before the app loads — which is how a new device
+ * signs in and finds what an old one wrote — and reads `writes` back to see
+ * what the app stored. A write replaces the metadata with what it was given
+ * and is answered with it, as the provider answers an update. Nothing here
+ * merges: that is the app's job, and the walk is what checks it did.
+ */
+interface WalkSignInMetadata {
+  metadata?: unknown;
+  writes: unknown[];
+}
+
+/** The page's stand-in store, made empty where the walk put none. */
+function walkSignInMetadata(): WalkSignInMetadata {
+  const scope = globalThis as { __passportWalkSignIn?: Partial<WalkSignInMetadata> };
+  const store = scope.__passportWalkSignIn ?? {};
+  if (!Array.isArray(store.writes)) store.writes = [];
+  scope.__passportWalkSignIn = store;
+  return store as WalkSignInMetadata;
+}
+
+/** A copy as it would come back over the network: JSON, and nothing shared. */
+function overTheWire(value: unknown): unknown {
+  return value === undefined ? undefined : (JSON.parse(JSON.stringify(value)) as unknown);
 }
 
 /**

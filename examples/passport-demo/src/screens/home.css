@@ -1264,10 +1264,12 @@ button.mnhome-support { font-family: inherit; cursor: pointer; }
 .mnhome-activity-dot[data-tone='complete'] { background: var(--mn-accent); }
 /* Filled, but muted rather than accent: a still frame has to distinguish "in
    flight" from "done" on its own, and the pulse only helps a reader who is
-   watching. */
+   watching. So it pulses a handful of times when the row appears and then
+   holds that still frame (2026/09/25): an endless pulse kept the compositor
+   drawing every frame for as long as a payment sat pending on an open Home. */
 .mnhome-activity-dot[data-tone='pending'] {
   background: var(--mn-text-muted);
-  animation: mnhome-activity-pulse 1.8s ease-in-out infinite;
+  animation: mnhome-activity-pulse 1.8s ease-in-out 6;
 }
 /* Attention is a hollow ring rather than another fill: the palette carries no
    red, and a ring reads as "unfinished" at a glance without inventing one. */
@@ -1610,20 +1612,36 @@ button.mnhome-support { font-family: inherit; cursor: pointer; }
   background: var(--mn-accent-soft);
 }
 .mnhome-onway-dot {
+  position: relative;
   flex: 0 0 auto;
   width: 8px;
   height: 8px;
   margin-top: 6px;
   border-radius: 50%;
   background: var(--mn-accent);
-  box-shadow: 0 0 0 0 color-mix(in srgb, var(--mn-accent) 45%, transparent);
-  animation: mnhome-onway-pulse 1.6s ease-out infinite;
+}
+/* THE PULSE, COMPOSITED AND FINITE (2026/09/25). It was a box-shadow keyframe
+   that ran for as long as the card was up, and a box-shadow is repainted on
+   every frame: in the Pixel 7 profile at a sixfold CPU slowdown an idle Home
+   with the Companion's face removed was busy 2.7 s in every 20 with it and
+   0.4 s without. The same widening, fading disc is now a layer the compositor
+   scales and fades without a repaint, and it pulses a few times when the card
+   appears and then rests. The card's own words say the balance is on its way;
+   a still dot says it as well as a moving one. */
+.mnhome-onway-dot::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: var(--mn-accent);
+  opacity: 0;
+  animation: mnhome-onway-pulse 1.6s ease-out 4;
 }
 @keyframes mnhome-onway-pulse {
-  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--mn-accent) 45%, transparent); }
-  100% { box-shadow: 0 0 0 10px color-mix(in srgb, var(--mn-accent) 0%, transparent); }
+  0% { opacity: .45; transform: scale(1); }
+  100% { opacity: 0; transform: scale(3.5); }
 }
-@media (prefers-reduced-motion: reduce) { .mnhome-onway-dot { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .mnhome-onway-dot::after { animation: none; } }
 .mnhome-onway-copy { display: grid; gap: 6px; min-width: 0; }
 .mnhome-onway-title { margin: 0; font-size: 14px; font-weight: 600; color: var(--mn-text-primary); }
 .mnhome-onway-pills { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; }
@@ -1749,6 +1767,28 @@ button.mnhome-support { font-family: inherit; cursor: pointer; }
   white-space: nowrap;
   text-overflow: ellipsis;
 }
+/* THE PHASE AND "KEEP PASSPORT OPEN" SHARE ONE LINE on the pill (2026/09/26),
+   so the pill keeps its height; the phase gives way first, so the ask stays
+   whole. */
+.mnsendp-line {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+.mnsendp-line .mnsendp-phase { flex: 0 1 auto; min-width: 0; }
+.mnsendp-hold {
+  flex: 0 0 auto;
+  color: var(--mn-text-primary);
+  font-size: 12px;
+  font-weight: 600;
+}
+.mnsendp-line .mnsendp-hold::before {
+  content: '·';
+  margin-right: 6px;
+  color: var(--mn-text-secondary);
+  font-weight: 400;
+}
 /* The failure sentence is the whole message, so it may take two lines. */
 .mnsendp-pill[data-state='failed'] .mnsendp-title {
   display: -webkit-box;
@@ -1816,6 +1856,7 @@ button.mnhome-support { font-family: inherit; cursor: pointer; }
 .mnsendp-row .mnsendp-text { flex: 1 1 auto; }
 .mnsendp-row .mnsendp-title { white-space: normal; }
 .mnsendp-row .mnsendp-phase { white-space: normal; }
+.mnsendp-row .mnsendp-hold { white-space: normal; }
 
 /* The live row is PENDING, not a record: an accent edge and a small tag set it
    apart from the calm rows under it, and the whole of it is a button. */

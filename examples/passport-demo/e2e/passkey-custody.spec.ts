@@ -1895,8 +1895,12 @@ async function readStill(
   );
 }
 
-/** A stand-in for the payment engine, a step apart — see `paymentEngine` in `CustodyPassport.tsx`. */
-function walkPayment(options: { stepMs: number; fail?: string }) {
+/**
+ * A stand-in for the payment engine, a step apart — see `paymentEngine` in
+ * `CustodyPassport.tsx`. `tidyUpMs` is a payment that kept change, whose note
+ * of it takes that long to write after "Sent" (2026/09/26).
+ */
+function walkPayment(options: { stepMs: number; fail?: string; tidyUpMs?: number }) {
   return async (page: Page): Promise<void> => {
     await page.addInitScript((asked) => {
       (window as unknown as { __passportWalkPayment?: unknown }).__passportWalkPayment = asked;
@@ -2067,6 +2071,92 @@ test.describe('a payment that runs behind the Passport (2026/09/25)', () => {
     await close();
   });
 
+  /* KEEP PASSPORT OPEN UNTIL IT IS SENT (2026/09/26). Closing the tab or the
+     app before a payment is handed to the network stops it, so the three
+     surfaces say so, and the browser is asked to warn — only for that window,
+     because a `beforeunload` listener keeps the page out of the back/forward
+     cache. Once handed over, they say closing will not stop it. */
+  test('asks for Passport to be kept open until the payment is sent, and the browser warns only then', async ({
+    browser,
+  }) => {
+    const { page, close } = await passkeyPassportOnHome(browser, {
+      beforeOpen: async (page) => {
+        await walkPayment({ stepMs: 4_000 })(page);
+        /* Counts the page's live `beforeunload` listeners, from the first line. */
+        await page.addInitScript(() => {
+          const live = new Set<unknown>();
+          (window as unknown as { __leaveListeners: () => number }).__leaveListeners = () => live.size;
+          const add = window.addEventListener.bind(window);
+          const remove = window.removeEventListener.bind(window);
+          window.addEventListener = ((type: string, listener: unknown, options?: unknown) => {
+            if (type === 'beforeunload') live.add(listener);
+            return add(type, listener as EventListener, options as AddEventListenerOptions);
+          }) as typeof window.addEventListener;
+          window.removeEventListener = ((type: string, listener: unknown, options?: unknown) => {
+            if (type === 'beforeunload') live.delete(listener);
+            return remove(type, listener as EventListener, options as EventListenerOptions);
+          }) as typeof window.removeEventListener;
+        });
+      },
+    });
+    /* Whether the browser would warn now, and how many listeners are on the page. */
+    const leaving = () =>
+      page.evaluate(() => {
+        const event = new Event('beforeunload', { cancelable: true });
+        window.dispatchEvent(event);
+        return {
+          warns: event.defaultPrevented,
+          listeners: (window as unknown as { __leaveListeners: () => number }).__leaveListeners(),
+        };
+      });
+    expect(await leaving()).toEqual({ warns: false, listeners: 0 });
+
+    await payTenMusd(page);
+    await expect(sendPill(page)).toHaveAttribute('data-state', 'running');
+    await expect(sendPill(page).getByTestId('send-keep-open')).toHaveText('Keep Passport open');
+    await expect(page.getByTestId('send-progress-row')).toContainText('Keep Passport open until this is sent.');
+    expect(await leaving()).toEqual({ warns: true, listeners: 1 });
+    await page.getByRole('button', { name: /^Sending 10 mUSD to .+ — view progress$/ }).click();
+    await expect(page.getByTestId('send-progress-closing')).toHaveText(
+      'Keep Passport open until this is sent. You can close this sheet.',
+    );
+    await page.getByTestId('send-progress-sheet').getByRole('button', { name: 'Close' }).first().click();
+
+    /* Handed over: the ask goes, the listener comes off, and the words change. */
+    await expect(sendPill(page).locator('.mnsendp-phase')).toHaveText('Confirming…', { timeout: 30_000 });
+    await expect(sendPill(page).getByTestId('send-keep-open')).toHaveCount(0);
+    await expect(page.getByTestId('send-progress-row')).toContainText('Closing Passport now will not stop it.');
+    expect(await leaving()).toEqual({ warns: false, listeners: 0 });
+    await sendPill(page).locator('.mnsendp-open').click();
+    await expect(page.getByTestId('send-progress-closing')).toHaveText(
+      'It has been handed to the network. Closing Passport now will not stop it.',
+    );
+    await page.getByTestId('send-progress-sheet').getByRole('button', { name: 'Close' }).first().click();
+
+    await expect(sendPill(page)).toHaveAttribute('data-state', 'sent', { timeout: 30_000 });
+    expect(await leaving()).toEqual({ warns: false, listeners: 0 });
+    await close();
+  });
+
+  test('takes the warning off again when a payment fails before it is sent', async ({ browser }) => {
+    const { page, close } = await passkeyPassportOnHome(browser, {
+      beforeOpen: walkPayment({ stepMs: 1_500, fail: 'That payment did not go through. Nothing left your Passport.' }),
+    });
+    const warns = () =>
+      page.evaluate(() => {
+        const event = new Event('beforeunload', { cancelable: true });
+        window.dispatchEvent(event);
+        return event.defaultPrevented;
+      });
+    await payTenMusd(page);
+    await expect(sendPill(page).getByTestId('send-keep-open')).toBeVisible();
+    expect(await warns()).toBe(true);
+    await expect(sendPill(page)).toHaveAttribute('data-state', 'failed', { timeout: 30_000 });
+    await expect(sendPill(page).getByTestId('send-keep-open')).toHaveCount(0);
+    expect(await warns()).toBe(false);
+    await close();
+  });
+
   test('a reload in the middle of a payment shows the same pill, from the record', async ({
     browser,
   }) => {
@@ -2090,6 +2180,125 @@ test.describe('a payment that runs behind the Passport (2026/09/25)', () => {
     await expect(sendPill(page)).toContainText(/Sending 10 mUSD to /);
     await expect(sendPill(page).locator('.mnsendp-phase')).toHaveText('Confirming…');
     await expect(page.getByTestId('send-progress-row')).toContainText('Confirming…');
+    /* It was handed over before the reload, and the chain — not this tab — says
+       what it came to, so closing Passport now cannot stop it, and nothing asks
+       the browser to warn. */
+    await expect(page.getByTestId('send-progress-row')).toContainText('Closing Passport now will not stop it.');
+    await expect(sendPill(page).getByTestId('send-keep-open')).toHaveCount(0);
+    await close();
+  });
+});
+
+/**
+ * Every state the pill has been in, from here on — so a walk can say a
+ * failure never showed, not merely that it is not showing now.
+ */
+async function recordPillStates(page: Page): Promise<() => Promise<string[]>> {
+  await page.evaluate(() => {
+    const w = window as unknown as { __pillStates: string[] };
+    w.__pillStates = [];
+    const look = () => {
+      const state = document.querySelector('[data-testid="send-progress"]')?.getAttribute('data-state');
+      if (state && w.__pillStates[w.__pillStates.length - 1] !== state) w.__pillStates.push(state);
+    };
+    new MutationObserver(look).observe(document.body, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeFilter: ['data-state'],
+    });
+  });
+  return () => page.evaluate(() => (window as unknown as { __pillStates: string[] }).__pillStates);
+}
+
+/** Fills in 5 mUSD to a pasted shielded address and confirms it. */
+async function payFiveMusdToAddress(page: Page): Promise<void> {
+  await openSend(page);
+  await chooseAsset(page, 'mUSD');
+  await sendRecipient(page).fill(THROWAWAY_ADDRESS);
+  await sendAmount(page).fill('5');
+  await expect(page.getByRole('button', { name: /^Review$/ })).toBeEnabled({ timeout: 30_000 });
+  await page.getByRole('button', { name: /^Review$/ }).click();
+  await page.locator('.mnhome-send-primary').click();
+}
+
+/**
+ * THE LIVE WALK OF 2026/09/26, ON STAGENET: 10 mUSD to a name landed, and a
+ * 5 mUSD payment to a shielded address confirmed straight after it went to
+ * "Not sent — Your Passport is still finishing the last thing you asked it to
+ * do" with a Try again button, and nothing moved for eight minutes. "Sent" is
+ * said the moment a payment has its answer; the account is busy for a while
+ * after that, writing down the change it kept. A payment confirmed in that
+ * window now waits for it, says so, and goes by itself.
+ */
+test.describe('a second payment straight after the first (2026/09/26)', () => {
+  test('waits for the last one to finish, says so on the pill and the row, and lands with no retry', async ({
+    browser,
+  }) => {
+    const { page, close } = await passkeyPassportOnHome(browser, {
+      beforeOpen: walkPayment({ stepMs: 500, tidyUpMs: 15_000 }),
+    });
+    const pillStates = await recordPillStates(page);
+    await payTenMusd(page);
+    await expect(sendPill(page)).toHaveAttribute('data-state', 'sent', { timeout: 30_000 });
+    await expect(sendPill(page)).toContainText(/Sent 10 mUSD to /);
+
+    /* Straight away, while the first one's change is still being written. */
+    await payFiveMusdToAddress(page);
+    await expect(page.locator('.mnhome-send')).toHaveCount(0);
+    await expect(sendPill(page)).toHaveAttribute('data-state', 'running');
+    await expect(sendPill(page)).toContainText(/Sending 5 mUSD to /);
+    await expect(sendPill(page).locator('.mnsendp-phase')).toHaveText(
+      'Waiting for your last payment to finish…',
+    );
+    const row = page.getByTestId('send-progress-row');
+    await expect(row).toContainText('Pending');
+    await expect(row).toContainText('Waiting for your last payment to finish…');
+    /* The details say the same, as the step it is on. */
+    await row.getByRole('button', { name: /^Sending 5 mUSD to .+ — view progress$/ }).click();
+    const details = page.getByTestId('send-progress-sheet');
+    await expect(details.locator('[aria-current="step"]')).toHaveText('Waiting for your last payment');
+    await details.getByRole('button', { name: 'Close' }).first().click();
+    await expect(details).toHaveCount(0);
+
+    /* It goes by itself once the first has finished — nobody presses anything. */
+    await expect(sendPill(page).locator('.mnsendp-phase')).toHaveText(/Proving…|Confirming…/, {
+      timeout: 30_000,
+    });
+    await expect(sendPill(page)).toHaveAttribute('data-state', 'sent', { timeout: 30_000 });
+    await expect(sendPill(page)).toContainText(/Sent 5 mUSD to /);
+    /* And "Not sent" was never on the screen. */
+    expect(await pillStates()).not.toContain('failed');
+    await expect(page.getByText(/still finishing the last thing/)).toHaveCount(0);
+    await close();
+  });
+
+  test('ends in the one sentence, with Try again, if the last one never finishes within the bound', async ({
+    browser,
+  }) => {
+    const { page, close } = await passkeyPassportOnHome(browser, {
+      beforeOpen: async (page) => {
+        await walkPayment({ stepMs: 300, tidyUpMs: 120_000 })(page);
+        await page.addInitScript(() => {
+          (window as unknown as { __passportCustodyBounds?: unknown }).__passportCustodyBounds = {
+            prepareWaitMs: 6_000,
+          };
+        });
+      },
+    });
+    await payTenMusd(page);
+    await expect(sendPill(page)).toHaveAttribute('data-state', 'sent', { timeout: 30_000 });
+    await payFiveMusdToAddress(page);
+    await expect(sendPill(page).locator('.mnsendp-phase')).toHaveText(
+      'Waiting for your last payment to finish…',
+    );
+    await expect(sendPill(page)).toHaveAttribute('data-state', 'failed', { timeout: 30_000 });
+    await expect(sendPill(page)).toContainText(
+      'Your Passport is still finishing the last thing you asked it to do. Try again in a moment.',
+    );
+    await expect(page.getByTestId('send-progress-row')).toContainText('Not sent');
+    /* Exact: the sentence itself says "Try again in a moment". */
+    await expect(sendPill(page).getByRole('button', { name: 'Try again', exact: true })).toBeVisible();
     await close();
   });
 });

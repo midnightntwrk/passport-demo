@@ -107,6 +107,8 @@ export interface AssetsScreenProps {
    * person opens to check what arrived; omit it and no control appears.
    */
   onRefresh?: () => void
+  /** The account watch's cheap look, as Home takes it. See `HomeScreenProps`. */
+  onWatch?: (context: { chasing: boolean }) => Promise<boolean>
   /**
    * The activity trail, so this screen can say what is on its way but has not
    * landed. Optional: omit it and no such line appears.
@@ -144,7 +146,7 @@ interface AssetRow {
 }
 
 export default function AssetsScreen(props: AssetsScreenProps) {
-  const { account, pendingBalances, onRefresh, activity, setupUnfinished } = props
+  const { account, pendingBalances, onRefresh, onWatch, activity, setupUnfinished } = props
 
   /* What has been announced and has not landed. One line under the token
      shelf, from the trail, gone the moment the balances themselves say it —
@@ -169,6 +171,7 @@ export default function AssetsScreen(props: AssetsScreenProps) {
   useBalanceWatch({
     active: Boolean(account),
     refresh: onRefresh,
+    look: onWatch,
     signature: holdingsSignature(account),
     chaseKey: `${onTheWay.length}|${activity?.[0]?.id ?? ''}|${activity?.[0]?.status ?? ''}`,
   })

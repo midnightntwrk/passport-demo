@@ -1017,13 +1017,20 @@ export function custodyStoppedSendVerdict(input: {
   return 'checking';
 }
 
-/** The sentence for each verdict, about the person it was paid to. */
+/**
+ * The sentence for a verdict somebody has to read, about the person it was
+ * paid to.
+ *
+ * `'landed'` IS NOT TAKEN, ON PURPOSE (2026/09/25). A payment that landed is
+ * recorded in the activity list, not announced in Home's alert strip, so there
+ * is no sentence for it and the type refuses one — a caller cannot wire the old
+ * "Sent." banner back in by passing the verdict through.
+ */
 export function custodyStoppedSendSentence(
   record: CustodyShieldedSendRecord,
-  verdict: 'landed' | 'not-landed' | 'checking',
+  verdict: 'not-landed' | 'checking',
 ): string {
   const who = record.recipientLabel.trim().length > 0 ? record.recipientLabel.trim() : 'them';
-  if (verdict === 'landed') return `Sent. ${who} has it.`;
   if (verdict === 'not-landed') return CUSTODY_SEND_NOT_SENT;
   return `Checking whether your payment to ${who} went through…`;
 }
@@ -1114,9 +1121,11 @@ export function nextCustodyShieldedSendStep(
  * numbers, no circuit names, no proving service, and no claim that the value
  * came back unless it did.
  */
-export function custodyShieldedSendOutcome(record: CustodyShieldedSendRecord): string {
-  const who = record.recipientLabel.trim().length > 0 ? record.recipientLabel.trim() : 'them';
-  if (record.stage === 'done') return `Sent. ${who} has it.`;
+export function custodyShieldedSendOutcome(record: CustodyShieldedSendRecord): string | null {
+  /* A PAYMENT THAT LANDED IS OWED NO SENTENCE (2026/09/25). It is a row in the
+     activity list, not a line in Home's alert strip, so `null` here: there is
+     no "Sent." wording left for a screen to show by accident. */
+  if (record.stage === 'done') return null;
   /* NO TRANSACTION EVER EXISTED, so there is a stronger thing to say than the
      one below, and saying the weaker one would be hedging about money that
      demonstrably never moved. `sendTxId` is written on the `confirm` phase, the

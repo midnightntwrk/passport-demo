@@ -83,7 +83,7 @@ export async function mountDynamic(): Promise<void> {
     host.id = 'mn-dynamic-root'
     document.body.appendChild(host)
 
-    const { DynamicContextProvider, useDynamicContext } = core
+    const { DynamicContextProvider, useDynamicContext, useRefreshUser, useUserUpdateRequest } = core
 
     /**
      * Reads Dynamic's context and publishes it. Renders nothing: the only
@@ -96,6 +96,14 @@ export async function mountDynamic(): Promise<void> {
          than on the whole context object, which is rebuilt on every one of the
          SDK's own renders and would re-register the actions each time. */
       const { setShowAuthFlow, handleLogOut, sdkHasLoaded, user } = context
+      /* THE USER'S METADATA, READ AND WRITTEN (2026/09/26), for the key that
+         reads a Passport's payments, kept beside its way back — see
+         `../identity/signInViewingKeys.ts`. `updateUser` is the SDK's own
+         (`useUserUpdateRequest`, typed in 5.8.0's
+         `useUpdateUser.d.ts`); `useRefreshUser` re-reads the user from the
+         provider rather than this browser's copy. */
+      const { updateUser } = useUserUpdateRequest()
+      const refreshUser = useRefreshUser()
 
       /* Both writes are effects rather than render-time statements. The store
          they write wakes `useSyncExternalStore` subscribers in the OTHER root,
@@ -157,8 +165,27 @@ export async function mountDynamic(): Promise<void> {
           signOut: async () => {
             await handleLogOut()
           },
+          /* `user.metadata` is the copy the sign-in itself filled — the
+             provider's sign-in answer carries it (`SdkUser.metadata`, and
+             `convertSdkUserToUserProfile` passes it through) — so a new device
+             that has just signed in reads it with no further request. */
+          readMetadata: async ({ fresh }) => {
+            if (!user) throw new Error('Sign in first — there is nobody to read.')
+            if (!fresh) return user.metadata
+            const refreshed = await refreshUser()
+            return refreshed?.metadata
+          },
+          /* The SDK merges the top level of what it is given over its own copy
+             before it sends it; the caller has already merged over a fresh
+             read, so what is sent is the whole of what should be kept. The
+             answer is the provider's own record of the user. */
+          writeMetadata: async (metadata) => {
+            if (!user) throw new Error('Sign in first — there is nobody to write to.')
+            const result = await updateUser({ metadata: { ...metadata } })
+            return result.updateUserProfileResponse.user.metadata
+          },
         })
-      }, [setShowAuthFlow, handleLogOut, wallet])
+      }, [setShowAuthFlow, handleLogOut, wallet, user, updateUser, refreshUser])
 
       return null
     }

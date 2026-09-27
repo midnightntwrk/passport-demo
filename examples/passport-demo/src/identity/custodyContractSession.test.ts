@@ -19,6 +19,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  adoptionApproverRecord,
   DYNAMIC_SETUP_STEPS,
   CUSTODY_MARKER_CIRCUIT,
   custodyArmFromOperations,
@@ -677,3 +678,71 @@ describe('custodyArmFromOperations', () => {
   });
 });
 
+/* -------------------------------------------------------------------------- */
+/* The sign-in's own record, on a device that has never held it (2026/09/26)  */
+/* -------------------------------------------------------------------------- */
+
+describe('the record a sign-in approves a new device against', () => {
+  const SIGN_IN = '0x00a329c0648769a73afac7f9381e08fb43dbea72';
+  const FOUND = 'cd'.repeat(32);
+  const PK = { x: 0xabcn, y: 0x0def01n };
+  const ask = (stored: CustodyAccountRecord | null) =>
+    adoptionApproverRecord({ stored, user: SIGN_IN, network: 'stagenet', address: FOUND, pk: PK });
+
+  it('is written on a device that has none — the live defect of 2026/09/26', () => {
+    /* A new device holds nothing for the sign-in, and every gated call reads
+       its signer's record first. So the add refused before it asked for a
+       signature. What is written now is what the check just established. */
+    expect(ask(null)).toEqual({
+      kind: 'write',
+      record: recoveredCustodyRecord({
+        user: SIGN_IN,
+        network: 'stagenet',
+        address: FOUND,
+        privateStateId: k1PrivateStateId(SIGN_IN),
+        pkXHex: 'abc',
+        pkYHex: 'def01',
+      }),
+    });
+  });
+
+  it('is in the shape a Passport found by a sign-in has always been written in', () => {
+    const decided = ask(null);
+    if (decided.kind !== 'write') throw new Error('expected a record to write');
+    /* Finished: activated and every wave in, because an account whose device
+       set holds this key has been through all of it. No salt: activation is
+       behind it. Unpadded hex for the point, as `findByName` writes it. */
+    expect(decided.record).toMatchObject({
+      user: SIGN_IN,
+      address: FOUND,
+      privateStateId: 'passport-account-custody-00a329c0',
+      saltHex: '',
+      pkXHex: 'abc',
+      pkYHex: 'def01',
+      activated: true,
+    });
+    expect(decided.record.wavesDone).toBe(decided.record.totalWaves);
+  });
+
+  it('is used as it is when this device already holds a finished one for the same account', () => {
+    expect(ask({ ...RECORD, user: SIGN_IN, address: FOUND })).toEqual({ kind: 'ready' });
+    /* The address is hex; its case is not part of it. */
+    expect(ask({ ...RECORD, user: SIGN_IN, address: FOUND.toUpperCase() })).toEqual({ kind: 'ready' });
+  });
+
+  it('never writes over a finished Passport this sign-in already opens here', () => {
+    expect(ask({ ...RECORD, user: SIGN_IN, address: 'ee'.repeat(32) })).toEqual({ kind: 'other-passport' });
+  });
+
+  it('replaces a setup that was never finished, whose account holds nothing', () => {
+    for (const unfinished of [
+      { ...RECORD, user: SIGN_IN, address: null, activated: false, wavesDone: 0 },
+      { ...RECORD, user: SIGN_IN, address: 'ee'.repeat(32), activated: false, wavesDone: 1 },
+      { ...RECORD, user: SIGN_IN, address: 'ee'.repeat(32), activated: false, interrupted: true },
+    ]) {
+      const decided = ask(unfinished);
+      expect(decided.kind).toBe('write');
+      if (decided.kind === 'write') expect(decided.record.address).toBe(FOUND);
+    }
+  });
+});

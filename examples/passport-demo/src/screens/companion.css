@@ -58,8 +58,16 @@ button.mncompanion-row { font: inherit; text-align: left; width: 100%; cursor: p
 .mncompanion-modal .mnid-actions { margin-top: 14px; }
 
 /* The animated face (bot-avatars). The icon circle keeps its 34px size; the
-   face sits inside it without clipping the hop. */
-.mncompanion-face { display: inline-grid; place-items: center; line-height: 0; }
+   face sits inside it without clipping the hop.
+
+   NEVER THE TARGET OF A PRESS (2026/09/25). The face swaps its canvas when it
+   starts or stops moving, and a press that starts on it wakes it — so the
+   canvas under a finger can be replaced between pointerdown and pointerup, and
+   a click whose first half landed on a node that has gone is a click that may
+   never fire. With no pointer events of its own the press always belongs to
+   the control around it. The face still looks at the pointer: the library
+   follows it on the document, not on the canvas. */
+.mncompanion-face { display: inline-grid; place-items: center; line-height: 0; pointer-events: none; }
 .mncompanion-icon { overflow: visible; }
 .mncompanion-icon .mncompanion-face { width: 26px; height: 26px; }
 .mncompanion-mark { width: 40px; height: 40px; background: transparent; }

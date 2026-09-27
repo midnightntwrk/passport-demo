@@ -46,7 +46,7 @@ that file documents each variable and why it exists.
 | What | Port | Needed for |
 |---|---|---|
 | `examples/passport-funder` | 8799 | Sponsored `.night` registration. Needed for a clean onboarding walk-through — see below. |
-| `examples/raffle-demo` (`npm run demo:raffle`) | 5177 | The example dApp in the Apps grid: profile handshake and a Passport-signed payment. |
+| `examples/raffle-demo` (`npm run demo:raffle`) | 5177 | The example dApp (listed in the Apps grid only through `VITE_LOCAL_APP_URL`): profile handshake and a Passport-signed payment. |
 | `examples/passport-profile-client` (`npm run demo:profile-client`) | 5176 | The separate-origin profile consent client ("Atlas"). Superseded in the Apps grid by the raffle since 2026/08/05; still runnable. |
 | `examples/passport-app-template` | 5178 | The starter a third-party developer copies. Point Passport at it with `VITE_LOCAL_APP_URL`. |
 | `examples/clubcoin-mock` | 5181 | The URL-callback (redirect) connector example — the phone-shaped alternative to the popup handshake. |
@@ -127,7 +127,9 @@ within about a minute. The full API, refusal codes, and cost maths are in
 7. **Send.** Send unshielded NIGHT to an address pasted in, or scanned with the
    QR scanner — the camera fills the field and never bypasses it. Fees are
    sponsored; record the returned transaction hash and open it in the explorer.
-8. **Apps.** Open the raffle from the Apps grid. It asks for a profile,
+8. **Apps.** Run the raffle (`npm run demo:raffle`) with Passport's
+   `VITE_LOCAL_APP_URL=http://localhost:5177`, and open it from the Apps grid;
+   Passport no longer lists it by itself (2026/09/25). It asks for a profile,
    Passport shows its own consent sheet, and only approved fields cross the
    origin boundary. Then let it request a payment: the app posts an intent,
    Passport approves and signs, and the node's transaction id comes back.

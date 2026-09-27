@@ -206,10 +206,17 @@ import { useDynamicCustodyArm, usePasskeyCustodyArm } from './lib/custodyArms.js
 /* The way-back hand-off, and what Home may say about a way back. Nothing at run
    time but the standard library, which is why both may be reached statically
    from here — see their module headers. */
-import { adoptionStage, clearAdoption, loadAdoption } from './lib/custodyAdoption.js';
+import {
+  ADOPTION_NOT_ADDED,
+  adoptionStage,
+  clearAdoption,
+  loadAdoption,
+} from './lib/custodyAdoption.js';
 import { RECOVERY_COPY } from './lib/recoveryStep.js';
 /* A TYPE, which is erased: naming it here pulls nothing into the entry chunk. */
 import type { K256DeviceIdentity } from './identity/custodyContractSigning.js';
+/* The same, for the seams the mocked walk hands the second half. */
+import type { CustodyDeps } from './identity/custodyContractClient.js';
 const RecoverWithProvider = lazy(() =>
   runtimesReady().then(() => import('./screens/RecoverWithProvider.js')),
 );
@@ -256,7 +263,6 @@ import type {
    already makes. See the `name-taken` branch in `runClaimBoundToAccount`. */
 import type { NameTakenReading } from './identity/sponsoredAlias.js';
 import { createClaimWarmup } from './identity/claimWarmup.js';
-import { answerEarlierPaymentsOffer, earlierPaymentsOfferDue } from './identity/viewingKeys.js';
 import {
   forgetPassportContractRecordsForCredential,
   loadPassportContractRecord,
@@ -860,6 +866,22 @@ const ACCOUNT_CUSTODY_ON = accountCustodyEnabled({
   walkFlag: import.meta.env.VITE_PASSPORT_ACC_WALK as string | undefined,
   search: window.location.search,
 });
+
+/**
+ * THE MOCKED WALK'S STAND-IN FOR THE CHAIN, for bringing a Passport to a new
+ * device (2026/09/26) — and in every deployed build a function that returns no
+ * seams at all. See `./lib/walkChain.ts`.
+ *
+ * AT MODULE LEVEL AND WRITTEN OUT, as the stand-in sign-in is in `main.tsx`:
+ * Vite turns the flag into a literal, and Rollup deletes the branch, the
+ * `import()`, and the module behind it. Inside a callback the minifier still
+ * dropped the call, but Rollup had already emitted the module as a chunk of
+ * its own that nothing referenced.
+ */
+let walkChainOverrides = (): Promise<Partial<CustodyDeps>> => Promise.resolve({});
+if (import.meta.env.VITE_PASSPORT_ACC_WALK === '1') {
+  walkChainOverrides = () => import('./lib/walkChain.js').then((walk) => walk.walkChainOverrides());
+}
 
 /**
  * The onboarding steps that follow a successful passkey + wallet open.
@@ -1650,12 +1672,6 @@ export default function PassportDemo() {
   );
   const [incentives, setIncentives] = useState<PassportIncentiveRecord[]>(loadIncentives);
   const [identityStep, setIdentityStep] = useState<IdentityStep>(null);
-  /**
-   * Bumped when a recovered Passport answers "bring back your earlier
-   * payments?" (2026/09/26). The question lives in storage, which React does
-   * not watch, so the answer needs a render of its own to take the screen down.
-   */
-  const [, setEarlierPaymentsAnswers] = useState(0);
   /** See {@link AccountSearch}. `null` when nothing is being looked for. */
   const [accountSearch, setAccountSearch] = useState<AccountSearch | null>(null);
   /**
@@ -1873,11 +1889,18 @@ export default function PassportDemo() {
    * Cancels the in-flight §2.2 session restore, if any. A user-initiated
    * ceremony calls it before touching the wallet so the two never both replace
    * `localWalletRef`.
+   *
+   * It also ends the restoring answer (2026/09/26). The restore's own `finally`
+   * leaves that to a run that replaced it, which is right for StrictMode's
+   * remount and wrong here: nothing replaces a restore that a ceremony or a
+   * sign-out cancelled, so the flag stayed up for the rest of the page load,
+   * and the landing now waits on it.
    */
   const sessionRestoreCancel = useRef<(() => void) | null>(null);
   const cancelSessionRestore = useCallback(() => {
     sessionRestoreCancel.current?.();
     sessionRestoreCancel.current = null;
+    setPasskeyRestoring(false);
   }, []);
   const onboardingRunning = useRef(false);
   // The live handle is held in a ref, not in state: it is an object with a
@@ -2250,6 +2273,13 @@ export default function PassportDemo() {
       scope: { appId: string; accountId: string },
       credentialId: string | null,
     ) => {
+      /* The two WASM runtimes first, in order (2026/09/25). The ledger is no
+         longer in the entry chunk, so after a ceremony this is the first thing
+         that reaches it; the landing started the download when it went idle,
+         and what is left of it is waited for here, under a line that says what
+         is happening. See `./lib/runtimeGate.ts`. */
+      setOnboardingBusyLabel('Opening your Passport');
+      await runtimesReady();
       const { createLocalMidnightWallet } = await import('./lib/localWallet.js');
       setLocalWalletStatus('opening');
       // §2.2 stopgap (see the banner near LOCAL_SCOPE): persist the wrapped
@@ -2316,6 +2346,9 @@ export default function PassportDemo() {
         setLocalWalletStatus('opening');
       setOnboardingBusyLabel('Reopening your Passport');
       try {
+        /* Behind the runtimes, for the reason `openLocalWalletWithSeed` gives:
+           this is the other way a wallet is first opened. */
+        await runtimesReady();
         const { createLocalMidnightWallet } = await import('./lib/localWallet.js');
         let wallet: LocalMidnightWallet;
         try {
@@ -2917,7 +2950,7 @@ export default function PassportDemo() {
          user would loop. Both controls the screen already carries do lead
          somewhere from here, and the sentence names them. */
       throw new Error(
-        'You already have a Passport on this device. Choose "Log in" to pick it, or "Sign up" to try again.',
+        'You already have a Passport on this device. Choose "Log in" to pick it, or "Sign up" to make another one.',
       );
     }
     try {
@@ -3094,6 +3127,49 @@ export default function PassportDemo() {
     } catch (cause) {
       if (!(cause instanceof PassportEnrolmentConflictError)) throw enrolmentCeremonyFailure(cause);
       return signInAfterEnrolmentConflict();
+    }
+    return { profile: await adoptEnrolledPasskey(enrolled), created: true };
+  };
+
+  /**
+   * "Sign up" — ALWAYS a new passkey and a new Passport (2026/09/25).
+   *
+   * Until today Sign up ran the old single button's guess: a browser that held
+   * a Passport profile was signed back into it, and even the create path
+   * discovered first, refused outright where a profile existed, and excluded
+   * every known credential — which the platform authenticator answers by
+   * refusing the create whenever it holds ANY of them, and that refusal was
+   * turned into a sign-in. So on a browser that had been used once, Sign up
+   * could only ever reopen the first Passport, unfinished setup and all.
+   *
+   * None of those guards protects anything any more. The user handle has been
+   * random per enrolment since 2026/09/03 (`newUserHandle` in
+   * `demo-backend/src/passkey.ts`), so a create cannot replace a credential; and
+   * every record a Passport keeps here — profile, encrypted state, custody
+   * pointer, name — is keyed by the credential, so the new passkey starts a
+   * Passport of its own beside the old one, which stays exactly as it was and
+   * is reached by "Log in".
+   *
+   * So: ONE enrolment, no discovery, no existing-profile check, no exclusion
+   * list. A dismissed sheet or a device that cannot make a usable passkey is
+   * reported as on every other enrolment.
+   */
+  const signUpNewLocalPassport = async (): Promise<{
+    profile: DemoPassportProfile;
+    created: boolean;
+  }> => {
+    setOnboardingBusyLabel('Creating your Passport passkey');
+    let enrolled: import('./backend.js').EnrolledPassportPasskey;
+    try {
+      enrolled = await withPasskeyWatchdog(() =>
+        WebAuthnPrfKeyProvider.enrollWithPrf({
+          label: 'Midnight Passport',
+          userId: LOCAL_ACCOUNT_ID,
+          knownCredentialIds: [],
+        }),
+      );
+    } catch (cause) {
+      throw enrolmentCeremonyFailure(cause);
     }
     return { profile: await adoptEnrolledPasskey(enrolled), created: true };
   };
@@ -3362,7 +3438,7 @@ export default function PassportDemo() {
   };
 
   const runLocalOnboarding = async (
-    requested: 'create' | 'signin' | 'auto' | 'enrol-new',
+    requested: 'create' | 'signin' | 'auto' | 'enrol-new' | 'signup',
   ) => {
     if (onboardingRunning.current) return;
     onboardingRunning.current = true;
@@ -3383,10 +3459,13 @@ export default function PassportDemo() {
     // the resolved journey below corrects the label.
     setOnboardingIntent(requested === 'signin' ? 'local-signin' : 'local-create');
     setOnboardingBusyLabel('Checking this browser for a Passport');
-    // One button, both journeys (2026/08/05): a stored local profile means the
-    // existing sign-in/unlock flow runs; a clean browser means enrolment.
-    // WebAuthn discoverable credentials mean the assertion path also finds a
-    // passkey synced from another device once a profile exists here.
+    // `signup` is the landing's "Sign up" and always enrols (2026/09/25);
+    // "Log in" is `runDiscoverableSignIn`, and the way-out panels run
+    // `enrol-new`. `auto`, `create`, and `signin` are the old single button's
+    // journeys (a stored profile meant sign-in, a clean browser enrolment):
+    // no control reaches them since Sign up stopped guessing, and they are
+    // left in place until the account-blob write that rides on the targeted
+    // unlock has another home.
     let intent: 'create' | 'signin' = requested === 'signin' ? 'signin' : 'create';
     let activeProfile: DemoPassportProfile | null = null;
     /* What the create journey DID, not what it set out to do: the
@@ -3404,7 +3483,13 @@ export default function PassportDemo() {
       );
       // Both journeys now open the wallet from the SAME ceremony that unlocked
       // the profile — no second passkey prompt to derive the seed.
-      if (requested === 'enrol-new') {
+      if (requested === 'signup') {
+        /* "Sign up": always a new passkey and a new Passport, whatever this
+           browser already holds. See `signUpNewLocalPassport`. */
+        const outcome = await signUpNewLocalPassport();
+        activeProfile = outcome.profile;
+        created = outcome.created;
+      } else if (requested === 'enrol-new') {
         /* The `unusable-credential` recovery, and the ONE path that enrols
            without discovering first. Everything the discover-before-create
            guard protects has already been established here: a credential
@@ -6382,42 +6467,104 @@ export default function PassportDemo() {
     alreadyAdopted: passkeyCustodyUser !== null,
   });
 
+  /**
+   * The one sentence a second half that did not finish is shown with, or null
+   * while it runs (2026/09/26).
+   *
+   * THERE WAS NONE. A failure was a console line; the effect below never ran
+   * again, because nothing it depends on changes when a run fails; and
+   * "Adding this device to …" stayed on screen for ever over a flow that had
+   * already stopped — live on a new device on 2026/09/26. A failure now says
+   * so and offers the press that runs it again, which is safe because every
+   * step of it is.
+   */
+  const [adoptFailure, setAdoptFailure] = useState<string | null>(null);
+
   /* One at a time, and never restarted by a re-render. A second run would ask
      for a second approval for a transaction that is already away. */
   const adoptRunning = useRef(false);
-  useEffect(() => {
+  /**
+   * Runs the second half. The effect below makes the first attempt on its
+   * own; "Try again" makes every later one, from the press itself, so the
+   * passkey prompt it opens is as close to the gesture as it can be.
+   */
+  const runAdoption = useCallback(() => {
     if (adoptStage !== 'adopt' || adoptRunning.current) return;
     const handoff = adoption;
     const credentialId = profile?.passkey.credentialId;
     const session = dynamicArm.session;
     if (handoff === null || !credentialId || session === null) return;
     adoptRunning.current = true;
+    setAdoptFailure(null);
     void (async () => {
       try {
-        const [{ adoptDeviceKey }, identity] = await Promise.all([
+        /* No seams in any deployed build; the mocked walk's stand-in for the
+           chain in its own. See `walkChainOverrides` above. */
+        const [overrides, { bringPassportHere }] = await Promise.all([
+          walkChainOverrides(),
           import('./identity/custodyAdopt.js'),
-          dynamicArm.ensureIdentity(),
         ]);
-        await adoptDeviceKey({
+        /* BOUNDED, AND IT NEVER REJECTS: every way it ends is either the
+           Passport or one sentence. The sign-in's key is asked for inside the
+           bound, because a sign-in can hang as well as a chain. */
+        const outcome = await bringPassportHere({
           handoff,
           contractRoot: passportContractRoot,
           credentialId,
           session,
-          socialDevice: identity.device as K256DeviceIdentity,
+          socialDevice: async () => (await dynamicArm.ensureIdentity()).device as K256DeviceIdentity,
+          provider: dynamicSession.provider,
           storage: window.localStorage,
+          overrides,
         });
+        if (outcome.kind === 'failed') {
+          console.warn('[account-custody] this Passport could not be brought here yet', outcome.cause);
+          setAdoptFailure(outcome.sentence);
+          return;
+        }
         /* CLEARED ONLY ON SUCCESS. A failure is a hand-off to be resumed, and
-           the next open resumes it — every step of it is safe to repeat. */
+           the next press — or the next open — resumes it. */
         clearAdoption(window.localStorage);
         setAdoption(null);
         setRecoverWithProvider(false);
       } catch (cause) {
+        /* Only a module that would not load reaches here; the run itself
+           answers in words. */
         console.warn('[account-custody] this Passport could not be brought here yet', cause);
+        setAdoptFailure(ADOPTION_NOT_ADDED);
       } finally {
         adoptRunning.current = false;
       }
     })();
-  }, [adoptStage, adoption, dynamicArm, passportContractRoot, profile]);
+  }, [adoptStage, adoption, dynamicArm, dynamicSession.provider, passportContractRoot, profile]);
+  useEffect(() => {
+    /* The first attempt, and never a second one on its own: after a failure
+       the next run is the person's press, not a re-render's. */
+    if (adoptFailure !== null) return;
+    runAdoption();
+  }, [adoptFailure, runAdoption]);
+  /**
+   * THE WAY OUT of a second half that did not finish: this recovery is put
+   * down, and the person is back where a sign-in is chosen.
+   *
+   * The key made on this device for it is signed out as well, because it
+   * holds no Passport yet, and a device with a key on it is shown that key's
+   * own screens rather than the way back. Nothing on the Passport changes:
+   * either the add never landed, or it did and this device's key is on the
+   * account unused — and the way back finds it there next time without a
+   * second approval.
+   */
+  const leaveAdoption = () => {
+    if (adoptRunning.current) return;
+    void (async () => {
+      await signOutPassport();
+      clearAdoption(window.localStorage);
+      setAdoption(null);
+      setAdoptFailure(null);
+      setRecoverWithProvider(true);
+      void dynamicSession.signOut();
+    })();
+  };
 
   const showOnboarding =
     !sessionActive ||
@@ -6428,12 +6575,28 @@ export default function PassportDemo() {
     unusableCredential !== null;
   // The §2.2 session restore opens the wallet with no onboarding intent set,
   // so an opening local wallet also reads as the working stage.
+  //
+  // NO LANDING UNTIL THE RESTORE HAS ANSWERED (2026/09/26). The restore reads
+  // its stored session before it marks the wallet as opening, and in that beat
+  // this used to be the welcome stage: Sign up, Log in, and — since Sign up
+  // stopped signing anybody back in — "Already have a Passport on this device?
+  // Log in to carry on with it." over a Passport a few awaits from reopening by
+  // itself. A slow phone showed it for long enough to read, and a press on it
+  // took the reader somewhere they never meant to go: "Log in" raised the
+  // passkey picker for a Passport that needed no ceremony, and "Sign up" made a
+  // second Passport. `passkeyRestoring` is up from the first render on a device
+  // that has signed in before, and comes down on every way out of the restore,
+  // so the welcome stage is painted only once there is nothing to reopen.
+  // (It covers `passkeyProfilePending`, the later beat of the same restore.)
   const onboardingStage: 'welcome' | 'working' =
-    onboardingIntent !== null || localWalletStatus === 'opening' || passkeyProfilePending
+    onboardingIntent !== null || localWalletStatus === 'opening' || passkeyRestoring
       ? 'working'
       : 'welcome';
   const onboardingLabel =
-    onboardingBusyLabel ?? 'Follow the passkey prompt on this device';
+    onboardingBusyLabel ??
+    (passkeyRestoring && onboardingIntent === null
+      ? 'Reopening your Passport'
+      : 'Follow the passkey prompt on this device');
   /**
    * The press that finishes an enrolment the platform could not finish on its
    * own — and the gesture the assertion behind it is spent from.
@@ -6452,7 +6615,9 @@ export default function PassportDemo() {
   };
 
   /** The one onboarding route, plus the `unusable-credential` recovery. */
-  const startPasskeyOnboarding = (intent: 'create' | 'signin' | 'auto' | 'enrol-new') => {
+  const startPasskeyOnboarding = (
+    intent: 'create' | 'signin' | 'auto' | 'enrol-new' | 'signup',
+  ) => {
     void runLocalOnboarding(intent);
   };
 
@@ -9288,14 +9453,7 @@ export default function PassportDemo() {
     const result = await exportPassportBackup(password);
     addActivity({
       label: 'Passport backup exported',
-      /* "No keys are in it" until 2026/09/26. It now holds ONE — the key that
-         reads this Passport's payments — and the trail says so rather than
-         keeping a sentence that stopped being true. See `./identity/backup.ts`. */
-      detail: `Saved as ${result.fileName}, encrypted under a password Passport never stores. ${
-        result.counts.viewingKeyAccounts > 0
-          ? 'It holds the key that reads your payments, and nothing that can spend them.'
-          : 'No keys are in it.'
-      }`,
+      detail: `Saved as ${result.fileName}, encrypted under a password Passport never stores. No keys are in it.`,
       status: 'complete',
       source: 'local',
     });
@@ -9423,10 +9581,6 @@ export default function PassportDemo() {
           ledgerCheck.ran
             ? ` ${ledgerCheck.confirmed} confirmed on ${ledgerCheck.network}, ${ledgerCheck.unconfirmed} not yet.`
             : ''
-        }${
-          /* The line that matters to a Passport that has just come back: the
-             key to what it was sent before this device (2026/09/26). */
-          summary.viewingKeys.restored > 0 ? ' Payments sent before this device can now be read.' : ''
         }`,
         status: 'complete',
         source: 'local',
@@ -9952,37 +10106,6 @@ export default function PassportDemo() {
    * may show.
    */
   const renderCustodyHome = (custody: CustodyHomeView) => {
-    /* THE BACKUP SCREEN, FOR THIS PASSPORT TOO (2026/09/26). It was withheld
-       from a custody Passport because the file restored none of its state; it
-       now carries the one thing such a Passport cannot get back any other way
-       — the key that reads the payments it was sent before a new device — so it
-       is offered here, and asked for once after a recovery. See
-       `./identity/viewingKeys.ts`. */
-    const custodyAccount = custody.accountAddress
-      ? { network: custody.network, address: custody.accountAddress }
-      : null;
-    const earlierPaymentsAsked =
-      custodyAccount !== null && earlierPaymentsOfferDue(window.localStorage, custodyAccount);
-    if (earlierPaymentsAsked || identityStep === 'backup') {
-      return (
-        <BackupScreen
-          purpose={earlierPaymentsAsked ? 'earlier-payments' : 'backup'}
-          onExport={exportPassportState}
-          onRestore={restorePassportState}
-          onDone={() => {
-            /* ANSWERED EITHER WAY. A restore and "Not now" both end the
-               question; "Back up or restore" on Home is the road back to it. */
-            if (custodyAccount !== null) answerEarlierPaymentsOffer(window.localStorage, custodyAccount);
-            setEarlierPaymentsAnswers((count) => count + 1);
-            setIdentityStep(null);
-            /* And read again at once, so a key that came back shows its
-               payments on the Home this press lands on rather than on the
-               next poll. */
-            custody.onRefresh();
-          }}
-        />
-      );
-    }
     const account = custodyHomeAccount(custody.holdings);
     /* The `Arriving` word, and `Transferring` on the asset a payment is moving
        while the pill says it is running — one projection for Home and the
@@ -10029,6 +10152,9 @@ export default function PassportDemo() {
         passportContract={contractRecord ? { record: contractRecord } : null}
         network={custody.network as PassportNetwork}
         syncPercent={custody.syncPercent}
+        /* The watch's cheap look, so a Passport left open reads its account
+           only when something has landed on it. See `lib/balanceWatch.ts`. */
+        onWatch={custody.onWatch}
         account={account}
         /* The `Arriving` word under a figure with coins behind it that have no
            position yet. Never added to the figure itself. */
@@ -10099,12 +10225,15 @@ export default function PassportDemo() {
         /* THE REST OF A SETUP NOTHING ELSE WILL FINISH, and the press that
            does (2026/09/24). Absent in the ordinary case. */
         finishSetup={custody.finishSetup ?? null}
-        /* "Back up or restore", since 2026/09/26. Until then it was hidden
-           here, because the file held only the prototype's stores and would
-           have restored nothing of this Passport. It now carries the viewing
-           key, which is what a new device needs to read the payments this one
-           was sent — see `identity/backup.ts`. */
-        onOpenBackup={() => setIdentityStep('backup')}
+        /* NO BACK-UP FILE FOR THIS PASSPORT, so no control offering one.
+           `identity/backup.ts` exports the prototype's stores — the passkey
+           profile, the alias records, the prototype account — and none of them
+           is where a custody Passport's state lives; the file it would write
+           would restore nothing. Hidden rather than offered and broken.
+           (For a few hours on 2026/09/26 it was offered, because the file
+           carried the key that reads this Passport's payments. That key now
+           travels with the way back instead — `identity/signInViewingKeys.ts`
+           — with no password and no file.) */
         /* THE DEVELOPER PANEL IS OFF. It says "nothing in your Passport is held
            by this key", which is true of a prototype Passport and false of this
            one: here that key IS the device that approves. */
@@ -10133,6 +10262,7 @@ export default function PassportDemo() {
             network={custody.network as PassportNetwork}
             onRefresh={custody.onRefresh}
             activity={homeActivity}
+            onWatch={custody.onWatch}
           />
         ) : (
           /* The apps grid, with NO transfer seam. An app that asks this
@@ -10236,9 +10366,11 @@ export default function PassportDemo() {
           takes one approval from the sign-in and no press at all here, so what
           is on screen is a line saying what is happening — not the welcome page
           the custody screen would otherwise paint over it, and not the
-          dead-end card this road replaced. */}
+          dead-end card this road replaced. Unless it does not finish: then it
+          says so in one sentence, with "Try again" and a way out
+          (2026/09/26). */}
       {adoptStage === 'adopt' ? (
-        <section className="mnob-screen" aria-busy="true">
+        <section className="mnob-screen" aria-busy={adoptFailure === null}>
           <header className="mnob-bar">
             <img className="mnob-wordmark" src="/midnight-wordmark.svg" alt="Midnight" />
             <span className="mnob-bar-label">Passport</span>
@@ -10249,10 +10381,34 @@ export default function PassportDemo() {
               <span>Opening your</span>
               <span>Passport</span>
             </h1>
-            <p className="mnob-lede" role="status" data-testid="adopting">
-              Adding this device to {adoption?.name ?? 'your Passport'}.night. Approve it with the
-              account you just signed in with.
-            </p>
+            {adoptFailure === null ? (
+              <p className="mnob-lede" role="status" data-testid="adopting">
+                Adding this device to {adoption?.name ?? 'your Passport'}.night. Approve it with the
+                account you just signed in with.
+              </p>
+            ) : (
+              /* A SECOND HALF THAT DID NOT FINISH ENDS HERE, NOT IN A SPINNER
+                 (2026/09/26): one sentence, the press that runs it again, and
+                 the way out. */
+              <>
+                <div className="mnob-unusable" role="alert" data-testid="adopt-failed">
+                  <p className="mnob-unusable-copy">{adoptFailure}</p>
+                </div>
+                <div className="mnob-stage">
+                  <button
+                    type="button"
+                    className="mnob-primary"
+                    onClick={runAdoption}
+                    data-testid="adopt-retry"
+                  >
+                    <span className="mnob-primary-copy">{RECOVERY_COPY.adoptRetry}</span>
+                  </button>
+                  <button type="button" className="mnob-alt" onClick={leaveAdoption}>
+                    {RECOVERY_COPY.adoptLeave}
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </section>
       ) : recoverWithProvider && custodyArm === null ? (
@@ -10335,7 +10491,7 @@ export default function PassportDemo() {
           busyLabel={onboardingLabel}
           error={onboardingError}
           hasExistingPassport={localPassportKnown}
-          onContinue={() => startPasskeyOnboarding('auto')}
+          onContinue={() => startPasskeyOnboarding('signup')}
           onUseDifferentPasskey={() => void runDiscoverableSignIn()}
           /* "Lost your device? Recover with …" — and nothing else on this screen is a
              provider sign-in any more. Absent where the build has none, which

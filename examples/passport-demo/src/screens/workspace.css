@@ -144,39 +144,9 @@
 }
 .mnhome-discover .mnapps-list { grid-template-columns: minmax(0, 1fr); }
 .mnapps-card { box-shadow: none; border-radius: 18px; padding: 20px; }
-.mnapps-card-illustrated { grid-template-columns: 78px minmax(0, 1fr) 16px; }
-.mnapps-card-art {
-  grid-column: auto;
-  width: 78px;
-  height: 88px;
-  margin: 0;
-  border-radius: 14px;
-}
-.mnapps-card-art .mnraffle-art { width: 72px; }
 .mnapps-card-copy strong { font-size: 16px; font-weight: 650; }
 .mnapps-card-copy small { line-height: 1.6; }
 .mnapps-list:has(> :only-child) { grid-template-columns: minmax(0, 1fr); }
-/* Home's featured card gets its own hierarchy; the Apps catalogue stays a
-   compact, consistent list. The existing SVG follows the active theme. */
-.mnhome-discover .mnapps-card-illustrated {
-  min-height: 0;
-  grid-template-columns: minmax(0, 1fr) 40px;
-  gap: 16px 10px;
-  padding: 16px;
-  border-radius: 20px;
-  overflow: hidden;
-}
-.mnhome-discover .mnapps-card-art {
-  grid-column: 1 / -1;
-  width: auto;
-  height: 128px;
-  margin: -16px -16px 0;
-  border-radius: 19px 19px 0 0;
-  background:
-    radial-gradient(circle at 50% 80%, var(--mn-accent-soft), transparent 65%),
-    var(--mn-surface-card);
-}
-.mnhome-discover .mnapps-card-art .mnraffle-art { width: 174px; }
 .mnhome-discover .mnapps-card-copy { gap: 8px; align-self: center; }
 .mnhome-discover .mnapps-card-copy strong { font-size: 17px; font-weight: 700; }
 .mnhome-discover .mnapps-card-copy small { font-size: 13px; line-height: 1.5; }
@@ -338,9 +308,6 @@
   .mnassets-shelf,
   .mnapps-section[aria-labelledby='mnapps-featured'] { padding: 16px; }
   .mnapps-card { padding: 14px; gap: 10px; }
-  .mnapps-card-illustrated { grid-template-columns: 54px minmax(0, 1fr) 12px; }
-  .mnapps-card-art { width: 54px; height: 70px; }
-  .mnapps-card-art .mnraffle-art { width: 54px; }
   .mnhome-addr-modal { padding: 18px; }
   .mnhome-activity-day { padding: 14px; }
 }
@@ -375,6 +342,8 @@
   .mnhome-body { padding-top: 36px; padding-bottom: 40px; gap: 28px; }
   .mnhome-overview,
   .mnhome-discover { grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr); gap: 24px; }
+  /* No apps listed on this network: the activity feed takes the whole row. */
+  .mnhome-discover:has(> :only-child) { grid-template-columns: minmax(0, 1fr); }
   .mnhome-passport-column > .mnid-card:not(.mnid-account) { min-height: 216px; padding: 28px; }
   .mnhome-passport-column > .mnid-card:not(.mnid-account)::before { width: 32px; height: 32px; top: 28px; right: 28px; }
   .mnhome-passport-column .mnid-card-head { flex-direction: column; align-items: flex-start; }
@@ -404,20 +373,6 @@
   .mnapps-screen { padding-bottom: 48px; }
   .mnapps-list { gap: 20px; }
   .mnapps-card { min-height: 144px; }
-  .mnhome-discover .mnapps-card-illustrated {
-    grid-template-columns: 144px minmax(0, 1fr) 40px;
-    min-height: 176px;
-    gap: 20px;
-    padding: 16px;
-  }
-  .mnhome-discover .mnapps-card-art {
-    grid-column: auto;
-    width: 144px;
-    height: 144px;
-    margin: 0;
-    border-radius: 14px;
-  }
-  .mnhome-discover .mnapps-card-art .mnraffle-art { width: 126px; }
   .mnid-bar { min-height: 80px; }
   .mnid-body { width: min(100% - 80px, 680px); flex: 0 1 auto; padding-top: 48px; }
   .mnid-screen .mnid-lede { max-width: 560px; }

@@ -13,8 +13,15 @@
  * Passport, and on 2026/09/05 it stopped being: a sign-in no longer asks for
  * the extension, because the one ceremony a fresh container runs is the one
  * that must not be narrowed by it. See the note above the second and third
- * tests. The blob is still written, still survives, and is still read back off
- * the authenticator here — what changed is that nothing waits on it.
+ * tests. What changed is that nothing waits on it.
+ *
+ * AND SINCE 2026/09/25 NOTHING ON THE LANDING WRITES IT. The write rode on the
+ * targeted unlock the landing's main button used to run; "Sign up" now always
+ * makes a new Passport, and "Log in" is the platform's picker, which carries no
+ * largeBlob slice. So the walks below no longer read a blob back — they hold
+ * the part that was always the point: the passkey that holds a Passport is
+ * never created over. The walk that needs a blob on the credential is parked
+ * as `fixme` until the ride-along has a new home.
  *
  * Both halves of it were broken, and both were reproduced in a browser before
  * either was fixed:
@@ -224,11 +231,11 @@ async function clearSiteData(h: Harness): Promise<void> {
   });
 }
 
-/** Signs in, writing the pending blob on the assertion — a real claim's next visit. */
-async function signInAndWriteBlob(h: Harness): Promise<void> {
+/** Signs back in through "Log in" — a real claim's next visit. */
+async function signInAgain(h: Harness): Promise<void> {
   await dropSession(h);
   await h.page.reload();
-  await h.page.getByRole('button', { name: SIGN_IN_BUTTON }).click();
+  await h.page.getByRole('button', { name: 'Log in', exact: true }).click();
   await expect(h.page.getByText(/Your account is ready/)).toBeVisible({ timeout: 60_000 });
 }
 
@@ -244,13 +251,11 @@ test('a passkey that survives a cleared browser is never created over', async ({
   try {
     const credentialId = await enrol(h);
     await seedClaim(h, credentialId, PASSPORT_ACCOUNT_ADDRESS);
-    await signInAndWriteBlob(h);
+    await signInAgain(h);
 
     const before = await credentials(h);
     expect(before).toHaveLength(1);
     expect(before[0]?.id).toBe(credentialId);
-    // The account rode onto the credential on the sign-in's own assertion.
-    expect(before[0]?.blob).toContain(PASSPORT_ACCOUNT_ADDRESS);
 
     await clearSiteData(h);
     await h.page.reload();
@@ -262,8 +267,8 @@ test('a passkey that survives a cleared browser is never created over', async ({
     const after = await credentials(h);
     const survivor = after.find((credential) => credential.id === credentialId);
     expect(survivor, 'the passkey holding the account was replaced').toBeDefined();
-    expect(survivor?.blob).toContain(PASSPORT_ACCOUNT_ADDRESS);
-    expect(survivor?.blob).toContain(NAME);
+    /* Sign up made a SECOND passkey beside it, which is what it is for. */
+    expect(after).toHaveLength(2);
   } finally {
     await h.context.close();
   }
@@ -303,7 +308,7 @@ test('a passkey found on a forgetful browser is signed in to, and the name is a 
   try {
     const credentialId = await enrol(h);
     await seedClaim(h, credentialId, PASSPORT_ACCOUNT_ADDRESS);
-    await signInAndWriteBlob(h);
+    await signInAgain(h);
     await clearSiteData(h);
     await h.page.reload();
 
@@ -319,20 +324,20 @@ test('a passkey found on a forgetful browser is signed in to, and the name is a 
     await expect(h.page.getByRole('button', { name: /find my Passport/i })).toBeVisible();
 
     /* AND NOTHING WAS DESTROYED GETTING HERE — the whole point of the file.
-       One credential, the one that was enrolled, with the blob a real
-       assertion wrote still on it. A sign-in that recovers nothing is
-       recoverable; a sign-in that CREATED over this would not be. */
+       One credential, the one that was enrolled. A sign-in that recovers
+       nothing is recoverable; a sign-in that CREATED over this would not be. */
     const after = await credentials(h);
     expect(after).toHaveLength(1);
     expect(after[0]?.id).toBe(credentialId);
-    expect(after[0]?.blob).toContain(PASSPORT_ACCOUNT_ADDRESS);
-    expect(after[0]?.blob).toContain(NAME);
   } finally {
     await h.context.close();
   }
 });
 
-test('a blob naming an account the chain will not answer for holds nothing up', async ({
+/* PARKED (2026/09/25): it needs the app to have written a blob onto the
+   credential, and the only write rode on the targeted unlock the landing no
+   longer runs. See this file's header. */
+test.fixme('a blob naming an account the chain will not answer for holds nothing up', async ({
   browser,
 }) => {
   /* THE OTHER HALF, INVERTED BY THE SAME CHANGE. This blob names an address
@@ -350,7 +355,7 @@ test('a blob naming an account the chain will not answer for holds nothing up', 
   try {
     const credentialId = await enrol(h);
     await seedClaim(h, credentialId, UNFINDABLE_ADDRESS);
-    await signInAndWriteBlob(h);
+    await signInAgain(h);
     await clearSiteData(h);
     await h.page.reload();
 

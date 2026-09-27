@@ -37,6 +37,21 @@
  *   front of somebody. Slow on purpose: it is a courtesy, not a subscription,
  *   and a Passport left open on a desk should not be a load generator.
  *
+ * WITH A CHEAP LOOK (2026/09/25), both cadences change shape. Where the screen
+ * can ask "has anything landed on this account since it was last read?" for a
+ * hundred bytes, it does, every {@link BALANCE_WATCH_LOOK_FIRST_MS} — further
+ * apart, up to {@link BALANCE_WATCH_LOOK_CEILING_MS}, while the answer stays no
+ * and nothing is being chased. The whole read — the account's state, 64 KB on
+ * stagenet and 152 KB in the recorded fixture, a ledger decode, and the
+ * delivery walk — happens only when the answer is yes, or when
+ * {@link accountReadDue} says one is owed anyway: every
+ * {@link BALANCE_WATCH_STEADY_MS} while a chase runs or a coin waits for its
+ * position, and otherwise as a safety net. Measured on a Samsung phone left on
+ * Home, that read twice a minute was most of the network the tab used and a
+ * good part of its main thread, while a payment somebody else made could sit
+ * unseen for thirty seconds; with the look it shows within about five, for a
+ * fraction of the bytes. A screen with no look keeps both cadences above.
+ *
  * WHAT IT DELIBERATELY DOES NOT DO
  * --------------------------------
  * It never invents a figure. A watch only decides WHEN to ask; what comes back
@@ -102,6 +117,168 @@ export const BALANCE_WATCH_BUSY_STANDOFF_MS = 2_000;
 
 /** How the growth between chase reads is shaped. Gentle: 5s, 7.5s, 11.2s… */
 const CHASE_GROWTH = 1.5;
+
+/**
+ * The first cheap look, and the one after anything has moved.
+ *
+ * Three seconds, so that a payment landing on an account somebody is looking
+ * at shows within a few seconds of the indexer having it — the bar a person
+ * holding two phones side by side actually applies.
+ */
+export const BALANCE_WATCH_LOOK_FIRST_MS = 3_000;
+
+/**
+ * The widest the cheap looks grow while nothing moves.
+ *
+ * The backoff is real but short, on purpose: a look is one small POST, and the
+ * ceiling is what bounds how late an unannounced payment can be. Five seconds
+ * plus a round trip is still "a few seconds".
+ */
+export const BALANCE_WATCH_LOOK_CEILING_MS = 5_000;
+
+/**
+ * The longest the whole read is left undone while every look says nothing
+ * moved — a safety net rather than a cadence.
+ *
+ * Nothing about the account can change without a new action on it, so in
+ * principle the look is enough. The net is there for what is not an action:
+ * a coin whose position the indexer had not answered for yet, and an indexer
+ * that answered the look from a replica a block behind the one that answers
+ * the state.
+ */
+export const BALANCE_WATCH_QUIET_READ_MS = 5 * 60_000;
+
+/** How the gap between cheap looks grows: 3s, 4.5s, then the ceiling. */
+const LOOK_GROWTH = 1.5;
+
+/**
+ * How long to wait before the next cheap look.
+ *
+ * `quietLooks` is how many looks in a row have found nothing to read. Any look
+ * that did read puts it back to zero, because an account that just moved is
+ * the one most likely to move again — a send's change, a second payment.
+ */
+export function nextLookDelayMs(quietLooks: number): number {
+  const grown = BALANCE_WATCH_LOOK_FIRST_MS * LOOK_GROWTH ** Math.max(0, quietLooks);
+  return Math.round(Math.min(grown, BALANCE_WATCH_LOOK_CEILING_MS));
+}
+
+/**
+ * Whether a cheap look should go on to read the whole account.
+ *
+ * `head` is what the look was just told about the newest action on the
+ * account, `headAtLastRead` what it was told before the last whole read began.
+ * Both are opaque: equal means nothing has landed since, different means
+ * something has, and `null` is a look that could not be answered.
+ *
+ *   - An unanswered look proves nothing either way, so the read falls back to
+ *     the steady cadence it would have had without a look at all. A build whose
+ *     indexer cannot answer the look is therefore exactly as fresh as before.
+ *     So does a last read that could not fetch the state: retrying it every
+ *     few seconds because the head "moved" would turn an indexer that is
+ *     failing into one that is being hammered.
+ *   - A head that moved is the whole point: read now.
+ *   - A coin already delivered but not yet placed is settled by the indexer
+ *     answering a question about an OLD transaction, which moves no head. While
+ *     one is waiting, the steady cadence applies, as it always did. So it does
+ *     while a chase runs: what is announced almost always lands as an action
+ *     on the account, which the look sees within seconds, and the steady read
+ *     is there for whatever does not — a payment of this Passport's own that
+ *     never landed, taken back by the read's reconciliation.
+ *   - Otherwise the safety net, {@link BALANCE_WATCH_QUIET_READ_MS}.
+ */
+export function accountReadDue(input: {
+  head: string | null;
+  headAtLastRead: string | null;
+  sinceLastReadMs: number;
+  arriving: boolean;
+  /** The watch is chasing something announced. See below. */
+  chasing?: boolean;
+  /** The last read could not fetch the state. See below. */
+  lastReadFailed?: boolean;
+}): boolean {
+  if (input.head === null || input.lastReadFailed === true) {
+    return input.sinceLastReadMs >= BALANCE_WATCH_STEADY_MS;
+  }
+  if (input.head !== input.headAtLastRead) return true;
+  if (input.arriving || input.chasing === true) {
+    return input.sinceLastReadMs >= BALANCE_WATCH_STEADY_MS;
+  }
+  return input.sinceLastReadMs >= BALANCE_WATCH_QUIET_READ_MS;
+}
+
+/**
+ * The cheap look, as an indexer request body: the newest action on one
+ * contract, and nothing about it but the transaction it came in.
+ *
+ * `contractAction(address:)` with no offset is the latest action, the same
+ * field midnight-js's own `LATEST_CONTRACT_TX_BLOCK_HEIGHT_QUERY` asks; and
+ * `transaction { hash }` is the selection `custodyActionHistoryQuery` has
+ * asked this indexer for since 2026/09/18. No `state` — that one field is
+ * the 64 KB this exists to avoid. The address travels as a variable, so there
+ * is nothing to escape.
+ */
+export function accountHeadRequest(address: string): string {
+  return JSON.stringify({
+    operationName: 'PassportAccountHead',
+    query:
+      'query PassportAccountHead($address: HexEncoded!) { contractAction(address: $address) { transaction { hash } } }',
+    variables: { address },
+  });
+}
+
+/**
+ * The head a look answered with, or null where the answer says nothing usable.
+ *
+ * An account with no action at all answers `none` rather than null: that is a
+ * real, comparable answer ("nothing yet"), where null means "could not tell".
+ * An answer with errors is null even if some data came back — half an answer
+ * is not one to compare against.
+ */
+export function accountHeadFrom(body: unknown): string | null {
+  if (!body || typeof body !== 'object') return null;
+  const envelope = body as { data?: unknown; errors?: unknown };
+  if (Array.isArray(envelope.errors) && envelope.errors.length > 0) return null;
+  if (!envelope.data || typeof envelope.data !== 'object') return null;
+  if (!('contractAction' in envelope.data)) return null;
+  const action = (envelope.data as { contractAction?: unknown }).contractAction;
+  if (action === null) return 'none';
+  if (!action || typeof action !== 'object') return null;
+  const transaction = (action as { transaction?: unknown }).transaction;
+  if (!transaction || typeof transaction !== 'object') return null;
+  const hash = (transaction as { hash?: unknown }).hash;
+  return typeof hash === 'string' && hash.length > 0 ? hash : null;
+}
+
+/** How long a look may take before it counts as unanswered. */
+export const ACCOUNT_HEAD_TIMEOUT_MS = 8_000;
+
+/**
+ * Asks the indexer for an account's head. Never throws: a look that could not
+ * be made is `null`, which {@link accountReadDue} treats as "cannot tell".
+ *
+ * `fetch` is injected for the drills; the app passes nothing and gets the
+ * browser's.
+ */
+export async function readAccountHead(
+  indexerHttpUrl: string,
+  address: string,
+  options: { fetch?: typeof fetch; timeoutMs?: number } = {},
+): Promise<string | null> {
+  const request = options.fetch ?? ((input, init) => fetch(input, init));
+  try {
+    const response = await request(indexerHttpUrl, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: accountHeadRequest(address),
+      signal: AbortSignal.timeout(options.timeoutMs ?? ACCOUNT_HEAD_TIMEOUT_MS),
+    });
+    if (!response.ok) return null;
+    return accountHeadFrom(await response.json());
+  } catch {
+    return null;
+  }
+}
 
 /** Everything the delay rule needs to know about where a watch has got to. */
 export interface BalanceProbeSchedule {
@@ -221,6 +398,17 @@ export interface BalanceWatchOptions {
   /** The holdings fingerprint RIGHT NOW. Read after each probe settles. */
   signature: () => string;
   /**
+   * The cheap look, where the screen has one: asks whether anything has landed
+   * and reads the account only if so — or if {@link accountReadDue} says a read
+   * is owed, which is why it is told whether a chase is running — answering
+   * whether it read. Given, every tick is a look: every
+   * {@link BALANCE_WATCH_LOOK_FIRST_MS} while chasing, backing off to
+   * {@link BALANCE_WATCH_LOOK_CEILING_MS} otherwise. Absent, every tick is a
+   * full `refresh` on the cadences above, as before. A rejection counts as
+   * "did not read".
+   */
+  look?: (context: { chasing: boolean }) => boolean | Promise<boolean>;
+  /**
    * Whether the Passport is in the middle of something a read must not be
    * piled on top of — see {@link BALANCE_WATCH_BUSY_STANDOFF_MS}. Defaults to
    * "never busy", so a caller that does not know keeps the old behaviour.
@@ -259,10 +447,11 @@ export interface BalanceWatch {
  * second read would be the same answer twice. `resume` is the exception, and
  * deliberately so: a tab coming back from the background has been showing a
  * figure that stopped being watched, and the first thing it owes the reader is
- * a fresh one.
+ * a fresh one. With a cheap look that fresh one is the look, which reads in
+ * full only if something landed while the tab was away.
  *
- * Each read is scheduled after the previous one SETTLED, never on a fixed
- * clock, so a slow indexer cannot be asked twice at once.
+ * Each read — and each look — is scheduled after the previous one SETTLED,
+ * never on a fixed clock, so a slow indexer cannot be asked twice at once.
  */
 export function startBalanceWatch(options: BalanceWatchOptions): BalanceWatch {
   const now = options.now ?? (() => Date.now());
@@ -283,6 +472,10 @@ export function startBalanceWatch(options: BalanceWatchOptions): BalanceWatch {
      the announcement was made. The chase ends when the account stops matching
      it, which is the only evidence available that the thing landed. */
   let chaseBaseline = '';
+  /* With a look: how many looks in a row have found nothing to read. A chase
+     does not let them back off. */
+  const look = options.look;
+  let quietLooks = 0;
 
   const cancel = (): void => {
     if (timer !== null) {
@@ -296,11 +489,13 @@ export function startBalanceWatch(options: BalanceWatchOptions): BalanceWatch {
     cancel();
     const delay =
       delayMs ??
-      nextBalanceProbeDelayMs({
-        chasing,
-        attempt: chaseAttempt,
-        elapsedMs: now() - chaseStartedAt,
-      });
+      (look !== undefined
+        ? nextLookDelayMs(chasing ? 0 : quietLooks)
+        : nextBalanceProbeDelayMs({
+            chasing,
+            attempt: chaseAttempt,
+            elapsedMs: now() - chaseStartedAt,
+          }));
     timer = setTimer(() => {
       timer = null;
       void probe();
@@ -318,11 +513,14 @@ export function startBalanceWatch(options: BalanceWatchOptions): BalanceWatch {
     }
     inFlight = true;
     if (chasing) chaseAttempt += 1;
+    let read = false;
     try {
-      await options.refresh();
+      if (look === undefined) await options.refresh();
+      else read = (await look({ chasing })) === true;
     } catch {
       /* A read that could not be made says nothing about the money. The screen
-         shows its own unavailable state; the watch simply asks again. */
+         shows its own unavailable state; the watch simply asks again. A look
+         that threw read nothing. */
     } finally {
       inFlight = false;
       if (!stopped) {
@@ -330,6 +528,7 @@ export function startBalanceWatch(options: BalanceWatchOptions): BalanceWatch {
         if (chasing && (options.signature() !== chaseBaseline || chaseIsSpent(now() - chaseStartedAt))) {
           chasing = false;
         }
+        quietLooks = read ? 0 : quietLooks + 1;
         schedule();
       }
     }

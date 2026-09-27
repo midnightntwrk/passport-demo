@@ -75,13 +75,17 @@
  * stale, one that never ends turns a Passport left open into a load generator,
  * one that mistakes a failed read for an arrival stops early, and one that runs
  * in a backgrounded tab is a schedule the browser will throttle into
- * dishonesty. It holds no DOM, no React, no `fetch`, and no clock of its own —
- * the timers and the clock are injected — so all of it is drilled on a
- * hand-wound clock in `src/lib/balanceWatch.test.ts`. Its React wiring is
+ * dishonesty. Since 2026/09/25 it also decides when a cheap look at the
+ * account's newest action is enough and when the whole read is owed, and it
+ * builds and reads that look; one wrong answer there is a payment nobody sees.
+ * It holds no DOM, no React, and no clock of its own — the timers, the clock,
+ * and the look's `fetch` are injected, the browser's being only the default —
+ * so all of it is drilled on a hand-wound clock in
+ * `src/lib/balanceWatch.test.ts`. Its React wiring is
  * `src/screens/useBalanceWatch.ts`, which is out for the same reason every
  * other module in `src/screens` is: it imports React, and there is no jsdom
  * here to render a hook into. That file holds the watch's lifetime, a
- * `visibilitychange` listener, and two refs — no decisions.
+ * `visibilitychange` listener, and three refs — no decisions.
  *
  * `src/lib/buildId.ts` went IN on 2026/09/14, the day it was written. It is
  * one string rewrite, and that rewrite is the whole of the repair for a
@@ -122,6 +126,14 @@
  * finishes — and each is drilled in `src/lib/nodeSubmission.test.ts` against a
  * fake that closes the way polkadot-js does. The SDK glue that opens the real
  * client stays in `src/lib/localWallet.ts`, which is out below.
+ *
+ * `src/lib/paymentLeaveGuard.ts` went IN on 2026/09/26, the day it was
+ * written. It asks the browser to warn before the page goes while a payment has
+ * not been handed to the network, and holds the silent update back for the
+ * same window. Both of its wrong answers are silent: a listener left on the
+ * page keeps it out of the back/forward cache for good, and a hold released
+ * before the listener comes off lets an update reload the page into the
+ * browser's own warning. Each is drilled in `src/lib/paymentLeaveGuard.test.ts`.
  *
  * `src/lib/sendProgress.ts` went IN on 2026/09/25, the day it was written. It
  * decides what the in-progress pill and the live activity row say while a
@@ -306,6 +318,14 @@
  * painted in, `src/screens/Companion.tsx`, stay out with the rest of the
  * `.tsx`.
  *
+ * `src/lib/companionMotion.ts` went IN on 2026/09/25, the day it was written.
+ * It decides when the Companion's face moves — a few seconds on arriving, a few
+ * more when pressed or focused, while a pointer rests on it, and never for
+ * somebody who asked for reduced motion — and when it holds a still frame. The
+ * face left moving was the largest single cost of an idle Home on a phone, so
+ * each answer is a battery answer, and each is drilled on a hand-wound clock in
+ * `src/lib/companionMotion.test.ts`. Its wiring stays in `Companion.tsx`.
+ *
  * `src/lib/endpoints.ts` went IN on 2026/08/31, the day it was written, and it
  * belongs in the denominator because it is the rule that decides WHERE a
  * transaction gets proved and who pays for it. Until that day proving, fee
@@ -357,6 +377,15 @@
  * an in-memory store in `src/lib/activationHold.test.ts`. The sequencing that
  * consults it is four lines in `App.tsx` and stays out with the rest of the app
  * shell.
+ *
+ * `src/lib/midnightAddress.ts` went IN on 2026/09/25, the day it was written.
+ * It is the bech32m reader the Send sheet and the approval ladder use in place
+ * of the wallet SDK's, whose `address-format` dragged the 10 MB ledger in front
+ * of the landing. Every branch in it is an address a screen would call valid
+ * when the send will refuse it, or refuse when the send would have paid it —
+ * so `src/lib/midnightAddress.test.ts` holds it to the SDK's own verdict on
+ * every address type the SDK writes, on six networks, and on each way a string
+ * can fail to be one. It is pure: a string in, a verdict or a throw out.
  *
  * `src/lib/recipientName.ts` went IN on 2026/08/30, the day it was written. It
  * decides which of two completely different things happens to what somebody
@@ -735,15 +764,28 @@
  * carry; all three are drilled in `custodyInboxIndex.test.ts`. It holds no
  * network: a GraphQL document out, somebody else's answer in.
  *
+ * `src/identity/signInViewingKeys.ts` went IN on 2026/09/26 with the module
+ * itself. It keeps a Passport's viewing keys in its sign-in's metadata, beside
+ * the way back, and reads them back when the Passport is brought to a new
+ * device through that sign-in. A key it fails to keep is a set of payments a
+ * recovered device can never see or spend, and a write that replaced rather
+ * than merged would take away whatever else the sign-in keeps — another
+ * account's keys among it — so every branch is drilled in
+ * `signInViewingKeys.test.ts`: the versioned shape and the rows it will not
+ * read, the merge that keeps every other key, the ceiling and the byte budget,
+ * the fresh read a write is built on, the read-back that decides whether a
+ * write counted, and the sign-in that is not this Passport's. It holds no DOM,
+ * no React, and no SDK: the sign-in is two calls, injected or read from the
+ * `dynamicSession.ts` store.
+ *
  * `src/identity/viewingKeys.ts` went IN on 2026/09/26 with the module itself.
- * It holds the EARLIER viewing keys a password backup gives back to a Passport
- * recovered on a new device, and the one question that device is asked about
- * them. A key this module drops is a set of payments that device can never see
- * or spend, and a key it hands back for the wrong account is a walk that opens
- * somebody else's notes, so every branch — the account key, the ceiling that
- * keeps the oldest key, the read-back that decides whether a key was kept, and
- * the question asked once — is drilled in `viewingKeys.test.ts` and
- * `backup.viewingKeys.test.ts`. It holds no DOM, no React, and no network: the
+ * It holds the EARLIER viewing keys a Passport recovered on a new device is
+ * given back by its sign-in (`signInViewingKeys.ts`). A key this module drops
+ * is a set of payments that device can never see or spend, and a key it hands
+ * back for the wrong account is a walk that opens somebody else's notes, so
+ * every branch — the account key, the ceiling that keeps the oldest key, and
+ * the read-back that decides whether a key was kept — is drilled in
+ * `viewingKeys.test.ts`. It holds no DOM, no React, and no network: the
  * storage is handed in.
  *
  * `src/identity/custodySpentCoins.ts` went IN on 2026/09/26 with the module
@@ -869,6 +911,7 @@ export default mergeConfig(
           'src/lib/claimRetry.ts',
           'src/lib/claimSteps.ts',
           'src/lib/companionLink.ts',
+          'src/lib/companionMotion.ts',
           'src/lib/colour.ts',
           'src/lib/custodyAdoption.ts',
           'src/lib/custodyAccountLock.ts',
@@ -886,6 +929,7 @@ export default mergeConfig(
           'src/lib/walletSnapshotCheckpoint.ts',
           'src/lib/indexerFailover.ts',
           'src/lib/installPrompt.ts',
+          'src/lib/midnightAddress.ts',
           'src/lib/nameRecovery.ts',
           'src/lib/oneTxProbe.ts',
           'src/lib/networks.ts',
@@ -893,6 +937,7 @@ export default mergeConfig(
           'src/lib/notifications.ts',
           'src/lib/passkeyRecovery.ts',
           'src/lib/passportIdentity.ts',
+          'src/lib/paymentLeaveGuard.ts',
           'src/lib/qrPayload.ts',
           'src/lib/qrScan.ts',
           'src/lib/recipientName.ts',
@@ -920,6 +965,7 @@ export default mergeConfig(
           'src/identity/claimWarmup.ts',
           'src/identity/k1CoinStore.ts',
           'src/identity/custodyInbox.ts',
+          'src/identity/signInViewingKeys.ts',
           'src/identity/custodyInboxIndex.ts',
           'src/identity/viewingKeys.ts',
           'src/identity/custodySpentCoins.ts',

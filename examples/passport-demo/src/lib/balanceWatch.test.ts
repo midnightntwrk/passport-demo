@@ -16,14 +16,23 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   openingBalanceLegsHeld,
+  ACCOUNT_HEAD_TIMEOUT_MS,
   BALANCE_WATCH_BUSY_STANDOFF_MS,
   BALANCE_WATCH_CHASE_CEILING_MS,
   BALANCE_WATCH_CHASE_FIRST_MS,
   BALANCE_WATCH_CHASE_WINDOW_MS,
+  BALANCE_WATCH_LOOK_CEILING_MS,
+  BALANCE_WATCH_LOOK_FIRST_MS,
+  BALANCE_WATCH_QUIET_READ_MS,
   BALANCE_WATCH_STEADY_MS,
+  accountHeadFrom,
+  accountHeadRequest,
+  accountReadDue,
   chaseIsSpent,
   holdingsSignature,
   nextBalanceProbeDelayMs,
+  nextLookDelayMs,
+  readAccountHead,
   startBalanceWatch,
   type HoldingsSnapshot,
 } from './balanceWatch.js';
@@ -590,5 +599,312 @@ describe('startBalanceWatch', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The cheap look (2026/09/25)                                                */
+/* -------------------------------------------------------------------------- */
+
+describe('nextLookDelayMs', () => {
+  it('looks after three seconds, and backs off to five while nothing moves', () => {
+    expect(nextLookDelayMs(0)).toBe(BALANCE_WATCH_LOOK_FIRST_MS);
+    expect(nextLookDelayMs(1)).toBe(4_500);
+    expect(nextLookDelayMs(2)).toBe(BALANCE_WATCH_LOOK_CEILING_MS);
+    expect(nextLookDelayMs(50)).toBe(BALANCE_WATCH_LOOK_CEILING_MS);
+    expect(nextLookDelayMs(-3)).toBe(BALANCE_WATCH_LOOK_FIRST_MS);
+  });
+
+  it('keeps the slowest look well inside the old steady cadence', () => {
+    /* The point of the look: a payment somebody else makes shows within a few
+       seconds, where the steady read left it unseen for up to thirty. */
+    expect(BALANCE_WATCH_LOOK_CEILING_MS).toBeLessThan(BALANCE_WATCH_STEADY_MS / 5);
+  });
+});
+
+describe('accountReadDue', () => {
+  const quiet = { head: 'h1', headAtLastRead: 'h1', arriving: false } as const;
+
+  it('reads the moment the head moves', () => {
+    expect(accountReadDue({ ...quiet, head: 'h2', sinceLastReadMs: 0 })).toBe(true);
+    /* Never read with a head yet: anything it is told is news. */
+    expect(accountReadDue({ ...quiet, headAtLastRead: null, sinceLastReadMs: 0 })).toBe(true);
+  });
+
+  it('leaves a still account alone until the safety net', () => {
+    expect(accountReadDue({ ...quiet, sinceLastReadMs: BALANCE_WATCH_STEADY_MS })).toBe(false);
+    expect(accountReadDue({ ...quiet, sinceLastReadMs: BALANCE_WATCH_QUIET_READ_MS - 1 })).toBe(false);
+    expect(accountReadDue({ ...quiet, sinceLastReadMs: BALANCE_WATCH_QUIET_READ_MS })).toBe(true);
+  });
+
+  it('keeps the steady cadence while a delivered coin waits for its position', () => {
+    /* Placing it is the indexer answering about an OLD transaction, which
+       moves no head. */
+    const arriving = { ...quiet, arriving: true };
+    expect(accountReadDue({ ...arriving, sinceLastReadMs: BALANCE_WATCH_STEADY_MS - 1 })).toBe(false);
+    expect(accountReadDue({ ...arriving, sinceLastReadMs: BALANCE_WATCH_STEADY_MS })).toBe(true);
+  });
+
+  it('falls back to the steady cadence when the look cannot be answered', () => {
+    const blind = { ...quiet, head: null };
+    expect(accountReadDue({ ...blind, sinceLastReadMs: BALANCE_WATCH_STEADY_MS - 1 })).toBe(false);
+    expect(accountReadDue({ ...blind, sinceLastReadMs: BALANCE_WATCH_STEADY_MS })).toBe(true);
+  });
+
+  it('reads on the steady cadence while a chase runs, whatever the head says', () => {
+    /* What a chase waits for almost always moves the head; the steady read is
+       for what does not — a payment of this Passport's own that never landed. */
+    const chasing = { ...quiet, chasing: true };
+    expect(accountReadDue({ ...chasing, sinceLastReadMs: BALANCE_WATCH_STEADY_MS - 1 })).toBe(false);
+    expect(accountReadDue({ ...chasing, sinceLastReadMs: BALANCE_WATCH_STEADY_MS })).toBe(true);
+    expect(accountReadDue({ ...quiet, chasing: false, sinceLastReadMs: BALANCE_WATCH_STEADY_MS })).toBe(false);
+  });
+
+  it('does not hammer an indexer whose last read failed, however the head moves', () => {
+    const failing = { ...quiet, head: 'h2', lastReadFailed: true };
+    expect(accountReadDue({ ...failing, sinceLastReadMs: 5_000 })).toBe(false);
+    expect(accountReadDue({ ...failing, sinceLastReadMs: BALANCE_WATCH_STEADY_MS })).toBe(true);
+    /* And an explicit `false` is the ordinary rule. */
+    expect(accountReadDue({ ...failing, lastReadFailed: false, sinceLastReadMs: 0 })).toBe(true);
+  });
+});
+
+describe('accountHeadRequest', () => {
+  it('asks for the newest action’s transaction and never for the state', () => {
+    const body = JSON.parse(accountHeadRequest('ab'.repeat(32))) as {
+      operationName: string;
+      query: string;
+      variables: { address: string };
+    };
+    expect(body.operationName).toBe('PassportAccountHead');
+    expect(body.variables).toEqual({ address: 'ab'.repeat(32) });
+    expect(body.query).toContain('contractAction(address: $address)');
+    expect(body.query).toContain('transaction { hash }');
+    /* The one field this exists to avoid asking for. */
+    expect(body.query).not.toContain('state');
+  });
+});
+
+describe('accountHeadFrom', () => {
+  const answer = (contractAction: unknown) => ({ data: { contractAction } });
+
+  it('reads the hash of the newest action', () => {
+    expect(accountHeadFrom(answer({ transaction: { hash: 'f00d' } }))).toBe('f00d');
+  });
+
+  it('answers `none` for an account with no action at all — a real answer', () => {
+    expect(accountHeadFrom(answer(null))).toBe('none');
+  });
+
+  it('answers null for anything it cannot compare against', () => {
+    expect(accountHeadFrom(null)).toBeNull();
+    expect(accountHeadFrom('text')).toBeNull();
+    expect(accountHeadFrom({})).toBeNull();
+    expect(accountHeadFrom({ data: null })).toBeNull();
+    expect(accountHeadFrom({ data: {} })).toBeNull();
+    expect(accountHeadFrom(answer('odd'))).toBeNull();
+    expect(accountHeadFrom(answer({}))).toBeNull();
+    expect(accountHeadFrom(answer({ transaction: 'odd' }))).toBeNull();
+    expect(accountHeadFrom(answer({ transaction: { hash: 7 } }))).toBeNull();
+    expect(accountHeadFrom(answer({ transaction: { hash: '' } }))).toBeNull();
+  });
+
+  it('refuses half an answer', () => {
+    expect(
+      accountHeadFrom({ data: { contractAction: { transaction: { hash: 'f00d' } } }, errors: [{}] }),
+    ).toBeNull();
+    /* An empty error list is no error. */
+    expect(accountHeadFrom({ data: { contractAction: null }, errors: [] })).toBe('none');
+  });
+});
+
+describe('readAccountHead', () => {
+  const ok = (body: unknown) =>
+    Promise.resolve({ ok: true, json: () => Promise.resolve(body) } as unknown as Response);
+
+  it('posts the look to the indexer and reads the head back', async () => {
+    const fetch = vi.fn((_url: RequestInfo | URL, _init?: RequestInit) =>
+      ok({ data: { contractAction: { transaction: { hash: 'beef' } } } }),
+    );
+    await expect(
+      readAccountHead('https://indexer.example/graphql', 'cd'.repeat(32), { fetch, timeoutMs: 50 }),
+    ).resolves.toBe('beef');
+    const [url, init] = fetch.mock.calls[0];
+    expect(url).toBe('https://indexer.example/graphql');
+    expect(init?.method).toBe('POST');
+    expect(init?.body).toBe(accountHeadRequest('cd'.repeat(32)));
+    expect(init?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('never throws: a refusal or a failure is an unanswered look', async () => {
+    const refused = vi.fn(() => Promise.resolve({ ok: false } as Response));
+    await expect(readAccountHead('u', 'a', { fetch: refused })).resolves.toBeNull();
+    const failed = vi.fn(() => Promise.reject(new Error('offline')));
+    await expect(readAccountHead('u', 'a', { fetch: failed })).resolves.toBeNull();
+    const garbled = vi.fn(() =>
+      Promise.resolve({ ok: true, json: () => Promise.reject(new Error('not json')) } as unknown as Response),
+    );
+    await expect(readAccountHead('u', 'a', { fetch: garbled })).resolves.toBeNull();
+  });
+
+  it('uses the browser’s fetch and its own timeout when given neither', async () => {
+    const fetch = vi.fn((_url: RequestInfo | URL, _init?: RequestInit) =>
+      ok({ data: { contractAction: null } }),
+    );
+    vi.stubGlobal('fetch', fetch);
+    const timeout = vi.spyOn(AbortSignal, 'timeout');
+    try {
+      await expect(readAccountHead('u', 'a')).resolves.toBe('none');
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(timeout).toHaveBeenCalledWith(ACCOUNT_HEAD_TIMEOUT_MS);
+    } finally {
+      timeout.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe('startBalanceWatch with a cheap look', () => {
+  it('looks every few seconds instead of reading in full, backing off while nothing moves', async () => {
+    const timers = fakeTimers();
+    const refresh = vi.fn();
+    const look = vi.fn(() => false);
+    const watch = startBalanceWatch({ refresh, look, signature: () => 'a', ...timers });
+    expect(timers.nextDelay()).toBe(BALANCE_WATCH_LOOK_FIRST_MS);
+    await timers.fire();
+    expect(look).toHaveBeenCalledTimes(1);
+    expect(timers.nextDelay()).toBe(4_500);
+    await timers.fire();
+    expect(timers.nextDelay()).toBe(BALANCE_WATCH_LOOK_CEILING_MS);
+    await timers.fire();
+    expect(timers.nextDelay()).toBe(BALANCE_WATCH_LOOK_CEILING_MS);
+    /* The look decides whether to read; the watch never reads in full on its
+       own while it is not chasing. */
+    expect(refresh).not.toHaveBeenCalled();
+    watch.stop();
+  });
+
+  it('comes back to the quick look after a look that read', async () => {
+    const timers = fakeTimers();
+    let moved = false;
+    const look = vi.fn(() => Promise.resolve(moved));
+    const watch = startBalanceWatch({ refresh: vi.fn(), look, signature: () => 'a', ...timers });
+    await timers.fire();
+    await timers.fire();
+    expect(timers.nextDelay()).toBe(BALANCE_WATCH_LOOK_CEILING_MS);
+    moved = true;
+    await timers.fire();
+    expect(timers.nextDelay()).toBe(BALANCE_WATCH_LOOK_FIRST_MS);
+    watch.stop();
+  });
+
+  it('counts a look that threw as one that read nothing', async () => {
+    const timers = fakeTimers();
+    const look = vi.fn((): Promise<boolean> => Promise.reject(new Error('offline')));
+    const watch = startBalanceWatch({ refresh: vi.fn(), look, signature: () => 'a', ...timers });
+    await timers.fire();
+    expect(look).toHaveBeenCalledTimes(1);
+    expect(timers.nextDelay()).toBe(4_500);
+    watch.stop();
+  });
+
+  it('looks every three seconds while chasing, and tells the look it is chasing', async () => {
+    const timers = fakeTimers();
+    const refresh = vi.fn();
+    const look = vi.fn((_context: { chasing: boolean }) => false);
+    const watch = startBalanceWatch({ refresh, look, signature: () => 'unchanged', ...timers });
+    await timers.fire();
+    await timers.fire();
+    expect(timers.nextDelay()).toBe(BALANCE_WATCH_LOOK_CEILING_MS);
+    expect(look).toHaveBeenLastCalledWith({ chasing: false });
+    /* Something is announced: the looks stop backing off, and the look is told
+       — it is the look that decides a chase's full reads (`accountReadDue`). */
+    watch.expectChange();
+    expect(timers.nextDelay()).toBe(BALANCE_WATCH_LOOK_FIRST_MS);
+    await timers.fire();
+    expect(look).toHaveBeenLastCalledWith({ chasing: true });
+    expect(timers.nextDelay()).toBe(BALANCE_WATCH_LOOK_FIRST_MS);
+    await timers.fire();
+    expect(timers.nextDelay()).toBe(BALANCE_WATCH_LOOK_FIRST_MS);
+    expect(refresh).not.toHaveBeenCalled();
+    /* The window spent, the chase ends and the looks back off again. */
+    timers.advance(BALANCE_WATCH_CHASE_WINDOW_MS);
+    await timers.fire();
+    expect(watch.chasing()).toBe(false);
+    expect(timers.nextDelay()).toBeGreaterThan(BALANCE_WATCH_LOOK_FIRST_MS);
+    watch.stop();
+  });
+
+  it('ends a chase when a look finds the figure moved', async () => {
+    const timers = fakeTimers();
+    let holdings: HoldingsSnapshot = EMPTY;
+    const look = vi.fn(() => {
+      holdings = WITH_STABLECOIN;
+      return true;
+    });
+    const watch = startBalanceWatch({
+      refresh: vi.fn(),
+      look,
+      signature: () => holdingsSignature(holdings),
+      ...timers,
+    });
+    watch.expectChange();
+    await timers.fire();
+    expect(watch.chasing()).toBe(false);
+    expect(timers.nextDelay()).toBe(BALANCE_WATCH_LOOK_FIRST_MS);
+    watch.stop();
+  });
+
+  it('looks — rather than reading in full — on the way back from the background', async () => {
+    const timers = fakeTimers();
+    const refresh = vi.fn();
+    const look = vi.fn(() => false);
+    const watch = startBalanceWatch({ refresh, look, signature: () => 'a', ...timers });
+    watch.pause();
+    expect(timers.pendingCount()).toBe(0);
+    watch.resume();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(look).toHaveBeenCalledTimes(1);
+    expect(refresh).not.toHaveBeenCalled();
+    watch.stop();
+  });
+
+  it('stands off a busy Passport before a look too', async () => {
+    const timers = fakeTimers();
+    let busy = true;
+    const look = vi.fn(() => false);
+    const watch = startBalanceWatch({
+      refresh: vi.fn(),
+      look,
+      busy: () => busy,
+      signature: () => 'a',
+      ...timers,
+    });
+    await timers.fire();
+    expect(look).not.toHaveBeenCalled();
+    expect(timers.nextDelay()).toBe(BALANCE_WATCH_BUSY_STANDOFF_MS);
+    busy = false;
+    await timers.fire();
+    expect(look).toHaveBeenCalledTimes(1);
+    watch.stop();
+  });
+
+  it('does not look again once stopped mid-look', async () => {
+    const timers = fakeTimers();
+    const release: ((value: boolean) => void)[] = [];
+    const look = vi.fn(
+      () =>
+        new Promise<boolean>((resolve) => {
+          release.push(resolve);
+        }),
+    );
+    const watch = startBalanceWatch({ refresh: vi.fn(), look, signature: () => 'a', ...timers });
+    await timers.fire();
+    watch.stop();
+    release.forEach((resolve) => resolve(true));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(timers.pendingCount()).toBe(0);
   });
 });

@@ -155,6 +155,69 @@ function stampBuildId(): Plugin {
   };
 }
 
+/**
+ * A module id that is, or carries, one of the WebAssembly runtimes: the ledger,
+ * the on-chain runtime and the contract runtime that wraps it, ZKIR, or a
+ * `.wasm` file of any other name.
+ */
+const WASM_RUNTIME =
+  /[\\/]node_modules[\\/](?:@midnightntwrk[\\/](?:ledger|onchain-runtime)-v\d+|@midnight-ntwrk[\\/](?:compact-runtime|zkir-v\d+|ledger-v\d+|onchain-runtime-v\d+))[\\/]|\.wasm(?:\?|$)/;
+
+/**
+ * Fails the build if the app's entry chunk, or any chunk it statically imports,
+ * contains a WebAssembly runtime.
+ *
+ * WHY (2026/09/25). Every one of those runtimes initialises with a top-level
+ * `await` of its binary, so a static path to one holds the entry chunk — and
+ * React's mount — until it has downloaded and instantiated. The ledger alone is
+ * 10 MB. It sat on that path through the wallet SDK's address codec, recorded
+ * as a known cost, from 2026/09/01 to 2026/09/25; on a Pixel 7 profile with the
+ * CPU slowed four-fold the landing's "Sign up" became clickable 4.8 s after
+ * navigation on fast 4G and 25.0 s on slow 4G, against 0.7 s and 1.9 s once it
+ * was gone. `src/lib/firstPaintGraph.test.ts`
+ * guards the SOURCE graph, which is where a regression is written; this guards
+ * the OUTPUT, which is what a phone downloads, so a path through a package the
+ * source walk does not follow is caught too.
+ *
+ * Only the `main` input is checked. `verify/index.html` is an operator page
+ * that decodes the ledger by design; see `build.rollupOptions.input`.
+ */
+function entryChunkWithoutWasm(): Plugin {
+  return {
+    name: 'entry-chunk-without-wasm',
+    apply: 'build',
+    generateBundle(_options, bundle) {
+      const entry = Object.values(bundle).find(
+        (output) => output.type === 'chunk' && output.isEntry && output.name === 'main',
+      );
+      if (!entry) return;
+      const offending: string[] = [];
+      const seen = new Set<string>();
+      const queue = [entry.fileName];
+      while (queue.length > 0) {
+        const fileName = queue.shift() as string;
+        const chunk = bundle[fileName];
+        if (seen.has(fileName) || chunk?.type !== 'chunk') continue;
+        seen.add(fileName);
+        for (const id of Object.keys(chunk.modules)) {
+          if (WASM_RUNTIME.test(id)) offending.push(`${fileName} ← ${path.relative(__dirname, id)}`);
+        }
+        queue.push(...chunk.imports);
+      }
+      if (offending.length > 0) {
+        this.error(
+          'The entry chunk statically reaches a WebAssembly runtime, so the landing cannot ' +
+            'mount until it has downloaded:\n  ' +
+            offending.slice(0, 12).join('\n  ') +
+            '\nFind the static import that pulls it in (`src/lib/firstPaintGraph.test.ts` names ' +
+            'the source edge) and defer it behind `import()` — or behind `runtimesReady()` in ' +
+            '`src/lib/runtimeGate.ts` when it can run before a wallet is open.',
+        );
+      }
+    },
+  };
+}
+
 export default defineConfig({
   // `topLevelAwait()` is deliberately absent from the MAIN graph — see
   // 2026/08/05, found while deploying to Vercel. Its build transform hoists
@@ -183,7 +246,7 @@ export default defineConfig({
   // demo's WASM has had TLA for years, so dropping it costs nothing. It is
   // kept for `worker.plugins`, a separate and much smaller module graph that
   // does not contain the affected package.
-  plugins: [react(), wasm(), serveLocalCustodyAssets(), stampBuildId()],
+  plugins: [react(), wasm(), serveLocalCustodyAssets(), stampBuildId(), entryChunkWithoutWasm()],
   resolve: {
     alias: [
       { find: /^node:buffer$/, replacement: workspaceBuffer },

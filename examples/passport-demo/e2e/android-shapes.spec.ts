@@ -424,10 +424,10 @@ for (const { label, shape, alias } of WALKABLE_SHAPES) {
     await expect(h.page.locator('.mnid-alias')).toHaveText(`${alias}.night`, { timeout: 30_000 });
 
     /* AND THE SIGN-IN ITSELF: ONE ASSERTION. Signed out deliberately, then
-       back in through the one button on the landing screen. */
+       back in through "Log in" — "Sign up" always makes a new Passport. */
     await signOutToLanding(h.page);
     await resetCeremonies(h.page);
-    await h.page.getByRole('button', { name: SIGN_IN_BUTTON }).click();
+    await h.page.getByRole('button', { name: 'Log in', exact: true }).click();
     await onHome(h.page);
     expect(await ceremonies(h.page)).toEqual({ started: 1, done: 1 });
 
@@ -854,7 +854,7 @@ test('a passkey answered from another device is waited for, and asked for once',
 
   await signOutToLanding(h.page);
   await resetCeremonies(h.page);
-  await h.page.getByRole('button', { name: SIGN_IN_BUTTON }).click();
+  await h.page.getByRole('button', { name: 'Log in', exact: true }).click();
 
   /* WHILE IT WAITS: the working stage, with the instruction that matches what
      the platform is showing, and no second ceremony raised on top of the sheet

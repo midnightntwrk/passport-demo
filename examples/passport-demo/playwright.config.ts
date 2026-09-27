@@ -95,7 +95,7 @@ if (!webkitRuns) {
 /**
  * The build tier 1 serves. These are the same values the deployment builds
  * with (.github/workflows/deploy-demo.yml, and `deploy:passport:manual` for the
- * break-glass path), minus the raffle origin, so the mocked walk exercises the same
+ * break-glass path), so the mocked walk exercises the same
  * code paths the deployment does.
  *
  * The host is `67-205-177-162.sslip.io`. It is not the retired funder name

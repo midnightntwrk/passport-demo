@@ -538,8 +538,8 @@ describe('the inbox walk', () => {
   /* A PASSPORT BROUGHT BACK ON A NEW DEVICE (2026/09/26). Its account was
      pointed at the new device's key, and every note delivered before that is
      sealed to the key on the device that is gone. Handed both keys — the
-     earlier one from the person's password backup — the walk reads both sets,
-     and a key that opens nothing changes nothing. */
+     earlier one given back by the sign-in it came back through — the walk
+     reads both sets, and a key that opens nothing changes nothing. */
   it('tries every key it is handed on every entry, and reads notes sealed to an earlier key', async () => {
     const before = generateCustodyEncKeyPair();
     const after = generateCustodyEncKeyPair();

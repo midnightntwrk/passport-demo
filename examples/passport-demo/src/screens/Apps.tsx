@@ -2,12 +2,10 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { ArrowUpRight, Loader2, RotateCw, Search, X } from 'lucide-react'
 import {
   fetchAppRegistry,
-  RAFFLE_DEMO_APP_ID,
   withLocalApps,
   type RegistryApp,
   type RegistryCategory,
 } from '../lib/registry.js'
-import RaffleArt from './RaffleArt.js'
 import CompanionLink from './Companion.js'
 import AppBrowser, { AppIcon, type AppBrowserProps } from './AppBrowser.js'
 import { type PassportNetwork } from './NetworkSwitcher.js'
@@ -84,25 +82,9 @@ function AppCard({ app, onOpen }: { app: RegistryApp; onOpen: () => void }) {
   const networks = app.networks ?? []
   const shown = networks.slice(0, MAX_NETWORK_PILLS)
   const overflow = networks.length - shown.length
-  /* The raffle is the one entry we author ourselves, so it is the one entry we
-     can illustrate honestly — registry apps get their own icon or a letter
-     tile, never art we invented for them. */
-  const illustrated = app.id === RAFFLE_DEMO_APP_ID
   return (
-    <button
-      type="button"
-      className={illustrated ? 'mnapps-card mnapps-card-illustrated' : 'mnapps-card'}
-      onClick={onOpen}
-    >
-      {illustrated ? (
-        /* The banner IS the identity here, so the letter tile beside it would
-           only be a second, worse one. */
-        <span className="mnapps-card-art" aria-hidden="true">
-          <RaffleArt />
-        </span>
-      ) : (
-        <AppIcon app={app} />
-      )}
+    <button type="button" className="mnapps-card" onClick={onOpen}>
+      <AppIcon app={app} />
       <span className="mnapps-card-copy">
         <strong>{app.name}</strong>
         {app.description ? <small>{app.description}</small> : null}
@@ -192,30 +174,39 @@ export function FeaturedApps(props: FeaturedAppsProps) {
     return [...here.filter((app) => app.featured), ...here.filter((app) => !app.featured)]
   }, [apps, network])
 
+  /* NOTHING LISTED, NO HEADING (2026/09/25). With the raffle gone no registry
+     entry is listed for some networks — stagenet among them — and an "Apps"
+     heading over an empty grid is a promise with nothing behind it. The Apps
+     tab keeps its own honest empty state; Home simply leaves the space to the
+     rest of the screen. An app already open stays open. */
+  const nothingListed = state === 'ready' && ordered.length === 0
+
   return (
     <>
-      <section className="mnapps-section mnapps-embedded" aria-labelledby="mnapps-home-label">
-        <h2 className="mnapps-section-label" id="mnapps-home-label">
-          Apps
-        </h2>
-        {state === 'loading' ? (
-          <p className="mnapps-status" role="status">
-            <Loader2
-              className="mnapps-spinner"
-              size={15}
-              strokeWidth={2}
-              aria-hidden="true"
-            />
-            Loading apps…
-          </p>
-        ) : (
-          <div className="mnapps-list">
-            {ordered.map((app) => (
-              <AppCard key={app.id} app={app} onOpen={() => setOpenApp(app)} />
-            ))}
-          </div>
-        )}
-      </section>
+      {nothingListed ? null : (
+        <section className="mnapps-section mnapps-embedded" aria-labelledby="mnapps-home-label">
+          <h2 className="mnapps-section-label" id="mnapps-home-label">
+            Apps
+          </h2>
+          {state === 'loading' ? (
+            <p className="mnapps-status" role="status">
+              <Loader2
+                className="mnapps-spinner"
+                size={15}
+                strokeWidth={2}
+                aria-hidden="true"
+              />
+              Loading apps…
+            </p>
+          ) : (
+            <div className="mnapps-list">
+              {ordered.map((app) => (
+                <AppCard key={app.id} app={app} onOpen={() => setOpenApp(app)} />
+              ))}
+            </div>
+          )}
+        </section>
+      )}
 
       {openApp ? (
         <AppBrowser

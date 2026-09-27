@@ -1329,12 +1329,16 @@ async function storedProfileKeys(target: Page): Promise<string[]> {
   });
 }
 
-test('a Passport whose passkey this device cannot produce is offered a new one', async ({
+test('a Passport whose passkey this device cannot produce is no obstacle to Sign up', async ({
   browser,
 }) => {
-  /* The reported dead end, and the whole of its way out: "Continue with
-     Passport" targets the stored credential, the keystore has nothing to
-     answer with, and the screen that comes back offers to make one. */
+  /* The reported dead end of 2026/08/30, and what Sign up does about it now.
+     "Continue with Passport" used to target the stored credential, the
+     keystore had nothing to answer with, and the screen had to offer a way
+     out. Since 2026/09/25 Sign up never consults what this browser holds: it
+     makes a new passkey and a new Passport straight away, and the stranded
+     record is left exactly where it was. The keyless panel is still how
+     "Log in" answers an empty picker — see the walk after this one. */
   test.setTimeout(180_000);
   const context = await browser.newContext(walkContextOptions({ viewport: { width: 390, height: 844 } }));
   const stranded = await context.newPage();
@@ -1346,27 +1350,14 @@ test('a Passport whose passkey this device cannot produce is offered a new one',
     await seedStrandedProfile(stranded, STRANDED_CREDENTIAL_ID);
     await stranded.reload();
 
+    /* The landing knows this browser holds a Passport, and says where it is. */
+    await expect(stranded.getByTestId('login-to-carry-on')).toBeVisible();
     await stranded.getByRole('button', { name: SIGN_IN_BUTTON }).click();
 
-    /* Not a sentence about what went wrong. A sentence about what can be done
-       about it, and the control that does it. */
-    await expect(stranded.getByText(/Could not load your passkey/i)).toBeVisible({
-      timeout: 60_000,
-    });
-    await expect(stranded.getByText(/stays untouched/i)).toBeVisible();
-    const create = stranded.getByRole('button', { name: /Create a new passkey/i });
-    await expect(create).toBeVisible();
-
-    /* And the retry is still there beside it: this state offers both readings
-       of what happened — the passkey is gone, or it is merely not here now. */
-    await expect(stranded.getByRole('button', { name: SIGN_IN_BUTTON })).toBeVisible();
-
-    /* Nothing raw from the platform. `NotAllowedError`'s own message says the
-       operation "either timed out or was not allowed", which is true of four
-       different things and useful for none of them. */
+    /* No panel and no error on the way: nothing was asked about the stranded
+       passkey. And nothing raw from the platform. */
+    await expect(stranded.getByText(/Could not load your passkey/i)).toHaveCount(0);
     await expect(stranded.getByText(/NotAllowedError|not allowed/i)).toHaveCount(0);
-
-    await create.click();
 
     /* A working Passport, not a second error: the welcome screen is only ever
        reached once PRF has derived a seed and the wallet has opened. */
@@ -1378,9 +1369,8 @@ test('a Passport whose passkey this device cannot produce is offered a new one',
 
     /* THE OLD RECORDS ARE STILL THERE. The new Passport keys its profile and
        its private-state scope by ITS credential id, so it cannot have landed
-       on the stranded one — which is what makes the panel's promise that a
-       Passport this browser holds "stays untouched" a fact rather than a
-       hope. If the missing passkey turns up, it reopens its own Passport. */
+       on the stranded one. If the missing passkey turns up, "Log in" reopens
+       its own Passport. */
     const keys = await storedProfileKeys(stranded);
     expect(keys).toContain(localProfileKey(STRANDED_CREDENTIAL_ID));
     expect(keys.length).toBe(2);
@@ -1540,7 +1530,9 @@ test('a passkey that is still there is signed in to, never created over', async 
     await held.evaluate(() => {
       (window as unknown as { __refuseNextAssertion?: boolean }).__refuseNextAssertion = true;
     });
-    await held.getByRole('button', { name: SIGN_IN_BUTTON }).click();
+    /* "Log in", whose picker is the sheet the user closed. "Sign up" never
+       asks: it always makes a new Passport (see `signup-twice.spec.ts`). */
+    await held.getByRole('button', { name: 'Log in', exact: true }).click();
     await expect(held.getByText(/Could not load your passkey/i)).toBeVisible({ timeout: 60_000 });
 
     await held.getByRole('button', { name: /Create a new passkey/i }).click();
@@ -1691,7 +1683,9 @@ test('a claim whose passkey will not answer offers a retry, a way out, and a way
     });
 
     await arm();
-    await stalled.getByRole('button', { name: SIGN_IN_BUTTON }).click();
+    /* "Log in" — the way back to a Passport that already exists. "Sign up"
+       would make a new one without asking anything (2026/09/25). */
+    await stalled.getByRole('button', { name: 'Log in', exact: true }).click();
     await expect(stalled.getByText(/Could not load your passkey/i)).toBeVisible({ timeout: 90_000 });
     await stalled.getByRole('button', { name: /Create a new passkey/i }).click();
 
