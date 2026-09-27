@@ -817,6 +817,27 @@
  * `custodySpentCoins.test.ts`. It holds no DOM, no React, no `fetch`, and no
  * ledger: the question, the decoder, and the hash are handed in.
  *
+ * `src/identity/custodyChangeWalk.ts` went IN on 2026/09/27 with the module
+ * itself. It finds the change a payment from another device kept — a coin no
+ * note describes — by deriving its nonce from the spent coin exactly as the
+ * compiled build's `_sendShielded_0` does and searching its value against the
+ * outputs that payment made, then files it in the store. A branch too many
+ * files money that is not there, and one too few leaves a Passport showing 0
+ * over 77 it holds, so every branch — the derivation, held to the compiled
+ * build RUN on known coins; the bounded search and its slices; the chain of
+ * payments; what the store already knows; what waits for a later read — is
+ * drilled in `custodyChangeWalk.test.ts`. No DOM, no React, no `fetch`, no
+ * ledger: the question, the decoder, and the runtime are handed in.
+ *
+ * `src/lib/custodyChainActivity.ts` went IN on 2026/09/27 with the module
+ * itself. It turns a Passport's history on the chain into Activity rows at the
+ * times they happened, for a device that did not see them happen — where the
+ * only alternative was "1 min ago" on every row. A wrong row here is a payment
+ * shown twice, a device called "this" that is not, or a time that is not when
+ * it happened, so every branch, and the copy rule, is drilled in
+ * `custodyChainActivity.test.ts`, with the merge into the trail
+ * (`activityFeed.ts#mergeRestoredActivity`) beside it. Values in, rows out.
+ *
  * `src/lib/custodyAssets.ts` went IN on 2026/09/17 with the module itself. It is
  * what the Dynamic Passport's Home and Send read money through: which rows
  * exist, what each is called, how many decimal places an amount of it carries,
@@ -936,6 +957,7 @@ export default mergeConfig(
           'src/lib/pagePresence.ts',
           'src/lib/custodyAccountLock.ts',
           'src/lib/custodyAssets.ts',
+          'src/lib/custodyChainActivity.ts',
           'src/lib/custodyDelivery.ts',
           'src/lib/custodyRoute.ts',
           'src/lib/custodyScreenRules.ts',
@@ -989,6 +1011,7 @@ export default mergeConfig(
           'src/identity/custodyInboxIndex.ts',
           'src/identity/viewingKeys.ts',
           'src/identity/custodySpentCoins.ts',
+          'src/identity/custodyChangeWalk.ts',
           'src/identity/midnamesText.ts',
           'src/identity/sponsoredAlias.ts',
           'src/identity/timestamps.ts',

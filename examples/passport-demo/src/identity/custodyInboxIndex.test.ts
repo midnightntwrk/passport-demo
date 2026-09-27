@@ -58,9 +58,10 @@ describe('custodyActionHistoryQuery', () => {
     expect(text).toContain(`actions(limit: ${CUSTODY_ACTION_HISTORY_LIMIT})`);
     expect(text).toContain('... on ContractCall { entryPoint }');
     /* And the ledger's apply result, which decides whether a call that names
-       an appending entry point actually wrote a cell. */
+       an appending entry point actually wrote a cell — and the block's time,
+       which is when Activity says it happened (2026/09/27). */
     expect(text).toContain(
-      'transaction { hash ... on RegularTransaction { transactionResult { status } } }',
+      'transaction { hash block { timestamp } ... on RegularTransaction { transactionResult { status } } }',
     );
     /* The one field that must NOT be selected: ~19 KB of hex per action, on a
        query that runs every time Home opens. */
@@ -88,6 +89,41 @@ describe('custodyActionRowsFrom', () => {
 
   it('answers an empty history as a fact', () => {
     expect(custodyActionRowsFrom(answer([]))).toEqual([]);
+  });
+
+  it('keeps the block’s time where the answer carried one, and nothing where it did not', () => {
+    /* The shape `indexer.stagenet.shielded.tools/api/v4` answered with on
+       2026/09/27: milliseconds, as a number. */
+    const rows = custodyActionRowsFrom(
+      answer([
+        {
+          __typename: 'ContractCall',
+          entryPoint: 'withdraw_shielded_to_contract_with_jubjub',
+          transaction: { hash: 'cc', block: { timestamp: 1_790_486_736_001 } },
+        },
+        { __typename: 'ContractCall', entryPoint: 'deposit_shielded', transaction: { hash: 'bb', block: { timestamp: '1790485206001' } } },
+        { __typename: 'ContractDeploy', transaction: { hash: 'aa', block: {} } },
+      ]),
+    );
+    expect(rows).toEqual([
+      { kind: 'ContractDeploy', entryPoint: null, txHash: 'aa' },
+      { kind: 'ContractCall', entryPoint: 'deposit_shielded', txHash: 'bb', at: 1_790_485_206_001 },
+      {
+        kind: 'ContractCall',
+        entryPoint: 'withdraw_shielded_to_contract_with_jubjub',
+        txHash: 'cc',
+        at: 1_790_486_736_001,
+      },
+    ]);
+  });
+
+  it('reads nothing that is not a whole, positive number of milliseconds as a time', () => {
+    for (const block of [null, 7, 'x', { timestamp: null }, { timestamp: 0 }, { timestamp: -5 }, { timestamp: 1.5 }, { timestamp: '12a' }, { timestamp: Number.MAX_SAFE_INTEGER + 2 }]) {
+      const [row] = custodyActionRowsFrom(
+        answer([{ __typename: 'ContractCall', entryPoint: 'deposit_shielded', transaction: { hash: 'aa', block } }]),
+      ) ?? [];
+      expect(row).toEqual({ kind: 'ContractCall', entryPoint: 'deposit_shielded', txHash: 'aa' });
+    }
   });
 
   it('keeps a row it cannot read, rather than dropping it', () => {

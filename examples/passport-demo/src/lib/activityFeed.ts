@@ -355,3 +355,98 @@ export function serialiseActivity(entries: readonly ActivityFeedEntry[]): string
   }));
   return JSON.stringify(kept);
 }
+
+/* -------------------------------------------------------------------------- */
+/* Rows restored from the chain (2026/09/27)                                  */
+/* -------------------------------------------------------------------------- */
+
+/** The id prefix every restored row carries, and no row written as it happened does. */
+export const RESTORED_ACTIVITY_PREFIX = 'chain:';
+
+/**
+ * A row read back from a Passport's history on the chain rather than written as
+ * it happened — `./custodyChainActivity.ts` builds them. Everything the merge
+ * below needs to place it once, and at the right time.
+ */
+export interface RestoredActivityRow {
+  /** `chain:<kind>:<hash>`: the same row whenever it is rebuilt. */
+  readonly id: string;
+  readonly label: string;
+  readonly detail: string;
+  readonly status: ActivityFeedStatus;
+  /** The ledger transaction hash, lowercase. */
+  readonly txHash: string;
+  /** The other ids the same transaction goes by — what a submit answers with. */
+  readonly identifiers: readonly string[];
+  /** When it happened: its block's time, ISO-8601. */
+  readonly createdAt: string;
+  /** Set for a setup row, which a device may already have written at another time. */
+  readonly milestone: string | null;
+  /** Correct a row the device already has, and never add one. */
+  readonly correctOnly?: boolean;
+}
+
+function restoredTime(entry: ActivityFeedEntry): number {
+  const at = Date.parse(entry.createdAt);
+  return Number.isNaN(at) ? Number.NEGATIVE_INFINITY : at;
+}
+
+/**
+ * THE TRAIL, WITH WHAT THE CHAIN SAYS MERGED IN — once, and at the times it
+ * happened.
+ *
+ * Four rules, in order, per row:
+ *
+ *   1. A row already restored (same id) is left alone.
+ *   2. A row the device wrote ITSELF for the same transaction wins. Its hash
+ *      may be the ledger's or one of the ids a submit answers with — a payment
+ *      is written down before the chain has hashed it. If it is the same setup
+ *      row written at another time, only its time is corrected.
+ *   3. A setup row the device wrote with no transaction at all — a device that
+ *      did not see the Passport made writes "Passport created" when it first
+ *      notices — is corrected in place: the chain's time, and the hash its View
+ *      link needs.
+ *   4. Anything else is added, unless it is only a correction.
+ *
+ * Returns `current` itself when nothing changed, so a host that sets state
+ * with the answer does not render for nothing. What changed is re-sorted newest
+ * first and capped at `keep`, the shape {@link serialiseActivity} writes.
+ */
+export function mergeRestoredActivity<T extends ActivityFeedEntry>(
+  current: readonly T[],
+  rows: readonly RestoredActivityRow[],
+  make: (row: RestoredActivityRow) => T,
+  keep: number = ACTIVITY_KEEP,
+): readonly T[] {
+  let next: T[] | null = null;
+  const own = (entry: ActivityFeedEntry): boolean => !entry.id.startsWith(RESTORED_ACTIVITY_PREFIX);
+  for (const row of rows) {
+    const entries: readonly T[] = next ?? current;
+    if (entries.some((entry) => entry.id === row.id)) continue;
+    const sameTransaction = entries.findIndex((entry) => {
+      const hash = (entry.txHash ?? '').trim().toLowerCase().replace(/^0x/, '');
+      return own(entry) && hash.length > 0 && (hash === row.txHash || row.identifiers.includes(hash));
+    });
+    if (sameTransaction !== -1) {
+      const entry = entries[sameTransaction];
+      if (row.milestone !== null && entry.label === row.label && entry.createdAt !== row.createdAt) {
+        next ??= [...current];
+        next[sameTransaction] = { ...entry, createdAt: row.createdAt };
+      }
+      continue;
+    }
+    if (row.milestone !== null) {
+      const unlinked = entries.findIndex((entry) => own(entry) && entry.label === row.label && !entry.txHash);
+      if (unlinked !== -1) {
+        next ??= [...current];
+        next[unlinked] = { ...entries[unlinked], createdAt: row.createdAt, txHash: row.txHash };
+        continue;
+      }
+    }
+    if (row.correctOnly === true) continue;
+    next ??= [...current];
+    next.push(make(row));
+  }
+  if (next === null) return current;
+  return next.sort((left, right) => restoredTime(right) - restoredTime(left)).slice(0, keep);
+}
