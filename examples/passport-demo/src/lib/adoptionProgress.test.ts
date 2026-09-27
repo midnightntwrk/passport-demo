@@ -76,7 +76,7 @@ describe('the rows', () => {
     expect(rows.map((row) => row.label)).toEqual([
       'Check your Google sign-in',
       'Make this device’s key',
-      'Approve with Google',
+      'Google approves this device',
       'Add this device to your Passport',
       'Point your payments at this device',
       'Bring back earlier payments',
@@ -97,7 +97,7 @@ describe('the rows', () => {
     for (const provider of [null, '  ']) {
       const labels = adoptionRows({ step: 'sign-in', provider }).map((row) => row.label)
       expect(labels[0]).toBe('Check your sign-in')
-      expect(labels[2]).toBe('Approve with your sign-in')
+      expect(labels[2]).toBe('Your sign-in approves this device')
     }
   })
 

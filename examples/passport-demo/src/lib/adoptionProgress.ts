@@ -178,7 +178,7 @@ const SUB_STAGES: readonly { id: AdoptionSubStageId; label: string }[] = [
 /**
  * The rows, with the state each one is in.
  *
- * NAMED BY THE PROVIDER where one is known — "Approve with Google" — because
+ * NAMED BY THE PROVIDER where one is known — "Google approves this device" — because
  * that is what the person chose, and nothing here names what stands behind it.
  *
  * THE LAST ROW IS NEVER RUNNING. It is the outcome, not a step: it is ticked
@@ -199,7 +199,7 @@ export function adoptionRows(progress: {
     { id: 'passkey', label: 'Make this device’s key', expectedSeconds: null },
     {
       id: 'approve',
-      label: provider.length > 0 ? `Approve with ${provider}` : 'Approve with your sign-in',
+      label: provider.length > 0 ? `${provider} approves this device` : 'Your sign-in approves this device',
       expectedSeconds: null,
     },
     { id: 'add', label: 'Add this device to your Passport', expectedSeconds: ADOPTION_ADD_EXPECTED_SECONDS },

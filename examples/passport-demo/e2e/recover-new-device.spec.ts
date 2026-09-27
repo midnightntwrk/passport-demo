@@ -305,7 +305,7 @@ test.describe('coming back on a new device, from a browser that holds nothing (2
       /* THE SECOND HALF, ON SCREEN WHILE IT RUNS — the screen the live run
          never left. */
       await expect(page.getByTestId('adopting')).toHaveText(
-        `Adding this device to ${RESOLVABLE_NAME}.night. Approve it with the account you just signed in with.`,
+        `Adding this device to ${RESOLVABLE_NAME}.night. Your sign-in approves it for you, so there is nothing to press.`,
         { timeout: 120_000 },
       );
       await saysNothingForbidden(page);
@@ -482,7 +482,7 @@ test.describe('bringing a Passport here, as it happens (2026/09/27)', () => {
       await expect(rows).toHaveCount(7);
       await expect(rows.nth(0)).toContainText('Check your Google sign-in');
       await expect(rows.nth(1)).toContainText('Make this device’s key');
-      await expect(rows.nth(2)).toContainText('Approve with Google');
+      await expect(rows.nth(2)).toContainText('Google approves this device');
       await expect(rows.nth(3)).toContainText('Add this device to your Passport');
       await expect(rows.nth(4)).toContainText('Point your payments at this device');
       await expect(rows.nth(5)).toContainText('Bring back earlier payments');
