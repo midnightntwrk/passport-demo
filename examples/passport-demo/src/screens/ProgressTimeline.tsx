@@ -26,7 +26,7 @@
  * one of the two roads.
  */
 
-import { Check } from 'lucide-react'
+import { Check, ExternalLink } from 'lucide-react'
 import { useEffect, useState } from 'react'
 
 import { formatElapsed, stepTimingLine, type ClaimStepState } from '../lib/claimSteps.js'
@@ -57,6 +57,12 @@ export interface TimelineRow {
   readonly subStages?: readonly TimelineSubStage[] | null
   /** The warning about the minutes, said up front rather than mid-wait. */
   readonly note?: string | null
+  /**
+   * Where the row's transaction can be looked at, once it has landed — the
+   * same "View" the activity rows carry (2026/09/27). Null or absent for a row
+   * with no transaction, or one whose hash is not known.
+   */
+  readonly link?: { readonly label: string; readonly href: string } | null
 }
 
 /**
@@ -122,6 +128,17 @@ export default function ProgressTimeline({ rows }: { rows: readonly TimelineRow[
                   </ol>
                 ) : null}
                 {row.note != null ? <span className="mnid-stepper-note">{row.note}</span> : null}
+                {row.link != null ? (
+                  <a
+                    className="mnid-stepper-view"
+                    href={row.link.href}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    <span>{row.link.label}</span>
+                    <ExternalLink size={11} aria-hidden="true" />
+                  </a>
+                ) : null}
               </span>
             </li>
           )
