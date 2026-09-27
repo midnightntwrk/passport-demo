@@ -45,7 +45,7 @@
 import { SucceedEntirely } from '@midnight-ntwrk/midnight-js-types'
 
 import { defaultCustodyDeps, type CustodyDeps } from '../identity/custodyContractClient.js'
-import { custodyProofNotBuilt } from '../identity/custodyContractPlan.js'
+import { CUSTODY_PROVER_UNAVAILABLE, custodyProofNotBuilt } from '../identity/custodyContractPlan.js'
 
 /** Where the stand-in tells the walk what was handed over. Never a real host. */
 export const WALK_CHAIN_URL = 'https://passport-walk.invalid/chain'
@@ -88,11 +88,20 @@ export function walkChainOverrides(): Partial<CustodyDeps> {
         },
         submitTxAsync: async (_providers: unknown, options: unknown) => {
           const call = (options as { unprovenTx: WalkCall }).unprovenTx
-          const response = await fetch(WALK_CHAIN_URL, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify(call),
-          })
+          let response: Response
+          try {
+            response = await fetch(WALK_CHAIN_URL, {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify(call),
+            })
+          } catch (cause) {
+            /* THE CONNECTION DROPPED, said the way the real proving service's
+               client says it (`custodyProofProvider`), so a walk that pulls the
+               network out from under a proof meets what a phone meets. */
+            console.warn(`[account-custody] could not reach the proving service at ${WALK_CHAIN_URL} for ${call.circuit}`, cause)
+            throw new Error(CUSTODY_PROVER_UNAVAILABLE)
+          }
           if (!response.ok) throw custodyProofNotBuilt(`the walk refused ${call.circuit}`)
           const { txId } = (await response.json()) as { txId: string }
           return `${WALK_TX_PREFIX}${txId}`

@@ -185,12 +185,25 @@ interface Chain {
  * Registered after `installNetworkBoundary`, so these answer first and fall
  * back to it for everything else.
  */
-async function serveTheAccount(page: Page, options: { refuseAdds?: number } = {}): Promise<Chain> {
+async function serveTheAccount(
+  page: Page,
+  options: {
+    refuseAdds?: number;
+    /**
+     * How many adds lose their connection in flight (2026/09/27): the proof is
+     * asked for and the answer never arrives, and `onDrop` runs first — the
+     * phone that was put down.
+     */
+    dropAdds?: number;
+    onDrop?: () => Promise<void>;
+  } = {},
+): Promise<Chain> {
   const handedOver: string[] = [];
   const added: string[] = [];
   let nonceBump = 0n;
   let state = await accountState(added, nonceBump);
   let refusals = options.refuseAdds ?? 0;
+  let drops = options.dropAdds ?? 0;
 
   const resolver = fixture('stagenet-night-resolver.json').replace(RECORDED_TARGET, FOUND);
   const deployTx = fixture('stagenet-account-custody-deploy-tx.json');
@@ -221,6 +234,11 @@ async function serveTheAccount(page: Page, options: { refuseAdds?: number } = {}
     if (call.circuit.startsWith('add_device_with_') && refusals > 0) {
       refusals -= 1;
       return route.fulfill({ status: 503, body: 'refused' });
+    }
+    if (call.circuit.startsWith('add_device_with_') && drops > 0) {
+      drops -= 1;
+      await options.onDrop?.();
+      return route.abort('failed');
     }
     /* LANDED: the next read of the account carries it. An added key is in
        the device set; every authorised call moves `auth_nonce` on. A moment's
@@ -382,6 +400,179 @@ test.describe('coming back on a new device, from a browser that holds nothing (2
       await expect(page.getByTestId('recover-sign-in')).toBeVisible();
       /* This recovery is put down, so nothing resumes it behind the screen. */
       expect(await page.evaluate(() => window.localStorage.getItem('passport-account-custody-adopt:v1'))).toBeNull();
+    } finally {
+      await authenticator.remove().catch(() => {});
+      await context.close();
+    }
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The whole of it on screen, and a connection that drops (2026/09/27)        */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * A page this walk can put out of sight and bring back, the way a phone that is
+ * put down and picked up again does: `document.visibilityState` answers what
+ * the walk says, and `visibilitychange` fires when it changes.
+ */
+async function aPageThatCanBePutDown(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    let hidden = false;
+    Object.defineProperty(Document.prototype, 'visibilityState', {
+      configurable: true,
+      get: () => (hidden ? 'hidden' : 'visible'),
+    });
+    Object.defineProperty(Document.prototype, 'hidden', { configurable: true, get: () => hidden });
+    (window as unknown as { __putDown: (next: boolean) => void }).__putDown = (next) => {
+      hidden = next;
+      document.dispatchEvent(new Event('visibilitychange'));
+    };
+  });
+}
+
+/** Records, from a page's first byte, every failure sentence the second half ever showed. */
+async function watchForAFailure(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const w = window as unknown as { __adoptFailures: string[] };
+    w.__adoptFailures = [];
+    new MutationObserver(() => {
+      const shown = document.querySelector('[data-testid="adopt-failed"]')?.textContent ?? null;
+      if (shown !== null && !w.__adoptFailures.includes(shown)) w.__adoptFailures.push(shown);
+    }).observe(document, { subtree: true, childList: true, characterData: true });
+  });
+}
+
+/** Home — by way of the earlier-payments question on a build that still asks it. */
+async function reachHome(page: Page): Promise<void> {
+  const home = greeting(page);
+  const question = page.getByRole('heading', { name: 'Bring back your earlier payments' });
+  await expect(home.or(question)).toBeVisible({ timeout: 120_000 });
+  if (await question.isVisible()) await page.getByRole('button', { name: 'Not now' }).click();
+  await expect(home).toBeVisible({ timeout: 60_000 });
+}
+
+const EXPLORER_LINK = /^https:\/\/explorer\.1am\.xyz\/tx\/[0-9a-f]{64}\?network=stagenet$/u;
+
+test.describe('bringing a Passport here, as it happens (2026/09/27)', () => {
+  test('shows every step on a timeline, links each transaction, and writes both to the trail', async ({
+    browser,
+  }) => {
+    test.setTimeout(300_000);
+    const context = await browser.newContext(walkContextOptions({ viewport: { width: 420, height: 900 } }));
+    const page = await context.newPage();
+    await installNetworkBoundary(page);
+    const chain = await serveTheAccount(page);
+    const authenticator = await installVirtualAuthenticator(context, page);
+    try {
+      await findItByName(page);
+
+      /* NOT ONE SENTENCE ON A BLACK PAGE: the timeline, the line about keeping
+         Passport open, and — before anything is handed over — a way out. */
+      const timeline = page.getByTestId('adopt-progress');
+      await expect(timeline).toBeVisible({ timeout: 120_000 });
+      const rows = timeline.locator('.mnid-stepper-item');
+      await expect(rows).toHaveCount(7);
+      await expect(rows.nth(0)).toContainText('Check your Google sign-in');
+      await expect(rows.nth(1)).toContainText('Make this device’s key');
+      await expect(rows.nth(2)).toContainText('Approve with Google');
+      await expect(rows.nth(3)).toContainText('Add this device to your Passport');
+      await expect(rows.nth(4)).toContainText('Point your payments at this device');
+      await expect(rows.nth(5)).toContainText('Bring back earlier payments');
+      await expect(rows.nth(6)).toContainText('Open your Passport');
+      const stages = rows.nth(3).locator('.mnid-substage');
+      await expect(stages).toHaveText(['Proving', 'Covering the fee', 'Sending', 'Confirming']);
+      await expect(page.getByTestId('adopt-keep-open')).toHaveText('Keep Passport open until this finishes.');
+      await saysNothingForbidden(page);
+
+      /* THE ADD, LANDED, WITH ITS OWN "VIEW" — while the rest still runs. */
+      await expect(rows.nth(3)).toHaveAttribute('data-state', 'done', { timeout: 120_000 });
+      await expect(rows.nth(3).getByRole('link', { name: 'View' })).toHaveAttribute('href', EXPLORER_LINK);
+      /* Nothing to call back once it is in flight, so no Cancel. */
+      await expect(page.getByTestId('adopt-cancel')).toHaveCount(0);
+
+      await reachHome(page);
+      expect(chain.handedOver).toEqual(['add_device_with_k256', 'rotate_enc_key_with_jubjub']);
+
+      /* THE TRAIL: both transactions, each with the same "View" every row has. */
+      for (const label of ['This device was added to your Passport', 'Payments now come to this device']) {
+        const row = page.locator('.mnhome-activity-row', { hasText: label });
+        await expect(row).toHaveCount(1, { timeout: 30_000 });
+        await expect(row.getByRole('link', { name: 'View' })).toHaveAttribute('href', EXPLORER_LINK);
+      }
+      await saysNothingForbidden(page);
+    } finally {
+      await authenticator.remove().catch(() => {});
+      await context.close();
+    }
+  });
+
+  test('picks the add up again when its proof was dropped while the phone was put down, and reaches Home with no failure shown', async ({
+    browser,
+  }) => {
+    /* THE LIVE RUN: the proof was made in 43 s and the phone never heard —
+       the screen had dimmed, the tab was frozen, and the request in flight was
+       dropped ("Failed to fetch"). Here the page is put out of sight as the
+       add is handed over, the connection drops, and the page comes back. */
+    test.setTimeout(300_000);
+    const context = await browser.newContext(walkContextOptions({ viewport: { width: 420, height: 900 } }));
+    const page = await context.newPage();
+    await installNetworkBoundary(page);
+    await aPageThatCanBePutDown(page);
+    await watchForAFailure(page);
+    const chain = await serveTheAccount(page, {
+      dropAdds: 1,
+      onDrop: async () => {
+        await page.evaluate(() => (window as unknown as { __putDown: (next: boolean) => void }).__putDown(true));
+        setTimeout(() => {
+          void page
+            .evaluate(() => (window as unknown as { __putDown: (next: boolean) => void }).__putDown(false))
+            .catch(() => {});
+        }, 2_000);
+      },
+    });
+    const authenticator = await installVirtualAuthenticator(context, page);
+    try {
+      await findItByName(page);
+      await reachHome(page);
+      await expect(page.locator('.mnid-alias')).toHaveText(`${RESOLVABLE_NAME}.night`);
+
+      /* Dropped once, picked up once, and never a failure on screen. */
+      expect(chain.handedOver).toEqual(['add_device_with_k256', 'add_device_with_k256', 'rotate_enc_key_with_jubjub']);
+      expect(await page.evaluate(() => (window as unknown as { __adoptFailures: string[] }).__adoptFailures)).toEqual(
+        [],
+      );
+      expect(await page.evaluate(() => window.localStorage.getItem('passport-account-custody-adopt:v1'))).toBeNull();
+    } finally {
+      await authenticator.remove().catch(() => {});
+      await context.close();
+    }
+  });
+
+  test('shows a dropped connection while somebody is watching, with Try again, Cancel, and the other sign-in', async ({
+    browser,
+  }) => {
+    test.setTimeout(300_000);
+    const context = await browser.newContext(walkContextOptions({ viewport: { width: 420, height: 900 } }));
+    const page = await context.newPage();
+    await installNetworkBoundary(page);
+    await serveTheAccount(page, { dropAdds: 1 });
+    const authenticator = await installVirtualAuthenticator(context, page);
+    try {
+      await findItByName(page);
+      await expect(page.getByTestId('adopt-failed')).toHaveText(NOT_ADDED, { timeout: 120_000 });
+      await expect(page.getByTestId('adopt-retry')).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Use a different sign-in' })).toBeVisible();
+      await expect(page.getByTestId('adopt-cancel')).toHaveText('Cancel');
+
+      /* CANCEL: the recovery is put down, the key made for it signed out, and
+         the reader is back at the start — nothing resumes it. */
+      await page.getByTestId('adopt-cancel').click();
+      await expect(page.getByRole('button', { name: SIGN_IN_BUTTON })).toBeVisible({ timeout: 60_000 });
+      expect(await page.evaluate(() => window.localStorage.getItem('passport-account-custody-adopt:v1'))).toBeNull();
+      await page.goto(START);
+      await expect(page.getByRole('button', { name: SIGN_IN_BUTTON })).toBeVisible({ timeout: 60_000 });
+      await expect(page.getByTestId('adopting')).toHaveCount(0);
     } finally {
       await authenticator.remove().catch(() => {});
       await context.close();

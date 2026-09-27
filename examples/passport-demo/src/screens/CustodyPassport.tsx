@@ -153,6 +153,7 @@ import { LONG_WAIT_NOTE } from '../lib/claimSteps.js'
 import { accountReadDue, readAccountHead } from '../lib/balanceWatch.js'
 import { OFFER_AFTER_MS } from '../lib/waitingGame.js'
 import ProgressTimeline, { useTimelineClock, type TimelineRow } from './ProgressTimeline.js'
+import { holdScreenAwake } from '../lib/pagePresence.js'
 import WaitingGame from './WaitingGame.js'
 import SnakeGame from './SnakeGame.js'
 import {
@@ -619,6 +620,17 @@ export default function CustodyPassport({
      `../lib/paymentLeaveGuard.ts`. */
   const paymentUnsent = sendUnsent(sendProgressView({ progress, step: sendStep, record: null }))
   useEffect(() => (paymentUnsent ? guardUnsentPayment(window) : undefined), [paymentUnsent])
+  /* AND THE SCREEN STAYS ON WHILE IT RUNS (2026/09/27). A phone put down in the
+     middle of a proof dims its screen, Android freezes the tab, and the answer
+     in flight is dropped — live, on a recovery. Released when the payment ends,
+     either way. Where the platform has no wake lock, nothing happens. See
+     `../lib/pagePresence.ts`. */
+  const paymentRunning = progress?.kind === 'running'
+  useEffect(() => {
+    if (!paymentRunning) return undefined
+    const awake = holdScreenAwake()
+    return () => awake.release()
+  }, [paymentRunning])
   /**
    * Whether the welcome page has been read in this session.
    *
@@ -3261,6 +3273,14 @@ export default function CustodyPassport({
   /* the reader's hands, and it can be shut for the rest of this setup.      */
   /* ---------------------------------------------------------------------- */
   const setupRunning = setupPhase !== null && busy !== null
+  /* The screen stays on while the setup runs, for the reason a payment keeps
+     it on (2026/09/27): the proofs are minutes, and a dimmed screen is a frozen
+     tab. */
+  useEffect(() => {
+    if (!setupRunning) return undefined
+    const awake = holdScreenAwake()
+    return () => awake.release()
+  }, [setupRunning])
   const [offerDue, setOfferDue] = useState(false)
   const [gameOpen, setGameOpen] = useState(false)
   const [gameDismissed, setGameDismissed] = useState(false)
@@ -4115,7 +4135,7 @@ function RecoverStep(props: {
         {' '}{props.keyPhrase} is part of it before bringing anything back.
       </p>
       <form
-        className="mnob-stage"
+        className="mnob-stage mndyn-find-stage"
         onSubmit={(event: FormEvent) => {
           event.preventDefault()
           if (busy || !trimmed) return
