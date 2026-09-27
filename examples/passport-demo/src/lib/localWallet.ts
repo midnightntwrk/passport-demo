@@ -58,6 +58,24 @@
  * evidence, and the code that would do it if that ever changes, is in the
  * tip-bootstrap section of `./walletSnapshot.ts`. Nothing here calls it.
  *
+ * A WALLET THAT DOES NOT WALK THE CHAIN AT ALL (2026/09/27)
+ * ---------------------------------------------------------
+ * `chainSync: false` builds the same keys, addresses, facade, and submission
+ * connection and never starts the facade: no shielded, unshielded, or DUST
+ * sync, no pending-transaction polling, no snapshot read or write, and no depth
+ * check, because nothing is walked. It is the wallet a Passport on the account
+ * custody contract is given. That Passport's money is in its ACCOUNT, read from
+ * the account's own state and its list of deliveries; its fees are paid on its
+ * behalf; its circuits are proved by the proving service. The wallet is only
+ * the machinery a call is balanced, signed, and handed to the node through, and
+ * none of that reads what the wallet has synced: a custody call leaves nothing
+ * for this wallet to balance, so balancing finds an already balanced
+ * transaction whether the wallet has walked the chain or not. What the walk
+ * cost was the phone's CPU, battery, memory, and data for minutes after every
+ * sign-up, and a console full of sync errors. Such a wallet answers
+ * `unavailable` for its own balances and publishes no sync progress, rather
+ * than reporting the zeros of a state it never read.
+ *
  * THE LEDGER-9 PORT (2026/08/24)
  * -----------------------------
  * This module now runs on `@midnight-ntwrk/wallet-sdk` 2.0.0-beta.2 over
@@ -439,6 +457,12 @@ const DUST_DECIMALS = 15;
 const STATE_TIMEOUT_MS = 15_000;
 /** Upper bound on a snapshot write, so `close()` is never held open by one. */
 const SNAPSHOT_TIMEOUT_MS = 5_000;
+/**
+ * Why a wallet opened with `chainSync: false` reports no balance of its own.
+ * Carried in `balanceError` and in thrown errors — diagnostics, never a screen.
+ */
+const NOT_WALKING =
+  'this wallet was opened without a chain sync, so it has no balance or sync state of its own';
 
 function formatUnits(value: bigint, decimals: number): string {
   const negative = value < 0n;
@@ -687,6 +711,14 @@ export interface CreateLocalMidnightWalletOptions {
    * grow; production callers should leave it alone.
    */
   deepChainBlockThreshold?: bigint;
+  /**
+   * Whether this wallet walks the chain. `true`, the default, is every wallet
+   * as it always was. `false` never starts the facade — see "A wallet that does
+   * not walk the chain at all" in this module's header. A function is asked
+   * with this wallet's own network id, so a caller whose answer depends on the
+   * network decides it against the id the wallet really opens on.
+   */
+  chainSync?: boolean | ((networkId: string) => boolean);
 }
 
 // ---------------------------------------------------------------------------
@@ -853,19 +885,33 @@ export interface LocalMidnightWallet {
    */
   readonly resumedFromSnapshot: boolean;
   /**
+   * Whether this wallet walks the chain — {@link
+   * CreateLocalMidnightWalletOptions.chainSync}, as it was resolved. A wallet
+   * that does not has no balance and no sync progress of its own, and says so.
+   */
+  readonly chainSync: boolean;
+  /**
    * Persists the current sync state for the next session. Called automatically
    * on first sync, once a minute while synced, and during `close()`. Never
    * throws: a cache write is a convenience, not a correctness requirement.
+   * Writes nothing for a wallet that does not walk the chain: its state is the
+   * empty one it started with, and saving that over a real snapshot would cost
+   * the next walk everything the last one did.
    */
   saveSnapshot(): Promise<void>;
   /**
    * The shielded colours this wallet holds a positive balance of, newest state
    * first read from the same stream every other surface reads. An empty array
    * is a real answer — this wallet holds no shielded tokens — and is never a
-   * stand-in for a read that failed, which throws instead.
+   * stand-in for a read that failed, which throws instead. A wallet that does
+   * not walk the chain throws too: it has read nothing to answer from.
    */
   shieldedHoldings(): Promise<ShieldedHolding[]>;
-  /** Refreshes the balance surfaces. Never throws — failures land in `balanceError`. */
+  /**
+   * Refreshes the balance surfaces. Never throws — failures land in
+   * `balanceError`, and a wallet that does not walk the chain is `unavailable`
+   * with the reason, never a zero.
+   */
   getBalances(): Promise<LocalWalletBalances>;
   /**
    * Streams the balance surfaces, so incoming funds appear without anyone
@@ -899,7 +945,9 @@ export interface LocalMidnightWallet {
    * all three component wallets have emitted (they have, once the facade has
    * started). If the state stream errors, the listener receives one final
    * `unavailable` reading carrying the reason and the subscription ends; it
-   * does not resubscribe or retry behind the caller's back.
+   * does not resubscribe or retry behind the caller's back. A wallet that does
+   * not walk the chain has nothing to stream: the listener receives that one
+   * `unavailable` reading at once, and nothing after it.
    */
   subscribeBalances(
     listener: (balances: LocalWalletBalances) => void,
@@ -918,12 +966,17 @@ export interface LocalMidnightWallet {
   feeReadiness(options?: { force?: boolean }): Promise<FeeReadiness>;
   /** Addresses plus a balance refresh, in the shape the Home screen consumes. */
   surfaces(): Promise<LocalWalletSurfaces>;
-  /** Resolves once the facade reports a fully synced state. */
+  /**
+   * Resolves once the facade reports a fully synced state. Rejects at once for
+   * a wallet that does not walk the chain, which would otherwise wait for ever.
+   */
   waitForSync(): Promise<void>;
   /**
    * Streams live sync progress, throttled to at most ~2 updates per second.
    * Returns an unsubscribe function. The listener may fire once more with the
-   * update in flight when unsubscribed.
+   * update in flight when unsubscribed. A wallet that does not walk the chain
+   * has no progress, and never calls the listener at all — a reading of "not
+   * connected" would read to a stall watch as an indexer that stopped serving.
    */
   subscribeSyncProgress(listener: (progress: LocalWalletSyncProgress) => void): () => void;
   /** Stops sync and submission. Safe to call more than once. */
@@ -1096,6 +1149,12 @@ export async function createLocalMidnightWallet(
   installZswapApplyGuard();
 
   const configured = localWalletNetworkConfig(options.network);
+  /* Asked against the network id this wallet opens on — the indexer probe
+     below changes only the endpoint URLs, never the id. */
+  const chainSync =
+    typeof options.chainSync === 'function'
+      ? options.chainSync(configured.networkId)
+      : (options.chainSync ?? true);
   /**
    * WHICH INDEXER THIS WALLET OPENS ON.
    *
@@ -1234,7 +1293,10 @@ export async function createLocalMidnightWallet(
         submissionService: (config: { relayURL: URL }) =>
           settledSubmissionService(() => openSdkNodeClient(config.relayURL)),
       });
-      await started.start(shieldedSecretKeys, dustSecretKey);
+      /* THE WALK, and the only place one is started. Without it the facade is
+         the same object with its three wallets at their starting state, and
+         no indexer subscription or pending-transaction poll is ever opened. */
+      if (chainSync) await started.start(shieldedSecretKeys, dustSecretKey);
       return started;
     } catch (cause) {
       if (started) {
@@ -1274,14 +1336,19 @@ export async function createLocalMidnightWallet(
     return startFacade(null);
   };
 
+  /* NOTHING TO RESUME AND NOTHING TOO DEEP for a wallet that will not walk:
+     no snapshot is read, and the depth guard — which exists to refuse a walk
+     a tab cannot finish — has no walk to refuse. */
   const cached =
-    (options.resume ?? 'auto') === 'auto'
+    chainSync && (options.resume ?? 'auto') === 'auto'
       ? await loadWalletSnapshot(network.networkId, unshieldedAddress)
       : null;
 
   let facade: WalletFacade;
   let resumedFromSnapshot = false;
-  if (cached) {
+  if (!chainSync) {
+    facade = await startFacade(null);
+  } else if (cached) {
     try {
       facade = await startFacade(cached);
       resumedFromSnapshot = true;
@@ -1322,7 +1389,9 @@ export async function createLocalMidnightWallet(
   // -------------------------------------------------------------------------
 
   const saveSnapshot = async (): Promise<void> => {
-    if (stopped) return;
+    /* An unwalked state is the empty one this wallet started with; writing it
+       would replace a real snapshot with nothing. */
+    if (stopped || !chainSync) return;
     // Bounded so that `close()` — which awaits this — can never be held open
     // by a wedged facade or a blocked IndexedDB transaction.
     const [shielded, unshielded, dust] = await Promise.race([
@@ -1355,19 +1424,23 @@ export async function createLocalMidnightWallet(
     // Losing the cache costs a longer sync next time and nothing else.
     onError: (cause) => console.debug('[localWallet] unable to save the sync snapshot', cause),
   });
-  const snapshotSubscription = facade.state().subscribe({
-    next: (state) => {
-      if (closed) return;
-      snapshotCheckpointer.noteState(state.isSynced);
-    },
-    error: (cause) => {
-      // Sync errors are surfaced through subscribeSyncProgress's `connected`
-      // flag; here they only mean "stop trying to snapshot".
-      console.debug('[localWallet] state stream error; snapshots paused', cause);
-    },
-  });
+  // Nothing walked, nothing to checkpoint: the checkpointer is never fed.
+  const snapshotSubscription = chainSync
+    ? facade.state().subscribe({
+        next: (state) => {
+          if (closed) return;
+          snapshotCheckpointer.noteState(state.isSynced);
+        },
+        error: (cause) => {
+          // Sync errors are surfaced through subscribeSyncProgress's `connected`
+          // flag; here they only mean "stop trying to snapshot".
+          console.debug('[localWallet] state stream error; snapshots paused', cause);
+        },
+      })
+    : null;
 
   const getBalances = async (): Promise<LocalWalletBalances> => {
+    if (!chainSync) return unavailableBalances(new Error(NOT_WALKING));
     try {
       return projectBalances(await currentState(), new Date()).balances;
     } catch (cause) {
@@ -1384,6 +1457,12 @@ export async function createLocalMidnightWallet(
     listener: (balances: LocalWalletBalances) => void,
     options: { minIntervalMs?: number } = {},
   ): () => void => {
+    /* One honest reading and nothing after it: there is no stream to follow,
+       and the starting state's zeros are not this wallet's balance. */
+    if (!chainSync) {
+      if (!closed) listener(unavailableBalances(new Error(NOT_WALKING)));
+      return () => undefined;
+    }
     const minIntervalMs = Math.max(0, options.minIntervalMs ?? DEFAULT_BALANCE_MIN_INTERVAL_MS);
     // For the heartbeat: the newest state seen (null once the stream has
     // errored, so a dead subscription cannot keep reporting fresh numbers) and
@@ -1461,6 +1540,7 @@ export async function createLocalMidnightWallet(
 
   const shieldedHoldings = async (): Promise<ShieldedHolding[]> => {
     if (closed) throw new Error('This Passport wallet has been closed.');
+    if (!chainSync) throw new Error(NOT_WALKING);
     const state = await currentState();
     return Object.entries(state.shielded.balances)
       .filter(([, amount]) => amount > 0n)
@@ -1478,6 +1558,7 @@ export async function createLocalMidnightWallet(
     keys,
     provingMode,
     resumedFromSnapshot,
+    chainSync,
     saveSnapshot,
     shieldedHoldings,
     getBalances,
@@ -1494,9 +1575,12 @@ export async function createLocalMidnightWallet(
       };
     },
     async waitForSync(): Promise<void> {
+      if (!chainSync) throw new Error(NOT_WALKING);
       await Rx.firstValueFrom(facade.state().pipe(Rx.filter((state) => state.isSynced)));
     },
     subscribeSyncProgress(listener: (progress: LocalWalletSyncProgress) => void): () => void {
+      // No walk, no progress — and no reading a stall watch could mistake for one.
+      if (!chainSync) return () => undefined;
       const subscription = facade
         .state()
         .pipe(
@@ -1534,7 +1618,7 @@ export async function createLocalMidnightWallet(
     async close(): Promise<void> {
       if (closed) return;
       closed = true;
-      snapshotSubscription.unsubscribe();
+      snapshotSubscription?.unsubscribe();
       // Last write wins: whatever this session reached is what the next one
       // resumes from, synced or not.
       await snapshotCheckpointer.stop();

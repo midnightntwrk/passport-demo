@@ -135,6 +135,39 @@ export function passkeyPassportRoute(input: {
 }
 
 /**
+ * Whether the wallet a passkey sign-in opens should WALK THE CHAIN — asked
+ * before it is opened, from the same stored facts the route is decided from.
+ *
+ * ONLY A PROTOTYPE PASSPORT NEEDS THE WALK (2026/09/27). Its wallet holds real
+ * money — a NIGHT payment to a name passes through it, and the offer to move
+ * money that reached it from outside reads its balance — so what it has synced
+ * is what those flows spend. A Passport on the account custody contract keeps
+ * its money in the account, and the wallet is left holding its keys, its
+ * addresses, and a network id; the walk bought that Passport nothing but
+ * minutes of CPU, memory, and data after every sign-up.
+ *
+ * So the answer is the route's, with the same order of precedence: a build
+ * that makes no custody Passports walks, a credential not yet known walks
+ * (nothing stored can say which contract it is on, and walking is what every
+ * wallet did before this rule), and otherwise the wallet walks exactly when the
+ * route is `legacy`. A `legacy` route that appears only AFTER the wallet opened
+ * — an account read back off the passkey on a new device, or a backup restored
+ * — is the host's to notice: it reopens the wallet walking.
+ */
+export function passkeyWalletFollowsChain(input: {
+  /** {@link accountCustodyEnabled}'s answer for this build and page. */
+  readonly custodyOn: boolean;
+  /**
+   * What {@link passkeyPassportRoute} answers for the credential on the
+   * wallet's network, or null where the credential is not known.
+   */
+  readonly route: PasskeyPassportRoute | null;
+}): boolean {
+  if (!input.custodyOn || input.route === null) return true;
+  return input.route === 'legacy';
+}
+
+/**
  * What a browser that holds SOMEBODY ELSE'S Passport is owed before it is
  * offered a new one.
  *
