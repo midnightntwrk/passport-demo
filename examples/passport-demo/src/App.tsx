@@ -97,8 +97,10 @@ import type { ClaimRetryNotice, ClaimRetryRun } from './lib/claimRetry.js';
 import {
   ACTIVITY_KEEP,
   activityStorageKey,
+  mergeRestoredActivity,
   readStoredActivity,
   serialiseActivity,
+  type RestoredActivityRow,
 } from './lib/activityFeed.js';
 import type { ActivityFeedItem } from './screens/ActivityFeed.js';
 import type { NameLookup } from './lib/recipientName.js';
@@ -1974,6 +1976,32 @@ export default function PassportDemo() {
   const updateActivity = useCallback((id: string, patch: Partial<Omit<ActivityEntry, 'id' | 'createdAt'>>) => {
     setActivity((current) => current.map((entry) => (entry.id === id ? { ...entry, ...patch } : entry)));
   }, []);
+
+  /**
+   * Rows read back from a Passport's history on the chain, merged into the
+   * trail ONCE and at the times they happened (2026/09/27) — the one kind of
+   * row whose clock is not stamped here, because the block's clock is the
+   * true one. The rules are `./lib/activityFeed.ts#mergeRestoredActivity`;
+   * the network is stamped exactly as {@link addActivity} stamps it.
+   */
+  const restoreActivity = useCallback(
+    (rows: readonly RestoredActivityRow[]) => {
+      setActivity(
+        (current) =>
+          mergeRestoredActivity<ActivityEntry>(current, rows, (row) => ({
+            id: row.id,
+            label: row.label,
+            detail: row.detail,
+            status: row.status,
+            source: 'chain',
+            txHash: row.txHash,
+            network: selectedNetwork,
+            createdAt: row.createdAt,
+          })) as ActivityEntry[],
+      );
+    },
+    [selectedNetwork],
+  );
 
   /* ---------------------------------------------------------------------- */
   /* The trail, across reloads                                              */
@@ -10455,6 +10483,9 @@ export default function PassportDemo() {
             /* And everything that happens to it is written down. The trail is
                this file's: keyed, stored, paged, and linked to the explorer. */
             onActivity={addActivity}
+            /* And what happened before this device saw it, at the times it
+               happened, from the Passport's own history. */
+            onRestoreActivity={restoreActivity}
           />
         </Suspense>
       ) : showOnboarding ? (

@@ -61,6 +61,18 @@
  * It holds no DOM, no React, no `fetch`, no ledger, and no runtime: the
  * question to the indexer, the event decoder, and the hash are handed in, and
  * the whole of it is drilled in `./custodySpentCoins.test.ts`.
+ *
+ * WHAT THE SAME READ NOW KEEPS AS WELL (2026/09/27)
+ * -------------------------------------------------
+ * A spend's events say what it CREATED as well as what it spent: each Zswap
+ * output, with its commitment, the contract it was made for, and where in the
+ * tree it landed. And the transaction's identifiers come back with them, which
+ * are what this device's own trail wrote a payment under before the chain had
+ * given it a hash. `./custodyChangeWalk.ts` reads the first to find the change a
+ * payment from another device kept — a coin no note describes — and the
+ * Activity rebuild reads the second so it never writes a payment twice. Both
+ * are kept from the one request this module already makes, so nothing is asked
+ * of the indexer that was not asked before: {@link readCustodyTransactions}.
  */
 
 import { normalisedColourHex } from '../lib/colour.js';
@@ -74,6 +86,13 @@ import { forgetSpentK1Coins, k1CountedCoins, type K1Account, type K1HeldCoin } f
 
 /** The domain separator of a coin's nullifier, as the compiled build spells it. */
 export const CUSTODY_COIN_NULLIFIER_DOMAIN = 'midnight:zswap-cn[v1]';
+
+/**
+ * The domain separator of a coin's COMMITMENT, as the compiled build spells it
+ * — `_coinCommitment_0`, whose preimage is the nullifier's with this domain in
+ * place of that one.
+ */
+export const CUSTODY_COIN_COMMITMENT_DOMAIN = 'midnight:zswap-cc[v1]';
 
 /**
  * The one shape the hash is told about a type: how it is laid out, and how a
@@ -124,8 +143,42 @@ export function custodyCoinNullifier(
   coin: CustodyCoinDescription,
   address: string,
 ): string {
+  return custodyCoinHasher(runtime, CUSTODY_COIN_NULLIFIER_DOMAIN, address)(coin);
+}
+
+/**
+ * The commitment a coin this account holds is filed under in the tree, as
+ * lowercase hex — the bytes a `zswapOutput` event carries for it.
+ *
+ * The compiled build's `_coinCommitment_0` for a coin sent to `right(self)`:
+ * the nullifier's preimage with {@link CUSTODY_COIN_COMMITMENT_DOMAIN}, `false`
+ * because a contract and not a person holds it, and the account's address.
+ * `./custodySpentCoins.test.ts` holds it to that method, and to the ledger's own
+ * `ZswapOutput.newContractOwned(…).commitment`, on the same coins.
+ */
+export function custodyCoinCommitment(
+  runtime: CustodyHashRuntime,
+  coin: CustodyCoinDescription,
+  address: string,
+): string {
+  return custodyCoinHasher(runtime, CUSTODY_COIN_COMMITMENT_DOMAIN, address)(coin);
+}
+
+/**
+ * One of the two hashes above, with everything but the coin laid out ONCE.
+ *
+ * The change search (`./custodyChangeWalk.ts`) asks for the commitment of the
+ * same coin at up to a million values in a row; building the Compact types and
+ * encoding the domain and the address a million times over is most of the cost
+ * of doing that, and none of it changes between calls.
+ */
+export function custodyCoinHasher(
+  runtime: CustodyHashRuntime,
+  domainSeparator: string,
+  address: string,
+): (coin: CustodyCoinDescription) => string {
   const bytes32 = new runtime.CompactTypeBytes(32);
-  const domain = new runtime.CompactTypeBytes(CUSTODY_COIN_NULLIFIER_DOMAIN.length);
+  const domain = new runtime.CompactTypeBytes(domainSeparator.length);
   const uint128 = new runtime.CompactTypeUnsignedInteger((1n << 128n) - 1n, 16);
   const boolean = runtime.CompactTypeBoolean;
   const coinType: CustodyCompactType<CoinPreimage['info']> = {
@@ -150,13 +203,17 @@ export function custodyCoinNullifier(
       ...bytes32.toValue(value.data),
     ],
   };
-  const hash = runtime.persistentHash(preimage, {
-    domain_sep: new TextEncoder().encode(CUSTODY_COIN_NULLIFIER_DOMAIN),
-    info: { nonce: hexToBytes(coin.nonce), color: hexToBytes(coin.colour), value: coin.value },
-    dataType: false,
-    data: hexToBytes(address),
-  });
-  return [...hash].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  const domainBytes = new TextEncoder().encode(domainSeparator);
+  const data = hexToBytes(address);
+  return (coin) => {
+    const hash = runtime.persistentHash(preimage, {
+      domain_sep: domainBytes,
+      info: { nonce: hexToBytes(coin.nonce), color: hexToBytes(coin.colour), value: coin.value },
+      dataType: false,
+      data,
+    });
+    return [...hash].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -193,6 +250,9 @@ export const CUSTODY_SPEND_QUERY_BATCH = 25;
  * The hashes are interpolated raw because they have already been normalised to
  * 64 hex characters ({@link custodySpendTransactions}), so there is no quote
  * for one to smuggle in; anything else is left out rather than asked about.
+ *
+ * `identifiers` rides along (2026/09/27): the ids a submit answers with, which
+ * is what this device's own trail wrote a payment under — see the header.
  */
 export function custodySpendEventsQuery(hashes: readonly string[]): string {
   const asked = hashes.flatMap((asked, index) => {
@@ -201,7 +261,7 @@ export function custodySpendEventsQuery(hashes: readonly string[]): string {
       ? []
       : [
           `  t${index}: transactions(offset: { hash: "${hash}" }) ` +
-            '{ hash ... on RegularTransaction { zswapLedgerEvents { raw } } }',
+            '{ hash ... on RegularTransaction { identifiers zswapLedgerEvents { raw } } }',
         ];
   });
   return `query CustodySpentCoins {\n${asked.join('\n')}\n}`;
@@ -219,7 +279,28 @@ export function custodySpendEventsFrom(
   body: unknown,
   hashes: readonly string[],
 ): Map<string, string[]> {
-  const found = new Map<string, string[]>();
+  return new Map(
+    [...custodyTransactionAnswersFrom(body, hashes)].map(([hash, answer]) => [hash, answer.raws]),
+  );
+}
+
+/** What the indexer said about one transaction: its raw events, and its ids. */
+export interface CustodyTransactionAnswer {
+  readonly raws: string[];
+  /** Lowercase hex, as the submit that sent it answered; empty where none came back. */
+  readonly identifiers: string[];
+}
+
+/**
+ * {@link custodySpendEventsFrom}, with each transaction's identifiers kept as
+ * well. The same rules: only what was answered, and nothing from an answer
+ * with errors in it. An identifier that is not hex is left out.
+ */
+export function custodyTransactionAnswersFrom(
+  body: unknown,
+  hashes: readonly string[],
+): Map<string, CustodyTransactionAnswer> {
+  const found = new Map<string, CustodyTransactionAnswer>();
   if (!body || typeof body !== 'object') return found;
   const envelope = body as { data?: unknown; errors?: unknown };
   if (Array.isArray(envelope.errors) && envelope.errors.length > 0) return found;
@@ -229,16 +310,21 @@ export function custodySpendEventsFrom(
     const hash = normalisedColourHex(asked);
     const answer = data[`t${index}`];
     if (hash === null || !Array.isArray(answer)) return;
-    const transaction = (answer as { hash?: unknown; zswapLedgerEvents?: unknown }[]).find(
-      (row) => normalisedColourHex(typeof row?.hash === 'string' ? row.hash : null) === hash,
-    );
+    const transaction = (
+      answer as { hash?: unknown; zswapLedgerEvents?: unknown; identifiers?: unknown }[]
+    ).find((row) => normalisedColourHex(typeof row?.hash === 'string' ? row.hash : null) === hash);
     if (transaction === undefined || !Array.isArray(transaction.zswapLedgerEvents)) return;
-    found.set(
-      hash,
-      (transaction.zswapLedgerEvents as { raw?: unknown }[]).flatMap((event) =>
+    found.set(hash, {
+      raws: (transaction.zswapLedgerEvents as { raw?: unknown }[]).flatMap((event) =>
         typeof event?.raw === 'string' ? [event.raw] : [],
       ),
-    );
+      identifiers: (Array.isArray(transaction.identifiers) ? (transaction.identifiers as unknown[]) : []).flatMap(
+        (identifier) => {
+          const id = typeof identifier === 'string' ? identifier.trim().toLowerCase().replace(/^0x/, '') : '';
+          return /^[0-9a-f]+$/.test(id) ? [id] : [];
+        },
+      ),
+    });
   });
   return found;
 }
@@ -268,20 +354,65 @@ export function custodySpentInputs(events: readonly unknown[]): CustodySpentInpu
   return inputs;
 }
 
+/** One coin a transaction made: its commitment, whose it is, and where it landed. */
+export interface CustodyCreatedOutput {
+  readonly commitment: string;
+  /** The contract the coin was made for, or null for a coin made for a person. */
+  readonly contract: string | null;
+  /** Its position in the commitment tree — the `mt_index` a spend of it proves against. */
+  readonly mtIndex: bigint;
+}
+
+/**
+ * The outputs a transaction's events record, out of events already decoded by
+ * the ledger. A `zswapOutput` names its commitment and its position always,
+ * and its contract only when a contract holds the coin — the shape a real
+ * stagenet payment's events have (`./custodySpentCoins.test.ts`). Anything
+ * that is not a readable output is passed over.
+ */
+export function custodyCreatedOutputs(events: readonly unknown[]): CustodyCreatedOutput[] {
+  const outputs: CustodyCreatedOutput[] = [];
+  for (const event of events) {
+    const content = event as
+      | { tag?: unknown; commitment?: unknown; contract?: unknown; mtIndex?: unknown }
+      | null
+      | undefined;
+    if (content?.tag !== 'zswapOutput') continue;
+    const commitment = normalisedColourHex(typeof content.commitment === 'string' ? content.commitment : null);
+    const mtIndex = typeof content.mtIndex === 'bigint' && content.mtIndex >= 0n ? content.mtIndex : null;
+    if (commitment === null || mtIndex === null) continue;
+    if (content.contract === undefined || content.contract === null) {
+      outputs.push({ commitment, contract: null, mtIndex });
+      continue;
+    }
+    /* A contract that is named and cannot be read is not "nobody's": the
+       output is left out rather than guessed at. */
+    const contract = normalisedColourHex(typeof content.contract === 'string' ? content.contract : null);
+    if (contract !== null) outputs.push({ commitment, contract, mtIndex });
+  }
+  return outputs;
+}
+
 /* -------------------------------------------------------------------------- */
 /* The check                                                                  */
 /* -------------------------------------------------------------------------- */
 
-/** What {@link forgetSpentCustodyCoins} is handed: the three things it cannot do itself. */
-export interface CustodySpentCoinsDeps {
+/** How the account's own transactions are read: the question, and the decoder. */
+export interface CustodyTransactionReadDeps {
   /** Ask the indexer one GraphQL question and hand back the parsed answer. May throw. */
   readonly ask: (query: string) => Promise<unknown>;
   /** One raw event as the ledger decodes it — `Event.deserialize(bytes).content`. May throw. */
   readonly decode: (raw: string) => unknown;
-  /** A coin's nullifier as this account would spend it — {@link custodyCoinNullifier}. */
-  readonly nullifierOf: (coin: CustodyCoinDescription) => string;
   /** Spends already read, by transaction hash. The tab's own by default. */
   readonly known?: Map<string, readonly CustodySpentInput[]>;
+  /** Everything else those reads said, by transaction hash. The tab's own by default. */
+  readonly facts?: Map<string, CustodyTransactionFacts>;
+}
+
+/** What {@link forgetSpentCustodyCoins} is handed: the three things it cannot do itself. */
+export interface CustodySpentCoinsDeps extends CustodyTransactionReadDeps {
+  /** A coin's nullifier as this account would spend it — {@link custodyCoinNullifier}. */
+  readonly nullifierOf: (coin: CustodyCoinDescription) => string;
 }
 
 /** What one check did. */
@@ -292,11 +423,84 @@ export interface CustodySpentCoinsResult {
   readonly forgotten: readonly K1HeldCoin[];
 }
 
+/** Everything one of the account's own transactions was read to say. */
+export interface CustodyTransactionFacts {
+  /** The coins it spent, with the contract that held each. */
+  readonly inputs: readonly CustodySpentInput[];
+  /** The coins it made, with where each landed. */
+  readonly outputs: readonly CustodyCreatedOutput[];
+  /** The ids its submit could have answered with. */
+  readonly identifiers: readonly string[];
+  /**
+   * Whether EVERY event the indexer gave for it was read. A transaction with an
+   * event this build could not decode may have made a coin nobody here can see,
+   * so "it made nothing for this account" is said only of a whole one.
+   */
+  readonly whole: boolean;
+}
+
 /**
  * A transaction's events, once read, for the life of the tab. A transaction on
  * the chain does not change, so neither does this.
  */
 const KNOWN_SPENDS = new Map<string, readonly CustodySpentInput[]>();
+
+/** The rest of what those reads said, kept beside them for the same reason. */
+const KNOWN_FACTS = new Map<string, CustodyTransactionFacts>();
+
+/**
+ * THE ONE READ: what each of these transactions spent, made, and was known by,
+ * asked of the indexer only for the ones this tab has not read yet, in batches
+ * of {@link CUSTODY_SPEND_QUERY_BATCH}.
+ *
+ * `facts` is every asked transaction that HAS been read, now or before; one the
+ * indexer did not answer for is simply absent — "cannot say", never "made
+ * nothing". A batch that cannot be asked stops the reading, and `complete` says
+ * so; what earlier batches answered is kept.
+ */
+export async function readCustodyTransactions(
+  hashes: readonly string[],
+  deps: CustodyTransactionReadDeps,
+): Promise<{ readonly complete: boolean; readonly facts: ReadonlyMap<string, CustodyTransactionFacts> }> {
+  const known = deps.known ?? KNOWN_SPENDS;
+  const facts = deps.facts ?? KNOWN_FACTS;
+  const wanted = [
+    ...new Set(hashes.map((hash) => normalisedColourHex(hash)).filter((hash): hash is string => hash !== null)),
+  ];
+  const unread = wanted.filter((hash) => !known.has(hash) || !facts.has(hash));
+  for (let start = 0; start < unread.length; start += CUSTODY_SPEND_QUERY_BATCH) {
+    const batch = unread.slice(start, start + CUSTODY_SPEND_QUERY_BATCH);
+    let answered: Map<string, CustodyTransactionAnswer>;
+    try {
+      answered = custodyTransactionAnswersFrom(await deps.ask(custodySpendEventsQuery(batch)), batch);
+    } catch {
+      break;
+    }
+    for (const [hash, answer] of answered) {
+      const decoded = answer.raws.flatMap((raw) => {
+        try {
+          return [deps.decode(raw)];
+        } catch {
+          return [];
+        }
+      });
+      const inputs = custodySpentInputs(decoded);
+      known.set(hash, inputs);
+      facts.set(hash, {
+        inputs,
+        outputs: custodyCreatedOutputs(decoded),
+        identifiers: answer.identifiers,
+        whole: decoded.length === answer.raws.length,
+      });
+    }
+  }
+  const read = new Map<string, CustodyTransactionFacts>();
+  for (const hash of wanted) {
+    const fact = facts.get(hash);
+    if (fact !== undefined) read.set(hash, fact);
+  }
+  return { complete: read.size === wanted.length, facts: read };
+}
 
 /**
  * THE HELD-COIN CHECK: every coin the store counts, against the nullifiers the
@@ -317,30 +521,7 @@ export async function forgetSpentCustodyCoins(
   const spends = custodySpendTransactions(actions);
   if (coins.length === 0 || spends.length === 0) return { complete: true, forgotten: [] };
 
-  const unread = spends.filter((hash) => !known.has(hash));
-  for (let start = 0; start < unread.length; start += CUSTODY_SPEND_QUERY_BATCH) {
-    const batch = unread.slice(start, start + CUSTODY_SPEND_QUERY_BATCH);
-    let answered: Map<string, string[]>;
-    try {
-      answered = custodySpendEventsFrom(await deps.ask(custodySpendEventsQuery(batch)), batch);
-    } catch {
-      break;
-    }
-    for (const [hash, raws] of answered) {
-      known.set(
-        hash,
-        custodySpentInputs(
-          raws.flatMap((raw) => {
-            try {
-              return [deps.decode(raw)];
-            } catch {
-              return [];
-            }
-          }),
-        ),
-      );
-    }
-  }
+  await readCustodyTransactions(spends, { ...deps, known });
 
   const address = normalisedColourHex(account.address);
   const spent = new Set(
