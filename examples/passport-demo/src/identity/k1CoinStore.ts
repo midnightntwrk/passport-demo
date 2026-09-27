@@ -1067,7 +1067,7 @@ export function k1CountedCoins(account: K1Account): K1HeldCoin[] {
  * WHY THE STORE CAN HOLD A SPENT COIN AT ALL. The inbox is append-only: a note
  * stays after the coin it describes is spent. A device that walks the inbox
  * from the start — a Passport recovered on a new device and given its earlier
- * viewing key back by a password backup, or a second device whose synced
+ * viewing key back by its sign-in, or a second device whose synced
  * passkey derives the same key — files every note it can open, including the
  * notes for coins another device has already sent. Those were counted on Home
  * and offered to a payment, and the payment was refused by the node

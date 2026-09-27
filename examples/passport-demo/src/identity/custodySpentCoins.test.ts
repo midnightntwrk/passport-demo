@@ -3,7 +3,7 @@
  * payment, only the coins the chain says it still holds.
  *
  * The defect these drill: a device that walked the inbox with an earlier key —
- * one a password backup gave back, or a synced passkey re-derived — filed the
+ * one the sign-in gave back, or a synced passkey re-derived — filed the
  * notes of coins another device had already sent. Home counted them, and a
  * payment drawn on one was refused by the node at the end of a whole proof.
  *
