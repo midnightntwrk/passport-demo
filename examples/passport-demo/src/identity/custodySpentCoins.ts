@@ -8,7 +8,7 @@
  * it stays there after the coin is spent, because nothing ever removes one. A
  * device that walks the inbox from the start therefore finds every note ever
  * sealed to its key, spent or not: a Passport recovered on a new device whose
- * password backup gave its earlier viewing key back (`./viewingKeys.ts`), or a
+ * sign-in gave its earlier viewing key back (`./signInViewingKeys.ts`), or a
  * second device whose synced passkey derives the same key. Each note for a coin
  * the OTHER device had already sent was counted on Home, and a payment drawn on
  * one proved and was then refused by the node — `NullifierAlreadyPresent`,

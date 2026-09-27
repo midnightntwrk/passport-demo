@@ -1096,7 +1096,10 @@ const EARLIER_MUSD = 25n;
  * fresh ephemeral key, HKDF-SHA256 under `midnight:custody:inbox:v1`, and
  * AES-256-GCM over nonce ‖ colour ‖ value, padded to 192 bytes.
  */
-async function sealEarlierNote(recipientSecretHex: string): Promise<Uint8Array> {
+async function sealEarlierNote(
+  recipientSecretHex: string,
+  coin: { nonce: string; value: bigint } = { nonce: EARLIER_NONCE, value: EARLIER_MUSD },
+): Promise<Uint8Array> {
   const { x25519 } = await import('@noble/curves/ed25519.js');
   const recipient = x25519.getPublicKey(Buffer.from(recipientSecretHex, 'hex'));
   const ephemeral = crypto.getRandomValues(new Uint8Array(32));
@@ -1114,9 +1117,9 @@ async function sealEarlierNote(recipientSecretHex: string): Promise<Uint8Array> 
   );
   const key = await crypto.subtle.importKey('raw', bits, 'AES-GCM', false, ['encrypt']);
   const plaintext = new Uint8Array(80);
-  plaintext.set(Buffer.from(EARLIER_NONCE, 'hex'), 0);
+  plaintext.set(Buffer.from(coin.nonce, 'hex'), 0);
   plaintext.set(Buffer.from(MUSD_COLOUR, 'hex'), 32);
-  let value = EARLIER_MUSD;
+  let value = coin.value;
   for (let index = 15; index >= 0; index -= 1) {
     plaintext[64 + index] = Number(value & 0xffn);
     value >>= 8n;
@@ -1146,27 +1149,34 @@ async function sealEarlierNote(recipientSecretHex: string): Promise<Uint8Array> 
  * the ledger wrote: field 2 of the account's state is the inbox map and field 3
  * its count, which is the layout the compiled build's `ledger()` reads.
  */
-async function recordedStateWithEarlierNote(): Promise<string> {
+async function recordedStateWithEarlierNote(
+  notes: readonly { nonce: string; value: bigint }[] = [{ nonce: EARLIER_NONCE, value: EARLIER_MUSD }],
+): Promise<string> {
   const runtime = await import('@midnight-ntwrk/compact-runtime');
   const recorded = JSON.parse(ACCOUNT_CUSTODY_STATE) as { data: { contract: { state: string } } };
   const state = runtime.ContractState.deserialize(Buffer.from(recorded.data.contract.state, 'hex'));
   const fields = state.data.state.asArray()!;
-  const inbox = fields[2].asMap()!;
-  const index = BigInt(inbox.keys().length);
+  let grown = fields[2].asMap()!;
+  let index = BigInt(grown.keys().length);
   const u64 = new runtime.CompactTypeUnsignedInteger(18446744073709551615n, 8);
   const bytes192 = new runtime.CompactTypeBytes(192);
-  const note = await sealEarlierNote(OLD_VIEWING_SECRET);
-  const grown = inbox.insert(
-    { value: u64.toValue(index), alignment: u64.alignment() },
-    runtime.StateValue.newCell({ value: bytes192.toValue(note), alignment: bytes192.alignment() }),
-  );
+  /* In the order given: the first note is the lowest index, as it would be if
+     its payment had arrived first. */
+  for (const coin of notes) {
+    const note = await sealEarlierNote(OLD_VIEWING_SECRET, coin);
+    grown = grown.insert(
+      { value: u64.toValue(index), alignment: u64.alignment() },
+      runtime.StateValue.newCell({ value: bytes192.toValue(note), alignment: bytes192.alignment() }),
+    );
+    index += 1n;
+  }
   let next = runtime.StateValue.newArray();
   fields.forEach((field, position) => {
     next = next.arrayPush(
       position === 2
         ? runtime.StateValue.newMap(grown)
         : position === 3
-          ? runtime.StateValue.newCell({ value: u64.toValue(index + 1n), alignment: u64.alignment() })
+          ? runtime.StateValue.newCell({ value: u64.toValue(index), alignment: u64.alignment() })
           : field,
     );
   });
@@ -1495,6 +1505,249 @@ test.describe('a Passport brought back through its sign-in (2026/09/26)', () => 
     await expect(assetRow(page, 'mUSD')).not.toContainText('25');
     await expect(page.locator('.mnhome-notice')).toHaveCount(0);
     await saysNoMoreThanItShould(page);
+    await close();
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* A coin the old device had already spent (2026/09/26)                       */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * THE WALK THIS BLOCK IS FOR. The earlier key the sign-in gives back opens
+ * EVERY note sealed to it — including the notes for coins the old device had
+ * already sent. Until this change each of them was counted on Home and offered
+ * to a payment, which the node then refused (`NullifierAlreadyPresent`, 239).
+ * Home now counts only the coins the chain says the account still holds.
+ *
+ * Walked on the road the block above walks, with its helpers: the old device
+ * adds the way back and its key goes into the sign-in's metadata, and the new
+ * device, back through that sign-in, reads the key out again with nothing
+ * asked on the screen.
+ *
+ * Built here, beside the earlier delivery above: a SECOND note sealed to the
+ * old key — 40 mUSD, delivered first — and a spend of it by the old device,
+ * served as the chain serves one: a `withdraw_shielded_with_jubjub` in the
+ * account's history, and that transaction's `zswapInput` ledger event naming
+ * the coin's nullifier and the account. The event's bytes are a real stagenet
+ * spend's (`LIVE_SPEND_EVENT`) with the three fields put in, and the nullifier
+ * is computed below with the Compact runtime, written out in this file rather
+ * than imported from the module under test.
+ */
+const SPENT_NONCE = '2b'.repeat(32);
+const SPENT_MUSD = 40n;
+const SPENT_DELIVERY_TX = 'e3'.repeat(32);
+const OLD_DEVICE_SPEND_TX = 'e2'.repeat(32);
+
+/**
+ * A `zswapInput` event from stagenet — account `098b18f2…`'s coin going into
+ * transaction `47e1d1c1…` at block 519072 — cut where its three fields sit, so
+ * the walk can serve an event the ledger's own decoder reads.
+ */
+const LIVE_SPEND_EVENT = {
+  head: '6d69646e696768743a6576656e745b7631345d3a080080',
+  afterContract: '04001901',
+  afterTransaction: '0000000000',
+  tail: '00',
+};
+
+function spendEvent(contract: string, transaction: string, nullifier: string): string {
+  return (
+    LIVE_SPEND_EVENT.head +
+    contract +
+    LIVE_SPEND_EVENT.afterContract +
+    transaction +
+    LIVE_SPEND_EVENT.afterTransaction +
+    nullifier +
+    LIVE_SPEND_EVENT.tail
+  );
+}
+
+/**
+ * The nullifier a spend of a coin the account holds publishes: the compiled
+ * build's `coinNullifier`, `persistentHash` over `midnight:zswap-cn[v1]`, the
+ * coin, `false` (a contract holds it), and the account's address.
+ */
+async function accountCoinNullifier(nonce: string, value: bigint): Promise<string> {
+  const runtime = await import('@midnight-ntwrk/compact-runtime');
+  const b32 = new runtime.CompactTypeBytes(32);
+  const b21 = new runtime.CompactTypeBytes(21);
+  const u128 = new runtime.CompactTypeUnsignedInteger(340282366920938463463374607431768211455n, 16);
+  const flag = runtime.CompactTypeBoolean;
+  const preimage = {
+    alignment: () => [
+      ...b21.alignment(),
+      ...b32.alignment(),
+      ...b32.alignment(),
+      ...u128.alignment(),
+      ...flag.alignment(),
+      ...b32.alignment(),
+    ],
+    toValue: () => [
+      ...b21.toValue(new TextEncoder().encode('midnight:zswap-cn[v1]')),
+      ...b32.toValue(Buffer.from(nonce, 'hex')),
+      ...b32.toValue(Buffer.from(MUSD_COLOUR, 'hex')),
+      ...u128.toValue(value),
+      ...flag.toValue(false),
+      ...b32.toValue(Buffer.from(ACCOUNT_CUSTODY_ADDRESS, 'hex')),
+    ],
+    fromValue: () => null,
+  };
+  return Buffer.from(
+    runtime.persistentHash(preimage as unknown as Parameters<typeof runtime.persistentHash>[0], null),
+  ).toString('hex');
+}
+
+/**
+ * The history with the spent coin's delivery and its spend in it, where that
+ * delivery landed, and the spend's ledger events — handed to
+ * `passkeyPassportHere` as `moreHistory`, which registers it after
+ * `serveEarlierDelivery`, so it answers first. Every transaction the page asks
+ * about for its spends is written down in `askedAbout`.
+ */
+function serveTheOldDeviceSpend(
+  spentNullifier: string,
+  askedAbout: string[] = [],
+): (page: Page) => Promise<void> {
+  return async (page) => {
+    await page.route('**/indexer.stagenet.shielded.tools/**', async (route) => {
+      const body = route.request().postData() ?? '';
+      const aboutThisAccount = body.toLowerCase().includes(ACCOUNT_CUSTODY_ADDRESS);
+      if (aboutThisAccount && body.includes('CustodyInboxActions')) {
+        /* Newest first: the old device's spend, the 25, the 40 before it, the
+           recording's own delivery, and the deploy. */
+        const call = (entryPoint: string, hash: string) => ({
+          __typename: 'ContractCall',
+          entryPoint,
+          transaction: { hash, transactionResult: { status: 'SUCCESS' } },
+        });
+        return route.fulfill({
+          json: {
+            data: {
+              contract: {
+                actions: [
+                  call('withdraw_shielded_with_jubjub', OLD_DEVICE_SPEND_TX),
+                  call('deposit_shielded', EARLIER_DELIVERY_TX),
+                  call('deposit_shielded', SPENT_DELIVERY_TX),
+                  call('deposit_shielded', 'd1'.repeat(32)),
+                  { __typename: 'ContractDeploy', transaction: { hash: 'd0'.repeat(32) } },
+                ],
+              },
+            },
+          },
+        });
+      }
+      if (body.includes('CustodySpentCoins')) {
+        const query = (JSON.parse(body) as { query: string }).query;
+        const data: Record<string, unknown> = {};
+        for (const [, alias, hash] of query.matchAll(/(t\d+): transactions\(offset: \{ hash: "([0-9a-f]{64})" \}\)/g)) {
+          askedAbout.push(hash);
+          data[alias] =
+            hash === OLD_DEVICE_SPEND_TX
+              ? [
+                  {
+                    hash,
+                    zswapLedgerEvents: [
+                      { raw: spendEvent(ACCOUNT_CUSTODY_ADDRESS, OLD_DEVICE_SPEND_TX, spentNullifier) },
+                    ],
+                  },
+                ]
+              : [];
+        }
+        return route.fulfill({ json: { data } });
+      }
+      if (body.includes('transactions(offset') && body.includes(SPENT_DELIVERY_TX)) {
+        return route.fulfill({ json: { data: { transactions: [{ startIndex: 698, endIndex: 699 }] } } });
+      }
+      return route.fallback();
+    });
+  };
+}
+
+test.describe('a coin the old device had already spent (2026/09/26)', () => {
+  test('is not counted once the sign-in gives the earlier key back, and what is left can be sent', async ({
+    browser,
+  }) => {
+    test.setTimeout(300_000);
+    /* Two notes to the old key: 40 mUSD first, which the old device then
+       spent, and the 25 mUSD after it, which it did not. */
+    const stateBody = await recordedStateWithEarlierNote([
+      { nonce: SPENT_NONCE, value: SPENT_MUSD },
+      { nonce: EARLIER_NONCE, value: EARLIER_MUSD },
+    ]);
+    const spentNullifier = await accountCoinNullifier(SPENT_NONCE, SPENT_MUSD);
+
+    /* THE OLD DEVICE adds the way back, and its key goes with it. It shows
+       the 25 and not 65 itself: the same check runs there. */
+    const old = await passkeyPassportHere(browser, stateBody, {
+      viewingSecret: OLD_VIEWING_SECRET,
+      wayBack: false,
+      signIn: 'out',
+      metadata: { theme: 'dark' },
+      moreHistory: serveTheOldDeviceSpend(spentNullifier),
+    });
+    await expect(old.page.getByRole('heading', { name: /Add a way\s*back/ })).toBeVisible({ timeout: 60_000 });
+    await old.page.getByTestId('add-recovery').click();
+    await expect(greeting(old.page)).toBeVisible({ timeout: 120_000 });
+    await expect(old.page.getByTestId('recovery-state')).toHaveText('Recovery: on');
+    await expect(assetRow(old.page, 'mUSD')).toContainText('25', { timeout: 60_000 });
+    await expect(assetRow(old.page, 'mUSD')).not.toContainText('65');
+    await expect.poll(async () => (await signInMetadata(old.page)).writes.length, { timeout: 60_000 }).toBe(1);
+    const kept = await signInMetadata(old.page);
+    expect(kept.metadata).toEqual({
+      theme: 'dark',
+      passport: { v: 1, keys: { [SIGN_IN_SLOT]: [OLD_VIEWING_SECRET] } },
+    });
+    await old.close();
+
+    /* THE NEW DEVICE, back through the same sign-in: its own new key, an empty
+       coin store, the provider holding what the old device wrote, and the old
+       device's spend on the chain. */
+    const askedAbout: string[] = [];
+    const { page, close } = await passkeyPassportHere(browser, stateBody, {
+      viewingSecret: NEW_VIEWING_SECRET,
+      wayBack: true,
+      signIn: 'in',
+      metadata: kept.metadata,
+      moreHistory: serveTheOldDeviceSpend(spentNullifier, askedAbout),
+    });
+
+    /* HOME: the key the sign-in gave back opens both notes, the chain is asked
+       about the old device's spend, and only the 25 is counted. */
+    await expect(greeting(page)).toBeVisible({ timeout: 60_000 });
+    await expect(page.getByTestId('recovery-state')).toHaveText('Recovery: on');
+    await expect(assetRow(page, 'mUSD')).toContainText('25', { timeout: 60_000 });
+    await expect(assetRow(page, 'mUSD')).not.toContainText('65');
+    await expect.poll(() => askedAbout, { timeout: 60_000 }).toContain(OLD_DEVICE_SPEND_TX);
+    const store = await page.evaluate(
+      () => JSON.parse(window.localStorage.getItem('passport-k1-coins:v1') ?? '{}') as Record<string, unknown>,
+    );
+    const held = store[`${WALK_NETWORK}::${ACCOUNT_CUSTODY_ADDRESS}`] as {
+      coins: Record<string, { nonceHex: string; value: string }>;
+      queued: Record<string, unknown[]>;
+      spentNonces: string[];
+    };
+    /* The 25 is the coin a payment is offered, the 40 is nowhere, and it is
+       remembered as spent so the next walk cannot file it again. */
+    expect(held.coins[MUSD_COLOUR]).toMatchObject({ nonceHex: EARLIER_NONCE, value: '25' });
+    expect(held.queued[MUSD_COLOUR] ?? []).toEqual([]);
+    expect(held.spentNonces).toContain(SPENT_NONCE);
+    /* Nothing new is said about it — no question, no password, no file, and
+       no word of the machinery that decided it. */
+    await expect(page.locator('.mnhome-notice')).toHaveCount(0);
+    await saysNoMoreThanItShould(page);
+
+    /* AND ALL OF IT CAN BE SENT. */
+    await openSend(page);
+    await chooseAsset(page, 'mUSD');
+    await sendRecipient(page).fill(RESOLVABLE_NAME);
+    await sendAmount(page).fill('25');
+    await expect(page.getByRole('button', { name: /^Review$/ })).toBeEnabled({ timeout: 30_000 });
+    await page.getByRole('button', { name: /^Review$/ }).click();
+    await page.locator('.mnhome-send-primary').click();
+    const pill = sendPill(page);
+    await expect(pill).toHaveAttribute('data-state', 'sent', { timeout: 60_000 });
+    await expect(pill).toContainText(/Sent 25 mUSD to /);
     await close();
   });
 });
