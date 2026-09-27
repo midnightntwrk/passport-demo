@@ -61,14 +61,25 @@ export type SendProgressStep =
  * the transaction has an id: it has been handed to the network and is waiting
  * to be included. The three setup steps cannot reach a payment; if one ever
  * did, "Proving…" keeps the line moving without saying anything untrue.
+ *
+ * `sign` IS AN APPROVAL ONLY WHERE THE APPROVAL HAPPENS THERE. A provider
+ * sign-in approves inside the call, so its `sign` is somebody being asked. A
+ * passkey's approval is asked for FIRST — the Confirm press raises the prompt
+ * (2026/09/27) — and by the time the engine signs, the key is in hand and the
+ * signature is arithmetic: saying "Waiting for your approval" then would be
+ * asking for something already given. So with `approvalFirst` it is part of
+ * preparing the transaction, which is what it is.
  */
-export function sendProgressPhase(step: SendProgressStep | null): SendProgressPhase {
+export function sendProgressPhase(
+  step: SendProgressStep | null,
+  approvalFirst = false,
+): SendProgressPhase {
   switch (step) {
     case null:
     case 'wallet':
       return 'preparing';
     case 'sign':
-      return 'approving';
+      return approvalFirst ? 'preparing' : 'approving';
     case 'confirm':
       return 'confirming';
     default:
@@ -100,9 +111,34 @@ export interface SendDraft {
   readonly amount: string;
 }
 
+/**
+ * AN APPROVAL THE CONFIRM PRESS ASKED FOR ITSELF (2026/09/27).
+ *
+ * A passkey Passport's payment is approved by a fresh assertion, and the press
+ * on Confirm is the gesture that raises it — before the sheet re-checks the
+ * fee, which is a network read and would spend the gesture on a browser that
+ * wants one. So the sheet asks its host for the approval first and hands it to
+ * the payment it approves, or lets it go if that payment is not made. Opaque to
+ * the sheet: letting it go is the only thing the sheet may do with it.
+ */
+export interface SendApproval {
+  /** Nothing will be signed with it. Safe to call more than once. */
+  release(): void;
+}
+
+/**
+ * Whether a payment's approval comes before everything else it does — a
+ * passkey's, asked for by the press — rather than inside the call, where a
+ * provider sign-in is asked. Carried only where it is true, so a payment on
+ * the other arm is exactly the value it always was.
+ */
+interface ApprovalFirst {
+  readonly approvalFirst?: true;
+}
+
 /** The payment this tab is running or has just finished, and nothing older. */
 export type SendProgress =
-  | {
+  | ({
       readonly kind: 'running';
       readonly subject: SendProgressSubject;
       readonly draft: SendDraft;
@@ -110,20 +146,30 @@ export type SendProgress =
       readonly startedAt: number;
       /** Whether it is still waiting for the last payment to finish. */
       readonly waiting: boolean;
-    }
-  | {
+      /**
+       * Whether its approval is still being asked for: from the press until
+       * the prompt has been answered, on a payment approved first.
+       */
+      readonly approving?: true;
+    } & ApprovalFirst)
+  | ({
       readonly kind: 'sent';
       readonly subject: SendProgressSubject;
       readonly link: SendProgressLink | null;
       readonly startedAt: number;
-    }
-  | {
+    } & ApprovalFirst)
+  | ({
       readonly kind: 'failed';
       readonly subject: SendProgressSubject;
       readonly sentence: string;
       readonly draft: SendDraft;
       readonly startedAt: number;
-    };
+    } & ApprovalFirst);
+
+/** `approvalFirst`, carried from one state to the next only where it is true. */
+function carryApprovalFirst(state: ApprovalFirst): ApprovalFirst {
+  return state.approvalFirst === true ? { approvalFirst: true } : {};
+}
 
 /** Where the finished transaction can be looked at. */
 export interface SendProgressLink {
@@ -138,7 +184,17 @@ export type SendProgressEvent =
       readonly subject: SendProgressSubject;
       readonly draft: SendDraft;
       readonly at: number;
+      /**
+       * The approval comes first (a passkey), so the payment starts on
+       * "Waiting for your approval" and stays there until `answered`.
+       */
+      readonly approvalFirst?: boolean;
     }
+  /**
+   * The approval's prompt has been answered — either way. A payment that was
+   * not approved is `failed` straight after; one that was carries on.
+   */
+  | { readonly type: 'answered' }
   /**
    * The account is still finishing the last payment, and this one waits for
    * it rather than being refused; `turn` is the moment it goes. Both are about
@@ -182,7 +238,19 @@ export function sendProgressReduce(
         draft: event.draft,
         startedAt: event.at,
         waiting: false,
+        ...(event.approvalFirst === true ? { approvalFirst: true, approving: true } : {}),
       };
+    case 'answered':
+      return state?.kind === 'running' && state.approving === true
+        ? {
+            kind: 'running',
+            subject: state.subject,
+            draft: state.draft,
+            startedAt: state.startedAt,
+            waiting: state.waiting,
+            ...carryApprovalFirst(state),
+          }
+        : state;
     case 'waiting':
     case 'turn':
       return state?.kind === 'running' && state.waiting !== (event.type === 'waiting')
@@ -190,7 +258,13 @@ export function sendProgressReduce(
         : state;
     case 'sent':
       return state?.kind === 'running'
-        ? { kind: 'sent', subject: state.subject, link: event.link, startedAt: state.startedAt }
+        ? {
+            kind: 'sent',
+            subject: state.subject,
+            link: event.link,
+            startedAt: state.startedAt,
+            ...carryApprovalFirst(state),
+          }
         : state;
     case 'failed':
       if (state?.kind !== 'running') return state;
@@ -201,6 +275,7 @@ export function sendProgressReduce(
         sentence: event.sentence,
         draft: state.draft,
         startedAt: state.startedAt,
+        ...carryApprovalFirst(state),
       };
     case 'dismiss':
       return state?.kind === 'running' ? state : null;
@@ -251,6 +326,12 @@ export interface SendProgressView {
   readonly subject: SendProgressSubject;
   /** When the payment was started, for the progress view's elapsed time. */
   readonly startedAt: number;
+  /**
+   * Whether the approval is the first step rather than the second — a passkey
+   * Passport's, whose Confirm press raises the prompt. Absent otherwise. See
+   * {@link sendProgressSteps}.
+   */
+  readonly approvalFirst?: true;
 }
 
 /**
@@ -268,7 +349,15 @@ export function sendProgressView(input: {
 }): SendProgressView | null {
   const { progress, record } = input;
   if (progress?.kind === 'running') {
-    const phase = progress.waiting ? 'waiting' : sendProgressPhase(input.step);
+    /* WAITING FOR THE LAST PAYMENT comes before everything, the approval
+       included: a payment that waited asks for its approval when its turn
+       comes, never before (2026/09/27). Then the approval, for exactly as long
+       as the prompt is up; then the engine's own step. */
+    const phase = progress.waiting
+      ? 'waiting'
+      : progress.approving === true
+        ? 'approving'
+        : sendProgressPhase(input.step, progress.approvalFirst === true);
     return {
       kind: 'running',
       title: sendingLine(progress.subject),
@@ -279,6 +368,7 @@ export function sendProgressView(input: {
       recipient: progress.subject.recipient,
       subject: progress.subject,
       startedAt: progress.startedAt,
+      ...carryApprovalFirst(progress),
     };
   }
   if (progress?.kind === 'sent') {
@@ -292,6 +382,7 @@ export function sendProgressView(input: {
       recipient: progress.subject.recipient,
       subject: progress.subject,
       startedAt: progress.startedAt,
+      ...carryApprovalFirst(progress),
     };
   }
   if (progress?.kind === 'failed') {
@@ -305,6 +396,7 @@ export function sendProgressView(input: {
       recipient: progress.subject.recipient,
       subject: progress.subject,
       startedAt: progress.startedAt,
+      ...carryApprovalFirst(progress),
     };
   }
   if (record === null) return null;
@@ -363,6 +455,16 @@ export const SEND_PROGRESS_STEPS: readonly { readonly key: SendProgressPhase | '
   { key: 'sent', label: 'Sent' },
 ];
 
+/**
+ * The same five, for a payment approved FIRST (2026/09/27): a passkey
+ * Passport's, whose Confirm press raises the prompt before anything is
+ * prepared. The approval is the first thing that happens, so it is listed first.
+ */
+export const SEND_PROGRESS_STEPS_APPROVAL_FIRST: readonly {
+  readonly key: SendProgressPhase | 'sent';
+  readonly label: string;
+}[] = [SEND_PROGRESS_STEPS[1], SEND_PROGRESS_STEPS[0], ...SEND_PROGRESS_STEPS.slice(2)];
+
 /** The step a waiting payment is on, as the progress view lists it. */
 export const SEND_WAITING_STEP_LABEL = 'Waiting for your last payment';
 
@@ -377,20 +479,27 @@ export interface SendProgressStepRow {
  * The progress view's step list, from the view.
  *
  * Every step before the current one is done, and a Sent payment has done them
- * all. Approval is a step a Passport may not need — a key already held in this
- * tab skips it — so it reads done once anything after it is. A FAILED payment
- * claims no step at all: it was never handed over, so nothing on the list
- * happened in any sense a reader cares about, and its one sentence says so.
+ * all. A FAILED payment claims no step at all: it was never handed over, so
+ * nothing on the list happened in any sense a reader cares about, and its one
+ * sentence says so.
+ *
+ * WHERE THE APPROVAL SITS depends on who gives it (2026/09/27). A passkey
+ * Passport's is the first step — the press raises the prompt, and nothing is
+ * prepared until it is answered — and a provider sign-in's is the second, asked
+ * inside the call once the transaction is prepared. Either way it is a step
+ * that happens on every payment: nothing that can approve is kept from one
+ * payment to the next.
  */
 export function sendProgressSteps(view: SendProgressView): SendProgressStepRow[] {
-  const order = SEND_PROGRESS_STEPS.map((step) => step.key);
+  const list = view.approvalFirst === true ? SEND_PROGRESS_STEPS_APPROVAL_FIRST : SEND_PROGRESS_STEPS;
+  const order = list.map((step) => step.key);
   const at =
     view.kind === 'sent'
       ? order.length
       : view.kind === 'running'
-        ? order.indexOf(view.phase ?? 'preparing')
+        ? order.indexOf(view.phase ?? order[0])
         : -1;
-  const steps = SEND_PROGRESS_STEPS.map((step, index): SendProgressStepRow => ({
+  const steps = list.map((step, index): SendProgressStepRow => ({
     key: step.key,
     label: step.label,
     state: at < 0 || index > at ? 'waiting' : index < at ? 'done' : 'current',

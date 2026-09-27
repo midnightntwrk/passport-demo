@@ -6373,6 +6373,12 @@ export default function PassportDemo() {
    * ONE USER-VERIFIED ASSERTION, and the same one every other contract path in
    * this file takes: `PASSPORT_CONTRACT_SCOPE` through a one-shot provider.
    * The caller zeroes what comes back; nothing here keeps it.
+   *
+   * ASKED FOR EVERY ACTION (2026/09/27), and not once per session: the device
+   * built from it signs one payment, one addition of a key, or one setup, and
+   * is forgotten — see `lib/custodyApproval.ts`. The prompt is raised before
+   * the first await below, so a press that calls this synchronously is still
+   * the gesture the browser judges it by.
    */
   const passportContractRoot = useCallback(async (): Promise<Uint8Array> => {
     const passkey = profile?.passkey;
@@ -10480,6 +10486,9 @@ export default function PassportDemo() {
              payment waits for the first. See `lib/sendProgress.ts`. */
           ...(custody.send.background ? { background: true } : {}),
           inFlightReason: custody.send.inFlightReason ?? null,
+          /* A passkey Passport's payment is approved by the Send press itself:
+             the prompt is raised inside that gesture (2026/09/27). */
+          ...(custody.send.beginApproval ? { beginApproval: custody.send.beginApproval } : {}),
         }}
         /* The pill and the live row. */
         sendProgress={sendProgress}

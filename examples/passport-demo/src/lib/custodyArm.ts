@@ -13,11 +13,12 @@
  *   socket, and the Passport is named by the embedded address.
  *
  *   a PASSKEY holds a JubJub scalar derived from its own PRF output. There is
- *   no vendor and no address; the signer is built once from a contract root and
- *   signs synchronously, and the Passport is named by its own device point.
+ *   no vendor and no address; the signer is built from a contract root — a
+ *   FRESH one for every action, since 2026/09/27 — and signs synchronously, and
+ *   the Passport is named by its own device point.
  *
- * An adapter is those differences and nothing else. The screen asks it for a
- * device and a name, and asks the custody layer for everything else.
+ * An adapter is those differences and nothing else. The screen asks it for an
+ * approval and a name, and asks the custody layer for everything else.
  *
  * WHY THE SCREEN DOES NOT SIMPLY ASK "WHICH ARM"
  * ----------------------------------------------
@@ -25,8 +26,8 @@
  * point costs a user-verified assertion, and the screen has to render — the
  * header, the setup step, the stored record — before anybody has touched an
  * authenticator. So the adapter carries a `userKey` it may already know (from
- * the pointer a previous visit wrote) and a `ensureIdentity` that settles it
- * when a ceremony is actually warranted.
+ * the pointer a previous visit wrote) and an `approve` that asks for the
+ * ceremony when an action actually warrants one.
  *
  * NO REACT AND NO STORAGE FORMAT. Both adapters are built by their host and
  * handed in; this module holds the contract between them and the screen, and
@@ -34,6 +35,7 @@
  */
 
 import type { CustodyCallDevice, CustodyDynamicSession } from '../identity/custodyContractClient.js';
+import type { CustodyApproval } from './custodyApproval.js';
 
 /** The device, and the key every store this Passport owns is filed under. */
 export interface CustodyIdentity {
@@ -64,8 +66,21 @@ export interface CustodyArm {
    * passkey whose wallet is still opening are both "not yet".
    */
   readonly ready: boolean;
-  /** Settle the device, asking for whatever ceremony that costs. */
-  ensureIdentity(): Promise<CustodyIdentity>;
+  /**
+   * ONE APPROVAL, FOR ONE ACTION (2026/09/27) — the device that signs it, and
+   * the release that ends it. See `./custodyApproval.ts`.
+   *
+   * A PASSKEY is asked a fresh user-verified assertion on every call, and the
+   * prompt is raised before this returns — so a press that calls it
+   * synchronously is still the gesture the browser sees. What it builds can
+   * sign only until it is released. Nothing is cached between calls but the
+   * public key the Passport is filed under.
+   *
+   * A SOCIAL SIGN-IN has nothing to ask here: its key signs inside the
+   * provider, call by call. Its approval hands back the identity the arm
+   * already knows and holds nothing to release.
+   */
+  approve(): CustodyApproval<CustodyIdentity>;
   /** The busy line while an approval is outstanding. */
   readonly approvalPrompt: string;
   /**

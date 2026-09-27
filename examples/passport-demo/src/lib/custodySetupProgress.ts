@@ -383,7 +383,11 @@ export interface CustodyBackgroundInput {
   readonly wavesPending: boolean
   /** The opening balance is still to be asked for (`custodyOpeningBalanceDue`). */
   readonly openingBalanceDue: boolean
-  /** This tab holds the device key — the ceremony has happened here. */
+  /**
+   * This tab holds a SETUP's approval right now — the Create press's while its
+   * waves land, or "Finish setup"'s. Never a payment's: since 2026/09/27 every
+   * other approval ends with the action it was asked for.
+   */
   readonly keyHeld: boolean
   /** A press, a payment, or the background work itself is running. */
   readonly busy: boolean
@@ -404,11 +408,13 @@ export const CUSTODY_WAVES_RETRY_MS = 60_000
  * Which piece of the work behind Home to start now, or null for none.
  *
  * THE WAVES FIRST, AND ONLY WITH THE KEY. A passkey's maintenance authority is
- * derived from the device key and written nowhere, so the waves resume the
- * moment the key is held in this tab — the setup press, a payment, adding the
- * way back — and never by prompting for it: a browser refuses a passkey prompt
- * nobody pressed for. Until then NOTHING else starts either, because the
- * opening balance cannot be paid into an account that is missing circuits.
+ * derived from the device key and written nowhere, so the waves run only under
+ * a setup's own approval — the Create press, "Finish setup", or adding the way
+ * back, which finishes them first — and never by prompting for it: a browser
+ * refuses a passkey prompt nobody pressed for. Never under a payment's either
+ * (2026/09/27): a payment's approval signs that payment and ends with it. Until
+ * then NOTHING else starts, because the opening balance cannot be paid into an
+ * account that is missing circuits.
  *
  * THE BALANCE NEEDS NOBODY, and is asked once per tab from here; the waves'
  * own finish asks again, because a wave landing is new news.
@@ -443,19 +449,21 @@ export function custodyBackgroundWork(
  * balance is asked for only after the last of them. A tab closed, reloaded, or
  * suspended in the minute after Home therefore left a Passport whose rest never
  * landed and whose balance was never asked for, on every later open, while
- * Home promised the balance was on its way. A payment would have settled the
- * key, but there was nothing to pay with. The press is the way out: a browser
- * allows a passkey prompt somebody pressed for.
+ * Home promised the balance was on its way. The press is the way out: a
+ * browser allows a passkey prompt somebody pressed for. (A payment's approval
+ * does not land them either: since 2026/09/27 it signs that payment and ends
+ * with it.)
  *
- * WITH THE KEY HELD AND NOTHING PRESSED, NOTHING IS SAID. That is the ordinary
- * minute after setup, and the waves are already landing silently.
+ * WITH THE SETUP'S KEY HELD AND NOTHING PRESSED, NOTHING IS SAID. That is the
+ * ordinary minute after setup, and the waves are already landing silently
+ * under the Create press's own approval.
  */
 export type CustodyFinishSetupState = 'offer' | 'running' | 'failed'
 
 export interface CustodyFinishSetupInput {
   /** The record's waves are not all in (`custodyWavesPending`). */
   readonly wavesPending: boolean
-  /** This tab holds the device key. */
+  /** This tab holds the setup's approval — its waves are landing now. */
   readonly keyHeld: boolean
   /** How the last "Finish setup" press in this tab stands, or null for none. */
   readonly press: 'running' | 'failed' | null
