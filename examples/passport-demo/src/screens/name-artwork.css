@@ -46,6 +46,11 @@
   padding-top: 0;
 }
 .mndyn-name-stage .mnob-primary { width: 100%; min-height: 58px; margin-top: 20px; }
+/* FINDING A PASSPORT BY ITS NAME (2026/09/27): the field and the button it
+   answers to are spaced the way the name step spaces them. They touched — and
+   with the field's focus ring drawn over the button, on a phone with the
+   keyboard open, they read as one control. */
+.mndyn-find-stage .mnob-primary { margin-top: 20px; }
 
 @media (max-width: 760px) {
   .mnid-bar.mnclaim-bar,
@@ -57,6 +62,7 @@
   .mnclaim-flow .mnid-actions { margin-top: 24px; }
   .mnob-screen.mndyn:not(.mnob-landing) .mnob-stage.mndyn-name-stage { margin-top: 26px; }
   .mndyn-name-stage .mnob-primary { margin-top: 18px; }
+  .mndyn-find-stage .mnob-primary { margin-top: 18px; }
 }
 
 /* Keep the header's edges on the name step's wider body. */

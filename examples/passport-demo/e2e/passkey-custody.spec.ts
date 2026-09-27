@@ -1177,7 +1177,13 @@ test.describe('a passkey Passport paying somebody', () => {
  */
 async function passkeyPassportAfterTheName(
   browser: import('@playwright/test').Browser,
-  options: { recovered?: boolean; wavesDone?: number; walk?: 'out' | 'away' } = {},
+  options: {
+    recovered?: boolean;
+    wavesDone?: number;
+    walk?: 'out' | 'away' | '1';
+    /** Anything the browser holds before the Passport is made. */
+    beforeCreate?: (page: Page) => Promise<void>;
+  } = {},
 ): Promise<{ page: Page; close: () => Promise<void> }> {
   const context = await browser.newContext(
     walkContextOptions({ viewport: { width: 420, height: 900 } }),
@@ -1186,6 +1192,7 @@ async function passkeyPassportAfterTheName(
   await installNetworkBoundary(page);
   await serveAccountCustodyState(page, [ACCOUNT_CUSTODY_ADDRESS, PASSPORT_ACCOUNT_ADDRESS]);
   const authenticator = await installVirtualAuthenticator(context, page);
+  await options.beforeCreate?.(page);
   await page.goto(WALK);
   await page.getByRole('button', { name: SIGN_IN_BUTTON }).click();
   await expect(page.getByRole('heading', { name: /Welcome to\s*Passport/ })).toBeVisible({
@@ -2300,5 +2307,136 @@ test.describe('a second payment straight after the first (2026/09/26)', () => {
     /* Exact: the sentence itself says "Try again in a moment". */
     await expect(sendPill(page).getByRole('button', { name: 'Try again', exact: true })).toBeVisible();
     await close();
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* A recovery left behind never takes a Passport made here (2026/09/27)       */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * THE LIVE DEFECT, ANDROID, 2026/09/27. A recovery through the sign-in failed
+ * in a browser and left its hand-off in storage — cleared only on success. In
+ * the same browser a NEW passkey Passport was made, and added Google as its way
+ * back. The screen jumped to "I already have a Passport · Opening your Passport
+ * · Adding this device to …", nothing happened, and every reload — "Welcome
+ * back", the passkey, approved — came back to it.
+ *
+ * The stale hand-off is written here twice: before the Passport is made, as it
+ * was on the phone, and again once it exists, as a hand-off written by an
+ * earlier build would still be sitting there. It names the same sign-in the
+ * way back is added with — the stand-in's — which is the case that hijacked.
+ */
+const STALE_HANDOFF = {
+  network: WALK_NETWORK,
+  address: 'ab'.repeat(32),
+  name: 'somebodyelse',
+  socialUser: '0x00a329c0648769a73afac7f9381e08fb43dbea72',
+};
+const ADOPT_KEY = 'passport-account-custody-adopt:v1';
+
+/** Records, from a page's first byte, whether the second half's screen was EVER painted. */
+async function watchForTheAdoptScreen(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const w = window as unknown as { __adoptScreenSeen: string[] };
+    w.__adoptScreenSeen = [];
+    new MutationObserver(() => {
+      const text = (document.body?.textContent ?? '').replace(/\s+/g, ' ');
+      for (const marker of ['Opening your Passport', 'Adding this device to']) {
+        if (text.includes(marker) && !w.__adoptScreenSeen.includes(marker)) w.__adoptScreenSeen.push(marker);
+      }
+    }).observe(document, { subtree: true, childList: true, characterData: true });
+  });
+}
+
+const adoptScreenSeen = (page: Page) =>
+  page.evaluate(() => (window as unknown as { __adoptScreenSeen?: string[] }).__adoptScreenSeen ?? []);
+
+test.describe('a recovery left behind in this browser (the Android hijack, 2026/09/27)', () => {
+  test('never takes a Passport made here: adding the same sign-in as its way back stays on Home, before and after a reload', async ({
+    browser,
+  }) => {
+    test.setTimeout(240_000);
+    /* THE NEW PASSPORT, made through Sign up exactly as the tester made it — in
+       a browser where a recovery that failed earlier left its hand-off, in
+       storage before anything else happens. Written once, not per load. */
+    const made = await passkeyPassportAfterTheName(browser, {
+      beforeCreate: async (fresh) => {
+        await fresh.addInitScript(
+          ([key, value]) => {
+            if (window.sessionStorage.getItem('__staleSeeded') !== null) return;
+            window.sessionStorage.setItem('__staleSeeded', '1');
+            window.localStorage.setItem(key, value);
+          },
+          [ADOPT_KEY, JSON.stringify(STALE_HANDOFF)] as const,
+        );
+        await watchForTheAdoptScreen(fresh);
+      },
+    });
+    const walk = made.page;
+    try {
+      await expect(walk.getByTestId('add-recovery')).toBeVisible({ timeout: 60_000 });
+      /* Sign up put the recovery down. */
+      expect(await walk.evaluate((key) => window.localStorage.getItem(key), ADOPT_KEY)).toBeNull();
+
+      /* AND AGAIN, now that the Passport exists: a hand-off from an earlier
+         build that is still in storage, naming the same sign-in. */
+      await walk.evaluate(
+        ([key, value]) => window.localStorage.setItem(key, value),
+        [ADOPT_KEY, JSON.stringify(STALE_HANDOFF)] as const,
+      );
+      await walk.goto(`${WALK}&dynamicwalk=out`);
+      await expect(walk.getByTestId('add-recovery')).toBeVisible({ timeout: 60_000 });
+
+      /* THE WAY BACK, with the same sign-in the stale hand-off names. */
+      await walk.getByTestId('add-recovery').click();
+      const settled = walk.locator('.mnhome-name, .mnob-unusable-copy').first();
+      await expect(settled).toBeVisible({ timeout: 120_000 });
+      if ((await walk.getByTestId('skip-recovery').count()) > 0) {
+        await expect(walk.locator('.mnob-unusable-copy')).toContainText('Recovery was not added');
+        await walk.getByTestId('skip-recovery').click();
+      }
+      await expect(greeting(walk)).toBeVisible({ timeout: 60_000 });
+      await expect(walk.locator('.mnid-alias')).toHaveText('walker.night');
+      /* HOME STAYS HOME, and the hand-off is gone. */
+      await walk.waitForTimeout(3_000);
+      await expect(greeting(walk)).toBeVisible();
+      expect(await adoptScreenSeen(walk)).toEqual([]);
+      expect(await walk.evaluate((key) => window.localStorage.getItem(key), ADOPT_KEY)).toBeNull();
+
+      /* AND AFTER A RELOAD, with the sign-in still attached — the reload the
+         tester made, which came straight back to the stuck screen. */
+      await walk.goto(`${WALK}&dynamicwalk=1`);
+      await expect(greeting(walk)).toBeVisible({ timeout: 60_000 });
+      await expect(walk.locator('.mnid-alias')).toHaveText('walker.night');
+      await walk.waitForTimeout(3_000);
+      await expect(greeting(walk)).toBeVisible();
+      expect(await adoptScreenSeen(walk)).toEqual([]);
+      expect(await walk.evaluate((key) => window.localStorage.getItem(key), ADOPT_KEY)).toBeNull();
+    } finally {
+      await made.close();
+    }
+  });
+
+  test('is forgotten the moment a Passport of this device’s own is open with the same sign-in, even with no reload', async ({
+    browser,
+  }) => {
+    test.setTimeout(180_000);
+    const { page, close } = await passkeyPassportAfterTheName(browser, { recovered: true, walk: '1' });
+    try {
+      await expect(greeting(page)).toBeVisible({ timeout: 60_000 });
+      await watchForTheAdoptScreen(page);
+      /* Written while the Passport is open and the sign-in is signed in. */
+      await page.evaluate(
+        ([key, value]) => window.localStorage.setItem(key, value),
+        [ADOPT_KEY, JSON.stringify(STALE_HANDOFF)] as const,
+      );
+      await page.goto(`${WALK}&dynamicwalk=1`);
+      await expect(greeting(page)).toBeVisible({ timeout: 60_000 });
+      await expect.poll(() => page.evaluate((key) => window.localStorage.getItem(key), ADOPT_KEY)).toBeNull();
+      expect(await adoptScreenSeen(page)).toEqual([]);
+    } finally {
+      await close();
+    }
   });
 });

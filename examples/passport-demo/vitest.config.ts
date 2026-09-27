@@ -293,6 +293,23 @@
  * all of it is drilled in `src/lib/recoveryAdd.test.ts`. The screen that runs
  * it, `src/screens/CustodyPassport.tsx`, is out with the rest of the `.tsx`.
  *
+ * `src/lib/adoptionProgress.ts`, `src/lib/adoptionResume.ts`, and
+ * `src/lib/pagePresence.ts` went IN on 2026/09/27, the day they were written,
+ * for a recovery on an Android phone whose proof was made and never heard: the
+ * phone had been put down, the screen dimmed, and the frozen tab dropped the
+ * answer, on a screen that had shown one sentence the whole time. The first is
+ * the timeline that screen now shows, moved only by what the second half
+ * reports, and when a way out is offered; the second is the rule that picks a
+ * step up again by itself after its connection dropped while the page was
+ * away, which must never run a step that said no or one nobody was away for;
+ * the third keeps the screen on, and says whether the page is away and waits
+ * for it to come back — and its bound counts only what can be seen, so a tab
+ * that was frozen does not come back to a bound that ran out while it was. A
+ * branch too many in any of them is a press taken away from somebody, or a
+ * step run twice; a branch too few is the screen that was met live. None holds
+ * React, and the page, the clock, and the wake lock are injected, so every
+ * branch is drilled in their own `.test.ts`.
+ *
  * `src/lib/snakeGame.ts` went IN on 2026/09/24, the day it was written, for
  * the reason `src/lib/waitingGame.ts` is in: a game offered beside a
  * transaction must never be a reason the screen goes wrong, and the promise
@@ -914,6 +931,9 @@ export default mergeConfig(
           'src/lib/companionMotion.ts',
           'src/lib/colour.ts',
           'src/lib/custodyAdoption.ts',
+          'src/lib/adoptionProgress.ts',
+          'src/lib/adoptionResume.ts',
+          'src/lib/pagePresence.ts',
           'src/lib/custodyAccountLock.ts',
           'src/lib/custodyAssets.ts',
           'src/lib/custodyDelivery.ts',
