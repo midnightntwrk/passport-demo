@@ -59,7 +59,7 @@ import {
   type CustodyAssetRow,
 } from './custodyAssets.js';
 import type { PendingBalanceNote, PendingBalanceNotes } from './pendingBalances.js';
-import type { SendDraft, SendProgressView } from './sendProgress.js';
+import type { SendApproval, SendDraft, SendProgressView } from './sendProgress.js';
 import type { RecoveryHomeEntry } from './recoveryStep.js';
 
 /* -------------------------------------------------------------------------- */
@@ -448,18 +448,24 @@ export interface CustodyHomeSend {
     domain: string,
   ) => Promise<{ found: true; domain: string; accountAddress: string } | { found: false; reason: string }>;
   /** NIGHT, to an `mn_addr…` address. One gated `withdraw_unshielded`. */
-  readonly onSend: (params: { recipientAddress: string; amount: bigint }) => Promise<void>;
+  readonly onSend: (params: {
+    recipientAddress: string;
+    amount: bigint;
+    approval?: SendApproval;
+  }) => Promise<void>;
   /** NIGHT, to a name. Refused — see {@link CUSTODY_NIGHT_SEND_REFUSAL}. */
   readonly onSendToName: (params: {
     domain: string;
     accountAddress: string;
     amount: bigint;
+    approval?: SendApproval;
   }) => Promise<void>;
   /** A shielded amount to an address somebody pasted. One transaction. */
   readonly onSendShielded: (params: {
     recipientAddress: string;
     tokenType: string;
     amount: bigint;
+    approval?: SendApproval;
   }) => Promise<void>;
   /** A shielded amount to a name. One transaction, paid straight in. */
   readonly onSendShieldedToName: (params: {
@@ -467,6 +473,7 @@ export interface CustodyHomeSend {
     accountAddress: string;
     tokenType: string;
     amount: bigint;
+    approval?: SendApproval;
   }) => Promise<void>;
   /** Whether a resolved Passport can be paid from this one; the sentence if not. */
   readonly checkRecipientAccount: (input: {
@@ -481,6 +488,12 @@ export interface CustodyHomeSend {
   readonly background?: boolean;
   /** Why a second payment waits for the first, or null. */
   readonly inFlightReason?: string | null;
+  /**
+   * The payment's approval, asked for by the Send press itself (2026/09/27):
+   * a fresh passkey prompt raised inside the gesture, or null when there is
+   * nothing to ask at the press. See `SendSheetProps.beginApproval`.
+   */
+  readonly beginApproval?: () => SendApproval | null;
 }
 
 /**

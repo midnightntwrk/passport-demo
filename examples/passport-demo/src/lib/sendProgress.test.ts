@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   SEND_PROGRESS_PHASE_LABEL,
   SEND_PROGRESS_STEPS,
+  SEND_PROGRESS_STEPS_APPROVAL_FIRST,
   sendElapsed,
   sendProgressSteps,
   SEND_SENT_DISMISS_MS,
@@ -19,6 +20,7 @@ import {
   type SendProgress,
   type SendProgressRecord,
   type SendProgressSubject,
+  type SendProgressView,
 } from './sendProgress.js';
 
 const subject: SendProgressSubject = { amount: '10', symbol: 'mUSD', recipient: 'bob.night' };
@@ -350,3 +352,117 @@ describe('what closing Passport does to a running payment (2026/09/26)', () => {
     }
   });
 });
+
+/* -------------------------------------------------------------------------- */
+/* A payment approved FIRST — a passkey's, raised by the Confirm press          */
+/* (2026/09/27)                                                                */
+/* -------------------------------------------------------------------------- */
+
+describe('a payment whose approval comes first', () => {
+  const start = sendProgressReduce(null, { type: 'start', subject, draft, at: T0, approvalFirst: true });
+  const view = (progress: SendProgress | null, step: Parameters<typeof sendProgressView>[0]['step'] = null) =>
+    sendProgressView({ progress, step, record: null })!;
+
+  it('starts on "Waiting for your approval", and leaves it the moment the prompt is answered', () => {
+    expect(start).toEqual({ ...running, approvalFirst: true, approving: true });
+    expect(view(start).phase).toBe('approving');
+    expect(view(start).detail).toBe('Waiting for your approval…');
+
+    const answered = sendProgressReduce(start, { type: 'answered' });
+    expect(answered).toEqual({ ...running, approvalFirst: true });
+    expect(view(answered).phase).toBe('preparing');
+    /* Answered once is answered: a second answer changes nothing. */
+    expect(sendProgressReduce(answered, { type: 'answered' })).toBe(answered);
+  });
+
+  it('ignores an answer about a payment that is not waiting for one', () => {
+    /* A provider sign-in's payment, whose approval is inside the call. */
+    expect(sendProgressReduce(running, { type: 'answered' })).toBe(running);
+    expect(sendProgressReduce(null, { type: 'answered' })).toBeNull();
+    const sent: SendProgress = { kind: 'sent', subject, link, startedAt: T0 };
+    expect(sendProgressReduce(sent, { type: 'answered' })).toBe(sent);
+  });
+
+  it('says it is waiting for the last payment before it says it is waiting for an approval', () => {
+    /* A payment that waited asks for its approval when its turn comes. */
+    const waiting = sendProgressReduce(start, { type: 'waiting' });
+    expect(view(waiting).phase).toBe('waiting');
+    const turn = sendProgressReduce(waiting, { type: 'turn' });
+    expect(view(turn).phase).toBe('approving');
+  });
+
+  it('does not ask for the approval a second time when the engine signs', () => {
+    const answered = sendProgressReduce(start, { type: 'answered' });
+    /* The key is in hand by then: signing is part of preparing the payment. */
+    expect(sendProgressPhase('sign', true)).toBe('preparing');
+    expect(view(answered, 'sign').phase).toBe('preparing');
+    expect(view(answered, 'submit').phase).toBe('proving');
+    expect(view(answered, 'confirm').phase).toBe('confirming');
+  });
+
+  it('lists the approval first, and walks the list in that order', () => {
+    expect(SEND_PROGRESS_STEPS_APPROVAL_FIRST.map((step) => step.label)).toEqual([
+      'Waiting for your approval',
+      'Preparing',
+      'Proving',
+      'Confirming',
+      'Sent',
+    ]);
+    const states = (at: SendProgressView) => sendProgressSteps(at).map((step) => step.state);
+    expect(states(view(start))).toEqual(['current', 'waiting', 'waiting', 'waiting', 'waiting']);
+    const answered = sendProgressReduce(start, { type: 'answered' });
+    expect(states(view(answered))).toEqual(['done', 'current', 'waiting', 'waiting', 'waiting']);
+    expect(states(view(answered, 'submit'))).toEqual(['done', 'done', 'current', 'waiting', 'waiting']);
+    /* A running view with no phase named reads as its own first step. */
+    expect(states({ ...view(answered), phase: null })).toEqual([
+      'current',
+      'waiting',
+      'waiting',
+      'waiting',
+      'waiting',
+    ]);
+  });
+
+  it('keeps the order through Sent and through a failure', () => {
+    const answered = sendProgressReduce(start, { type: 'answered' });
+    const sent = sendProgressReduce(answered, { type: 'sent', link });
+    expect(sent).toEqual({ kind: 'sent', subject, link, startedAt: T0, approvalFirst: true });
+    expect(sendProgressSteps(view(sent)).map((step) => [step.label, step.state])).toEqual([
+      ['Waiting for your approval', 'done'],
+      ['Preparing', 'done'],
+      ['Proving', 'done'],
+      ['Confirming', 'done'],
+      ['Sent', 'done'],
+    ]);
+
+    /* NOT APPROVED: the prompt was answered with a no, and the payment ends in
+       its one sentence, with the draft to try again from. */
+    const refused = sendProgressReduce(sendProgressReduce(start, { type: 'answered' }), {
+      type: 'failed',
+      sentence: 'This payment was not approved. Nothing left your Passport.',
+      handedOver: false,
+    });
+    expect(refused).toEqual({
+      kind: 'failed',
+      subject,
+      sentence: 'This payment was not approved. Nothing left your Passport.',
+      draft,
+      startedAt: T0,
+      approvalFirst: true,
+    });
+    expect(view(refused).retry).toEqual(draft);
+    expect(sendProgressSteps(view(refused)).map((step) => step.state)).toEqual([
+      'waiting',
+      'waiting',
+      'waiting',
+      'waiting',
+      'waiting',
+    ]);
+  });
+
+  it('is unsent while the approval is being asked for', () => {
+    /* Closing Passport with the prompt up stops the payment, and nothing moved. */
+    expect(sendUnsent(view(start))).toBe(true);
+  });
+});
+
