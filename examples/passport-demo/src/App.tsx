@@ -10642,8 +10642,8 @@ export default function PassportDemo() {
                  sentence on a black page, for as long as it took. */
               <>
                 <p className="mnob-lede" role="status" data-testid="adopting">
-                  Adding this device to {adoption?.name ?? 'your Passport'}.night. Approve it with the
-                  account you just signed in with.
+                  Adding this device to {adoption?.name ?? 'your Passport'}.night. Your sign-in approves
+                  it for you, so there is nothing to press.
                 </p>
                 <div className="mnob-setup-progress" data-testid="adopt-progress">
                   <ProgressTimeline
