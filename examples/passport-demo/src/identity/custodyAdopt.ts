@@ -67,6 +67,20 @@ import {
 import { custodyEncPublicKey } from './custodyInbox.js';
 import { passkeyCustodyDevice } from './passkeyCustody.js';
 import {
+  ADOPTION_PHASE_FEE_COVERED,
+  adoptionHandedOver,
+  adoptionStepOfPhase,
+  type AdoptionStep,
+} from '../lib/adoptionProgress.js';
+import { ADOPTION_RESUME_ATTEMPTS, adoptionResumable } from '../lib/adoptionResume.js';
+import {
+  browserPage,
+  pageBack,
+  visibleCountdown,
+  watchDrop,
+  type PageSeam,
+} from '../lib/pagePresence.js';
+import {
   adoptionApproverRecord,
   k1PrivateStateId,
   recoveredCustodyRecord,
@@ -75,12 +89,12 @@ import {
 import {
   loadCustodyRecord,
   saveCustodyRecord,
-  withinCustodyBound,
   type CustodyStorage,
 } from './custodyContractPlan.js';
 import { saveCustodyPasskeyPointer } from '../lib/custodyRoute.js';
 import { saveBackupRecord } from '../lib/backupDevice.js';
 import {
+  ADOPTION_NOT_ADDED,
   ADOPTION_OTHER_PASSPORT,
   ADOPTION_OTHER_SIGN_IN,
   ADOPTION_UNCONFIRMED,
@@ -112,12 +126,39 @@ export interface AdoptDeviceKeyOptions {
   readonly storage: CustodyStorage;
   readonly onPhase?: (phase: CustodyPhase) => void;
   /**
+   * Told every time the second half moves, for the timeline the screen shows
+   * (2026/09/27). See `../lib/adoptionProgress.ts`.
+   */
+  readonly onStep?: (step: AdoptionStep) => void;
+  /** Told when each of the two transactions lands, with its chain hash where one is known. */
+  readonly onLanded?: (landed: AdoptionLanded) => void;
+  /**
+   * Aborted when the host has stopped waiting — the person cancelled, or the
+   * wait before anything was handed over ran out. From then on nothing more is
+   * handed over: the screen has already said that nothing was.
+   */
+  readonly signal?: AbortSignal;
+  /** The page, for picking a step up again after its connection dropped. */
+  readonly page?: PageSeam;
+  /**
    * The custody client's seams, for a drill or the mocked walk; nothing in the
    * app. Whatever is passed, the client reads {@link storage} — the storage the
    * records below are written to — so a step can never be refused over a record
    * that was written somewhere else.
    */
   readonly overrides?: Partial<CustodyDeps>;
+}
+
+/** One of the two transactions, landed. */
+export interface AdoptionLanded {
+  /** `add` — this device on the account; `rotate` — its payments pointed here. */
+  readonly kind: 'add' | 'rotate';
+  /** The chain hash, or null where there was no transaction to make or none was resolved. */
+  readonly txHash: string | null;
+  /** Where the explorer shows it (`custodyExplorerLink`), or null with no hash. */
+  readonly explorerUrl: string | null;
+  /** When it landed, by this device's clock. */
+  readonly at: number;
 }
 
 /** What the host needs back: the key every store of this Passport is under. */
@@ -131,7 +172,24 @@ export async function adoptDeviceKey(
   options: AdoptDeviceKeyOptions,
 ): Promise<AdoptDeviceKeyResult> {
   const { handoff, storage } = options;
-  const deps: Partial<CustodyDeps> = { ...options.overrides, storage: () => storage };
+  const page = options.page ?? browserPage();
+  const signal = options.signal ?? new AbortController().signal;
+  const step = (next: AdoptionStep) => options.onStep?.(next);
+  /* WHERE A COVERED FEE IS TOLD: the add while it runs, and nobody otherwise.
+     See {@link announceFeeCovered}. */
+  let feeCovered: () => void = () => undefined;
+  const given: Partial<CustodyDeps> = options.overrides ?? {};
+  const deps: Partial<CustodyDeps> = {
+    ...given,
+    storage: () => storage,
+    providers: async (wallet, privateStateId, account) =>
+      announceFeeCovered(
+        await (given.providers !== undefined
+          ? given.providers(wallet, privateStateId, account)
+          : defaultCustodyDeps().providers(wallet, privateStateId, account)),
+        () => feeCovered(),
+      ),
+  };
 
   /* STEP 0. The sign-in that found the account is the one that approves: its
      key is what the check found in the account's device set. Any other would
@@ -158,6 +216,7 @@ export async function adoptDeviceKey(
 
   const module = await (deps.contractModule ?? defaultCustodyDeps().contractModule)();
 
+  step('passkey');
   /* The root is READ and not retained, exactly as the passkey arm reads it.
      `passkeyCustodyDevice` derives from it and the buffer is zeroed here as
      well as there — twice costs nothing and a root left in memory is the one
@@ -174,14 +233,30 @@ export async function adoptDeviceKey(
   try {
     /* STEP 2. The sign-in approves, because the new key is not on the account
        yet and therefore cannot approve anything. Already-enrolled is not an
-       error here — see `addDeviceK1`, which is what makes this resumable. */
-    await addDeviceK1(
-      options.session,
-      options.socialDevice,
-      { arm: 'jubjub', pk: device.pk },
-      options.onPhase,
-      deps,
+       error here — see `addDeviceK1`, which is what makes this resumable, and
+       what lets a connection that dropped while the page was away be picked
+       up again rather than reported (2026/09/27). */
+    const add = await resumeAfterDrop(
+      () => {
+        step('approve');
+        const onPhase = whileWaitedFor(signal, (phase) => {
+          const next = adoptionStepOfPhase(phase);
+          if (next !== null) step(next);
+          options.onPhase?.(phase);
+        });
+        feeCovered = () => onPhase({ step: 'submit', detail: ADOPTION_PHASE_FEE_COVERED });
+        return addDeviceK1(
+          options.session,
+          options.socialDevice,
+          { arm: 'jubjub', pk: device.pk },
+          onPhase,
+          deps,
+        );
+      },
+      { page, signal },
     );
+    feeCovered = () => undefined;
+    options.onLanded?.({ kind: 'add', txHash: add.txHash, explorerUrl: add.explorerUrl, at: Date.now() });
 
     /* The record comes BEFORE the rotation, and the order is the point: from
        here on the new key is on the account, and every call it makes needs a
@@ -222,6 +297,7 @@ export async function adoptDeviceKey(
        above. A failure here is not a failure of the recovery — the Passport is
        back, and what is lost is only the reading of deliveries made from now
        on. It is bounded (`rotateEncKeyK1`), so it cannot hold the screen. */
+    step('rotate');
     const account = { network: handoff.network, address: handoff.address };
     const secret = device.encSecretKeyHex;
     let pointedAtNewKey = false;
@@ -230,12 +306,29 @@ export async function adoptDeviceKey(
          It cannot happen on this path — `passkeyCustodyDevice` always derives one
          — and the narrowing is the compiler's rather than a comment. */
       if (secret === undefined) throw new Error('this device has no key of its own to use');
-      await rotateEncKeyK1(null, device, custodyEncPublicKey(secret), options.onPhase, deps);
+      const rotated = await resumeAfterDrop(
+        () =>
+          rotateEncKeyK1(
+            null,
+            device,
+            custodyEncPublicKey(secret),
+            whileWaitedFor(signal, (phase) => options.onPhase?.(phase)),
+            deps,
+          ),
+        { page, signal },
+      );
       rememberK1EncSecretKey(account, secret);
       pointedAtNewKey = true;
+      options.onLanded?.({
+        kind: 'rotate',
+        txHash: rotated.txHash,
+        explorerUrl: rotated.explorerUrl,
+        at: Date.now(),
+      });
     } catch (cause) {
       console.warn('[account-custody] this Passport is back, but its deliveries still point at the other device', cause);
     }
+    step('earlier');
 
     /* STEP 5 (2026/09/26). The payments this Passport was sent before today are
        sealed to the key on the device that is gone, and the one thing that can
@@ -272,6 +365,24 @@ export type AdoptionOutcome =
 export const ADOPTION_WAIT_MS = RECOVERY_ADD_WAIT_MS;
 
 /**
+ * How long the second half may go without moving before anything has been
+ * handed over, counted only while the page can be seen (2026/09/27).
+ *
+ * Until today the only bound was {@link ADOPTION_WAIT_MS}, fifteen minutes,
+ * over the whole of it — so a step that hung before anything was sent left
+ * "Adding this device to …" on screen for a quarter of an hour. Nothing before
+ * the hand-over takes minutes: the sign-in's key, the passkey, opening the
+ * account, and the sign-in's approval are each seconds, and each of them
+ * counts as the second half moving. Two minutes without any of them is a hang,
+ * and ending it here is true in the strongest words: nothing was handed over,
+ * and from this moment nothing will be.
+ *
+ * The long bound is kept for the one stretch that can honestly take minutes —
+ * a transaction in flight, from the proof to the chain.
+ */
+export const ADOPTION_STALL_MS = 2 * 60_000;
+
+/**
  * {@link adoptDeviceKey}, bounded, with the sign-in's key asked for inside the
  * bound, and every way it can end turned into something the screen can say.
  *
@@ -281,6 +392,19 @@ export const ADOPTION_WAIT_MS = RECOVERY_ADD_WAIT_MS;
  * sentence (`../lib/recoveryAdd.ts#adoptionFailureSentence`) and the cause, for
  * the host to show and log, and the host's "Try again" runs this again — which
  * is safe, because every step of it is.
+ *
+ * TWO BOUNDS, BOTH COUNTING ONLY WHAT CAN BE SEEN (2026/09/27): nothing moving
+ * for {@link ADOPTION_STALL_MS} before a transaction is in flight, and
+ * {@link ADOPTION_WAIT_MS} over the whole of it until the add lands. After the
+ * add lands the Passport is here, and what is left — pointing the payments at
+ * this device, the earlier payments — is bounded step by step and never a
+ * failure of the recovery, so neither bound applies to it. A page that was
+ * hidden is not a page that hung: a frozen tab comes back with its timers
+ * overdue, and a wall-clock bound would fail it the moment it thawed.
+ *
+ * `signal` IS THE HOST SAYING IT HAS STOPPED WAITING — the person pressed
+ * Cancel. It ends this at once, and like the stall bound it closes the gate: a
+ * run still in progress behind the screen hands nothing over after that.
  */
 export async function bringPassportHere(
   options: Omit<AdoptDeviceKeyOptions, 'socialDevice'> & {
@@ -288,23 +412,163 @@ export async function bringPassportHere(
     readonly socialDevice: () => Promise<K256DeviceIdentity>;
     /** {@link ADOPTION_WAIT_MS}, or a drill's shorter one. */
     readonly waitMs?: number;
+    /** {@link ADOPTION_STALL_MS}, or a drill's shorter one. */
+    readonly stallMs?: number;
   },
 ): Promise<AdoptionOutcome> {
   const waitMs = options.waitMs ?? ADOPTION_WAIT_MS;
-  try {
-    const run = await withinCustodyBound(
-      options.socialDevice().then((socialDevice) => adoptDeviceKey({ ...options, socialDevice })),
-      waitMs,
-    );
-    if (run.kind === 'timeout') {
-      return {
-        kind: 'failed',
-        sentence: ADOPTION_UNCONFIRMED,
-        cause: new Error(`bringing this Passport here did not finish in ${Math.round(waitMs / 1000)} s`),
-      };
+  const stallMs = options.stallMs ?? ADOPTION_STALL_MS;
+  const page = options.page ?? browserPage();
+  /* THIS RUN'S OWN "STOP WAITING": closed by either bound or by the host. */
+  const gate = new AbortController();
+  let settle: (outcome: AdoptionOutcome) => void = () => undefined;
+  const stopped = new Promise<AdoptionOutcome>((resolve) => {
+    settle = resolve;
+  });
+  const stopWaiting = (outcome: AdoptionOutcome) => {
+    gate.abort();
+    settle(outcome);
+  };
+  const stall = visibleCountdown(page, () => {
+    console.warn(`[account-custody] bringing this Passport here did not move for ${Math.round(stallMs / 1000)} s before anything was handed over; stopping`);
+    stopWaiting({
+      kind: 'failed',
+      sentence: ADOPTION_NOT_ADDED,
+      cause: new Error(`nothing moved for ${Math.round(stallMs / 1000)} s, and nothing was handed over`),
+    });
+  });
+  const net = visibleCountdown(page, () =>
+    stopWaiting({
+      kind: 'failed',
+      sentence: ADOPTION_UNCONFIRMED,
+      cause: new Error(`bringing this Passport here did not finish in ${Math.round(waitMs / 1000)} s`),
+    }),
+  );
+  const cancelled = () =>
+    stopWaiting({ kind: 'failed', sentence: ADOPTION_NOT_ADDED, cause: new Error('the host stopped waiting') });
+  if (options.signal?.aborted === true) cancelled();
+  else options.signal?.addEventListener('abort', cancelled);
+
+  let landed = false;
+  const onStep = (step: AdoptionStep) => {
+    /* Every report is the second half moving. In flight, the stall bound
+       stands down: a proof alone is most of a minute. */
+    if (!landed) {
+      if (adoptionHandedOver(step)) stall.pause();
+      else stall.restart(stallMs);
     }
-    return { kind: 'back', result: run.value };
+    options.onStep?.(step);
+  };
+  const onLanded = (event: AdoptionLanded) => {
+    if (event.kind === 'add') {
+      landed = true;
+      stall.stop();
+      net.stop();
+    }
+    options.onLanded?.(event);
+  };
+  net.restart(waitMs);
+  onStep('sign-in');
+  try {
+    const run = options
+      .socialDevice()
+      .then((socialDevice) => adoptDeviceKey({ ...options, socialDevice, signal: gate.signal, page, onStep, onLanded }));
+    return await Promise.race([run.then((result): AdoptionOutcome => ({ kind: 'back', result })), stopped]);
   } catch (cause) {
     return { kind: 'failed', sentence: adoptionFailureSentence(cause), cause };
+  } finally {
+    stall.stop();
+    net.stop();
+    options.signal?.removeEventListener('abort', cancelled);
   }
+}
+
+/* -------------------------------------------------------------------------- */
+/* The plumbing the second half is run with                                    */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * A call's phase handler, closed once the host has stopped waiting.
+ *
+ * THE SCREEN HAS ALREADY SAID NOTHING WAS HANDED OVER — the person cancelled,
+ * or the stall bound ran out — and a run still going behind it must not make
+ * that untrue. So the two last moments before anything leaves this device, the
+ * sign-in's approval (`sign`) and the hand-over (`submit`, before its proof),
+ * refuse; a call already in flight is left to finish, because it cannot be
+ * called back.
+ */
+function whileWaitedFor(
+  signal: AbortSignal,
+  handler: (phase: CustodyPhase) => void,
+): (phase: CustodyPhase) => void {
+  return (phase) => {
+    if (signal.aborted && (phase.step === 'sign' || (phase.step === 'submit' && phase.detail === undefined))) {
+      throw new Error(ADOPTION_NOT_ADDED);
+    }
+    handler(phase);
+  };
+}
+
+/**
+ * Runs one step, and runs it again once the page is back if the connection
+ * dropped under it while the page was away — see
+ * `../lib/adoptionResume.ts#adoptionResumable` for exactly when (2026/09/27).
+ *
+ * THE LIVE CASE: the proof was made on the service and the phone never heard,
+ * because the tab had been frozen with the request in flight. Every step here
+ * reads the account before it does anything, so the second run finds the key
+ * already on it if the first one got that far, and sends nothing twice.
+ */
+async function resumeAfterDrop<T>(
+  run: () => Promise<T>,
+  env: { readonly page: PageSeam; readonly signal: AbortSignal },
+): Promise<T> {
+  for (let resumed = 0; ; resumed += 1) {
+    const watch = watchDrop(env.page);
+    let outcome: { readonly ok: true; readonly value: T } | { readonly ok: false; readonly cause: unknown };
+    try {
+      outcome = { ok: true, value: await run() };
+    } catch (cause) {
+      outcome = { ok: false, cause };
+    }
+    const dropped = watch.dropped();
+    watch.stop();
+    if (outcome.ok) return outcome.value;
+    if (env.signal.aborted || !adoptionResumable({ cause: outcome.cause, dropped, resumed })) {
+      throw outcome.cause;
+    }
+    console.info(
+      `[account-custody] the connection dropped while Passport was out of view; picking this step up again once it is back (${resumed + 1} of ${ADOPTION_RESUME_ATTEMPTS})`,
+      outcome.cause,
+    );
+    await pageBack(env.page, env.signal);
+    if (env.signal.aborted) throw outcome.cause;
+  }
+}
+
+/**
+ * The same providers, with one addition: the moment the fee has been covered,
+ * the adoption is told — the line between balancing and the hand-over, which
+ * the custody client does not draw (it draws the proof's, `announceProved`).
+ * The wallet provider is a plain object of closures, so it is spread rather
+ * than wrapped, as `custodyLiveSubmitProvider` spreads it.
+ */
+function announceFeeCovered(
+  providers: Record<string, unknown>,
+  covered: () => void,
+): Record<string, unknown> {
+  const wallet = providers.walletProvider as Record<string, unknown> | undefined;
+  const balanceTx = wallet?.balanceTx;
+  if (wallet === undefined || typeof balanceTx !== 'function') return providers;
+  return {
+    ...providers,
+    walletProvider: {
+      ...wallet,
+      balanceTx: async (...args: unknown[]): Promise<unknown> => {
+        const balanced: unknown = await (balanceTx as (...given: unknown[]) => Promise<unknown>).apply(wallet, args);
+        covered();
+        return balanced;
+      },
+    },
+  };
 }

@@ -203,6 +203,11 @@ async function thisDevicesKey(): Promise<CurvePoint> {
   return made.device.pk;
 }
 
+/** The chain hash the stand-in reports for one of its own ids: `tx-3` → `…03`. */
+function hashOf(txId: string): string {
+  return txId.replace(/\D/g, '').padStart(64, '0');
+}
+
 interface Chain {
   deps: Partial<CustodyDeps>;
   /** Every call built, in order, and every call made on the unbounded road. */
@@ -238,8 +243,10 @@ function chain(options: {
   const providers: Record<string, unknown> = {
     publicDataProvider: {
       queryContractState: () => Promise.resolve({ data: 'state', serialize: () => new Uint8Array([1]) }),
-      watchForTxData: (txId: string) => Promise.resolve({ txId, status: 'SucceedEntirely' }),
+      watchForTxData: (txId: string) => Promise.resolve({ txId, status: 'SucceedEntirely', txHash: hashOf(txId) }),
     },
+    /* Balancing, which covers the fee: it hands the transaction back as it is. */
+    walletProvider: { balanceTx: (tx: unknown) => Promise.resolve(tx) },
     privateStateProvider: {
       setContractAddress: () => undefined,
       setSigningKey: () => Promise.resolve(undefined),
@@ -288,6 +295,8 @@ function chain(options: {
             submits += 1;
             const prover = given.proofProvider as { proveTx?: (tx: unknown) => Promise<unknown> } | undefined;
             await prover?.proveTx?.(call.unprovenTx);
+            const wallet = given.walletProvider as { balanceTx?: (tx: unknown) => Promise<unknown> } | undefined;
+            await wallet?.balanceTx?.(call.unprovenTx);
             if (options.refuse?.circuit === call.unprovenTx.circuit && refused < options.refuse.times) {
               refused += 1;
               throw custodyProofNotBuilt('refused by the drill');
@@ -629,5 +638,249 @@ describe('the second half as the host runs it', () => {
     });
     expect(outcome).toMatchObject({ kind: 'failed', sentence: ADOPTION_UNCONFIRMED });
     expect(outcome.kind === 'failed' ? (outcome.cause as Error).message : '').toMatch(/did not finish in 0 s/);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* As the screen follows it (2026/09/27)                                      */
+/* -------------------------------------------------------------------------- */
+
+/** A page that is in view and online until a drill says otherwise. */
+function fakePage() {
+  let hidden = false;
+  let online = true;
+  const listeners = new Set<() => void>();
+  return {
+    page: {
+      hidden: () => hidden,
+      online: () => online,
+      watch: (listener: () => void) => {
+        listeners.add(listener);
+        return () => {
+          listeners.delete(listener);
+        };
+      },
+    },
+    set(next: { hidden?: boolean; online?: boolean }) {
+      if (next.hidden !== undefined) hidden = next.hidden;
+      if (next.online !== undefined) online = next.online;
+      for (const listener of [...listeners]) listener();
+    },
+  };
+}
+
+/** The proving service, answering as the stub in `beforeEach` does. */
+function proved(): Promise<Response> {
+  return Promise.resolve({
+    ok: true,
+    status: 200,
+    text: () => Promise.resolve(JSON.stringify({ provenTx: 'ab' })),
+  } as Response);
+}
+
+describe('the second half as the screen follows it', () => {
+  it('reports every step in order — the fee covered between the proof and the hand-over — and both landings with their links', async () => {
+    const storage = emptyBrowser();
+    const signIn = socialSignIn();
+    const run = chain({ members: [entryOf('k1', signIn.device.pk)] });
+    const steps: string[] = [];
+    const landed: { kind: string; txHash: string | null; explorerUrl: string | null }[] = [];
+
+    await adoptDeviceKey({
+      ...optionsFor(storage, signIn, run),
+      onStep: (step) => steps.push(step),
+      onLanded: ({ kind, txHash, explorerUrl }) => landed.push({ kind, txHash, explorerUrl }),
+    });
+
+    expect(steps).toEqual(['passkey', 'approve', 'approve', 'prove', 'fee', 'send', 'confirm', 'rotate', 'earlier']);
+    expect(landed).toEqual([
+      { kind: 'add', txHash: hashOf('tx-1'), explorerUrl: `https://explorer.1am.xyz/tx/${hashOf('tx-1')}?network=${NETWORK}` },
+      { kind: 'rotate', txHash: hashOf('tx-2'), explorerUrl: `https://explorer.1am.xyz/tx/${hashOf('tx-2')}?network=${NETWORK}` },
+    ]);
+  });
+
+  it('reports an add found already on the account as landed, with nothing to link', async () => {
+    const storage = emptyBrowser();
+    const signIn = socialSignIn();
+    const run = chain({ members: [entryOf('k1', signIn.device.pk), entryOf('jj', await thisDevicesKey())] });
+    const landed: { kind: string; txHash: string | null }[] = [];
+    await adoptDeviceKey({
+      ...optionsFor(storage, signIn, run),
+      onLanded: ({ kind, txHash }) => landed.push({ kind, txHash }),
+    });
+    expect(landed).toEqual([
+      { kind: 'add', txHash: null },
+      { kind: 'rotate', txHash: hashOf('tx-1') },
+    ]);
+  });
+
+  it('picks the add up again once the page is back, when its proof was dropped while the page was away', async () => {
+    /* THE LIVE CASE: the proof was made and the phone never heard, because the
+       tab had been frozen with the request in flight. */
+    const storage = emptyBrowser();
+    const signIn = socialSignIn();
+    const run = chain({ members: [entryOf('k1', signIn.device.pk)] });
+    const screen = fakePage();
+    let asked = 0;
+    vi.stubGlobal('fetch', () => {
+      asked += 1;
+      if (asked > 1) return proved();
+      screen.set({ hidden: true });
+      setTimeout(() => screen.set({ hidden: false }), 5);
+      return Promise.reject(new TypeError('Failed to fetch'));
+    });
+
+    const result = await adoptDeviceKey({ ...optionsFor(storage, signIn, run), page: screen.page });
+
+    expect(result.pointedAtNewKey).toBe(true);
+    expect(run.calls.map((call) => call.circuit)).toEqual([
+      'add_device_with_k256',
+      'add_device_with_k256',
+      'rotate_enc_key_with_jubjub',
+    ]);
+    /* Approved again for the second attempt, as a press of "Try again" would
+       have been — and never a second passkey prompt. */
+    expect(signIn.signed).toHaveLength(2);
+  });
+
+  it('shows a dropped connection rather than picking it up, when somebody was watching', async () => {
+    const storage = emptyBrowser();
+    const signIn = socialSignIn();
+    const run = chain({ members: [entryOf('k1', signIn.device.pk)] });
+    vi.stubGlobal('fetch', () => Promise.reject(new TypeError('Failed to fetch')));
+    await expect(
+      adoptDeviceKey({ ...optionsFor(storage, signIn, run), page: fakePage().page }),
+    ).rejects.toThrow(CUSTODY_KEY_NOT_ADDED);
+    expect(run.calls.map((call) => call.circuit)).toEqual(['add_device_with_k256']);
+  });
+
+  it('stops picking it up after the most times it may, and then says so', async () => {
+    const storage = emptyBrowser();
+    const signIn = socialSignIn();
+    const run = chain({ members: [entryOf('k1', signIn.device.pk)] });
+    const screen = fakePage();
+    vi.stubGlobal('fetch', () => {
+      screen.set({ hidden: true });
+      setTimeout(() => screen.set({ hidden: false }), 1);
+      return Promise.reject(new TypeError('Failed to fetch'));
+    });
+    await expect(adoptDeviceKey({ ...optionsFor(storage, signIn, run), page: screen.page })).rejects.toThrow(
+      CUSTODY_KEY_NOT_ADDED,
+    );
+    expect(run.calls.filter((call) => call.circuit === 'add_device_with_k256')).toHaveLength(4);
+  });
+
+  it('hands nothing over once the host has stopped waiting', async () => {
+    const storage = emptyBrowser();
+    const signIn = socialSignIn();
+    const run = chain({ members: [entryOf('k1', signIn.device.pk)] });
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      adoptDeviceKey({ ...optionsFor(storage, signIn, run), signal: controller.signal }),
+    ).rejects.toThrow(CUSTODY_KEY_NOT_ADDED);
+    /* Not approved, not built, not sent. */
+    expect(signIn.signed).toHaveLength(0);
+    expect(run.calls).toHaveLength(0);
+  });
+
+  it('lets a call already in flight finish, however the host has moved on', async () => {
+    /* A proof cannot be called back: the gate is only ever the two moments
+       before anything leaves the device. */
+    const storage = emptyBrowser();
+    const signIn = socialSignIn();
+    const run = chain({ members: [entryOf('k1', signIn.device.pk)] });
+    const controller = new AbortController();
+    const result = await adoptDeviceKey({
+      ...optionsFor(storage, signIn, run),
+      signal: controller.signal,
+      onStep: (step) => {
+        if (step === 'prove') controller.abort();
+      },
+    });
+    expect(result.userKey).toMatch(/^jubjub:/u);
+    expect(run.calls.map((call) => call.circuit)).toEqual(['add_device_with_k256']);
+  });
+});
+
+describe('the host’s bounds, and its way out', () => {
+  function hostOptions(storage: CustodyStorage, signIn: ReturnType<typeof socialSignIn>, run: Chain) {
+    const { socialDevice: _device, ...rest } = optionsFor(storage, signIn, run);
+    return { ...rest, socialDevice: () => Promise.resolve(signIn.device) };
+  }
+
+  it('says nothing was added, and hands nothing over, when nothing moves before the hand-over', async () => {
+    const storage = emptyBrowser();
+    const signIn = socialSignIn();
+    const outcome = await bringPassportHere({
+      ...hostOptions(storage, signIn, chain({ members: [entryOf('k1', signIn.device.pk)] })),
+      socialDevice: () => new Promise<K256DeviceIdentity>(() => undefined),
+      stallMs: 20,
+    });
+    expect(outcome).toMatchObject({ kind: 'failed', sentence: ADOPTION_NOT_ADDED });
+    expect(outcome.kind === 'failed' ? (outcome.cause as Error).message : '').toMatch(/nothing moved for 0 s/);
+  });
+
+  it('closes the gate when the stall bound runs out, so a late answer hands nothing over', async () => {
+    const storage = emptyBrowser();
+    const signIn = socialSignIn();
+    const run = chain({ members: [entryOf('k1', signIn.device.pk)] });
+    let answer: (device: K256DeviceIdentity) => void = () => undefined;
+    const outcome = await bringPassportHere({
+      ...hostOptions(storage, signIn, run),
+      socialDevice: () =>
+        new Promise<K256DeviceIdentity>((resolve) => {
+          answer = resolve;
+        }),
+      stallMs: 20,
+    });
+    expect(outcome.kind).toBe('failed');
+    answer(signIn.device);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(signIn.signed).toHaveLength(0);
+    expect(run.calls).toHaveLength(0);
+  });
+
+  it('stands the stall bound down while a transaction is in flight', async () => {
+    /* A proof slower than the stall bound: it is in flight, so the long bound
+       is the only one that applies, and the Passport comes back. */
+    const storage = emptyBrowser();
+    const signIn = socialSignIn();
+    vi.stubGlobal('fetch', () => new Promise<Response>((resolve) => setTimeout(() => resolve(proved()), 80)));
+    const steps: string[] = [];
+    const outcome = await bringPassportHere({
+      ...hostOptions(storage, signIn, chain({ members: [entryOf('k1', signIn.device.pk)] })),
+      stallMs: 40,
+      onStep: (step) => steps.push(step),
+    });
+    expect(outcome.kind).toBe('back');
+    expect(steps[0]).toBe('sign-in');
+    expect(steps.at(-1)).toBe('earlier');
+  });
+
+  it('ends at once when the host stops waiting — the person pressed Cancel — and hands nothing over after', async () => {
+    const storage = emptyBrowser();
+    const signIn = socialSignIn();
+    const run = chain({ members: [entryOf('k1', signIn.device.pk)] });
+    const controller = new AbortController();
+    let answer: (device: K256DeviceIdentity) => void = () => undefined;
+    const pending = bringPassportHere({
+      ...hostOptions(storage, signIn, run),
+      socialDevice: () =>
+        new Promise<K256DeviceIdentity>((resolve) => {
+          answer = resolve;
+        }),
+      signal: controller.signal,
+    });
+    controller.abort();
+    expect(await pending).toMatchObject({ kind: 'failed', sentence: ADOPTION_NOT_ADDED });
+    answer(signIn.device);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(signIn.signed).toHaveLength(0);
+    expect(run.calls).toHaveLength(0);
+
+    /* And a host that had stopped waiting before it began is answered the same. */
+    const before = await bringPassportHere({ ...hostOptions(emptyBrowser(), signIn, run), signal: controller.signal });
+    expect(before).toMatchObject({ kind: 'failed', sentence: ADOPTION_NOT_ADDED });
   });
 });

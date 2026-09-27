@@ -209,9 +209,27 @@ import { useDynamicCustodyArm, usePasskeyCustodyArm } from './lib/custodyArms.js
 import {
   ADOPTION_NOT_ADDED,
   adoptionStage,
+  bindAdoption,
+  browserHoldsOtherPassport,
   clearAdoption,
+  custodyRecordUsers,
+  deviceKeyHoldsPassport,
+  forgetStaleAdoption,
   loadAdoption,
 } from './lib/custodyAdoption.js';
+/* The timeline the second half is shown with, and keeping the screen on while
+   it runs — the same rule: nothing at run time but the standard library. */
+import {
+  ADOPTION_DONE_BEAT_MS,
+  ADOPTION_KEEP_OPEN,
+  adoptionCancellable,
+  adoptionRows,
+  type AdoptionStep,
+} from './lib/adoptionProgress.js';
+import { PASSKEY_APPROVAL_PROMPT } from './lib/custodyArm.js';
+import { holdScreenAwake } from './lib/pagePresence.js';
+import ProgressTimeline, { useTimelineClock, type TimelineRow } from './screens/ProgressTimeline.js';
+import type { AdoptionLanded } from './identity/custodyAdopt.js';
 import { RECOVERY_COPY } from './lib/recoveryStep.js';
 /* A TYPE, which is erased: naming it here pulls nothing into the entry chunk. */
 import type { K256DeviceIdentity } from './identity/custodyContractSigning.js';
@@ -1965,12 +1983,14 @@ export default function PassportDemo() {
    * nothing to restore after a reload and nothing to disclose before one.
    */
   const addActivity = useCallback(
-    (entry: Omit<ActivityEntry, 'id' | 'createdAt' | 'network'>) => {
+    /* `createdAt` for a row written after the fact, at the time the thing it
+       records really happened (2026/09/27); now, for everything else. */
+    (entry: Omit<ActivityEntry, 'id' | 'createdAt' | 'network'> & { createdAt?: string }) => {
       const value = {
         ...entry,
         network: selectedNetwork,
         id: crypto.randomUUID(),
-        createdAt: new Date().toISOString(),
+        createdAt: entry.createdAt ?? new Date().toISOString(),
       };
       setActivity((current) => [value, ...current].slice(0, ACTIVITY_KEEP));
       return value;
@@ -3116,7 +3136,15 @@ export default function PassportDemo() {
    * than anything this path introduces, and it is a display record: the name
    * itself is held on chain by the wallet that registered it.
    */
-  const enrolNewLocalPassportProfile = async (): Promise<{
+  const enrolNewLocalPassportProfile = async (
+    /**
+     * Told the new credential the moment the platform has made it, before it
+     * becomes this session's profile — which is how a recovery ties itself to
+     * the key it asked for (2026/09/27). Never told of a key that already
+     * existed: the conflict road below signs in to one, and makes nothing.
+     */
+    onEnrolled?: (credentialId: string) => void,
+  ): Promise<{
     profile: DemoPassportProfile;
     created: boolean;
   }> => {
@@ -3135,6 +3163,7 @@ export default function PassportDemo() {
       if (!(cause instanceof PassportEnrolmentConflictError)) throw enrolmentCeremonyFailure(cause);
       return signInAfterEnrolmentConflict();
     }
+    onEnrolled?.(enrolled.reference.credentialId);
     return { profile: await adoptEnrolledPasskey(enrolled), created: true };
   };
 
@@ -3446,9 +3475,20 @@ export default function PassportDemo() {
 
   const runLocalOnboarding = async (
     requested: 'create' | 'signin' | 'auto' | 'enrol-new' | 'signup',
+    /** Set by the one enrolment a recovery asks for: see `onRecoverToDeviceKey`. */
+    options: { readonly forHandoff?: boolean } = {},
   ) => {
     if (onboardingRunning.current) return;
     onboardingRunning.current = true;
+    /* A PASSPORT MADE HERE IS NOT A RECOVERY (2026/09/27). Every road that makes
+       one puts down any recovery this browser was part-way through: the live
+       defect was a hand-off left over from a recovery that failed, resumed by a
+       brand-new Passport the moment it added its way back. Only the enrolment
+       a recovery itself asked for keeps it — and ties it to the key it makes. */
+    if (requested !== 'signin' && options.forHandoff !== true) {
+      clearAdoption(window.localStorage);
+      setAdoption(null);
+    }
     // A user-initiated ceremony wins over the silent §2.2 restore: two flows
     // must never race to replace `localWalletRef`.
     cancelSessionRestore();
@@ -3503,7 +3543,14 @@ export default function PassportDemo() {
            answered, and it cannot open a Passport. See
            `enrolNewLocalPassportProfile` for why creating is the user's call
            to make and what still stops it replacing a real Passport. */
-        const outcome = await enrolNewLocalPassportProfile();
+        const outcome = await enrolNewLocalPassportProfile(
+          /* THE KEY THE RECOVERY ASKED FOR, written into it the moment it
+             exists and before it is anybody's profile — so no other key on this
+             device can ever resume it, and no render sees it untied. */
+          options.forHandoff === true
+            ? (credentialId) => setAdoption(bindAdoption(window.localStorage, credentialId))
+            : undefined,
+        );
         activeProfile = outcome.profile;
         created = outcome.created;
       } else if (intent === 'create') {
@@ -5946,6 +5993,10 @@ export default function PassportDemo() {
        restore reads the same flag, so the restore abandons itself rather than
        racing. */
     cancelSessionRestore();
+    /* A RECOVERY IN FLIGHT ENDS WITH THE SESSION (2026/09/27). Left behind, it
+       was resumed by whatever Passport signed in here next. */
+    clearAdoption(window.localStorage);
+    setAdoption(null);
     // Sign-out is the boundary of the §2.2 session stopgap: the wrapped seed
     // and its wrapping key are removed before anything else is torn down.
     await clearPersistedWalletSession();
@@ -6454,25 +6505,61 @@ export default function PassportDemo() {
   );
 
   /**
-   * Which half of a hand-off is next, asked on every render and costing
-   * nothing. See `./lib/custodyAdoption.ts`.
+   * Whether the key signed in here holds a Passport of its own — read from
+   * STORAGE, never from an open wallet (2026/09/27). A pointer, on any network,
+   * or a prototype account record: see
+   * `./lib/custodyAdoption.ts#deviceKeyHoldsPassport`.
    *
-   * `alreadyAdopted` is the POINTER, not the chain: a pointer for this
-   * credential is this browser's own record that the key it holds already opens
-   * that Passport, which is precisely what the second half writes.
+   * The answer that stood here before was the pointer for the wallet's own
+   * network, which is null until a wallet has opened — every enrolment and
+   * every sign-in sets the profile first — and null for good for a Passport
+   * that has no pointer. In that beat a hand-off left over from a failed
+   * recovery took the screen from a device that had a Passport of its own.
    */
-  const adoptStage = adoptionStage({
-    handoff: adoption,
-    /* THE NETWORK THE APP IS ON, not the one an open wallet reports. A device
-       with no key on it has no wallet, and that is the whole population this
-       road exists for — reading the wallet here would make a resumed hand-off
-       permanently idle on exactly the device it is meant to rescue. */
-    network: custodyNetwork,
-    hasDeviceKey: profile !== null,
-    socialSignedIn:
-      dynamicSession.status === 'signed-in' && (dynamicSession.evmAddress ?? '').length > 0,
-    alreadyAdopted: passkeyCustodyUser !== null,
-  });
+  const adoptPointers = loadCustodyPasskeyPointers(window.localStorage);
+  const passkeyHoldsPassport =
+    profile !== null &&
+    deviceKeyHoldsPassport({
+      credentialId: profile.passkey.credentialId,
+      pointers: adoptPointers,
+      prototypeRecords: contractRecords,
+    });
+  /* And whether this browser holds a Passport that is not the recovery's own,
+     which is what a hand-off tied to no key is asked about. See
+     `./lib/custodyAdoption.ts#browserHoldsOtherPassport`. */
+  const adoptOtherPassports =
+    adoption !== null &&
+    browserHoldsOtherPassport({
+      handoff: adoption,
+      pointers: adoptPointers,
+      prototypeRecords: contractRecords,
+      custodyUsers: custodyRecordUsers(window.localStorage),
+    });
+  /**
+   * Which half of a hand-off is next, and whether the hand-off has gone stale,
+   * asked on every render and costing nothing. See `./lib/custodyAdoption.ts`.
+   */
+  const adoptCredentialId = profile?.passkey.credentialId ?? null;
+  const adoptSocialUser =
+    dynamicSession.status === 'signed-in' && (dynamicSession.evmAddress ?? '').length > 0
+      ? (dynamicSession.evmAddress ?? '').toLowerCase()
+      : null;
+  const adoptInput = useMemo(
+    () => ({
+      handoff: adoption,
+      /* THE NETWORK THE APP IS ON, not the one an open wallet reports. A device
+         with no key on it has no wallet, and that is the whole population this
+         road exists for — reading the wallet here would make a resumed
+         hand-off permanently idle on exactly the device it is meant to rescue. */
+      network: custodyNetwork,
+      credentialId: adoptCredentialId,
+      holdsPassport: passkeyHoldsPassport,
+      otherPassports: adoptOtherPassports,
+      socialUser: adoptSocialUser,
+    }),
+    [adoptCredentialId, adoptOtherPassports, adoptSocialUser, adoption, custodyNetwork, passkeyHoldsPassport],
+  );
+  const adoptStage = adoptionStage(adoptInput);
 
   /**
    * The one sentence a second half that did not finish is shown with, or null
@@ -6486,10 +6573,76 @@ export default function PassportDemo() {
    * step of it is.
    */
   const [adoptFailure, setAdoptFailure] = useState<string | null>(null);
+  /**
+   * Where the second half is, for the timeline the screen shows (2026/09/27),
+   * and where the explorer shows each transaction it has landed. See
+   * `./lib/adoptionProgress.ts`.
+   */
+  const [adoptStep, setAdoptStep] = useState<AdoptionStep | null>(null);
+  const [adoptLinks, setAdoptLinks] = useState<Partial<Record<AdoptionLanded['kind'], string>>>({});
+  /**
+   * Whether a run is in progress. The screen stays up for the whole of it —
+   * the add lands a step before the end, and the pointer it writes would
+   * otherwise take the screen away from the rows still running — and the
+   * screen is kept on for the whole of it.
+   */
+  const [adoptBusy, setAdoptBusy] = useState(false);
 
   /* One at a time, and never restarted by a re-render. A second run would ask
      for a second approval for a transaction that is already away. */
   const adoptRunning = useRef(false);
+  /** The run in progress's own "stop waiting": Cancel, or its hand-off put down. */
+  const adoptAbort = useRef<AbortController | null>(null);
+  /**
+   * Stops waiting for the run in progress, if there is one. Behind the screen
+   * it closes the gate: nothing more is handed over (`bringPassportHere`).
+   */
+  const stopAdoptionRun = useCallback(() => {
+    adoptAbort.current?.abort();
+    adoptAbort.current = null;
+    adoptRunning.current = false;
+    setAdoptBusy(false);
+  }, []);
+  /** Puts the hand-off down, and any run in progress with it. */
+  const forgetAdoption = useCallback(() => {
+    stopAdoptionRun();
+    clearAdoption(window.localStorage);
+    setAdoption(null);
+  }, [stopAdoptionRun]);
+  /**
+   * FORGOTTEN WHEN STALE (2026/09/27): a different sign-in, or a key with a
+   * Passport of its own that is not the key the hand-off was made for — see
+   * `adoptionStale`. And forgotten when FINISHED: the key made for it holds the
+   * Passport now, and no run is in progress to clear it — a tab closed in the
+   * beat between the add landing and the end.
+   */
+  const adoptFinished =
+    adoption?.credentialId !== undefined &&
+    adoption.credentialId === adoptCredentialId &&
+    passkeyHoldsPassport;
+  useEffect(() => {
+    if (forgetStaleAdoption(window.localStorage, adoptInput) || (adoptFinished && !adoptBusy)) {
+      forgetAdoption();
+    }
+  }, [adoptBusy, adoptFinished, adoptInput, forgetAdoption]);
+  /* Nothing is carried from one hand-off to the next: a failure left over
+     would stop the next one from starting by itself. */
+  useEffect(() => {
+    if (adoption !== null) return;
+    setAdoptFailure(null);
+    setAdoptStep(null);
+    setAdoptLinks({});
+  }, [adoption]);
+  /* THE SCREEN STAYS ON while the second half runs (2026/09/27): a phone put
+     down mid-proof dimmed, froze the tab, and dropped the answer. Asked for
+     again each time the page comes back; let go of at the end or on failure.
+     See `./lib/pagePresence.ts`. */
+  useEffect(() => {
+    if (!adoptBusy) return undefined;
+    const awake = holdScreenAwake();
+    return () => awake.release();
+  }, [adoptBusy]);
+
   /**
    * Runs the second half. The effect below makes the first attempt on its
    * own; "Try again" makes every later one, from the press itself, so the
@@ -6497,12 +6650,23 @@ export default function PassportDemo() {
    */
   const runAdoption = useCallback(() => {
     if (adoptStage !== 'adopt' || adoptRunning.current) return;
-    const handoff = adoption;
     const credentialId = profile?.passkey.credentialId;
     const session = dynamicArm.session;
-    if (handoff === null || !credentialId || session === null) return;
+    if (adoption === null || !credentialId || session === null) return;
+    /* TIED TO THIS KEY BEFORE ANYTHING ELSE (2026/09/27). From the first run on,
+       no other key on this device can resume it — see `bindAdoption`. */
+    const handoff = bindAdoption(window.localStorage, credentialId) ?? adoption;
     adoptRunning.current = true;
+    const controller = new AbortController();
+    adoptAbort.current = controller;
+    /* Answers from a run the screen has stopped waiting for are not news. */
+    const current = () => adoptAbort.current === controller;
+    const landed: AdoptionLanded[] = [];
+    setAdoption(handoff);
     setAdoptFailure(null);
+    setAdoptStep('sign-in');
+    setAdoptLinks({});
+    setAdoptBusy(true);
     void (async () => {
       try {
         /* No seams in any deployed build; the mocked walk's stand-in for the
@@ -6523,12 +6687,45 @@ export default function PassportDemo() {
           provider: dynamicSession.provider,
           storage: window.localStorage,
           overrides,
+          signal: controller.signal,
+          onStep: (step) => {
+            if (current()) setAdoptStep(step);
+          },
+          onLanded: (event) => {
+            landed.push(event);
+            const href = event.explorerUrl;
+            if (current() && href !== null) setAdoptLinks((links) => ({ ...links, [event.kind]: href }));
+          },
         });
+        if (!current()) return;
         if (outcome.kind === 'failed') {
           console.warn('[account-custody] this Passport could not be brought here yet', outcome.cause);
           setAdoptFailure(outcome.sentence);
           return;
         }
+        /* THE TRAIL (2026/09/27): what this recovery put on the chain, at the
+           times it landed, each with the same "View" every other row has. */
+        for (const event of landed) {
+          addActivity({
+            label:
+              event.kind === 'add'
+                ? 'This device was added to your Passport'
+                : 'Payments now come to this device',
+            detail:
+              event.kind === 'add'
+                ? `${handoff.name}.night can be opened on this device now.`
+                : 'What is sent to your Passport from now on can be read here.',
+            status: 'complete',
+            source: 'local',
+            ...(event.txHash ? { txHash: event.txHash } : {}),
+            createdAt: new Date(event.at).toISOString(),
+          });
+        }
+        /* Every row ticked, for a beat, before Home: the last row is the
+           outcome, and an outcome nobody sees is a jump rather than an end. */
+        setAdoptStep('done');
+        await new Promise((resolve) => window.setTimeout(resolve, ADOPTION_DONE_BEAT_MS));
+        if (!current()) return;
         /* CLEARED ONLY ON SUCCESS. A failure is a hand-off to be resumed, and
            the next press — or the next open — resumes it. */
         clearAdoption(window.localStorage);
@@ -6537,13 +6734,18 @@ export default function PassportDemo() {
       } catch (cause) {
         /* Only a module that would not load reaches here; the run itself
            answers in words. */
+        if (!current()) return;
         console.warn('[account-custody] this Passport could not be brought here yet', cause);
         setAdoptFailure(ADOPTION_NOT_ADDED);
       } finally {
-        adoptRunning.current = false;
+        if (current()) {
+          adoptAbort.current = null;
+          adoptRunning.current = false;
+          setAdoptBusy(false);
+        }
       }
     })();
-  }, [adoptStage, adoption, dynamicArm, dynamicSession.provider, passportContractRoot, profile]);
+  }, [addActivity, adoptStage, adoption, dynamicArm, dynamicSession.provider, passportContractRoot, profile]);
   useEffect(() => {
     /* The first attempt, and never a second one on its own: after a failure
        the next run is the person's press, not a re-render's. */
@@ -6565,13 +6767,36 @@ export default function PassportDemo() {
     if (adoptRunning.current) return;
     void (async () => {
       await signOutPassport();
-      clearAdoption(window.localStorage);
-      setAdoption(null);
-      setAdoptFailure(null);
+      forgetAdoption();
       setRecoverWithProvider(true);
       void dynamicSession.signOut();
     })();
   };
+  /**
+   * "CANCEL" (2026/09/27): the recovery is put down, whatever it was doing
+   * before anything was handed over, and the person is taken to this device's
+   * own Passport — or, where the key here holds none, back to the start, with
+   * the key made for the recovery and the sign-in both signed out.
+   *
+   * It is the way out that did not exist: a hand-off that should never have
+   * been resumed held the screen, with nothing on it to press.
+   */
+  const cancelAdoption = () => {
+    const ownPassport = passkeyHoldsPassport;
+    forgetAdoption();
+    setRecoverWithProvider(false);
+    if (ownPassport) return;
+    void (async () => {
+      await signOutPassport();
+      void dynamicSession.signOut();
+    })();
+  };
+  /** Whether the second half's screen is up: while it is due, and for the whole of a run. */
+  const adoptScreenUp = adoptStage === 'adopt' || adoptBusy;
+  const adoptTimeline = adoptionRows({ step: adoptStep ?? 'sign-in', provider: dynamicSession.provider });
+  const adoptTimedRow =
+    adoptBusy && adoptFailure === null ? (adoptTimeline.find((row) => row.state === 'active') ?? null) : null;
+  const adoptElapsedFor = useTimelineClock(adoptTimedRow?.id ?? null);
 
   const showOnboarding =
     !sessionActive ||
@@ -6624,8 +6849,9 @@ export default function PassportDemo() {
   /** The one onboarding route, plus the `unusable-credential` recovery. */
   const startPasskeyOnboarding = (
     intent: 'create' | 'signin' | 'auto' | 'enrol-new' | 'signup',
+    options: { readonly forHandoff?: boolean } = {},
   ) => {
-    void runLocalOnboarding(intent);
+    void runLocalOnboarding(intent, options);
   };
 
   const refreshMobile = () => {
@@ -10415,7 +10641,7 @@ export default function PassportDemo() {
           dead-end card this road replaced. Unless it does not finish: then it
           says so in one sentence, with "Try again" and a way out
           (2026/09/26). */}
-      {adoptStage === 'adopt' ? (
+      {adoptScreenUp ? (
         <section className="mnob-screen" aria-busy={adoptFailure === null}>
           <header className="mnob-bar">
             <img className="mnob-wordmark" src="/midnight-wordmark.svg" alt="Midnight" />
@@ -10428,14 +10654,53 @@ export default function PassportDemo() {
               <span>Passport</span>
             </h1>
             {adoptFailure === null ? (
-              <p className="mnob-lede" role="status" data-testid="adopting">
-                Adding this device to {adoption?.name ?? 'your Passport'}.night. Approve it with the
-                account you just signed in with.
-              </p>
+              /* THE WHOLE OF IT, AS IT HAPPENS (2026/09/27) — the same panel and
+                 clock the setup and the way back are shown with, moved only by
+                 what the second half reports, never by a timer. It was one
+                 sentence on a black page, for as long as it took. */
+              <>
+                <p className="mnob-lede" role="status" data-testid="adopting">
+                  Adding this device to {adoption?.name ?? 'your Passport'}.night. Approve it with the
+                  account you just signed in with.
+                </p>
+                <div className="mnob-setup-progress" data-testid="adopt-progress">
+                  <ProgressTimeline
+                    rows={adoptTimeline.map((row): TimelineRow => {
+                      const href =
+                        row.id === 'add' ? adoptLinks.add : row.id === 'rotate' ? adoptLinks.rotate : undefined;
+                      return {
+                        id: row.id,
+                        label: row.label,
+                        state: row.state,
+                        expectedSeconds: row.expectedSeconds,
+                        elapsedMs: adoptElapsedFor(row),
+                        /* The one row that is the reader's own hands. */
+                        detail: row.id === 'passkey' && row.state === 'active' ? PASSKEY_APPROVAL_PROMPT : null,
+                        subStages: row.subStages,
+                        link: href === undefined ? null : { label: 'View', href },
+                      };
+                    })}
+                  />
+                </div>
+                <p className="mnob-hint" data-testid="adopt-keep-open">
+                  {ADOPTION_KEEP_OPEN}
+                </p>
+                {/* The way out, while there is still nothing to call back. */}
+                {adoptionCancellable(adoptStep ?? 'sign-in') ? (
+                  <button
+                    type="button"
+                    className="mnob-alt"
+                    onClick={cancelAdoption}
+                    data-testid="adopt-cancel"
+                  >
+                    {RECOVERY_COPY.adoptCancel}
+                  </button>
+                ) : null}
+              </>
             ) : (
               /* A SECOND HALF THAT DID NOT FINISH ENDS HERE, NOT IN A SPINNER
                  (2026/09/26): one sentence, the press that runs it again, and
-                 the way out. */
+                 the ways out. */
               <>
                 <div className="mnob-unusable" role="alert" data-testid="adopt-failed">
                   <p className="mnob-unusable-copy">{adoptFailure}</p>
@@ -10451,6 +10716,14 @@ export default function PassportDemo() {
                   </button>
                   <button type="button" className="mnob-alt" onClick={leaveAdoption}>
                     {RECOVERY_COPY.adoptLeave}
+                  </button>
+                  <button
+                    type="button"
+                    className="mnob-alt"
+                    onClick={cancelAdoption}
+                    data-testid="adopt-cancel"
+                  >
+                    {RECOVERY_COPY.adoptCancel}
                   </button>
                 </div>
               </>
@@ -10486,8 +10759,10 @@ export default function PassportDemo() {
                enrolment is the host's, because it replaces the screen that
                asked for it. See `./lib/custodyAdoption.ts`. */
             onRecoverToDeviceKey={(handoff) => {
+              setAdoptFailure(null);
               setAdoption(handoff);
-              startPasskeyOnboarding('enrol-new');
+              /* The one enrolment that keeps the hand-off, and is tied to it. */
+              startPasskeyOnboarding('enrol-new', { forHandoff: true });
             }}
             onLeaveRecovery={() => {
               setRecoverWithProvider(false);
