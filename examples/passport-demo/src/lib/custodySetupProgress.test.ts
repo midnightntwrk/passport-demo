@@ -157,6 +157,19 @@ describe('the three rows', () => {
        It was four minutes while the waves and the grant sat in front of Home. */
     expect(CUSTODY_SETUP_EXPECTED_SECONDS).toBe(90)
   })
+
+  it('waits on the reader for a passkey prompt, and not for a sign-in that signs by itself (2026/09/28)', () => {
+    expect(custodySetupSteps('confirm-identity', 'passkey').map((row) => row.actor)).toEqual([
+      'passport',
+      'you',
+      'passport',
+    ])
+    expect(custodySetupSteps('confirm-identity', 'dynamic').map((row) => row.actor)).toEqual([
+      'passport',
+      'passport',
+      'passport',
+    ])
+  })
 })
 
 describe('the three states of the long row', () => {

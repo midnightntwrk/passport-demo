@@ -3,6 +3,7 @@ import { Eraser, Fingerprint, Loader2, UserRoundPlus, X } from 'lucide-react'
 import ThemeToggle from './ThemeToggle'
 import { RECOVERY_COPY } from '../lib/recoveryStep.js'
 import PassportIllustration from './PassportIllustration'
+import { LandingInstall } from './InstallOffer.js'
 import './onboarding.css'
 
 /**
@@ -385,6 +386,11 @@ export default function OnboardingScreen(props: OnboardingProps) {
                   <span>Log in</span>
                 </button>
               </div>
+              {/* INSTALL PASSPORT, as the secondary action under the two doors,
+                  for a phone with no Passport yet (2026/09/28). Renders nothing
+                  on a desktop, once installed, or where installing cannot
+                  work. */}
+              <LandingInstall hasExistingPassport={hasExistingPassport} />
               {/* WHICH DOOR FOR A RETURNING READER. Sign up makes a new Passport
                   every time, so a browser that already holds one says, once,
                   where the one it holds is — including one whose setup was

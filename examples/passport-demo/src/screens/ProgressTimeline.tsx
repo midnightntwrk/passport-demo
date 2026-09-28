@@ -29,7 +29,7 @@
 import { Check, ExternalLink } from 'lucide-react'
 import { useEffect, useState } from 'react'
 
-import { formatElapsed, stepTimingLine, type ClaimStepState } from '../lib/claimSteps.js'
+import { formatElapsed, stepTimingLine, type ClaimStepState, type StepActor } from '../lib/claimSteps.js'
 import './identity.css'
 
 /** One of the filling rows beneath a long step. */
@@ -45,8 +45,13 @@ export interface TimelineRow {
   readonly id: string
   readonly label: string
   readonly state: ClaimStepState
-  /** How long this row usually takes, or null for "as long as you take". */
+  /** How long this row usually takes, or null when nobody can put a number on it. */
   readonly expectedSeconds: number | null
+  /**
+   * Whose move the running row waits on. Only `'you'` — a prompt that is up —
+   * says "Waiting for you"; absent is Passport's own work (2026/09/28).
+   */
+  readonly actor?: StepActor
   /** How long it HAS taken, measured, or null when there is nothing to say. */
   readonly elapsedMs: number | null
   /** The phase's own sentence beneath the label, for a row that is one thing. */

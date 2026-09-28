@@ -259,31 +259,6 @@ export function explorerTxUrl(
   return `${origin}/tx/${encodeURIComponent(txHash as string)}?network=${network}`;
 }
 
-/**
- * The step verifier — this demo's own read-only page, which reads a Passport's
- * whole history back off the indexer and renders it step by step.
- *
- * It is the SECOND place a transaction can be shown, and the only one that
- * works before the indexer has mapped a submitted identifier to a ledger hash:
- * it is asked for a NAME, not a hash, and it goes and finds every action on the
- * account that name resolves to.
- */
-export const VERIFIER_URL = 'https://midnightpassport.com/verify/';
-
-/**
- * A verifier link for one Passport, keyed by its `.night` name.
- *
- * `q` is the parameter `src/verify/main.ts` reads on load, and it takes exactly
- * what the search box takes. `null` for an absent or empty name, because a
- * verifier opened on nothing is a page that says "Ready." and nothing else.
- */
-export function verifierNameUrl(name: string | null | undefined): string | null {
-  if (typeof name !== 'string') return null;
-  const trimmed = name.trim();
-  if (!trimmed) return null;
-  return `${VERIFIER_URL}?q=${encodeURIComponent(trimmed)}`;
-}
-
 /** Where a submitted transaction can be looked at, and what to call the link. */
 export interface TxReceiptLink {
   label: string;
@@ -291,28 +266,98 @@ export interface TxReceiptLink {
 }
 
 /**
- * The link a "submitted" toast carries — the explorer where there is one, and
- * the verifier where there is not.
+ * The link a submitted transaction carries — its page on the explorer, or
+ * nothing at all.
  *
- * Two things stop the explorer from being an option, and neither is a failure:
- * a network with no public explorer in {@link EXPLORER_URLS}, and a transaction
- * whose 33-byte IDENTIFIER the indexer has not yet mapped to a ledger hash
- * ({@link isLedgerTxHash}). The account-contract deploy hits the second one
- * routinely — it is the first thing a Passport ever submits, and the toast
- * fires the moment it lands rather than minutes later — so a deploy passes its
- * `.night` name as a fallback and the toast points at the verifier, which finds
- * the deploy by resolving the name once the indexer has it.
+ * NEVER THE VERIFIER, AND NEVER BY NAME (2026/09/28). This used to fall back to
+ * the step verifier searched by the sender's `.night` name whenever the value
+ * was a 33-byte submit IDENTIFIER the indexer had not yet mapped to a ledger
+ * hash — which, for a payment, is most of the time. A tester who sent mUSD was
+ * handed `midnightpassport.com/verify/?q=<their name>`: an operator's tool,
+ * showing their whole history, instead of the one transaction they had just
+ * made. The verifier stays an operator tool; a person is shown the
+ * transaction, on the explorer, once its hash is known
+ * ({@link resolveReceiptHash}), and no link until then.
  *
- * `null` means there is genuinely nowhere to send the user, and the caller
- * shows a toast with no link rather than one that resolves to nothing.
+ * `null` for a network with no public explorer in {@link EXPLORER_URLS} and
+ * for a value that is not a ledger hash, so the caller shows the row or toast
+ * without a link rather than one that resolves to nothing.
  */
 export function txReceiptLink(
   networkId: string | null | undefined,
   txHash: string | null | undefined,
-  fallbackName?: string | null,
 ): TxReceiptLink | null {
   const explorer = explorerTxUrl(networkId, txHash);
-  if (explorer) return { label: 'View on explorer', href: explorer };
-  const verifier = verifierNameUrl(fallbackName);
-  return verifier ? { label: 'View on the verifier', href: verifier } : null;
+  return explorer ? { label: 'View on explorer', href: explorer } : null;
+}
+
+/**
+ * Whether a value is a 33-byte transaction IDENTIFIER — 66 hex characters, the
+ * id midnight-js answers a submit with — and therefore something the indexer
+ * can be asked to turn into the ledger hash an explorer resolves.
+ */
+export function isTxIdentifier(value: string | null | undefined): boolean {
+  return typeof value === 'string' && /^[0-9a-fA-F]{66}$/.test(value);
+}
+
+/** How a caller asks the indexer, once, for the ledger hash behind an identifier. */
+export type ReceiptHashLookup = (identifier: string) => Promise<string | null>;
+
+export interface ResolveReceiptHashOptions {
+  /** One question to the indexer: the hash, or null for "not yet". */
+  readonly lookup: ReceiptHashLookup;
+  /** How many times to ask before giving up. */
+  readonly attempts?: number;
+  /** How long to wait between two asks. */
+  readonly intervalMs?: number;
+  /** The wait itself, injectable so the rule is drilled without a clock. */
+  readonly sleep?: (ms: number) => Promise<void>;
+  /** Stop asking: the screen that wanted the answer has gone. */
+  readonly cancelled?: () => boolean;
+}
+
+/**
+ * Two and a half minutes of asking, every five seconds. The indexer usually
+ * maps a submitted identifier within a block or two (stagenet: twenty-odd
+ * seconds each); the window is wide enough for a slow one and narrow enough
+ * that a transaction that never landed stops being asked about.
+ */
+export const RECEIPT_HASH_ATTEMPTS = 30;
+export const RECEIPT_HASH_INTERVAL_MS = 5_000;
+
+/**
+ * The ledger hash a receipt can link to, from whatever the transaction is
+ * known by now.
+ *
+ * A ledger hash is its own answer, lower-cased. An identifier is asked about
+ * until the indexer answers with a hash, and a lookup that throws counts as
+ * "not yet" — a dropped socket says nothing about the transaction. Anything
+ * else, an exhausted window, and a cancelled caller all come back `null`, which
+ * every caller reads as "keep showing no link": a lagging indexer costs a
+ * link, never a wrong one.
+ */
+export async function resolveReceiptHash(
+  value: string | null | undefined,
+  options: ResolveReceiptHashOptions,
+): Promise<string | null> {
+  if (isLedgerTxHash(value)) return (value as string).toLowerCase();
+  if (!isTxIdentifier(value)) return null;
+  const attempts = options.attempts ?? RECEIPT_HASH_ATTEMPTS;
+  const intervalMs = options.intervalMs ?? RECEIPT_HASH_INTERVAL_MS;
+  const sleep =
+    options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const cancelled = options.cancelled ?? (() => false);
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (cancelled()) return null;
+    let answer: string | null = null;
+    try {
+      answer = await options.lookup(value as string);
+    } catch {
+      answer = null;
+    }
+    if (cancelled()) return null;
+    if (isLedgerTxHash(answer)) return (answer as string).toLowerCase();
+    if (attempt + 1 < attempts) await sleep(intervalMs);
+  }
+  return null;
 }

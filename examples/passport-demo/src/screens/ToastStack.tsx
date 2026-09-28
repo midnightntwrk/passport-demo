@@ -35,6 +35,13 @@ export interface PassportToast {
   title: string
   body?: string
   link?: PassportToastLink
+  /**
+   * A quiet line where the link WILL be, while it is being looked for — a
+   * payment's ledger hash the indexer has not mapped yet (2026/09/28). It holds
+   * the link's place, so the card does not change height when the link
+   * arrives, and it is never a link itself.
+   */
+  pendingLink?: string
 }
 
 type Listener = (toasts: PassportToast[]) => void
@@ -77,6 +84,16 @@ export function pushToast(toast: Omit<PassportToast, 'id'>): number {
   return id
 }
 
+/**
+ * Changes a toast that is still in the stack — a payment's explorer link that
+ * was found after the toast went up. A toast already dismissed is left gone.
+ */
+export function updateToast(id: number, patch: Partial<Omit<PassportToast, 'id'>>) {
+  if (!queue.some((t) => t.id === id)) return
+  queue = queue.map((t) => (t.id === id ? { ...t, ...patch } : t))
+  emit()
+}
+
 export function dismissToast(id: number) {
   queue = queue.filter((t) => t.id !== id)
   emit()
@@ -107,7 +124,7 @@ function Toast({
 }) {
   const isVisible = index < MAX_VISIBLE
   const timer = useRef<number | null>(null)
-  const remaining = useRef(toast.link ? LINKED_DISMISS_MS : AUTO_DISMISS_MS)
+  const remaining = useRef(toast.link || toast.pendingLink ? LINKED_DISMISS_MS : AUTO_DISMISS_MS)
   const startedAt = useRef(0)
 
   useEffect(() => {
@@ -185,6 +202,8 @@ function Toast({
             <span>{toast.link.label}</span>
             <ExternalLink size={13} strokeWidth={2.2} aria-hidden="true" />
           </a>
+        ) : toast.pendingLink ? (
+          <span className="mntoast-link mntoast-link-pending">{toast.pendingLink}</span>
         ) : null}
       </div>
       <motion.button

@@ -13,7 +13,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { expect, type Browser, type Page } from '@playwright/test';
+import { expect, type Browser, type BrowserContextOptions, type Page } from '@playwright/test';
 
 import { PASSPORT_ACCOUNT_ADDRESS, installNetworkBoundary } from './mocks.js';
 import { installVirtualAuthenticator } from './passkey.js';
@@ -76,8 +76,16 @@ export async function custodyPassportOnHome(
   browser: Browser,
   atStep: (page: Page, step: 'landing' | 'welcome' | 'name') => Promise<void> = async () => {},
   open: string = CUSTODY_WALK,
+  /**
+   * A device to be, over whatever the project emulates — a phone, for a walk
+   * whose subject only a phone is shown (2026/09/28: the install card).
+   */
+  device: BrowserContextOptions = {},
 ): Promise<{ page: Page; close: () => Promise<void> }> {
-  const context = await browser.newContext(walkContextOptions({ viewport: { width: 420, height: 900 } }));
+  const context = await browser.newContext({
+    ...walkContextOptions({ viewport: { width: 420, height: 900 } }),
+    ...device,
+  });
   const page = await context.newPage();
   await installNetworkBoundary(page);
   await serveAccountCustodyState(page);

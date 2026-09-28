@@ -1,0 +1,168 @@
+@import './tokens.css';
+
+/* The install offer — prefix "mninstall-card", "mninstall-landing", and
+   "mninstall-step". Token-driven, both themes (2026/09/28). The iPhone's
+   steps sheet reuses `../pwa-install.css`, the sheet it replaces. */
+
+/* THE CARD ON HOME. The Companion, the title and one line, a quiet "not now"
+   in the corner, and one full-width button a thumb cannot miss. Every target
+   is 44 px or more (#101). Nothing about it animates in: it is there from the
+   first frame it can be, and it does not push the page about afterwards. */
+.mninstall-card {
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr) 44px;
+  grid-template-areas:
+    'face copy close'
+    'action action action';
+  align-items: center;
+  column-gap: 12px;
+  row-gap: 14px;
+  margin: 14px 0 0;
+  padding: 14px 10px 14px 14px;
+  border: var(--mn-hairline) solid var(--mn-border-medium);
+  border-radius: var(--mn-radius-lg);
+  color: var(--mn-text-primary);
+  background:
+    radial-gradient(120% 140% at 0% 0%, var(--mn-accent-soft) 0%, transparent 62%),
+    var(--mn-surface-raised);
+  box-shadow: var(--mn-shadow-sm);
+}
+
+.mninstall-card-face {
+  grid-area: face;
+  display: grid;
+  place-items: center;
+  width: 52px;
+  height: 52px;
+  border-radius: var(--mn-radius-pill);
+  color: var(--mn-accent-ink);
+  background: var(--mn-accent-soft);
+  line-height: 0;
+}
+
+.mninstall-card-copy { grid-area: copy; display: grid; gap: 3px; min-width: 0; }
+
+.mninstall-card-title {
+  margin: 0;
+  font-family: var(--mn-font-display);
+  font-size: 16px;
+  font-weight: 650;
+  line-height: 1.25;
+  letter-spacing: -.01em;
+}
+
+.mninstall-card-line {
+  margin: 0;
+  color: var(--mn-text-secondary);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.mninstall-card-close {
+  grid-area: close;
+  align-self: start;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  margin: -6px 0 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--mn-radius-pill);
+  color: var(--mn-text-muted);
+  background: transparent;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.mninstall-card-close:hover { color: var(--mn-text-primary); background: var(--mn-surface-hover); }
+
+.mninstall-card-primary {
+  grid-area: action;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  min-height: 48px;
+  margin-right: 4px;
+  padding: 0 18px;
+  border: 0;
+  border-radius: var(--mn-radius-pill);
+  color: var(--mn-accent-text);
+  background: var(--mn-accent);
+  box-shadow: var(--mn-shadow-accent, none);
+  font-family: var(--mn-font-body);
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -.005em;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: background .15s ease, transform .12s ease;
+}
+.mninstall-card-primary:hover { background: var(--mn-accent-hover); }
+.mninstall-card-primary:active { transform: scale(.985); }
+
+.mninstall-card-close:focus-visible,
+.mninstall-card-primary:focus-visible,
+.mninstall-landing:focus-visible {
+  outline: 2px solid var(--mn-focus-ring, var(--mn-accent-ink));
+  outline-offset: 2px;
+}
+
+/* THE LANDING'S SECONDARY ACTION, under Sign up and Log in: an outlined pill,
+   quieter than the two doors above it and louder than the text links below. */
+.mninstall-landing {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 46px;
+  margin-top: 12px;
+  padding: 0 18px;
+  border: var(--mn-hairline) solid var(--mn-border-medium);
+  border-radius: var(--mn-radius-pill);
+  color: var(--mn-text-primary);
+  background: transparent;
+  font-family: var(--mn-font-body);
+  font-size: 14px;
+  font-weight: 650;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: background .15s ease, border-color .15s ease;
+}
+.mninstall-landing:hover { background: var(--mn-surface-hover); border-color: var(--mn-border-strong); }
+.mninstall-landing svg { color: var(--mn-accent-ink); }
+
+/* THE IPHONE'S TWO TAPS, illustrated: the number, the glyph Safari itself
+   shows, and the words. */
+.mninstall-steps li {
+  grid-template-columns: 22px 36px minmax(0, 1fr);
+  gap: 11px;
+}
+.mninstall-step-number {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--mn-radius-pill);
+  color: var(--mn-accent-ink);
+  background: var(--mn-accent-soft);
+  font-size: 12px;
+  font-weight: 700;
+}
+.mninstall-step-glyph {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border: var(--mn-hairline) solid var(--mn-border-hairline);
+  border-radius: var(--mn-radius);
+  color: var(--mn-accent-ink);
+  background: var(--mn-surface-raised);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mninstall-card-primary,
+  .mninstall-landing { transition: none; }
+  .mninstall-card-primary:active { transform: none; }
+}

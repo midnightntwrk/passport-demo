@@ -1,12 +1,8 @@
 import { Download, Share, SquarePlus, X } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 
-import {
-  INSTALL_HINT_STEPS,
-  INSTALL_LABEL,
-  installAffordance,
-  type InstallAffordance,
-} from '../lib/installPrompt.js'
+import { INSTALL_HINT_STEPS, INSTALL_LABEL } from '../lib/installPrompt.js'
+import { promptInstall, useInstallOffer } from '../pwa.js'
 import './install-passport.css'
 
 /**
@@ -24,52 +20,10 @@ import './install-passport.css'
  * decline: it is a control in a toolbar, not an invitation.
  */
 
-interface BeforeInstallPromptEvent extends Event {
-  prompt(): Promise<void>
-  userChoice: Promise<{ outcome: 'accepted' | 'dismissed'; platform: string }>
-}
-
-interface NavigatorWithStandalone extends Navigator {
-  standalone?: boolean
-}
-
-function readStandaloneDisplay(): boolean {
-  return window.matchMedia('(display-mode: standalone)').matches
-}
-
 export default function InstallPassport() {
-  const [prompt, setPrompt] = useState<BeforeInstallPromptEvent | null>(null)
-  const [standalone, setStandalone] = useState(readStandaloneDisplay)
+  const { affordance } = useInstallOffer()
   const [hintOpen, setHintOpen] = useState(false)
   const rootRef = useRef<HTMLDivElement | null>(null)
-
-  useEffect(() => {
-    const onBeforeInstallPrompt = (event: Event) => {
-      /* Held rather than acted on. Chromium's own banner is suppressed by the
-         default being prevented in `pwa.tsx`; this page replays the event when
-         somebody presses the button, which is the only place it is ever
-         replayed from. */
-      setPrompt(event as BeforeInstallPromptEvent)
-    }
-    const onInstalled = () => {
-      setPrompt(null)
-      setStandalone(true)
-      setHintOpen(false)
-    }
-    window.addEventListener('beforeinstallprompt', onBeforeInstallPrompt)
-    window.addEventListener('appinstalled', onInstalled)
-    /* An app opened in a tab and then installed elsewhere, or launched from
-       the home screen into an already-open document, changes display mode
-       without reloading. */
-    const media = window.matchMedia('(display-mode: standalone)')
-    const onDisplayChange = () => setStandalone(readStandaloneDisplay())
-    media.addEventListener('change', onDisplayChange)
-    return () => {
-      window.removeEventListener('beforeinstallprompt', onBeforeInstallPrompt)
-      window.removeEventListener('appinstalled', onInstalled)
-      media.removeEventListener('change', onDisplayChange)
-    }
-  }, [])
 
   useEffect(() => {
     if (!hintOpen) return undefined
@@ -87,31 +41,7 @@ export default function InstallPassport() {
     }
   }, [hintOpen])
 
-  const affordance: InstallAffordance = installAffordance({
-    standaloneDisplay: standalone,
-    iosStandalone: (navigator as NavigatorWithStandalone).standalone,
-    promptHeld: prompt !== null,
-    userAgent: navigator.userAgent,
-    maxTouchPoints: navigator.maxTouchPoints,
-  })
-
   if (affordance === 'hidden') return null
-
-  const install = async () => {
-    if (!prompt) return
-    try {
-      await prompt.prompt()
-      const choice = await prompt.userChoice
-      /* An accepted prompt cannot be replayed, and a declined one should not
-         be: the control stays for the session either way, and Chromium hands
-         the page a fresh event when it is willing to be asked again. */
-      if (choice.outcome === 'accepted') setPrompt(null)
-    } catch {
-      /* The event was already spent — the mobile sheet in `pwa.tsx` got there
-         first. Nothing to say; the browser has already shown its dialogue. */
-      setPrompt(null)
-    }
-  }
 
   return (
     <div className="mninstall" ref={rootRef}>
@@ -123,7 +53,7 @@ export default function InstallPassport() {
         aria-expanded={affordance === 'hint' ? hintOpen : undefined}
         onClick={() => {
           if (affordance === 'hint') setHintOpen((open) => !open)
-          else void install()
+          else void promptInstall()
         }}
       >
         <Download size={15} aria-hidden="true" />

@@ -400,8 +400,9 @@ function restoredTime(entry: ActivityFeedEntry): number {
  *   1. A row already restored (same id) is left alone.
  *   2. A row the device wrote ITSELF for the same transaction wins. Its hash
  *      may be the ledger's or one of the ids a submit answers with — a payment
- *      is written down before the chain has hashed it. If it is the same setup
- *      row written at another time, only its time is corrected.
+ *      is written down before the chain has hashed it — and an id is replaced
+ *      with the ledger hash, which is what its View link needs. If it is the
+ *      same setup row written at another time, its time is corrected too.
  *   3. A setup row the device wrote with no transaction at all — a device that
  *      did not see the Passport made writes "Passport created" when it first
  *      notices — is corrected in place: the chain's time, and the hash its View
@@ -420,18 +421,32 @@ export function mergeRestoredActivity<T extends ActivityFeedEntry>(
 ): readonly T[] {
   let next: T[] | null = null;
   const own = (entry: ActivityFeedEntry): boolean => !entry.id.startsWith(RESTORED_ACTIVITY_PREFIX);
+  const hashOf = (entry: ActivityFeedEntry): string => (entry.txHash ?? '').trim().toLowerCase().replace(/^0x/, '');
+  /* Matched on what each row was WRITTEN with, so a row whose identifier is
+     replaced below is not then taken for a second row of the same
+     transaction — a payment's change is its own row. */
+  const written = new Map(current.map((entry) => [entry.id, hashOf(entry)]));
   for (const row of rows) {
     const entries: readonly T[] = next ?? current;
     if (entries.some((entry) => entry.id === row.id)) continue;
     const sameTransaction = entries.findIndex((entry) => {
-      const hash = (entry.txHash ?? '').trim().toLowerCase().replace(/^0x/, '');
+      const hash = written.get(entry.id) ?? hashOf(entry);
       return own(entry) && hash.length > 0 && (hash === row.txHash || row.identifiers.includes(hash));
     });
     if (sameTransaction !== -1) {
       const entry = entries[sameTransaction];
-      if (row.milestone !== null && entry.label === row.label && entry.createdAt !== row.createdAt) {
+      const retime = row.milestone !== null && entry.label === row.label && entry.createdAt !== row.createdAt;
+      /* A row written under the submit's IDENTIFIER takes the ledger hash the
+         chain knows it by, so its View link can go to the explorer
+         (2026/09/28). Its own words and its own time stay. */
+      const rehash = hashOf(entry) !== row.txHash;
+      if (retime || rehash) {
         next ??= [...current];
-        next[sameTransaction] = { ...entry, createdAt: row.createdAt };
+        next[sameTransaction] = {
+          ...entry,
+          ...(retime ? { createdAt: row.createdAt } : {}),
+          ...(rehash ? { txHash: row.txHash } : {}),
+        };
       }
       continue;
     }

@@ -87,6 +87,18 @@ describe('sendProgressReduce', () => {
     });
   });
 
+  it('gives a sent payment its explorer link once the hash is found, and changes nothing else (2026/09/28)', () => {
+    const unlinked: SendProgress = { kind: 'sent', subject, link: null, startedAt: T0 };
+    expect(sendProgressReduce(unlinked, { type: 'link', link })).toEqual({ ...unlinked, link });
+    /* A payment that already has its link keeps it; one still running, or none
+       at all, is not what the link is about. */
+    const linked: SendProgress = { kind: 'sent', subject, link, startedAt: T0 };
+    const other = { label: 'View', href: 'https://explorer.1am.xyz/tx/ff?network=stagenet' };
+    expect(sendProgressReduce(linked, { type: 'link', link: other })).toBe(linked);
+    expect(sendProgressReduce(running, { type: 'link', link })).toBe(running);
+    expect(sendProgressReduce(null, { type: 'link', link })).toBeNull();
+  });
+
   it('turns a running payment that was never handed over into its one sentence', () => {
     expect(
       sendProgressReduce(running, { type: 'failed', sentence: 'Nothing left.', handedOver: false }),

@@ -106,3 +106,86 @@ export function installAffordance(environment: InstallEnvironment): InstallAffor
   }
   return 'hidden';
 }
+
+/* -------------------------------------------------------------------------- */
+/* The card on Home, and how long a "not now" lasts (2026/09/28)              */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * THE REVIEW. The install control was a 34 px glyph in Home's top bar, and the
+ * one invitation a phone got was a sheet four seconds in that any dismissal
+ * retired for ever. The reviewer could not tell how to install Passport and
+ * asked for it to be prominent, "like Coinbase". So a phone that has not
+ * installed Passport gets a card on Home — the Companion, one line, and one
+ * button — and a "not now" puts it away for a week rather than for good,
+ * because installing is something this app wants people to do. The top bar
+ * keeps its modest control, which is what a desktop is offered.
+ */
+
+/** The card's one line beneath "Install Passport". */
+export const INSTALL_CARD_LINE = 'Open it from your home screen, full screen, one tap away.';
+
+/** The iOS card's button, which shows the two taps rather than performing them. */
+export const INSTALL_SHOW_HOW = 'Show me how';
+
+/** The card's dismissal, and what it promises. */
+export const INSTALL_NOT_NOW = 'Not now';
+
+/** How long a "not now" keeps the card away: a week. */
+export const INSTALL_SNOOZE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Where the end of a snooze is kept, as epoch milliseconds. */
+export const INSTALL_SNOOZE_KEY = 'mn-passport:install-snoozed-until';
+
+/** The value to store for a "not now" pressed at `now`. */
+export function installSnoozeValue(now: number): string {
+  return String(now + INSTALL_SNOOZE_MS);
+}
+
+/**
+ * Whether a stored snooze is still running at `now`.
+ *
+ * Anything that does not read as a whole number of milliseconds — nothing
+ * stored, storage that threw and was read as `null`, a value some other build
+ * wrote — is no snooze at all: the card shows, because a card that never came
+ * back over a malformed value would be the old "dismissed for ever" by
+ * accident. A snooze reaching further ahead than a week is not one this app
+ * wrote — a clock that was wrong when it was written, say — and is read the
+ * same way, for the same reason.
+ */
+export function installSnoozed(stored: string | null | undefined, now: number): boolean {
+  if (typeof stored !== 'string' || !/^\d{1,16}$/.test(stored.trim())) return false;
+  const until = Number(stored.trim());
+  return until > now && until - now <= INSTALL_SNOOZE_MS;
+}
+
+/**
+ * A phone or a tablet — somewhere "your home screen" means something.
+ *
+ * Read off the user agent, never the viewport: a desktop window made narrow is
+ * still a desktop, and the card's promise is about a home screen it does not
+ * have. iPadOS is found the way {@link isIosDevice} finds it.
+ */
+export function isMobileBrowser(userAgent: string, maxTouchPoints: number): boolean {
+  return isIosDevice(userAgent, maxTouchPoints) || /Android|Mobi/i.test(userAgent);
+}
+
+/** Everything the card's rule needs. */
+export interface InstallCardInput extends InstallEnvironment {
+  /** What {@link INSTALL_SNOOZE_KEY} holds, or null. */
+  readonly snoozedUntil: string | null;
+  readonly now: number;
+}
+
+/**
+ * Whether Home shows the install card.
+ *
+ * On a phone that can install Passport and has not — the browser holds an
+ * install prompt, or it is iOS Safari — and has not said "not now" this week.
+ * Installed, on a desktop, or in a browser that cannot install, never.
+ */
+export function installCardVisible(input: InstallCardInput): boolean {
+  if (!isMobileBrowser(input.userAgent, input.maxTouchPoints)) return false;
+  if (installAffordance(input) === 'hidden') return false;
+  return !installSnoozed(input.snoozedUntil, input.now);
+}
