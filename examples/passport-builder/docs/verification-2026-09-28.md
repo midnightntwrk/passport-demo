@@ -57,6 +57,10 @@ A fresh ledger query returned an empty records map.
 - Sponsor: 895 passed, one skipped; typecheck passed.
 - Browser: signed-out builder gate, published app rendering, generated image,
   and real public ledger reads checked.
+- Release artefacts: the v5.0 archive passed its pinned SHA-256 and size checks;
+  all 182 files across account, account-custody, and midnames matched the tracked
+  manifests. The production build and 84 PWA checks passed with this bundle.
+  Required contract checks prevent an older warm cache from omitting custody.
 
 The builder and sponsor changes are deployed. Production build requests now
 require the deployed Passport capability manifest; an unavailable approval receiver

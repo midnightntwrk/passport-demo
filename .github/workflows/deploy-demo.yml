@@ -334,12 +334,14 @@ jobs:
         id: zk-cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  #v4.3.0
         with:
-          key: zk-artefacts-${{ hashFiles('examples/passport-balancer/contracts-stagenet/managed/*/compiler/contract-manifest.json') }}
+          key: zk-artefacts-${{ hashFiles('scripts/zk-artefacts.lock.json', 'examples/passport-balancer/contracts-stagenet/managed/*/compiler/contract-manifest.json') }}
           path: |
             examples/passport-balancer/contracts-stagenet/managed/account/keys
             examples/passport-balancer/contracts-stagenet/managed/account/zkir
             examples/passport-balancer/contracts-stagenet/managed/midnames/keys
             examples/passport-balancer/contracts-stagenet/managed/midnames/zkir
+            examples/passport-balancer/contracts-stagenet/managed/account-custody/keys
+            examples/passport-balancer/contracts-stagenet/managed/account-custody/zkir
 
       # Hard failure here, unlike verify-demo.yml. A deploy that cannot build
       # must not be green.
@@ -378,7 +380,7 @@ jobs:
           tar --zstd -xf "/tmp/${ZK_BUNDLE_ASSET}" -C .
 
       - name: Verify the ZK artefacts against the committed manifests
-        run: node .github/workflows/scripts/verify-zk-artefacts.mjs
+        run: PASSPORT_SKIP_ZK_FETCH=1 node scripts/fetch-zk-artefacts.mjs
 
       # TypeScript imports the generated contract modules from this workspace.
       # They are deliberately ignored build output, so restore and stage them
