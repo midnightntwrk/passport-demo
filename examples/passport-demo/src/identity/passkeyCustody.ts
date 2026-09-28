@@ -15,15 +15,23 @@
  * `custodyContractClient.ts` never sees a passkey and the screen never sees a
  * scalar.
  *
- * ONE ASSERTION PER ACTION, AND THE SIGNER OUTLIVES THE CALL
- * ----------------------------------------------------------
+ * ONE ASSERTION PER ACTION, AND THE SIGNER ENDS WITH IT
+ * ----------------------------------------------------
  * {@link passkeyCustodyDevice} takes a contract root that has already been
  * derived — it asks for no ceremony of its own — and the signer it returns
- * holds the scalar in memory for as long as the caller keeps it. That is what
- * makes a send one prompt rather than several: a spend, its `mt_index`
+ * holds the scalar in memory until {@link PasskeyCustodyDevice.forget}. That is
+ * what makes a send one prompt rather than several: a spend, its `mt_index`
  * candidate retries, and the inbox backfill that follows are all authorised by
- * the signer the one assertion produced. The `forget` on what comes back zeroes
- * what can be zeroed when the action is over.
+ * the signer the one assertion produced.
+ *
+ * AND NOT ONE ACTION MORE (2026/09/27). A device that was built once and kept
+ * signed every payment after the first with no prompt at all — see
+ * `../lib/custodyApproval.ts` for the review question and the rule that
+ * replaced it. `forget` is now the end of the device, not a courtesy: it drops
+ * the signer, so `sign` refuses from then on, and the two derived secrets
+ * cannot be read off it any more. A reference to the device that outlives its
+ * action — in a closure, a callback, a stale render — holds nothing that can
+ * sign.
  *
  * WHAT THIS MODULE MUST NEVER DO
  * ------------------------------
@@ -49,7 +57,20 @@ import {
   custodyUserKey,
   type CustodyPasskeyDevice,
 } from './custodyContractClient.js';
-import { bytesToHex, type CustodyPureCircuits } from './custodyContractSigning.js';
+import {
+  bytesToHex,
+  type CustodyPureCircuits,
+  type JubjubAuthorisation,
+  type JubjubChallengeBuilder,
+} from './custodyContractSigning.js';
+
+/**
+ * What a device that has been forgotten says when it is asked to sign, or to
+ * hand over a secret. It is reached only by a defect — every caller lets go of
+ * a device when its action is over — and it says so rather than signing.
+ */
+export const PASSKEY_DEVICE_FORGOTTEN =
+  'This approval is over. Confirm it is you again to approve anything else.';
 
 /**
  * A passkey's device: the identity, the signer, and the secrets the account is
@@ -65,7 +86,12 @@ export interface PasskeyCustodyDevice {
   readonly device: CustodyPasskeyDevice & JubjubSigner;
   /** What every store this Passport owns is keyed by. See {@link custodyUserKey}. */
   readonly userKey: string;
-  /** Zero what can be zeroed. The scalar inside the signer cannot be reached. */
+  /**
+   * The end of the device. The signer is dropped, so `sign` refuses from now
+   * on; the viewing secret and the maintenance key can no longer be read off
+   * it; and this module's own byte arrays are zeroed. The point and the user
+   * key stay, because they are public. Safe to call more than once.
+   */
   forget(): void;
 }
 
@@ -106,29 +132,64 @@ export async function passkeyCustodyDevice(options: {
     secretScalar: scalar,
     randomBytes: options.randomBytes,
   });
-  const encSecretKeyHex = bytesToHex(secrets.encSecret);
-  const maintenanceSecretHex =
-    options.keepMaintenanceAuthority === false ? undefined : bytesToHex(secrets.maintenanceSecret);
+  const keepsMaintenance = options.keepMaintenanceAuthority !== false;
+  /* EVERYTHING THAT CAN SIGN OR READ, IN ONE PLACE THAT `forget` EMPTIES. The
+     device below reaches it only through this, so once it is null the signer —
+     and the scalar closed inside it — and the two hex secrets have no
+     reference left from the device at all. */
+  let held: {
+    readonly signer: JubjubSigner;
+    readonly encSecretKeyHex: string;
+    readonly maintenanceSecretHex: string | undefined;
+  } | null = {
+    signer,
+    encSecretKeyHex: bytesToHex(secrets.encSecret),
+    maintenanceSecretHex: keepsMaintenance ? bytesToHex(secrets.maintenanceSecret) : undefined,
+  };
   /* The three we did not ask for go back to zero before anybody can hold them.
      `deviceSecret` and `recoverySecret` belong to the PROTOTYPE contract and
      have no meaning on this one; they come back only because the derivation is
      one function and splitting it would cost a second reading of the root. */
   secrets.deviceSecret.fill(0);
   secrets.recoverySecret.fill(0);
-  if (maintenanceSecretHex === undefined) secrets.maintenanceSecret.fill(0);
+  if (!keepsMaintenance) secrets.maintenanceSecret.fill(0);
 
-  const device: CustodyPasskeyDevice & JubjubSigner = {
-    arm: 'jubjub',
-    pk: signer.pk,
-    sign: signer.sign.bind(signer),
-    encSecretKeyHex,
-    ...(maintenanceSecretHex === undefined ? {} : { maintenanceSecretHex }),
+  const live = () => {
+    if (held === null) throw new Error(PASSKEY_DEVICE_FORGOTTEN);
+    return held;
   };
+  const sign = (challenge: JubjubChallengeBuilder, useCounter: bigint): JubjubAuthorisation =>
+    live().signer.sign(challenge, useCounter);
+  /* ABSENT, not undefined, where the authority is retired — the custody layer
+     tells the two plans apart by whether the field is there at all
+     (`custodyRetiresAuthority`). And a forgotten device THROWS rather than
+     answering undefined, which that same test would read as "retire it". */
+  const device: CustodyPasskeyDevice & JubjubSigner = keepsMaintenance
+    ? {
+        arm: 'jubjub',
+        pk: signer.pk,
+        sign,
+        get encSecretKeyHex() {
+          return live().encSecretKeyHex;
+        },
+        get maintenanceSecretHex() {
+          return live().maintenanceSecretHex;
+        },
+      }
+    : {
+        arm: 'jubjub',
+        pk: signer.pk,
+        sign,
+        get encSecretKeyHex() {
+          return live().encSecretKeyHex;
+        },
+      };
   return {
     device,
     /* No session: this arm has no vendor and no address. */
     userKey: custodyUserKey(null, device),
     forget: () => {
+      held = null;
       secrets.encSecret.fill(0);
       secrets.maintenanceSecret.fill(0);
     },

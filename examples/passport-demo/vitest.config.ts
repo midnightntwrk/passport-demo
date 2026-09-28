@@ -135,6 +135,17 @@
  * before the listener comes off lets an update reload the page into the
  * browser's own warning. Each is drilled in `src/lib/paymentLeaveGuard.test.ts`.
  *
+ * `src/lib/custodyApproval.ts` went IN on 2026/09/27, the day it was written.
+ * It is the rule that answers "I can send transfers without being prompted to
+ * confirm the transaction with my passkeys": every custody transaction that
+ * moves value or changes who controls the account is signed by a device built
+ * from a FRESH assertion and forgotten when that action is over. Its wrong
+ * answers are all silent — a prompt raised after an await and so outside the
+ * gesture, a root left unzeroed, a device that outlives its payment and signs
+ * the next one, a payment whose approval was refused that reaches the engine
+ * anyway — and each is drilled in `src/lib/custodyApproval.test.ts`. The hooks
+ * that call it are `src/lib/custodyArms.tsx`, which holds no decisions.
+ *
  * `src/lib/sendProgress.ts` went IN on 2026/09/25, the day it was written. It
  * decides what the in-progress pill and the live activity row say while a
  * payment runs behind the Passport instead of in front of it: which of four
@@ -923,6 +934,7 @@ export default mergeConfig(
           'src/lib/adoptionResume.ts',
           'src/lib/pagePresence.ts',
           'src/lib/custodyAccountLock.ts',
+          'src/lib/custodyApproval.ts',
           'src/lib/custodyAssets.ts',
           'src/lib/custodyDelivery.ts',
           'src/lib/custodyRoute.ts',

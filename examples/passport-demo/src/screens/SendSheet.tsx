@@ -93,8 +93,9 @@ import {
   sendStepLine,
 } from '../lib/sendLegs.js'
 
-/* The draft "Try again" hands back. Type-only. */
-import type { SendDraft } from '../lib/sendProgress.js'
+/* The draft "Try again" hands back, and the approval a press asks for.
+   Type-only. */
+import type { SendApproval, SendDraft } from '../lib/sendProgress.js'
 
 import './home.css'
 
@@ -273,7 +274,7 @@ export interface SendSheetProps {
    * arrive as the account module's `AccountCustodyError` — `{ code, message,
    * detail? }` — and are shown untouched.
    */
-  onSend: (params: { recipientAddress: string; amount: bigint }) => Promise<void>
+  onSend: (params: { recipientAddress: string; amount: bigint; approval?: SendApproval }) => Promise<void>
   /**
    * Reads the shielded colours the ACCOUNT holds, in each colour's own atomic
    * units. Called ONCE, when the sheet opens — since 2026/08/31 the asset is
@@ -312,6 +313,7 @@ export interface SendSheetProps {
     recipientAddress: string
     tokenType: string
     amount: bigint
+    approval?: SendApproval
   }) => Promise<void>
   /**
    * Which build of the account this Passport's money is held by.
@@ -355,6 +357,7 @@ export interface SendSheetProps {
     domain: string
     accountAddress: string
     amount: bigint
+    approval?: SendApproval
   }) => Promise<void>
   /**
    * Pays the account a name resolves to, in a SHIELDED asset.
@@ -379,6 +382,7 @@ export interface SendSheetProps {
     accountAddress: string
     tokenType: string
     amount: bigint
+    approval?: SendApproval
   }) => Promise<void>
   /**
    * The colour the fee sponsor named for itself, when it named one.
@@ -554,6 +558,23 @@ export interface SendSheetProps {
    * answer.
    */
   inFlightReason?: string | null
+  /**
+   * ASKS FOR THE PAYMENT'S APPROVAL FROM THE PRESS ITSELF (2026/09/27).
+   *
+   * Called first thing when Send is pressed — before the fee is checked again,
+   * which is a network read — so the prompt a passkey Passport raises is raised
+   * inside the gesture that asked for it, which is what a browser that wants a
+   * gesture for a passkey prompt judges it by. What comes back is handed to the
+   * payment it approves, in the seam's `approval`; if that payment is not made
+   * after all — the fee arrangement changed, or there is no seam for the pair —
+   * the sheet lets it go.
+   *
+   * Null from the host means there is nothing to ask for at the press: a
+   * payment that has to wait for the last one asks when its turn comes, and a
+   * provider sign-in approves inside the call. Absent, the sheet asks nothing,
+   * which is every prototype Passport.
+   */
+  beginApproval?: () => SendApproval | null
   /**
    * A payment to open on — what "Try again" hands back after one that did not
    * go through. It fills the three fields and nothing else: the sheet opens at
@@ -806,6 +827,7 @@ export default function SendSheet(props: SendSheetProps) {
     onClose,
     background,
     inFlightReason,
+    beginApproval,
     initialDraft,
   } = props
 
@@ -1477,6 +1499,12 @@ export default function SendSheet(props: SendSheetProps) {
 
   const handleSend = useCallback(async () => {
     if (amount === null || !recipientReady || busy) return
+    /* THE APPROVAL FIRST, IN THE PRESS (2026/09/27). Nothing is awaited before
+       it: the fee check below is a network read, and a passkey prompt raised
+       after it would no longer be inside the gesture that asked for it. From
+       here the approval is either handed to the payment or let go — see
+       `SendSheetProps.beginApproval`. */
+    const approval = beginApproval?.() ?? null
     setBusy(true)
     setFailure(null)
     setFeeChanged(false)
@@ -1529,10 +1557,17 @@ export default function SendSheet(props: SendSheetProps) {
     const feeArrangementChanged =
       quotedMode === null ? recheckedMode !== 'sponsored' : recheckedMode !== quotedMode
     if (feeArrangementChanged) {
+      /* Nothing is sent against a quote that changed, so nothing is signed:
+         the approval asked for by this press is let go, and the next press
+         asks again. */
+      approval?.release()
       setBusy(false)
       setFeeChanged(true)
       return
     }
+    /* Whether the press's approval has been handed to a payment yet. Until it
+       has, it is this sheet's to let go. */
+    let handedOver = false
     try {
       /* ONE DISPATCH, ON THE PAIR. Every seam it can reach is re-read on the
          way in: `canReview` already required each of them, and re-reading is
@@ -1541,6 +1576,9 @@ export default function SendSheet(props: SendSheetProps) {
          The seam is CHOSEN here and called below, so a host that runs the
          payment in the background is handed exactly the call this sheet
          would have awaited. */
+      /* The press's approval rides with whichever seam is chosen; absent, the
+         seam is called exactly as it always was. */
+      const approved = approval === null ? {} : { approval }
       const payment = ((): (() => Promise<void>) => {
         if (sendRoute === 'shielded-name') {
           if (!onSendShieldedToName || tokenType === null || resolvedName === null) {
@@ -1553,6 +1591,7 @@ export default function SendSheet(props: SendSheetProps) {
               accountAddress: target.accountAddress,
               tokenType,
               amount,
+              ...approved,
             })
         }
         if (sendRoute === 'night-name') {
@@ -1565,16 +1604,18 @@ export default function SendSheet(props: SendSheetProps) {
               domain: target.domain,
               accountAddress: target.accountAddress,
               amount,
+              ...approved,
             })
         }
         if (sendRoute === 'shielded-address') {
           if (!onSendShielded || tokenType === null) {
             throw new Error('This Passport cannot send a shielded token right now.')
           }
-          return () => onSendShielded({ recipientAddress: recipient.trim(), tokenType, amount })
+          return () =>
+            onSendShielded({ recipientAddress: recipient.trim(), tokenType, amount, ...approved })
         }
         if (sendRoute === 'night-address') {
-          return () => onSend({ recipientAddress: recipient.trim(), amount })
+          return () => onSend({ recipientAddress: recipient.trim(), amount, ...approved })
         }
         /* Unreachable behind `recipientReady`, and deliberately not a silent
            fall-through to the plain send: a pair with no route is a pair the
@@ -1582,6 +1623,9 @@ export default function SendSheet(props: SendSheetProps) {
            this whole dispatch exists to make impossible. */
         throw new Error('This Passport cannot make that transfer.')
       })()
+      /* From this line the approval is the payment's: the host lets it go
+         when the payment is over, whichever way it ends. */
+      handedOver = true
       if (background) {
         /* HANDED OVER, AND THE SHEET GETS OUT OF THE WAY (2026/09/25). The
            host shows the payment from here on — its phase, what it came to,
@@ -1597,6 +1641,8 @@ export default function SendSheet(props: SendSheetProps) {
       // of the way.
       onClose()
     } catch (cause) {
+      /* A pair with no seam: nothing was made, so nothing may be signed. */
+      if (!handedOver) approval?.release()
       const code =
         typeof cause === 'object' && cause !== null &&
         typeof (cause as { code?: unknown }).code === 'string'
@@ -1635,6 +1681,7 @@ export default function SendSheet(props: SendSheetProps) {
   }, [
     amount,
     background,
+    beginApproval,
     busy,
     fee,
     onClose,

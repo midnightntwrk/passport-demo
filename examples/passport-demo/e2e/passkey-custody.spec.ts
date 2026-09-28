@@ -1359,7 +1359,10 @@ test.describe('a passkey Passport that has just been named', () => {
   test('offers "Finish setup" on a reopened Passport whose rest never landed, and the press asks for the balance', async ({
     browser,
   }) => {
-    const { page, close } = await passkeyPassportAfterTheName(browser, { wavesDone: 1 });
+    const { page, close } = await passkeyPassportAfterTheName(browser, {
+      wavesDone: 1,
+      beforeCreate: watchPasskeyPrompts,
+    });
     const funding: string[] = [];
     page.on('request', (request) => {
       if (request.url().includes('/fund-account')) funding.push(request.url());
@@ -1379,9 +1382,11 @@ test.describe('a passkey Passport that has just been named', () => {
     for (const forbidden of ['wallet address', 'dust', 'contract', 'registry', 'indexer', 'resolver', 'sponsor', 'sdk', 'dynamic']) {
       expect(cardText, `"${forbidden}" is on the card`).not.toContain(forbidden);
     }
-    /* Nothing runs by itself: no balance is asked for before the press. */
+    /* Nothing runs by itself: no balance is asked for before the press, and
+       no approval either (2026/09/27). */
     await page.waitForTimeout(2_000);
     expect(funding).toEqual([]);
+    expect(await passkeyPrompts(page)).toBe(0);
 
     /* THE PRESS needs the account-custody verifier keys to build the rest of
        the setup, and the ZK bundle pinned for CI carries none (see the setup
@@ -1402,6 +1407,8 @@ test.describe('a passkey Passport that has just been named', () => {
     await page.getByRole('button', { name: 'Finish setup' }).click();
     await expect(card).toHaveCount(0, { timeout: 120_000 });
     await expect.poll(() => funding.length, { timeout: 60_000 }).toBeGreaterThan(0);
+    /* ONE APPROVAL for the press, and the rest landed under it. */
+    expect(await passkeyPrompts(page)).toBe(1);
     /* The record says the rest landed, so no reopen offers it again. */
     expect(
       await page.evaluate(() => {
@@ -2438,5 +2445,309 @@ test.describe('a recovery left behind in this browser (the Android hijack, 2026/
     } finally {
       await close();
     }
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* A fresh approval for every payment (2026/09/27)                            */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * THE REVIEW QUESTION, AS A WALK: "I can send transfers without being prompted
+ * to confirm the transaction with my passkeys, how is that possible?" It was
+ * possible because the device built at the first ceremony was kept and signed
+ * every payment after it. Every walk below counts the passkey prompts the app
+ * raises, so a payment signed without one fails here.
+ *
+ * The counter is a thin wrapper over `navigator.credentials.get`, installed
+ * before the app loads, around Chromium's real virtual authenticator. It counts
+ * every assertion asked for, and can HOLD one — the prompt stays up until the
+ * walk lets it go, which is a person looking at it — or REFUSE one the way a
+ * browser does when the person presses Cancel. Every load starts it at zero.
+ */
+async function watchPasskeyPrompts(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const credentials = navigator.credentials;
+    const get = credentials.get.bind(credentials);
+    const w = window as unknown as {
+      __passkeyPrompts: { asked: number; hold: boolean; refuseNext: boolean; held: (() => void)[] };
+    };
+    w.__passkeyPrompts = { asked: 0, hold: false, refuseNext: false, held: [] };
+    credentials.get = (options?: CredentialRequestOptions) => {
+      const watch = w.__passkeyPrompts;
+      if (options?.publicKey === undefined) return get(options);
+      watch.asked += 1;
+      if (watch.refuseNext) {
+        watch.refuseNext = false;
+        return Promise.reject(
+          new DOMException('The operation either timed out or was not allowed.', 'NotAllowedError'),
+        );
+      }
+      if (!watch.hold) return get(options);
+      return new Promise<void>((resolve) => watch.held.push(resolve)).then(() => get(options));
+    };
+  });
+}
+
+type PasskeyPromptWindow = {
+  __passkeyPrompts: { asked: number; hold: boolean; refuseNext: boolean; held: (() => void)[] };
+};
+
+/** How many passkey prompts this load has raised. */
+const passkeyPrompts = (page: Page) =>
+  page.evaluate(() => (window as unknown as PasskeyPromptWindow).__passkeyPrompts.asked);
+
+/** Keeps every prompt from now on up until {@link answerPasskeyPrompt} — or answers at once again. */
+const holdPasskeyPrompts = (page: Page, hold: boolean) =>
+  page.evaluate((held) => {
+    (window as unknown as PasskeyPromptWindow).__passkeyPrompts.hold = held;
+  }, hold);
+
+/** The person answers the prompt that is up. */
+const answerPasskeyPrompt = (page: Page) =>
+  page.evaluate(() => {
+    (window as unknown as PasskeyPromptWindow).__passkeyPrompts.held.shift()?.();
+  });
+
+/** The person presses Cancel on the next prompt. */
+const cancelNextPasskeyPrompt = (page: Page) =>
+  page.evaluate(() => {
+    (window as unknown as PasskeyPromptWindow).__passkeyPrompts.refuseNext = true;
+  });
+
+/** Records every phase the pill says, in order, from now on. */
+async function recordPillPhases(page: Page): Promise<() => Promise<string[]>> {
+  await page.evaluate(() => {
+    const w = window as unknown as { __pillPhases: string[] };
+    w.__pillPhases = [];
+    const look = () => {
+      const phase = document.querySelector('[data-testid="send-progress"] .mnsendp-phase')?.textContent?.trim();
+      if (phase && w.__pillPhases[w.__pillPhases.length - 1] !== phase) w.__pillPhases.push(phase);
+    };
+    new MutationObserver(look).observe(document.body, { subtree: true, childList: true, characterData: true });
+  });
+  return () => page.evaluate(() => (window as unknown as { __pillPhases: string[] }).__pillPhases);
+}
+
+/** What this Passport has written down about a payment in flight, if anything. */
+const writtenPayment = (page: Page) =>
+  page.evaluate(() => window.localStorage.getItem('passport-account-custody-shielded-send:v1'));
+
+const NOT_APPROVED = 'This payment was not approved. Nothing left your Passport.';
+
+test.describe('a fresh approval for every payment (2026/09/27)', () => {
+  test('asks for nothing on a reload, or while a payment is filled in, until it is confirmed', async ({
+    browser,
+  }) => {
+    const { page, close } = await passkeyPassportOnHome(browser, {
+      beforeOpen: async (opening) => {
+        await watchPasskeyPrompts(opening);
+        await walkPayment({ stepMs: 300 })(opening);
+      },
+    });
+    await expect(assetRow(page, 'mUSD')).toContainText('250', { timeout: 30_000 });
+    /* Home, its reads, and its watch: nothing that signs, so nothing asked. */
+    await page.waitForTimeout(3_000);
+    expect(await passkeyPrompts(page)).toBe(0);
+
+    /* A reload is not a transaction either. */
+    await page.reload();
+    await expect(greeting(page)).toBeVisible({ timeout: 60_000 });
+    await expect(assetRow(page, 'mUSD')).toContainText('250', { timeout: 30_000 });
+    await page.waitForTimeout(2_000);
+    expect(await passkeyPrompts(page)).toBe(0);
+
+    /* Nor is choosing, typing, and reviewing. */
+    await openSend(page);
+    await chooseAsset(page, 'mUSD');
+    await sendRecipient(page).fill(RESOLVABLE_NAME);
+    await sendAmount(page).fill('10');
+    await expect(page.getByRole('button', { name: /^Review$/ })).toBeEnabled({ timeout: 30_000 });
+    await page.getByRole('button', { name: /^Review$/ }).click();
+    await expect(page.locator('.mnhome-send-primary')).toBeEnabled();
+    expect(await passkeyPrompts(page)).toBe(0);
+
+    /* THE CONFIRM PRESS IS WHAT ASKS. */
+    await page.locator('.mnhome-send-primary').click();
+    await expect(sendPill(page)).toHaveAttribute('data-state', 'sent', { timeout: 30_000 });
+    expect(await passkeyPrompts(page)).toBe(1);
+    await close();
+  });
+
+  test('asks again for every payment, and says "Waiting for your approval" exactly while it asks', async ({
+    browser,
+  }) => {
+    const { page, close } = await passkeyPassportOnHome(browser, {
+      beforeOpen: async (opening) => {
+        await watchPasskeyPrompts(opening);
+        await walkPayment({ stepMs: 300 })(opening);
+      },
+    });
+    await expect(assetRow(page, 'mUSD')).toContainText('250', { timeout: 30_000 });
+    const phases = await recordPillPhases(page);
+    await holdPasskeyPrompts(page, true);
+
+    /* THE FIRST PAYMENT. The prompt is up and stays up: the pill says so, and
+       nothing else happens while it does. */
+    await payTenMusd(page);
+    await expect(page.locator('.mnhome-send')).toHaveCount(0);
+    await expect(sendPill(page)).toHaveAttribute('data-state', 'running');
+    await expect(sendPill(page).locator('.mnsendp-phase')).toHaveText('Waiting for your approval…');
+    expect(await passkeyPrompts(page)).toBe(1);
+    await page.waitForTimeout(1_500);
+    await expect(sendPill(page).locator('.mnsendp-phase')).toHaveText('Waiting for your approval…');
+    /* The details list the approval first, as the step it is on. */
+    await sendPill(page).locator('.mnsendp-open').click();
+    const details = page.getByTestId('send-progress-sheet');
+    await expect(details.locator('[aria-current="step"]')).toHaveText('Waiting for your approval');
+    await expect(details.locator('.mnsendp-step').first()).toHaveText('Waiting for your approval');
+    await details.getByRole('button', { name: 'Close' }).first().click();
+    await expect(details).toHaveCount(0);
+
+    await answerPasskeyPrompt(page);
+    await expect(sendPill(page)).toHaveAttribute('data-state', 'sent', { timeout: 30_000 });
+    expect(await passkeyPrompts(page)).toBe(1);
+    /* Asked once, and never again once it was answered. */
+    const first = await phases();
+    expect(first.filter((phase) => phase === 'Waiting for your approval…')).toHaveLength(1);
+    expect(first.indexOf('Waiting for your approval…')).toBeLessThan(first.indexOf('Proving…'));
+
+    /* THE SECOND PAYMENT, STRAIGHT AFTER: the first one's key is gone, so it
+       asks again. */
+    await payTenMusd(page);
+    await expect(sendPill(page).locator('.mnsendp-phase')).toHaveText('Waiting for your approval…');
+    expect(await passkeyPrompts(page)).toBe(2);
+    await answerPasskeyPrompt(page);
+    await expect(sendPill(page)).toHaveAttribute('data-state', 'sent', { timeout: 30_000 });
+    await expect(sendPill(page)).toContainText(/Sent 10 mUSD to /);
+    expect(await passkeyPrompts(page)).toBe(2);
+    await close();
+  });
+
+  test('a payment whose approval is cancelled is not sent, moves nothing, and offers Try again', async ({
+    browser,
+  }) => {
+    const { page, close } = await passkeyPassportOnHome(browser, {
+      beforeOpen: async (opening) => {
+        await watchPasskeyPrompts(opening);
+        await walkPayment({ stepMs: 300 })(opening);
+      },
+    });
+    await expect(assetRow(page, 'mUSD')).toContainText('250', { timeout: 30_000 });
+    const phases = await recordPillPhases(page);
+
+    await cancelNextPasskeyPrompt(page);
+    await payTenMusd(page);
+    await expect(sendPill(page)).toHaveAttribute('data-state', 'failed', { timeout: 30_000 });
+    await expect(sendPill(page)).toContainText(NOT_APPROVED);
+    await expect(page.getByTestId('send-progress-row')).toContainText('Not sent');
+    await sendPill(page).locator('.mnsendp-open').click();
+    const details = page.getByTestId('send-progress-sheet');
+    await expect(details.getByRole('heading', { name: 'Not sent' })).toBeVisible();
+    await expect(details).toContainText(NOT_APPROVED);
+    await details.getByRole('button', { name: 'Close' }).first().click();
+    expect(await passkeyPrompts(page)).toBe(1);
+
+    /* NOTHING MOVED: nothing was prepared, proved, or written down, and the
+       balance is the one it started with. */
+    expect(await phases()).not.toContain('Proving…');
+    expect(await phases()).not.toContain('Confirming…');
+    expect((await writtenPayment(page)) ?? '').not.toContain('"stage":"sending"');
+    await expect(assetRow(page, 'mUSD')).toContainText('250');
+    await expect(assetRow(page, 'mUSD')).not.toContainText(/Transferring/i);
+
+    /* TRY AGAIN reopens the same payment, and its press asks again. */
+    await sendPill(page).getByRole('button', { name: 'Try again' }).click();
+    await expect(page.locator('.mnhome-send')).toBeVisible();
+    await expect(sendAmount(page)).toHaveValue('10');
+    await expect(page.getByRole('button', { name: /^Review$/ })).toBeEnabled({ timeout: 30_000 });
+    await page.getByRole('button', { name: /^Review$/ }).click();
+    await page.locator('.mnhome-send-primary').click();
+    await expect(sendPill(page)).toHaveAttribute('data-state', 'sent', { timeout: 30_000 });
+    expect(await passkeyPrompts(page)).toBe(2);
+    await close();
+  });
+
+  test('a payment that waits for the last one asks for its approval when its turn comes, not before', async ({
+    browser,
+  }) => {
+    const { page, close } = await passkeyPassportOnHome(browser, {
+      beforeOpen: async (opening) => {
+        await watchPasskeyPrompts(opening);
+        await walkPayment({ stepMs: 400, tidyUpMs: 6_000 })(opening);
+      },
+    });
+    await expect(assetRow(page, 'mUSD')).toContainText('250', { timeout: 30_000 });
+    await payTenMusd(page);
+    await expect(sendPill(page)).toHaveAttribute('data-state', 'sent', { timeout: 30_000 });
+    expect(await passkeyPrompts(page)).toBe(1);
+
+    /* Straight away, while the first one's change is still being written: the
+       second waits, and has asked for nothing yet. */
+    await payFiveMusdToAddress(page);
+    await expect(sendPill(page).locator('.mnsendp-phase')).toHaveText(
+      'Waiting for your last payment to finish…',
+    );
+    expect(await passkeyPrompts(page)).toBe(1);
+
+    /* Its turn: it asks now, and goes. */
+    await expect.poll(() => passkeyPrompts(page), { timeout: 30_000 }).toBe(2);
+    await expect(sendPill(page)).toHaveAttribute('data-state', 'sent', { timeout: 30_000 });
+    await expect(sendPill(page)).toContainText(/Sent 5 mUSD to /);
+    expect(await passkeyPrompts(page)).toBe(2);
+    await close();
+  });
+
+  test('adding a way back asks once', async ({ browser }) => {
+    const { page, close } = await passkeyPassportAfterTheName(browser, {
+      beforeCreate: watchPasskeyPrompts,
+    });
+    await expect(page.getByTestId('add-recovery')).toBeVisible({ timeout: 60_000 });
+    expect(await passkeyPrompts(page)).toBe(0);
+
+    await page.getByTestId('add-recovery').click();
+    /* However the add ends in this tier — landed, or one plain sentence — it
+       asked for exactly one approval on the way. */
+    await expect(page.locator('.mnhome-name, .mnob-unusable-copy').first()).toBeVisible({
+      timeout: 120_000,
+    });
+    expect(await passkeyPrompts(page)).toBe(1);
+    await close();
+  });
+
+  test('setup asks once, at Create, and not again while it runs', async ({ browser }) => {
+    test.setTimeout(180_000);
+    const context = await browser.newContext(walkContextOptions({ viewport: { width: 420, height: 900 } }));
+    const page = await context.newPage();
+    await installNetworkBoundary(page);
+    await watchPasskeyPrompts(page);
+    const authenticator = await installVirtualAuthenticator(context, page);
+    await page.goto(WALK);
+    await page.getByRole('button', { name: SIGN_IN_BUTTON }).click();
+    await expect(page.getByRole('heading', { name: /Welcome to\s*Passport/ })).toBeVisible({
+      timeout: 60_000,
+    });
+    await page.getByRole('button', { name: /^Choose my (\.night )?name$/ }).click();
+    await page.getByLabel('Your name').fill('walker');
+    await expect(page.getByRole('button', { name: 'Create my Passport' })).toBeEnabled({
+      timeout: 120_000,
+    });
+    /* Whatever the sign-in itself asked for is the sign-in's. */
+    const before = await passkeyPrompts(page);
+
+    await page.getByRole('button', { name: 'Create my Passport' }).click();
+    /* The approval is in once the key it belongs to is written down. */
+    await page.waitForFunction(
+      () => window.localStorage.getItem('passport-account-custody-passkey:v1') !== null,
+      undefined,
+      { timeout: 60_000 },
+    );
+    expect(await passkeyPrompts(page)).toBe(before + 1);
+    /* And the setup carries on under it, asking for nothing more. */
+    await page.waitForTimeout(8_000);
+    expect(await passkeyPrompts(page)).toBe(before + 1);
+
+    await authenticator.remove();
+    await context.close();
   });
 });

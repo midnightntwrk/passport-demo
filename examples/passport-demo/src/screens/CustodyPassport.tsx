@@ -27,6 +27,11 @@ import {
 import { holdCriticalWork } from '../lib/appBusy.js'
 import { guardUnsentPayment } from '../lib/paymentLeaveGuard.js'
 import type { CustodyArm, CustodyIdentity } from '../lib/custodyArm.js'
+import {
+  CUSTODY_PAYMENT_NOT_APPROVED,
+  runApprovedWork,
+  type CustodyApproval,
+} from '../lib/custodyApproval.js'
 import { parseEndpointList } from '../lib/endpoints.js'
 import { type K256DeviceIdentity } from '../identity/custodyContractSigning.js'
 import {
@@ -201,6 +206,7 @@ import {
   sendProgressReduce,
   sendProgressView,
   sendUnsent,
+  type SendApproval,
   type SendDraft,
   type SendProgressLink,
   type SendProgressSubject,
@@ -483,8 +489,8 @@ export default function CustodyPassport({
    * arm did not have to think about. A sign-in knows its key as soon as it is
    * signed in; a passkey's key is its device point, which costs a user-verified
    * assertion to derive. The arm supplies whatever it already knows — for a
-   * passkey, the pointer a previous visit wrote — and {@link ensureIdentity}
-   * settles it the first time a ceremony is warranted anyway.
+   * passkey, the pointer a previous visit wrote — and {@link approve} settles
+   * it the first time a ceremony is warranted anyway.
    */
   const [user, setUser] = useState<string | null>(arm.userKey)
   /**
@@ -663,10 +669,44 @@ export default function CustodyPassport({
   const wavesRun = useRef<Promise<void> | null>(null)
   /* The stopwatch of the press that is running, for the lines behind Home. */
   const setupClock = useRef<CustodySetupClock | null>(null)
-  /* Whether the device is settled in this tab, for the effect that picks the
-     waves back up — a ref cannot wake an effect. */
-  const [identityHeld, setIdentityHeld] = useState(false)
-  const device = useRef<CustodyIdentity | null>(null)
+  /**
+   * THE SETUP'S OWN APPROVAL, for exactly as long as the setup is still
+   * landing — and for nothing else (2026/09/27).
+   *
+   * The Create press asks for ONE approval, and it covers the whole of making
+   * the account: the deploy, the activation, and the waves that land behind
+   * Home straight after, which are signed with the maintenance key derived from
+   * that same assertion. So it is held from the press until the waves are in or
+   * have stopped — a few minutes at most on stagenet, and never across a
+   * reload — and then released, which leaves its device unable to sign. "Finish
+   * setup" on Home holds its own for the same span. Nothing else reads this: a
+   * payment, adding a way back, and every other action ask for their own.
+   *
+   * State beside the ref because the effect that picks the waves back up and
+   * the "Finish setup" card both read it, and a ref cannot wake either.
+   */
+  const [setupKeyHeld, setSetupKeyHeld] = useState(false)
+  const setupKey = useRef<{
+    readonly approval: CustodyApproval<CustodyIdentity>
+    readonly identity: CustodyIdentity
+  } | null>(null)
+  /* A screen that goes takes the setup's approval with it. */
+  useEffect(
+    () => () => {
+      setupKey.current?.approval.release()
+      setupKey.current = null
+    },
+    [],
+  )
+  /**
+   * A SIGN-IN'S KEY, once a press has settled it — kept, as it always was,
+   * because it is PUBLIC and signs nothing by itself: every signature it makes
+   * is the provider's, asked for call by call. The waves behind Home may pick
+   * it up (see the effect that does). A passkey's key is never kept here:
+   * since 2026/09/27 it ends with the action it was asked for.
+   */
+  const providerIdentity = useRef<CustodyIdentity | null>(null)
+  const [providerIdentityHeld, setProviderIdentityHeld] = useState(false)
   /* Whether a payment or a setup is running. See {@link run}. */
   const inFlight = useRef(false)
   /* The sync subscription's own handle — see {@link readHoldings}. */
@@ -823,25 +863,73 @@ export default function CustodyPassport({
   }, [error, refresh, view])
 
   /**
-   * The key that approves, settled once.
+   * ONE APPROVAL, FOR ONE ACTION (2026/09/27).
    *
-   * ONE CEREMONY, AND IT IS NOT FREE ON EITHER ARM. A sign-in hands out an
-   * address and nothing else, so the point behind it is recovered from a
-   * signature over a digest Passport chose; a passkey hands out nothing until
-   * somebody touches the authenticator. Doing either per call would mean an
-   * approval before every approval, which is the thing a person would notice.
+   * "I can send transfers without being prompted to confirm the transaction
+   * with my passkeys, how is that possible?" Because this used to be "the key
+   * that approves, settled once": the device built at the first ceremony was
+   * kept for the life of the screen, and every payment after it was signed
+   * with no prompt at all. Now every action that signs asks for its own
+   * approval — a fresh user-verified assertion on the passkey arm, raised
+   * before anything is awaited — uses the device it builds, and releases it
+   * when the action is over, which leaves that device unable to sign. See
+   * `../lib/custodyApproval.ts`.
    *
-   * It also settles {@link user}, which on the passkey arm is not known before
-   * this runs — so every caller below awaits this before reading a store.
+   *   asks every time: a payment (to a name, to an address, NIGHT to an
+   *   address), adding a way back, and "Finish setup". Coming back by name
+   *   asks too, to learn which key this device holds, and signs nothing.
+   *   asks once for all of it: the Create press, which covers the whole setup
+   *   including the waves behind Home — see {@link setupKey}.
+   *   never asks: reading, receiving, the opening balance, a payment into the
+   *   account — nothing on this screen signs for any of them.
+   *
+   * What IS kept is public: the key every store is filed under, settled here
+   * the first time an approval is built, because on the passkey arm it is not
+   * known before one has been.
    */
-  const ensureIdentity = useCallback(async (): Promise<CustodyIdentity> => {
-    if (device.current) return device.current
-    const identity = await arm.ensureIdentity()
-    device.current = identity
-    rememberUser(identity.userKey)
-    setIdentityHeld(true)
-    return identity
+  const approve = useCallback((): CustodyApproval<CustodyIdentity> => {
+    const approval = arm.approve()
+    if (arm.kind === 'passkey') {
+      void approval.ready.then(
+        (identity) => rememberUser(identity.userKey),
+        () => undefined,
+      )
+      return approval
+    }
+    /* A SIGN-IN'S is not read here — its key is known from the session, and
+       reading its approval now would ask the provider for the point before the
+       action has reached its signing point — only noted once it is. */
+    let settled: Promise<CustodyIdentity> | null = null
+    return {
+      answered: approval.answered,
+      get ready(): Promise<CustodyIdentity> {
+        settled ??= approval.ready.then((identity) => {
+          providerIdentity.current = identity
+          setProviderIdentityHeld(true)
+          return identity
+        })
+        return settled
+      },
+      release: () => approval.release(),
+    }
   }, [arm, rememberUser])
+
+  /** Holds the setup's approval while its waves land. See {@link setupKey}. */
+  const holdSetupKey = useCallback(
+    (approval: CustodyApproval<CustodyIdentity>, identity: CustodyIdentity) => {
+      setupKey.current?.approval.release()
+      setupKey.current = { approval, identity }
+      setSetupKeyHeld(true)
+    },
+    [],
+  )
+  /** Ends the setup's approval: its waves are in, or have stopped. */
+  const releaseSetupKey = useCallback((approval: CustodyApproval<CustodyIdentity>) => {
+    approval.release()
+    if (setupKey.current?.approval !== approval) return
+    setupKey.current = null
+    setSetupKeyHeld(false)
+  }, [])
 
   /**
    * The busy line, and the one write that changes what a stopped payment is
@@ -1260,9 +1348,13 @@ export default function CustodyPassport({
    *
    * The name is written down BEFORE the first transaction leaves, so a reload
    * in the middle comes back to a Passport that still knows what it is called;
-   * and the name is written after {@link ensureIdentity} and not before it,
-   * because on the passkey arm the key every store is filed under IS the
-   * ceremony's output.
+   * and the name is written after the approval and not before it, because on
+   * the passkey arm the key every store is filed under IS the ceremony's
+   * output.
+   *
+   * ONE APPROVAL FOR ALL OF IT (2026/09/27): the press asks once, and that
+   * approval signs the deploy, the activation, and the waves behind Home, and
+   * ends with the last of them. See {@link setupKey}.
    */
   const createPassport = useCallback(
     (alias: string) => {
@@ -1294,7 +1386,20 @@ export default function CustodyPassport({
            reader's own step — so the timeline names it before anything is
            asked of them rather than after they have answered. */
         setSetupSignal('identity')
-        const settled = await ensureIdentity()
+        /* THE ONE APPROVAL THE WHOLE SETUP IS SIGNED WITH (2026/09/27), asked
+           for before anything is awaited, so this press is still the gesture
+           the prompt needs. It is held until the waves behind Home are in —
+           see `setupKey` — and released on every other road out. */
+        const approval = approve()
+        let heldForWaves = false
+        try {
+          heldForWaves = await setUpWith(approval)
+        } finally {
+          if (!heldForWaves) approval.release()
+        }
+      }
+      async function setUpWith(approval: CustodyApproval<CustodyIdentity>): Promise<boolean> {
+        const settled = await approval.ready
         clock.mark('identity')
         /* THE CONNECTION IS OPENED NOW, not while the name was typed: an idle
            socket is one the node closes, and the deploy must not go out on it. */
@@ -1368,11 +1473,14 @@ export default function CustodyPassport({
            name's claim is still running (`custodyNameFirstStage`). */
         refresh()
         clock.mark('home')
-        /* And behind it: the rest of the roster, then the opening balance. */
-        void backgroundRef.current(settled, clock)
+        /* And behind it: the rest of the roster, then the opening balance —
+           signed by this same approval, which ends when they do. */
+        holdSetupKey(approval, settled)
+        void backgroundRef.current(settled, clock).finally(() => releaseSetupKey(approval))
+        return true
       }
     },
-    [arm, ensureIdentity, interrupted, network, refresh, run, startNameClaim],
+    [approve, arm, holdSetupKey, interrupted, network, refresh, releaseSetupKey, run, startNameClaim],
   )
 
   /* ---------------------------------------------------------------------- */
@@ -1877,10 +1985,12 @@ export default function CustodyPassport({
    * left the rest pending with no key on every later open: nothing landed it,
    * the opening balance behind it was never asked for, and there was no money
    * for a payment that would have settled the key. So Home offers the press
-   * (`custodyFinishSetupCard`), and the press settles the key through the same
-   * {@link ensureIdentity} every other press uses — a browser allows a prompt
-   * somebody pressed for — and runs {@link finishInBackground}, which asks for
-   * the opening balance after the last wave exactly as it does after setup.
+   * (`custodyFinishSetupCard`), and the press asks for its own approval — a
+   * browser allows a prompt somebody pressed for — and runs
+   * {@link finishInBackground} under it, which asks for the opening balance
+   * after the last wave exactly as it does after setup. The approval is held
+   * while the rest lands and released after, the same span as the setup's
+   * (see {@link setupKey}).
    *
    * Stopped short means the record still has waves pending once the run is
    * over, or the key was not settled; either is one sentence and the press
@@ -1892,8 +2002,10 @@ export default function CustodyPassport({
     if (finishPressing.current) return
     finishPressing.current = true
     setFinishPress('running')
+    /* Asked for in the press, before anything is awaited. */
+    const approval = approve()
     try {
-      const identity = await ensureIdentity()
+      const identity = await approval.ready
       await finishInBackground(identity, setupClock.current)
       const settled = userRef.current
       const latest = settled === null ? null : loadCustodyRecord(window.localStorage, settled, network)
@@ -1902,9 +2014,10 @@ export default function CustodyPassport({
       console.warn('[account-custody] the rest of this Passport could not be finished from Home', cause)
       setFinishPress('failed')
     } finally {
+      approval.release()
       finishPressing.current = false
     }
-  }, [ensureIdentity, finishInBackground, network])
+  }, [approve, finishInBackground, network])
 
   /**
    * PICKS THE BACKGROUND WORK BACK UP, whenever it can be done without asking.
@@ -1912,30 +2025,40 @@ export default function CustodyPassport({
    * The opening balance needs nobody, so a Passport whose last wave landed and
    * whose balance was never asked for is asked on open. The waves need this
    * device's key — a passkey's maintenance authority is derived from it and
-   * written nowhere — so they resume the moment the key is settled in this tab
-   * for any reason: the setup press, a payment, adding the way back. Never by
-   * prompting on open: a browser refuses a passkey prompt nobody pressed for,
-   * and a fingerprint asked for out of nowhere is the one thing about this that
-   * a person would notice.
+   * written nowhere — and only a SETUP's approval is ever used for them: the
+   * Create press's, while its waves land ({@link setupKey}), "Finish setup",
+   * or adding the way back, which finishes them first. Never a payment's
+   * (2026/09/27): a payment's approval is for that payment and ends with it.
+   * Never by prompting on open either: a browser refuses a passkey prompt
+   * nobody pressed for, and a fingerprint asked for out of nowhere is the one
+   * thing about this that a person would notice.
    */
   useEffect(() => {
     const record = view?.record ?? null
     if (record === null) return
+    const held = setupKey.current
+    /* A sign-in's key, where this tab has settled one for THIS Passport. */
+    const provider =
+      providerIdentityHeld && providerIdentity.current?.userKey === record.user
+        ? providerIdentity.current
+        : null
     const work = custodyBackgroundWork({
       wavesPending: custodyWavesPending(record),
       openingBalanceDue: custodyOpeningBalanceDue(record),
-      keyHeld: identityHeld && device.current !== null,
+      keyHeld: (setupKeyHeld && held !== null) || provider !== null,
       busy: inFlight.current || wavesRun.current !== null || balanceAsking.current,
       balanceTried: balanceTried.current,
       wavesStoppedMsAgo:
         wavesStoppedAt.current === null ? null : Date.now() - wavesStoppedAt.current,
     })
-    if (work === 'waves' && device.current !== null) {
-      void finishInBackground(device.current, setupClock.current)
+    if (work === 'waves' && held !== null) {
+      void finishInBackground(held.identity, setupClock.current).finally(() => releaseSetupKey(held.approval))
+    } else if (work === 'waves' && provider !== null) {
+      void finishInBackground(provider, setupClock.current)
     } else if (work === 'opening-balance') {
       void settleOpeningBalance(record, setupClock.current)
     }
-  }, [finishInBackground, identityHeld, settleOpeningBalance, view])
+  }, [finishInBackground, providerIdentityHeld, releaseSetupKey, setupKeyHeld, settleOpeningBalance, view])
 
   /**
    * A STOPPED PAYMENT, ANSWERED FROM THE CHAIN (2026/09/22).
@@ -2170,6 +2293,8 @@ export default function CustodyPassport({
       amount: bigint
       recipientAccountAddress: string
       recipientModule: PassportContractName
+      /** This payment's own approval — see {@link runPayment}. */
+      approved: () => Promise<CustodyIdentity>
     }): Promise<() => Promise<void>> => {
       const { account, amount, asset, label, record, wallet } = params
       const [store, accountModule] = await Promise.all([
@@ -2225,12 +2350,13 @@ export default function CustodyPassport({
       saveCustodyShieldedSend(window.localStorage, stoppedRecord)
       setStopped(stoppedRecord)
 
-      /* THE APPROVAL IS THE ARM'S. A social sign-in asks a vendor over a
-         socket; a passkey asks the authenticator in front of the reader. The
-         send does not care which, and the busy line is the arm's own sentence
-         so that neither reader is shown the other's. */
+      /* THE APPROVAL IS THE ARM'S, AND THIS PAYMENT'S OWN. A social sign-in
+         asks a vendor over a socket, here; a passkey was asked by the press
+         that confirmed this payment, before anything above ran (2026/09/27).
+         The send does not care which, and the busy line is the arm's own
+         sentence so that neither reader is shown the other's. */
       setBusy(arm.approvalPrompt)
-      const { device: identity } = await ensureIdentity()
+      const { device: identity } = await params.approved()
       const sent = await settleNotSent(stoppedRecord, () => paymentEngine().withdrawShieldedToContractK1(
         arm.session,
         identity,
@@ -2264,10 +2390,11 @@ export default function CustodyPassport({
       /* THE TIDY-UP IS HANDED BACK, NOT AWAITED. It is a gated call of its own,
          so it still runs under the payment's flag — two gated calls against one
          account must never sign against the same `auth_nonce` — but the sheet
-         is not held on it. See `runCustodyPayment`. */
+         is not held on it. See `runCustodyPayment`. It is signed by THIS
+         payment's approval, which ends when it does (`runApprovedWork`). */
       return () => backfillChange({ wallet, record, identity, change: sent.change })
     },
-    [arm, backfillChange, ensureIdentity, sendPhase, setStopped, settleNotSent],
+    [arm, backfillChange, sendPhase, setStopped, settleNotSent],
   )
 
   /**
@@ -2286,6 +2413,8 @@ export default function CustodyPassport({
       asset: CustodyAssetRow
       amount: bigint
       shieldedAddress: string
+      /** This payment's own approval — see {@link runPayment}. */
+      approved: () => Promise<CustodyIdentity>
     }): Promise<() => Promise<void>> => {
       const { account, amount, asset, record, wallet } = params
       const [store, accountModule] = await Promise.all([
@@ -2337,7 +2466,7 @@ export default function CustodyPassport({
       setStopped(stoppedRecord)
 
       setBusy(arm.approvalPrompt)
-      const { device: identity } = await ensureIdentity()
+      const { device: identity } = await params.approved()
       const sent = await settleNotSent(stoppedRecord, () => paymentEngine().withdrawShieldedK1(
         arm.session,
         identity,
@@ -2359,10 +2488,11 @@ export default function CustodyPassport({
          styling, a warning triangle, and a "Dismiss error" cross — which read
          as something having gone wrong. The activity row and the toast that
          `reportSent` writes are the record of it. */
-      /* As above: under the payment's flag, and not holding the sheet. */
+      /* As above: under the payment's flag and its approval, and not holding
+         the sheet. */
       return () => backfillChange({ wallet, record, identity, change: sent.change })
     },
-    [arm, backfillChange, ensureIdentity, sendPhase, setStopped, settleNotSent],
+    [arm, backfillChange, sendPhase, setStopped, settleNotSent],
   )
 
   /* ---------------------------------------------------------------------- */
@@ -2388,6 +2518,35 @@ export default function CustodyPassport({
   )
 
   /**
+   * The approvals a Send press asked for itself, by the ticket the sheet was
+   * handed for each (2026/09/27). A ticket the sheet hands back with a payment
+   * is looked up here; anything else is not an approval this screen asked for.
+   */
+  const pressedApprovals = useRef(new WeakMap<SendApproval, CustodyApproval<CustodyIdentity>>())
+
+  /**
+   * THE SEND PRESS ASKS FOR THE PAYMENT'S APPROVAL ITSELF (2026/09/27).
+   *
+   * Called by the Send sheet first thing in the press, before it checks the fee
+   * again — a network read that would spend the gesture a passkey prompt needs
+   * on a browser that wants one. So the prompt goes up inside the press, and
+   * the payment it approves is handed it.
+   *
+   * NOTHING TO ASK, and null, when the payment would not run now: one that has
+   * to wait for the last payment asks for its approval when its turn comes
+   * (#106), so an approval is never given for a payment that then sits behind
+   * another. Nor on a provider sign-in, whose approval is the provider's, inside
+   * the call.
+   */
+  const approveOnPress = useCallback((): SendApproval | null => {
+    if (arm.kind !== 'passkey' || inFlight.current) return null
+    const approval = approve()
+    const ticket: SendApproval = { release: () => approval.release() }
+    pressedApprovals.current.set(ticket, approval)
+    return ticket
+  }, [approve, arm.kind])
+
+  /**
    * ONE PAYMENT AT A TIME, AND IT THROWS RATHER THAN PAINTING.
    *
    * THIS IS NOT {@link run}. `run` is onboarding's runner: it puts a label on
@@ -2406,12 +2565,37 @@ export default function CustodyPassport({
   const runPayment = useCallback(
     async (
       payment: { subject: SendProgressSubject; draft: SendDraft },
-      work: () => Promise<(() => Promise<void>) | void>,
+      /**
+       * The payment. `approved` resolves with THIS payment's device at the
+       * moment it signs; it cannot be used for anything after the payment and
+       * its tidy-up are over.
+       */
+      work: (approved: () => Promise<CustodyIdentity>) => Promise<(() => Promise<void>) | void>,
+      /** The approval the Send press asked for, where it asked for one. */
+      ticket?: SendApproval,
     ): Promise<void> => {
+      /* ONE APPROVAL PER PAYMENT (2026/09/27). A passkey's comes FIRST: the
+         press raised the prompt, and the payment reads "Waiting for your
+         approval" for exactly as long as it is up. */
+      const approvalFirst = arm.kind === 'passkey'
+      let pressed: CustodyApproval<CustodyIdentity> | null = null
+      if (ticket !== undefined) {
+        pressed = pressedApprovals.current.get(ticket) ?? null
+        pressedApprovals.current.delete(ticket)
+        if (pressed === null) ticket.release()
+      }
       /* THE PILL IS UP FROM THE PRESS (2026/09/25). The Send sheet has closed by
          now, so this is the only thing on screen that says a payment is
          running — including the second or two before its record is written. */
-      dispatchProgress({ type: 'start', subject: payment.subject, draft: payment.draft, at: Date.now() })
+      dispatchProgress({
+        type: 'start',
+        subject: payment.subject,
+        draft: payment.draft,
+        at: Date.now(),
+        approvalFirst,
+      })
+      if (approvalFirst) setBusy(arm.approvalPrompt)
+      let waited = false
       /* A PAYMENT CONFIRMED WHILE THE LAST ONE IS STILL FINISHING WAITS FOR IT
          (2026/09/26), before anything about it is read or planned, and says so
          on the pill and the row. It used to be refused here on the spot, with
@@ -2424,22 +2608,56 @@ export default function CustodyPassport({
           settling: () => holdingsInFlight.current !== null,
           now: () => Date.now(),
           sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
-          onWait: () => dispatchProgress({ type: 'waiting' }),
+          onWait: () => {
+            waited = true
+            dispatchProgress({ type: 'waiting' })
+          },
         },
         custodyPrepareWaitMs(),
       )
       dispatchProgress({ type: 'turn' })
+      /* AN APPROVAL IS NEVER OLDER THAN THE PAYMENT'S TURN. The press asks only
+         when nothing is running, so this does not happen; if it ever did, the
+         approval given before the wait is let go and the payment asks again
+         now, rather than signing with one given for a moment that has passed. */
+      if (pressed !== null && (waited || refusal !== null)) {
+        pressed.release()
+        pressed = null
+      }
       if (refusal !== null) {
         dispatchProgress({ type: 'failed', sentence: refusal, handedOver: false })
         throw new Error(refusal)
       }
       setError(null)
       lastSentLink.current = null
+      /* ASKED FOR WHEN IT RUNS: the press's own approval, or — for a payment
+         that waited for the last one — a new one now, in the same turn the
+         wait ended, so it is never an approval given before the payment in
+         front of it had finished. */
+      const approval = pressed ?? approve()
       /* THE SHEET HAS ITS ANSWER THE MOMENT THE PAYMENT HAS ONE (2026/09/22):
          the tidy-up and the read that follow run on without it — see
          `runCustodyPayment` — and the figures are redrawn from the store at
-         once, so "Sent" never sits over the balance from before. */
-      const { failure } = await runCustodyPayment(inFlight, work, readHoldings)
+         once, so "Sent" never sits over the balance from before.
+
+         AND THE APPROVAL ENDS WITH THE PAYMENT: after its tidy-up where it
+         hands one back, at once where it does not, and whichever way it
+         failed. A payment whose approval was not given never reaches the
+         engine, so nothing is submitted. See `runApprovedWork`. */
+      const { failure } = await runCustodyPayment(
+        inFlight,
+        () =>
+          runApprovedWork(
+            approval,
+            {
+              approvalFirst,
+              onAnswered: () => dispatchProgress({ type: 'answered' }),
+              notApproved: approvalFirst ? CUSTODY_PAYMENT_NOT_APPROVED : null,
+            },
+            work,
+          ),
+        readHoldings,
+      )
       void showStoreHoldings()
       setBusy(null)
       setSendStep(null)
@@ -2479,7 +2697,7 @@ export default function CustodyPassport({
       dispatchProgress({ type: 'failed', sentence, handedOver })
       throw new Error(sentence)
     },
-    [readHoldings, setStopped, showStoreHoldings, view],
+    [approve, arm.approvalPrompt, arm.kind, readHoldings, setStopped, showStoreHoldings, view],
   )
 
   /**
@@ -2557,6 +2775,7 @@ export default function CustodyPassport({
       accountAddress: string
       tokenType: string
       amount: bigint
+      approval?: SendApproval
     }): Promise<void> => {
       const payment = paymentOf({
         asset: custodyAssetRow(assetRows, params.tokenType),
@@ -2564,7 +2783,7 @@ export default function CustodyPassport({
         recipient: params.domain,
         assetId: params.tokenType,
       })
-      await runPayment(payment, async () => {
+      await runPayment(payment, async (approved) => {
         setNotice(null)
         const { account, record, wallet } = await beforePayment(custodyContext(), 'opening this Passport')
         const asset = custodyAssetRow(assetRows, params.tokenType)
@@ -2584,6 +2803,7 @@ export default function CustodyPassport({
           amount: params.amount,
           recipientAccountAddress: params.accountAddress,
           recipientModule,
+          approved,
         })
         reportSent({
           asset,
@@ -2592,7 +2812,7 @@ export default function CustodyPassport({
           network: record.network,
         })
         return tidyUp
-      })
+      }, params.approval)
     },
     [assetRows, custodyContext, paymentOf, reportSent, runPayment, sendShielded],
   )
@@ -2607,7 +2827,7 @@ export default function CustodyPassport({
    * anybody is asked to approve anything.
    */
   const sendNightToAddress = useCallback(
-    async (params: { recipientAddress: string; amount: bigint }): Promise<void> => {
+    async (params: { recipientAddress: string; amount: bigint; approval?: SendApproval }): Promise<void> => {
       const address = params.recipientAddress.trim()
       const payment = paymentOf({
         asset: assetRows.find((row) => row.mode === 'unshielded') ?? null,
@@ -2618,7 +2838,7 @@ export default function CustodyPassport({
            `../lib/sendAssets.ts`. */
         assetId: 'night',
       })
-      await runPayment(payment, async () => {
+      await runPayment(payment, async (approved) => {
         setNotice(null)
         const { account, record, wallet } = await beforePayment(custodyContext(), 'opening this Passport')
         if (!record.activated) {
@@ -2650,7 +2870,7 @@ export default function CustodyPassport({
         saveCustodyShieldedSend(window.localStorage, stoppedRecord)
         setStopped(stoppedRecord)
         setBusy(arm.approvalPrompt)
-        const { device: identity } = await ensureIdentity()
+        const { device: identity } = await approved()
         const sent = await settleNotSent(stoppedRecord, () =>
           paymentEngine().withdrawUnshieldedK1(
             arm.session,
@@ -2671,13 +2891,12 @@ export default function CustodyPassport({
           recipientLabel: shortHex(address),
           network: record.network,
         })
-      })
+      }, params.approval)
     },
     [
       arm,
       assetRows,
       custodyContext,
-      ensureIdentity,
       paymentOf,
       reportSent,
       runPayment,
@@ -2715,6 +2934,7 @@ export default function CustodyPassport({
       recipientAddress: string
       tokenType: string
       amount: bigint
+      approval?: SendApproval
     }): Promise<void> => {
       const payment = paymentOf({
         asset: custodyAssetRow(assetRows, params.tokenType),
@@ -2723,7 +2943,7 @@ export default function CustodyPassport({
         recipientLabel: shortHex(params.recipientAddress.trim()),
         assetId: params.tokenType,
       })
-      await runPayment(payment, async () => {
+      await runPayment(payment, async (approved) => {
         setNotice(null)
         const { account, record, wallet } = await beforePayment(custodyContext(), 'opening this Passport')
         const asset = custodyAssetRow(assetRows, params.tokenType)
@@ -2735,6 +2955,7 @@ export default function CustodyPassport({
           asset,
           amount: params.amount,
           shieldedAddress: params.recipientAddress.trim(),
+          approved,
         })
         reportSent({
           asset,
@@ -2743,7 +2964,7 @@ export default function CustodyPassport({
           network: record.network,
         })
         return tidyUp
-      })
+      }, params.approval)
     },
     [assetRows, custodyContext, paymentOf, reportSent, runPayment, sendShieldedToAddress],
   )
@@ -2828,16 +3049,27 @@ export default function CustodyPassport({
          that key IS the device point, which is what the assertion produces. So
          the identity is settled before any store is read rather than after it,
          and somebody who typed a name they do not own has paid one touch for
-         the answer, which is the cheapest honest price for it. */
+         the answer, which is the cheapest honest price for it.
+
+         AND IT SIGNS NOTHING (2026/09/27). What this road needs from the
+         approval is public — the key and the point — and the one secret it
+         keeps is the viewing secret, which is written to this Passport's own
+         store below. So those three are read and the approval ends at once:
+         nothing that can sign outlives the answer. */
       let restoredUser: string
       let identity: CustodyIdentity
+      let viewingSecretHex: string | undefined
+      const approval = approve()
       try {
-        identity = await ensureIdentity()
+        identity = await approval.ready
         restoredUser = identity.userKey
         pk = identity.device.pk
+        viewingSecretHex = 'encSecretKeyHex' in identity.device ? identity.device.encSecretKeyHex : undefined
       } catch (cause) {
         console.warn('[account-custody] could not open this Passport', cause)
         return { kind: 'unreachable', detail: 'Your Passport is still starting up.' }
+      } finally {
+        approval.release()
       }
       try {
         const deps = defaultCustodyDeps()
@@ -2938,19 +3170,19 @@ export default function CustodyPassport({
          Only where the store has NONE. An existing secret is this account's own
          and is never written over — see `rememberK1EncSecretKey`'s caller at
          the deploy, which files it when the account is created. */
-      if ('encSecretKeyHex' in identity.device && identity.device.encSecretKeyHex !== undefined) {
+      if (viewingSecretHex !== undefined) {
         const { loadK1CoinStore, rememberK1EncSecretKey } = await import(
           '../identity/k1CoinStore.js'
         )
         const account = { network, address }
         if (loadK1CoinStore(account).encSecretKeyHex === null) {
-          rememberK1EncSecretKey(account, identity.device.encSecretKeyHex)
+          rememberK1EncSecretKey(account, viewingSecretHex)
         }
       }
       refresh()
       return outcome
     },
-    [arm.kind, ensureIdentity, network, onRecoverToDeviceKey, refresh],
+    [approve, arm.kind, network, onRecoverToDeviceKey, refresh],
   )
 
   /* ---------------------------------------------------------------------- */
@@ -3053,6 +3285,13 @@ export default function CustodyPassport({
       }
       const wait = (milliseconds: number): Promise<void> =>
         new Promise((resolve) => window.setTimeout(resolve, milliseconds))
+      /* ONE APPROVAL FOR THE WHOLE ADD (2026/09/27): asked for in the press,
+         before anything is awaited, and ended the moment the add is — landed,
+         refused, or bounded out. It signs the rest of the setup where that is
+         still to land (the way back waits for it) and the addition of the key,
+         and nothing after. */
+      let approval: CustodyApproval<CustodyIdentity> | null = null
+      const endApproval = () => approval?.release()
       try {
         /* THE ORDER AND EVERY BOUND ARE `../lib/recoveryAdd.ts`'s (2026/09/24).
            What stood here awaited the rest of the setup through a call that
@@ -3062,7 +3301,8 @@ export default function CustodyPassport({
         let identity: CustodyIdentity | null = null
         await addRecoveryInOrder<CustodyIdentity, K256DeviceIdentity>({
           ensureIdentity: async () => {
-            identity = await ensureIdentity()
+            approval = approve()
+            identity = await approval.ready
             return identity
           },
           wavesPending,
@@ -3076,6 +3316,7 @@ export default function CustodyPassport({
           onProgress: setRecoveryProgress,
           wait,
         })
+        endApproval()
         const held = identity as CustodyIdentity | null
         if (held !== null) {
           saveBackupRecord(window.localStorage, held.userKey, network, {
@@ -3095,6 +3336,7 @@ export default function CustodyPassport({
         console.warn('[account-custody] the way back could not be added', cause)
         setError(recoveryAddFailureSentence(cause))
       } finally {
+        endApproval()
         recoveryRunning.current = false
         setRecoveryIntended(false)
         const settled = userRef.current
@@ -3105,7 +3347,7 @@ export default function CustodyPassport({
         refresh()
       }
     },
-    [arm.session, ensureIdentity, finishInBackground, keepKeysWithSignIn, network, refresh],
+    [approve, arm.session, finishInBackground, keepKeysWithSignIn, network, refresh],
   )
 
   /** The press on the offer. */
@@ -3595,7 +3837,7 @@ export default function CustodyPassport({
     })
     const finishState = custodyFinishSetupCard({
       wavesPending: view?.record != null && custodyWavesPending(view.record),
-      keyHeld: identityHeld,
+      keyHeld: setupKeyHeld || providerIdentityHeld,
       press: finishPress,
     })
     return renderHome({
@@ -3687,7 +3929,11 @@ export default function CustodyPassport({
            name it cannot go at all — the sheet says so at the field, before
            Review; this rejection is only the backstop behind that. */
         onSend: sendNightToAddress,
-        onSendToName: () => Promise.reject(new Error(CUSTODY_NIGHT_SEND_REFUSAL)),
+        onSendToName: (params) => {
+          /* Nothing is made, so nothing may be signed. */
+          params.approval?.release()
+          return Promise.reject(new Error(CUSTODY_NIGHT_SEND_REFUSAL))
+        },
         checkRecipientAccount,
         onSendShielded: sendShieldedToPastedAddress,
         onSendShieldedToName: sendShieldedToName,
@@ -3697,6 +3943,8 @@ export default function CustodyPassport({
            it from there. And a second payment waits for the first. */
         background: true,
         inFlightReason: sendInFlightReason(sendView),
+        /* The payment's approval, asked for by the Send press itself. */
+        beginApproval: approveOnPress,
       },
     })
   }
