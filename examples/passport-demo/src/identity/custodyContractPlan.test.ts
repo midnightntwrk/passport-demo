@@ -1068,6 +1068,21 @@ describe('a node refusal, read down the whole chain of causes', () => {
     expect(custodyRebuildRefusal(new Error('WebSocket is not connected'))).toBe(false);
   });
 
+  it('tells a coin already spent (239, NullifierAlreadyPresent) from every other refusal', async () => {
+    const { custodyCoinAlreadySpent, custodyRebuildRefusal, CUSTODY_SPENT_COIN_RETRIES } = await import(
+      './custodyContractPlan.js'
+    );
+    const spent = liveRefusal('Custom error: 239');
+    expect(custodyCoinAlreadySpent(spent)).toBe(true);
+    expect(custodyRebuildRefusal(spent)).toBe(false);
+    expect(custodyCoinAlreadySpent(new Error('Transaction invalid: NullifierAlreadyPresent(…)'))).toBe(true);
+    for (const other of ['104', '196', '217', '2390', '23']) {
+      expect(custodyCoinAlreadySpent(liveRefusal(`Custom error: ${other}`))).toBe(false);
+    }
+    expect(custodyCoinAlreadySpent(new Error('Public transcript input mismatch'))).toBe(false);
+    expect(CUSTODY_SPENT_COIN_RETRIES).toBeGreaterThan(0);
+  });
+
   it('runs a step again on a curable refusal, a bounded number of times, and nothing else', async () => {
     const { custodyRebuildOnRefusal, CUSTODY_STATE_RACE_RETRIES, CUSTODY_STATE_RACE_WAIT_MS } = await import(
       './custodyContractPlan.js'
