@@ -1,6 +1,7 @@
-import { config, defaultModel } from './config.js';
+import { config, defaultModel, passportOrigin } from './config.js';
 import { imageModel } from './assets.js';
 import type { BuilderConfig } from '../shared/types.js';
+import { acceptsPassportCapabilities } from './passport-readiness.js';
 let cached: { expires: number; services: BuilderConfig['services'] } | undefined;
 let pending: Promise<BuilderConfig['services']> | undefined;
 
@@ -9,6 +10,7 @@ export function serviceReadiness(): Promise<BuilderConfig['services']> {
   if (pending) return pending;
   pending = (async () => {
     const checks = await Promise.all([
+      probe('Passport', passportOrigin, '/passport-capabilities.json', acceptsPassportCapabilities, 'Stage-net profile and contract approval receiver deployed'),
       probe('Sponsor', process.env.BUILDER_SPONSOR_URL, '/wallet-status', body => body.available > 0 && body.wallets?.some((wallet: { ready?: boolean }) => wallet.ready), 'Stage-net fee sponsor available'),
       probe('Prover', process.env.BUILDER_PROOF_SERVER_URL, '/health', body => body.status === 'healthy' || body.status === 'ok', 'Remote proving service reachable'),
     ]);

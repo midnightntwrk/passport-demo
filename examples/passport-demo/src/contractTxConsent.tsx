@@ -42,6 +42,7 @@ export function PassportContractTxConsent({ sessionActive, networkId, execute }:
   useEffect(() => signing ? holdCriticalWork() : undefined, [signing]);
   useEffect(() => {
     const opener = launch ? window.opener as Window | null : null;
+    // nosemgrep: javascript.browser.security.wildcard-postmessage-configuration.wildcard-postmessage-configuration -- bootstrap sends only the opener's own random pair; no profile, request, or transaction data. Subsequent replies pin the request origin.
     if (launch && opener) opener.postMessage(createPassportProfileReady(launch.requestId, launch.nonce), '*');
     const onMessage = (event: MessageEvent) => {
       const frame = launch ? null : document.querySelector<HTMLIFrameElement>('iframe.mnapps-frame');

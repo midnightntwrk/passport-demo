@@ -3,7 +3,7 @@ import { PendingTransaction, unresolved, type Transaction } from './pending-tran
 
 type Profile = { displayName?: string; passportContract?: { address: string; network?: string } };
 const data = JSON.parse(document.getElementById('runtime-data')!.textContent!) as {
-  id: string; name: string; passportOrigin: string; app: string;
+  passportReady?: boolean; id: string; name: string; passportOrigin: string; app: string;
   contractAddress?: string; deploymentId?: string; circuits: string[];
 };
 const frame = document.getElementById('app') as HTMLIFrameElement;
@@ -79,13 +79,14 @@ try {
 function post(message: object) {
   // This exact frame has an opaque sandbox origin, so '*' is required here.
   // Its listener pins this host's real origin and event.source === parent.
+  // nosemgrep: javascript.browser.security.wildcard-postmessage-configuration.wildcard-postmessage-configuration -- required for this exact opaque sandbox frame; the receiver pins our origin and source.
   frame.contentWindow?.postMessage({ channel: 'passport-builder:host', ...message }, '*');
 }
 function state() {
   recovery.hidden = !unresolved(lastTransaction);
   clearPending.disabled = !!busy;
-  connectButton.disabled = !!busy;
-  connectButton.textContent = profile?.displayName || (profile ? 'Passport connected' : busy === 'connect' ? 'Connecting…' : 'Connect Passport');
+  connectButton.disabled = !!busy || data.passportReady === false;
+  connectButton.textContent = data.passportReady === false ? 'Passport update required' : profile?.displayName || (profile ? 'Passport connected' : busy === 'connect' ? 'Connecting…' : 'Connect Passport');
   post({ type: 'state', state: { profile, connected: !!profile, connecting: busy === 'connect', transacting: busy === 'call',
     contractAddress: data.contractAddress, network: 'stagenet', ledgerVersion, lastTransaction } });
 }
@@ -101,6 +102,7 @@ async function shareProfile(): Promise<Profile> {
   return profile;
 }
 function connect(fromApp = false): Promise<Profile> {
+  if (data.passportReady === false) return Promise.reject(new Error('This Passport deployment does not yet support this app’s approval flow. Its contract and ledger are real, but wallet writes are unavailable until Passport is updated.'));
   if (profile) { state(); return Promise.resolve(profile); }
   if (connectFlight) return connectFlight;
   if (busy) return Promise.reject(new Error('A transaction is already awaiting Passport approval.'));
@@ -185,6 +187,7 @@ function waitForTransaction(txId: unknown): Promise<Transaction> {
   return tracked.polling;
 }
 async function call(params: any): Promise<Transaction> {
+  if (data.passportReady === false) throw new Error('Passport contract approvals are not deployed yet. No transaction was prepared or sent.');
   if (!data.contractAddress || !data.deploymentId) throw new Error('This app is still deploying. Transactions become available once the deployment is indexed.');
   if (!params || typeof params.circuit !== 'string' || !data.circuits.includes(params.circuit) || !Array.isArray(params.args) || params.args.length > 32 || typeof params.purpose !== 'string' || params.purpose.length < 1 || params.purpose.length > 240) throw new Error('Invalid contract request.');
   if (JSON.stringify(params.args).length > 20_000) throw new Error('Contract arguments exceed the request limit.');
@@ -247,6 +250,7 @@ window.addEventListener('message', async event => {
   }
 });
 frame.addEventListener('load', state);
+if (data.passportReady === false && !lastTransaction) notice.textContent = 'Contract deployed on stage-net. Passport integration is awaiting its wallet release; this app is not ready for end-to-end use yet.';
 frame.srcdoc = data.app;
 state();
 if (lastTransaction) void waitForTransaction(lastTransaction.txId);

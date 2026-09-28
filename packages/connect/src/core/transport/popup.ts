@@ -66,6 +66,9 @@ export function createPopupTransport(options: PopupTransportOptions): PassportTr
   const handlers = new Set<(data: unknown) => void>();
   /** Waiters on a `ready` echoing one specific pair. */
   const readyWaiters = new Map<string, (pair: PassportExchangePair) => void>();
+  // A custody sign-in can remount the receiver. Only an active exchange may
+  // replay its identical request when that same window announces the same pair.
+  const activeRequests = new Map<string, () => void>();
   let popup: Window | null = null;
   let attached = false;
 
@@ -84,7 +87,7 @@ export function createPopupTransport(options: PopupTransportOptions): PassportTr
       if (waiter) {
         readyWaiters.delete(key(ready));
         waiter({ requestId: ready.requestId, nonce: ready.nonce });
-      }
+      } else activeRequests.get(key(ready))?.();
       return;
     }
     for (const handler of handlers) handler(event.data);
@@ -182,10 +185,15 @@ export function createPopupTransport(options: PopupTransportOptions): PassportTr
             String((message as { type?: unknown }).type ?? 'unknown'),
             message,
           );
-          opened.postMessage(message, options.origin);
+          const snapshot = structuredClone(message);
+          const post = () => opened.postMessage(snapshot, options.origin);
+          // Legacy payment requests are not replay-safe.
+          if (kind !== 'tx') activeRequests.set(key(pair), post);
+          post();
         },
         closed: () => opened.closed,
         release: () => {
+          activeRequests.delete(key(pair));
           readyWaiters.delete(key(pair));
         },
       };
@@ -212,6 +220,7 @@ export function createPopupTransport(options: PopupTransportOptions): PassportTr
       attached = false;
       handlers.clear();
       readyWaiters.clear();
+      activeRequests.clear();
       popup = null;
     },
   };

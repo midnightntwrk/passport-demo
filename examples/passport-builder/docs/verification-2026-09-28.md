@@ -49,16 +49,19 @@ A fresh ledger query returned an empty records map.
 
 ## Automated checks and remaining release boundary
 
-- Builder: 109 tests passed; four opt-in real-compiler tests skipped. The live
+- Builder: 111 tests passed; four opt-in real-compiler tests skipped. The live
   application above exercised compilation, proving, deployment, and reads.
-- Passport: 3,422 existing/bridge tests passed, plus four targeted submission
-  recovery tests; typecheck and production build passed.
-- Connect SDK: 172 tests passed.
+- Passport: 3,427 tests passed; the explicit pure-helper coverage denominator
+  passed at 100%. Typecheck, production build, and all 84 PWA checks passed.
+- Connect SDK: 173 tests passed, including receiver remount recovery.
 - Sponsor: 895 passed, one skipped; typecheck passed.
 - Browser: signed-out builder gate, published app rendering, generated image,
   and real public ledger reads checked.
 
-The builder and sponsor changes are deployed. The canonical Passport site needs
+The builder and sponsor changes are deployed. Production build requests now
+require the deployed Passport capability manifest; an unavailable approval receiver
+blocks generation before spending tokens. Existing apps retain public ledger reads
+and explicitly show the pending Passport release instead of claiming usable writes. The canonical Passport site needs
 this branch's custody profile bridge and `contract-tx/v1` approval receiver.
 The repository requires main → release → staging → promotion, including live,
 returning-browser, and real-device checks. Those release/device checks and a

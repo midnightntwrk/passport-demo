@@ -222,3 +222,30 @@ describe('the pop-up transport, directly', () => {
     transport.destroy();
   });
 });
+
+describe('a Passport receiver remounting after custody sign-in', () => {
+  it('replays only the active exact-pair request to the same trusted popup', async () => {
+    const host = createFakeWindow(); const popup = createPeer(); host.nextPopup = popup;
+    const transport = createPopupTransport({ origin: ORIGIN, readyTimeoutMs: 5000, closedPollMs: 5, window: asWindow(host) });
+    const pending = transport.open('contract-tx', new AbortController().signal);
+    await tick();
+    const url = new URL(host.opens[0]!.url);
+    const pair = { requestId: url.searchParams.get('passportContractRequestId')!, nonce: url.searchParams.get('passportContractNonce')! };
+    const ready = createPassportProfileReady(pair.requestId, pair.nonce);
+    host.deliver(ready, ORIGIN, popup);
+    const channel = await pending;
+    const message = { type: 'test.request', ...pair, intent: 'the original request' };
+    channel.post(message); expect(popup.posts).toHaveLength(1);
+    message.intent = 'changed by caller after posting';
+    host.deliver(ready, 'https://attacker.example', popup);
+    host.deliver(ready, ORIGIN, createPeer());
+    host.deliver(createPassportProfileReady('other', 'pair'), ORIGIN, popup);
+    expect(popup.posts).toHaveLength(1);
+    host.deliver(ready, ORIGIN, popup);
+    expect(popup.posts).toHaveLength(2);
+    expect(popup.posts[1]).toEqual({ message: { ...message, intent: 'the original request' }, targetOrigin: ORIGIN });
+    channel.release(); host.deliver(ready, ORIGIN, popup);
+    expect(popup.posts).toHaveLength(2);
+    transport.destroy();
+  });
+});

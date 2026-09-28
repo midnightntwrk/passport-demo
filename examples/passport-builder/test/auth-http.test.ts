@@ -3,8 +3,8 @@ import { test } from 'node:test';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { createServer } from 'node:net';
-import { request, type ClientRequest } from 'node:http';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { request, createServer as createHttpServer, type ClientRequest } from 'node:http';
+import { mkdir, mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -17,6 +17,15 @@ test('HTTP requires verified Passport sessions and isolates projects by signing 
   const port = (socket.address() as { port: number }).port;
   await new Promise<void>(resolve => socket.close(() => resolve()));
   const folder = await mkdtemp(join(tmpdir(), 'passport-auth-http-'));
+  const capabilities = JSON.parse(await readFile(new URL('../../passport-demo/public/passport-capabilities.json', import.meta.url), 'utf8'));
+  const upstream = createHttpServer((req, res) => {
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify(req.url === '/passport-capabilities.json' ? capabilities : req.url === '/wallet-status' ? { available: 1, wallets: [{ ready: true }] } : { status: 'healthy' }));
+  });
+  upstream.listen(0, '127.0.0.1'); await once(upstream, 'listening');
+  const upstreamUrl = `http://127.0.0.1:${(upstream.address() as { port: number }).port}`;
+  const compiler = join(folder, 'compact-fixture');
+  await writeFile(compiler, '#!/bin/sh\nprintf "0.34.0\\n"\n', { mode: 0o700 });
   const operatorToken = 'operator-test-token-'.repeat(3);
   const ids = { alice: '33333333-3333-4333-a333-333333333333', bob: '44444444-4444-4444-a444-444444444444', old: '55555555-5555-4555-a555-555555555555' };
   const files = { 'contract.compact': 'export ledger count: Counter;', 'src/App.tsx': 'export default function App() { return <p>Counter</p> }', 'src/styles.css': 'body { margin: 0 }' };
@@ -38,9 +47,9 @@ test('HTTP requires verified Passport sessions and isolates projects by signing 
   const child = spawn(process.execPath, ['--import', 'tsx', 'service/server.ts'], {
     cwd: fileURLToPath(new URL('../', import.meta.url)), stdio: ['ignore', 'pipe', 'pipe'],
     env: { ...process.env, PORT: String(port), NODE_ENV: 'development', BUILDER_DEV_MODE: 'false', BUILDER_DATA_DIR: folder,
-      BUILDER_ACCESS_TOKEN: operatorToken, BUILDER_COMPACT_COMMAND: process.execPath, BUILDER_COMPACT_BIN: process.execPath,
-      BUILDER_PUBLIC_URL: '', BUILDER_ALLOWED_ORIGINS: '', PASSPORT_AUTH_ORIGIN: 'https://midnightpassport.com',
-      OPENROUTER_API_KEY: '', BUILDER_PROOF_SERVER_URL: 'http://127.0.0.1:9', BUILDER_SPONSOR_URL: 'http://127.0.0.1:9' },
+      BUILDER_ACCESS_TOKEN: operatorToken, BUILDER_COMPACT_BIN: compiler,
+      BUILDER_PUBLIC_URL: '', BUILDER_ALLOWED_ORIGINS: '', PASSPORT_AUTH_ORIGIN: upstreamUrl, PASSPORT_ORIGIN: upstreamUrl,
+      OPENROUTER_API_KEY: '', BUILDER_PROOF_SERVER_URL: upstreamUrl, BUILDER_SPONSOR_URL: upstreamUrl },
   });
   let diagnostics = ''; child.stdout.on('data', chunk => { diagnostics += String(chunk); }); child.stderr.on('data', chunk => { diagnostics += String(chunk); });
   const base = `http://127.0.0.1:${port}`;
@@ -128,6 +137,7 @@ test('HTTP requires verified Passport sessions and isolates projects by signing 
   } finally {
     delayedPatch?.destroy();
     child.kill('SIGTERM'); if (child.exitCode === null) await once(child, 'exit');
+    await new Promise<void>(resolve => upstream.close(() => resolve()));
     await rm(folder, { recursive: true, force: true });
   }
 });

@@ -1,6 +1,6 @@
 FROM node:22-bookworm-slim AS base
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl unzip xz-utils bash \
+    ca-certificates curl unzip xz-utils bash gosu \
     && rm -rf /var/lib/apt/lists/*
 ENV COMPACT_DIRECTORY=/opt/compact
 COPY examples/passport-builder/scripts/install-compact.sh /tmp/install-compact.sh
@@ -27,9 +27,11 @@ WORKDIR /app
 COPY --from=build /app/packages/connect ./packages/connect
 COPY --from=build /app/examples/passport-builder ./examples/passport-builder
 COPY --from=build /app/skills/midnight-passport ./skills/midnight-passport
-RUN mkdir -p /data && chmod 700 /data
+RUN mkdir -p /data && chown node:node /data && chmod 700 /data
+USER node
 WORKDIR /app/examples/passport-builder
 EXPOSE 3001
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD node -e 'fetch("http://127.0.0.1:"+(process.env.PORT||3001)+"/health").then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))'
-CMD ["npm", "start"]
+ENTRYPOINT ["sh", "scripts/start-container.sh"]
+CMD ["node", "--import", "tsx", "service/server.ts"]

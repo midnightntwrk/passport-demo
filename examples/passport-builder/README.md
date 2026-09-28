@@ -18,6 +18,10 @@ local `1am-build` reference. Their network implementation is **not reused**:
 the chain worker uses this repository's ledger-9 stage-net stack. There is no
 preview, preprod, or mainnet fallback.
 
+Production checks the deployed Passport capability manifest before starting a build.
+A configured wallet URL alone is not evidence that approvals work. Essential
+unsupported product features stop generation instead of becoming mocked substitutes.
+
 The generation harness includes the Passport agent skill from PR #118, pinned
 at `00711e045ef641a13f7f67b9f22144379cf41039` and checked against its SHA-256.
 The local capability overlay documents this branch's contract transaction extension;
@@ -152,7 +156,11 @@ mean healthy or unlimited capacity.
 `BUILDER_DATA_DIR` contains SQLite in WAL mode, immutable build directories,
 binary proving artefacts, a preview-link signing key, deployment journals, and
 `auth.sqlite` for sign-in challenges, replay protection, and hashed session tokens.
-Mount it at `/data` on Railway and run **one replica**. Back up the whole volume,
+Mount it at `/data` on Railway and run **one replica**. Set `RAILWAY_RUN_UID=0`
+for the volume initialisation entrypoint; it fixes ownership and immediately drops
+the API, compiler, and workers to uid 1000. The image defaults to the unprivileged
+`node` user. This handles [Railway volume ownership](https://docs.railway.com/volumes#permissions)
+without running the service as root. Back up the whole volume,
 including SQLite WAL files, or use SQLite's backup mechanism. Each deployment
 also persists its maintenance key privately; no user wallet seed is required.
 An interrupted deployment is reconciled from its saved transaction rather than

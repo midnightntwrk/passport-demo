@@ -55,8 +55,12 @@ function decorate(project: Project) {
 function safeEqual(a: string, b: string) { const left = Buffer.from(a); const right = Buffer.from(b); return left.length === right.length && timingSafeEqual(left, right); }
 type Actor = { subject: string; operator: boolean };
 function devRequest(req: IncomingMessage) { return devMode && ['localhost', '127.0.0.1', '[::1]'].includes(new URL(publicOrigin(req)).hostname); }
-function requireDeploymentServices(req: IncomingMessage) {
-  if (!config.deploymentConfigured && !devRequest(req)) throw Object.assign(new Error('Automatic stage-net deployment is unavailable. Configure BUILDER_PROOF_SERVER_URL and BUILDER_SPONSOR_URL on the builder service before building.'), { status: 503 });
+async function requireDeploymentServices(req: IncomingMessage) {
+  if (devRequest(req)) return;
+  if (!config.deploymentConfigured) throw Object.assign(new Error('Automatic stage-net deployment is unavailable. Configure BUILDER_PROOF_SERVER_URL and BUILDER_SPONSOR_URL on the builder service before building.'), { status: 503 });
+  const services = await serviceReadiness();
+  const unavailable = services.filter(service => ['Passport', 'Sponsor', 'Prover', 'Compact'].includes(service.name) && service.state !== 'ready');
+  if (unavailable.length) throw Object.assign(new Error(`A functional app cannot be published yet: ${unavailable.map(service => service.name).join(', ')} unavailable. ${unavailable.some(service => service.name === 'Passport') ? 'The Passport deployment must support stage-net sign-in and contract approvals.' : 'Restore the required services before building.'} No generation was started.`), { status: 503 });
 }
 function sessionInfo(req: IncomingMessage, session: AuthSession) { return { ...session, devMode: devRequest(req) }; }
 function authorise(req: IncomingMessage): Actor {
@@ -161,12 +165,12 @@ const server = createServer(async (req, res) => {
         const input = await body(req);
         const currentActor = authorise(req);
         const prompt = promptText(input.prompt || (input.template === 'counter' ? 'Create a community counter' : ''));
-        requireDeploymentServices(req);
+        await requireDeploymentServices(req);
         if (input.template !== 'counter' && !config.openrouterConfigured) throw new Error('OpenRouter is not configured. Set OPENROUTER_API_KEY on the builder service.');
         if (workflow.active.size >= 2) throw new Error('Two builds are already running. Try again shortly.');
         const now = new Date().toISOString();
         const project: Project = { id: randomUUID(), ownerSubject: currentActor.subject, name: input.template === 'counter' ? counterStarter.name : prompt.slice(0, 48), description: '', model: defaultModel, status: 'draft', revision: input.template === 'counter' ? 1 : 0, files: {}, messages: [{ role: 'user', content: prompt, createdAt: now }], logs: [], deployments: [], createdAt: now, updatedAt: now };
-        if (input.template === 'counter') Object.assign(project, structuredClone(counterStarter));
+        if (input.template === 'counter') { project.name = counterStarter.name; project.description = counterStarter.description; project.files = structuredClone(counterStarter.files); }
         registry.save(project);
         workflow.run(project, input.template === 'counter' ? 'compile' : 'generate', prompt);
         return json(res, { project: decorate(project) }, 202);
@@ -219,7 +223,7 @@ const server = createServer(async (req, res) => {
         const input = await body(req);
         const project = ownedProject(id, authorise(req));
         if (workflow.active.has(id)) throw new Error('This app already has an operation in progress.');
-        if (['generate', 'compile'].includes(action)) requireDeploymentServices(req);
+        if (['generate', 'compile', 'deploy'].includes(action)) await requireDeploymentServices(req);
         if (action === 'deploy' && !config.deploymentConfigured) throw new Error('Configure BUILDER_PROOF_SERVER_URL and BUILDER_SPONSOR_URL before deployment.');
         const prompt = action === 'generate' ? promptText(input.prompt) : '';
         if (action === 'generate') { project.model = defaultModel; project.messages.push({ role: 'user', content: prompt, createdAt: new Date().toISOString() }); }
@@ -238,7 +242,8 @@ const server = createServer(async (req, res) => {
       const buildDir = join(dataDir, 'builds', buildId);
       const [bundle, metadata] = await Promise.all([readFile(join(buildDir, 'app.js'), 'utf8'), readFile(join(buildDir, 'app-metadata.json'), 'utf8')]);
       const saved = JSON.parse(metadata);
-      const html = runtimeDocument({ id: project.id, name: saved.name, passportOrigin, app: sandboxDocument(bundle, saved.css, publicOrigin(req)), contractAddress: deployment?.contractAddress, deploymentId: deployment?.id, circuits: saved.circuits });
+      const passportReady = devRequest(req) || (await serviceReadiness()).some(service => service.name === 'Passport' && service.state === 'ready');
+      const html = runtimeDocument({ passportReady, id: project.id, name: saved.name, passportOrigin, app: sandboxDocument(bundle, saved.css, publicOrigin(req)), contractAddress: deployment?.contractAddress, deploymentId: deployment?.id, circuits: saved.circuits });
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer' }); res.end(html); return;
     }
     if (method === 'GET' && url.pathname === '/runtime/host.js') { res.writeHead(200, { 'content-type': 'application/javascript', 'cache-control': 'no-cache' }); res.end(await readFile(join(appDirectory, 'public/runtime.js'))); return; }

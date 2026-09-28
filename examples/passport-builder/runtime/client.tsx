@@ -10,7 +10,8 @@ const pending = new Map<string, { resolve: (data: any) => void; reject: (error: 
 declare const __PASSPORT_HOST_ORIGIN__: string;
 const hostOrigin = __PASSPORT_HOST_ORIGIN__;
 window.addEventListener('message', event => {
-  if (event.source !== parent || event.origin !== hostOrigin || event.data?.channel !== 'passport-builder:host') return;
+  if (event.origin !== hostOrigin) return;
+  if (event.source !== parent || event.data?.channel !== 'passport-builder:host') return;
   if (event.data.type === 'state') { state = { ...state, ...event.data.state }; subscribers.forEach(fn => fn()); return; }
   const task = pending.get(event.data.id);
   if (!task) return;

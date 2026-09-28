@@ -29,7 +29,7 @@ const storageKey = `passport-builder:profile:${passportOrigin}:${appId}`;
 const flush = async () => { for (let index = 0; index < 6; index += 1) await new Promise<void>(resolve => setImmediate(resolve)); };
 const json = (value: unknown) => JSON.parse(JSON.stringify(value));
 
-function host(options: { storage?: Map<string, string>; app?: string; fetch?: (path: string, options: any) => Promise<any>; sdk?: Record<string, unknown> } = {}) {
+function host(options: { passportReady?: boolean; storage?: Map<string, string>; app?: string; fetch?: (path: string, options: any) => Promise<any>; sdk?: Record<string, unknown> } = {}) {
   const posted: any[] = [];
   const listeners: Record<string, (...args: any[]) => any> = {};
   const elements: Record<string, any> = {};
@@ -37,7 +37,7 @@ function host(options: { storage?: Map<string, string>; app?: string; fetch?: (p
   for (const id of ['runtime-data', 'app', 'connect', 'notice', 'approval', 'approve', 'cancel', 'approval-title', 'approval-copy', 'recovery', 'check-pending', 'clear-pending']) {
     elements[id] = { textContent: '', addEventListener(type: string, action: (...args: any[]) => any) { this[type] = action; } };
   }
-  elements['runtime-data'].textContent = JSON.stringify({ id: options.app || appId, name: 'Tasks', passportOrigin, app: '<p>App</p>',
+  elements['runtime-data'].textContent = JSON.stringify({ passportReady: options.passportReady ?? true, id: options.app || appId, name: 'Tasks', passportOrigin, app: '<p>App</p>',
     contractAddress: 'ef'.repeat(32), deploymentId: 'deployment-1', circuits: ['startTask'] });
   elements.app.contentWindow = { postMessage(value: unknown) { posted.push(json(value)); } };
   elements.approval.showModal = () => { counts.dialogs += 1; };
@@ -258,4 +258,15 @@ test('lost Passport reply stays unknown across reload and cannot prepare or subm
   app.dispose(); reloaded.dispose();
   for (const action of [...app.scheduled, ...reloaded.scheduled]) action();
   await flush();
+});
+
+test('a deployed contract without the deployed Passport receiver cannot claim functional wallet actions', async () => {
+  const app = host({ passportReady: false });
+  const connect = app.send('connect'); await connect.done;
+  assert.match(app.result(connect.id).error, /does not yet support/);
+  const call = app.send('call', { circuit: 'startTask', args: ['7'], purpose: 'Start task' }); await call.done;
+  assert.match(app.result(call.id).error, /No transaction was prepared/);
+  assert.equal(app.counts.profile, 0); assert.equal(app.counts.transaction, 0); assert.equal(app.counts.dialogs, 0);
+  assert.equal(app.elements.connect.disabled, true);
+  app.dispose();
 });
