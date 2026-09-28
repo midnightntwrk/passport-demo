@@ -118,6 +118,8 @@ import {
   CUSTODY_PREPARE_WAIT_MS,
   CUSTODY_STATE_RACE_RETRIES,
   CUSTODY_STATE_RACE_WAIT_MS,
+  CUSTODY_SPENT_COIN_RETRIES,
+  custodyCoinAlreadySpent,
   custodyNodeRefused,
   custodyRebuildOnRefusal,
   custodyRebuildRefusal,
@@ -173,6 +175,7 @@ import { custodyAccountLock, type CustodyAccountLock } from '../lib/custodyAccou
 import {
   advanceK1CoinCandidate,
   emptyK1CoinStoreState,
+  forgetSpentK1Coins,
   heldK1Coin,
   k1AccountKey,
   k1CoinPositionsLeft,
@@ -2630,6 +2633,7 @@ async function spendWithAccount(
 
   let attempt = 0;
   let races = 0;
+  let spentCoins = 0;
   for (;;) {
     phase = 'building';
     proved = false;
@@ -2725,6 +2729,31 @@ async function spendWithAccount(
       } else if (waited.value.kind === 'failed') {
         const cause = waited.value.cause;
         const soFar = booked as { txId: string } | null;
+        /* THE COIN WAS ALREADY SPENT (2026/09/26). The node's
+           `NullifierAlreadyPresent` (239) is the chain saying the coin this
+           payment was built on is gone — sent by another device that read the
+           same notes, before Home's own check could say so. Nothing was
+           applied. The booking, if there was one, is taken back; the coin is
+           then forgotten and its nonce remembered as spent, which is what
+           Home's check would have done; and the payment is built again on the
+           next coin of the colour when that coin can cover it. Otherwise it
+           did not go through, in the sentence it always had, and the next read
+           of Home shows what is really there. */
+        if (custodyCoinAlreadySpent(cause)) {
+          if (soFar !== null) undoK1ChangeCoin(account, held, changeRef);
+          forgetSpentK1Coins(account, [held.nonce]);
+          const next = heldK1Coin(account, colour);
+          if (next !== null && next.value >= request.amount && spentCoins < CUSTODY_SPENT_COIN_RETRIES) {
+            spentCoins += 1;
+            attempt = 0;
+            console.info(
+              `[account-custody] the chain says that coin was already spent; building the payment on the next one (${spentCoins} of ${CUSTODY_SPENT_COIN_RETRIES})`,
+            );
+            continue;
+          }
+          console.warn('[account-custody] the chain says that coin was already spent, and no other can cover it', cause);
+          throw new CustodySubmitSettled(CUSTODY_SEND_NOT_SENT);
+        }
         /* NOT BOOKED: nothing was handed over, and the retry rules below
            decide exactly as they always have. */
         if (soFar === null) throw cause;

@@ -45,6 +45,7 @@ import {
 import {
   CUSTODY_PROOF_NOT_BUILT,
   CUSTODY_PROVER_UNAVAILABLE,
+  CUSTODY_SPENT_COIN_RETRIES,
   hexToBytes,
   saveCustodyRecord,
   type CustodyAccountRecord,
@@ -60,6 +61,7 @@ import {
   putK1Coin,
   putK1CoinCandidates,
   pendingK1Spends,
+  queuedK1Coins,
   rememberK1ChangeCoin,
   undoneK1Spends,
   type K1Account,
@@ -1720,13 +1722,87 @@ describe('a payment that cannot wait for ever', () => {
     info.mockRestore();
   });
 
-  it('does not build again a refusal that is a verdict (239)', async () => {
+  /* 2026/09/26: 239 is `NullifierAlreadyPresent` — the coin was already
+     spent, by another device that read the same notes. It is a verdict on the
+     COIN, so the same payment is never built on it again; it is built on the
+     next coin, and the spent one stops being counted. */
+  const SECOND_NONCE = '4c'.repeat(32);
+
+  it('forgets a coin the chain says was already spent (239), and says it did not go through', async () => {
     const test = harness({ circuitResult: changeResult(60n), withWallet: true, races: 1, raceCode: '239' });
     hold();
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     await expect(send(test)).rejects.toThrow(NOT_SENT);
     expect(test.grafts).toHaveLength(1);
-    expect(heldK1Coin(ACCOUNT, COLOUR)?.nonce).toBe(NONCE);
+    expect(heldK1Coin(ACCOUNT, COLOUR)).toBeNull();
+    expect(isK1NonceSpent(ACCOUNT, NONCE)).toBe(true);
+    expect(pendingK1Spends(ACCOUNT)).toEqual([]);
+    expect(awaitingK1Coins(ACCOUNT)).toEqual([]);
+    warn.mockRestore();
+  });
+
+  it('builds the payment again on the next coin when the first was already spent, and it lands', async () => {
+    const test = harness({ circuitResult: changeResult(60n), withWallet: true, races: 1, raceCode: '239' });
+    hold();
+    enqueueK1Coin(ACCOUNT, { colour: COLOUR, nonce: SECOND_NONCE, value: 100n, mtIndex: 6n });
+    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    const result = await send(test);
+    expect(test.calls.filter((call) => call.circuit.startsWith('withdraw_shielded'))).toHaveLength(2);
+    expect(test.grafts).toHaveLength(2);
+    expect(result.txHash).not.toBeNull();
+    /* The first forgotten, the second spent by the payment that landed, and
+       what is held now is the payment's change. */
+    expect(isK1NonceSpent(ACCOUNT, NONCE)).toBe(true);
+    expect(isK1NonceSpent(ACCOUNT, SECOND_NONCE)).toBe(true);
+    expect(heldK1Coin(ACCOUNT, COLOUR)?.value).toBe(60n);
+    expect(queuedK1Coins(ACCOUNT, COLOUR)).toEqual([]);
+    expect(pendingK1Spends(ACCOUNT)).toEqual([]);
+    info.mockRestore();
+  });
+
+  it('does not move on to a coin that cannot cover the payment', async () => {
+    const test = harness({ circuitResult: changeResult(60n), withWallet: true, races: 1, raceCode: '239' });
+    hold();
+    enqueueK1Coin(ACCOUNT, { colour: COLOUR, nonce: SECOND_NONCE, value: 10n, mtIndex: 6n });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    await expect(send(test)).rejects.toThrow(NOT_SENT);
+    expect(test.grafts).toHaveLength(1);
+    expect(heldK1Coin(ACCOUNT, COLOUR)?.nonce).toBe(SECOND_NONCE);
+    expect(isK1NonceSpent(ACCOUNT, SECOND_NONCE)).toBe(false);
+    warn.mockRestore();
+  });
+
+  it('moves on a bounded number of times however many coins the chain says are spent', async () => {
+    const test = harness({ circuitResult: changeResult(60n), withWallet: true, races: 99, raceCode: '239' });
+    hold();
+    for (let index = 0; index < CUSTODY_SPENT_COIN_RETRIES + 2; index += 1) {
+      enqueueK1Coin(ACCOUNT, {
+        colour: COLOUR,
+        nonce: (index + 0x40).toString(16).repeat(32),
+        value: 100n,
+        mtIndex: BigInt(10 + index),
+      });
+    }
+    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    await expect(send(test)).rejects.toThrow(NOT_SENT);
+    expect(test.grafts).toHaveLength(CUSTODY_SPENT_COIN_RETRIES + 1);
+    /* Each coin the chain named is forgotten; the two it never named are
+       still counted. */
+    expect(isK1NonceSpent(ACCOUNT, NONCE)).toBe(true);
+    expect(heldK1Coin(ACCOUNT, COLOUR)).not.toBeNull();
+    expect(queuedK1Coins(ACCOUNT, COLOUR)).toHaveLength(1);
+    info.mockRestore();
+    warn.mockRestore();
+  });
+
+  it('forgets the coin when the refusal came back before anything was booked', async () => {
+    const test = harness({ circuitResult: changeResult(60n), races: 1, raceCode: '239' });
+    hold();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    await expect(send(test)).rejects.toThrow(NOT_SENT);
+    expect(heldK1Coin(ACCOUNT, COLOUR)).toBeNull();
+    expect(isK1NonceSpent(ACCOUNT, NONCE)).toBe(true);
     warn.mockRestore();
   });
 
