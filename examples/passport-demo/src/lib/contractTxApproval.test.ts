@@ -68,6 +68,8 @@ describe('contract transaction approval boundary', () => {
   it('requires both the owned window and the expected origin', () => {
     const source = {} as Window;
     const peer = { source, origin: 'https://app.example' };
+    expect(contractRequestSourceMatches({ source, origin: 'https://app.example' }, { source: null, origin: null })).toBe(false);
+    expect(contractRequestSourceMatches({ source, origin: 'https://app.example' }, { source, origin: null })).toBe(true);
     expect(contractRequestSourceMatches({ source, origin: peer.origin }, peer)).toBe(true);
     expect(contractRequestSourceMatches({ source: {} as Window, origin: peer.origin }, peer)).toBe(false);
     expect(contractRequestSourceMatches({ source, origin: 'https://evil.example' }, peer)).toBe(false);

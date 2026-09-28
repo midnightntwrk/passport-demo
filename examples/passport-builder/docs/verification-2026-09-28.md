@@ -36,6 +36,7 @@ ceremony or the canonical Passport site's approval flow has passed.
 | Create | 663276 | `00b20ce7f5782e9d441ead734326b330db0f3550c5acde45b1ec3d99edc2b0e023` | Offer present, status 0 |
 | Reserve | 663291 | `0047d267de871653cbd370d63f4c95cf42aaaf8739fb28b7604e9fb85c10cd26c2` | Same offer, status 1 |
 | Complete | 663298 | `006bb27465835040326e2b8779fdea33351d868aaadf176bab3caa814d44b57a6d` | Same offer, status 2 |
+| Remove | 663314 | `0051d8f9aca7a1265da6d34c9efd7d249d40b60c32fd3fb23d318ac664e78b843d` | Offer absent, empty map |
 
 The complete call encountered an indexer outage after submission. Reconciliation
 used its saved identifier and confirmed the original transaction without another

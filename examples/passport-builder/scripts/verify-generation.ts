@@ -31,7 +31,7 @@ registry.save(project);
 await writeFile(reportFile, JSON.stringify({ id: project.id, startedAt: now }));
 const workflow = new Workflow(registry);
 // Start after the retained history so old provider diagnostics are not reprinted.
-let last = project.logs.at(-1)?.id || ''; 
+let last = project.logs.at(-1)?.id || '';
 workflow.run(project, 'generate', prompt);
 while (workflow.active.has(project.id)) {
   const logs = project.logs;
