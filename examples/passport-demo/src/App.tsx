@@ -163,6 +163,8 @@ import {
   type DemoPassportProfile,
 } from './publicProfile.js';
 import { PassportProfileConsent } from './profileConsent.js';
+import { PassportContractTxConsent } from './contractTxConsent.js';
+import type { PassportContractTransactionIntent } from '@midnight-passport/connect';
 /* The URL-callback flow. `callbackLaunch.js` reads the launch parameters at
    MODULE IMPORT time — before the first render, so the request is recorded
    before onboarding decides what to show — and keeps them alive across the
@@ -6633,6 +6635,8 @@ export default function PassportDemo() {
      would otherwise have nothing left keeping onboarding on screen. */
   /** The network every way-back decision on this render is about. */
   const custodyNetwork = localWalletNetworkId ?? configuredWalletNetwork ?? selectedNetwork;
+  const custodyAppSession = useRef({ user: settledCustodyUser, network: custodyNetwork });
+  custodyAppSession.current = { user: settledCustodyUser, network: custodyNetwork };
 
   /**
    * THE SIGN-IN, AS A WAY BACK (2026/09/22).
@@ -10534,6 +10538,36 @@ export default function PassportDemo() {
           passportContract: { address: custody.accountAddress, network: custody.network },
         }
       : null;
+    const signCustodyProfile = async (bytes: Uint8Array, encoded: string) => {
+      if (!custodyArm || !custody.ready) throw new Error('Open your Passport before signing in to this app.');
+      if (custodyArm.kind === 'passkey') {
+        const handle = localWalletRef.current;
+        if (!handle) throw new Error('Open your Passport before signing in to this app.');
+        await confirmLocalApproval('Sign in to the app with Passport');
+        if (localWalletRef.current !== handle) throw new Error('The Passport session changed. Nothing was shared.');
+        const { signPasskeyAppProfile } = await import('./lib/custodyAppBridge.js');
+        return signPasskeyAppProfile(handle.keys.unshieldedKeystore, bytes, encoded);
+      }
+      const { signProviderAppPayload } = await import('./lib/custodyAppBridge.js');
+      return { protocol: 'org.midnight.passport.callback/v1' as const, type: 'passport.callback.response' as const, payload: encoded, scheme: 'ecdsa-secp256k1-sha256' as const, ...await signProviderAppPayload(custodyArm, bytes) };
+    };
+    const executeCustodyContract = async (intent: PassportContractTransactionIntent, origin: string) => {
+      if (!custodyArm || !custody.ready || !custody.user || custody.network !== 'stagenet') throw new Error('Open a stage-net Passport before approving this call.');
+      if (custodyArm.kind === 'passkey') {
+        const approval = custodyArm.approve();
+        try { await approval.ready; } finally { approval.release(); }
+      } else {
+        const { signProviderAppPayload } = await import('./lib/custodyAppBridge.js');
+        await signProviderAppPayload(custodyArm, new TextEncoder().encode(JSON.stringify({ domain: 'passport.contract-approval/v1', origin, intent })));
+      }
+      const sameSession = () => custodyAppSession.current.user === custody.user && custodyAppSession.current.network === custody.network;
+      if (!sameSession()) throw new Error('The Passport session changed. Nothing was submitted.');
+      const [{ defaultCustodyDeps, freshCustodyWallet }, { walletProviderFor }, { executeAppContract }] = await Promise.all([
+        import('./identity/custodyContractClient.js'), import('./identity/contractRuntime.js'), import('./lib/executeAppContract.js'),
+      ]);
+      await freshCustodyWallet(custody.user);
+      return executeAppContract(intent, walletProviderFor(await defaultCustodyDeps().wallet(custody.user)), sameSession);
+    };
     const home = (
       <HomeScreen
         displayName={null}
@@ -10690,12 +10724,24 @@ export default function PassportDemo() {
           />
         ) : null}
         <PassportNav active={mobileTab} onSelect={setMobileTab} />
+        <PassportTxConsent sessionActive={true} />
+        <PassportProfileConsent sessionActive={true} passportSetUp={custody.ready} displayName={custody.name} passportContract={custodyAppsProfile?.passportContract ?? null} />
+        <PassportCallbackConsent launch={passportCallbackLaunch} sessionActive={true} passportSetUp={custody.ready} displayName={custody.name} passportContract={custodyAppsProfile?.passportContract ?? null} signResponse={signCustodyProfile} />
+        <PassportContractTxConsent sessionActive={custody.ready} networkId={custody.network} execute={executeCustodyContract} />
       </>
     );
   };
 
   const overlays = (
     <>
+      <PassportContractTxConsent sessionActive={localSessionActive} networkId={localWalletNetworkId} execute={localSessionActive ? async (intent: PassportContractTransactionIntent, origin: string) => {
+        const handle = localWalletRef.current;
+        if (!handle) throw new Error('Open your Passport before approving this call.');
+        await confirmLocalApproval(`Approve ${intent.entryPoint} requested by ${origin}`);
+        if (localWalletRef.current !== handle) throw new Error('The Passport session changed. Nothing was submitted.');
+        const [{ walletProviderFor }, { executeAppContract }] = await Promise.all([import('./identity/contractRuntime.js'), import('./lib/executeAppContract.js')]);
+        return executeAppContract(intent, walletProviderFor(handle), () => localWalletRef.current === handle);
+      } : undefined} />
       <PassportProfileConsent
         sessionActive={sessionActive}
         passportSetUp={sessionActive && passportSetUp}
@@ -11191,7 +11237,7 @@ export default function PassportDemo() {
           error={reclaimError}
         />
       ) : null}
-      {overlays}
+      {!custodyArm && overlays}
       <PassportToasts />
     </div>
   );

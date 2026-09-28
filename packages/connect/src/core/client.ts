@@ -44,6 +44,7 @@ import {
   readPassportTxResponse,
 } from '../protocol/tx.js';
 import { randomExchangePair } from './random.js';
+import { createPassportContractTxRequest, readPassportContractTxResponse, type PassportContractTransactionIntent } from '../protocol/contractTx.js';
 import { createIframeTransport } from './transport/iframe.js';
 import { createPopupTransport } from './transport/popup.js';
 import {
@@ -206,6 +207,8 @@ export interface Passport {
   ready(): Promise<void>;
   requestProfile(fields: readonly PassportProfileField[]): Promise<PassportProfileResult>;
   requestPayment(intent: PassportPaymentIntent): Promise<PassportPaymentResult>;
+  /** A single stagenet contract call with no asset transfers; Passport verifies the bytes. */
+  requestContractTransaction(intent: PassportContractTransactionIntent): Promise<PassportPaymentResult>;
   reportIncentive(incentive: PassportIncentive): Promise<PassportIncentiveResult>;
   on<K extends keyof PassportEventMap>(
     event: K,
@@ -268,6 +271,8 @@ export function createPassport(options: CreatePassportOptions): Passport {
   const mode: PassportMode = transport.mode;
 
   let destroyed = false;
+  const activeExchanges = new Set<() => void>();
+  let contractPending = false;
 
   /**
    * One exchange, start to finish: open a channel, post, and settle on the
@@ -281,20 +286,25 @@ export function createPassport(options: CreatePassportOptions): Passport {
    * apart.
    */
   async function exchange<T>(
-    kind: 'profile' | 'tx',
+    kind: 'profile' | 'tx' | 'contract-tx',
     build: (channel: PassportChannel) => object,
     match: (data: unknown, channel: PassportChannel) => T | null,
     onLocalFailure: (code: PassportLocalErrorCode) => T,
   ): Promise<T> {
     if (destroyed) return onLocalFailure('unsupported-transport');
+    if (kind !== 'contract-tx' && contractPending) return onLocalFailure('invalid-request');
     const controller = new AbortController();
     let channel: PassportChannel | null = null;
     let stopListening: (() => void) | null = null;
     let budget: number | undefined;
     let poll: number | undefined;
+    let cancel = () => controller.abort();
+    const abandon = () => cancel();
+    activeExchanges.add(abandon);
 
     const cleanup = (): void => {
       controller.abort();
+      activeExchanges.delete(abandon);
       stopListening?.();
       if (budget !== undefined) host.clearTimeout(budget);
       if (poll !== undefined) host.clearInterval(poll);
@@ -329,10 +339,15 @@ export function createPassport(options: CreatePassportOptions): Passport {
     }
 
     return new Promise<T>((resolve) => {
+      let settledAlready = false;
       const settle = (value: T): void => {
+        if (settledAlready) return;
+        settledAlready = true;
         cleanup();
         resolve(value);
       };
+      cancel = () => settle(onLocalFailure('unsupported-transport'));
+      if (destroyed) { cancel(); return; }
       const fail = (code: PassportLocalErrorCode): void => {
         emit('error', { code, message: passportErrorMessage(code) });
         settle(onLocalFailure(code));
@@ -487,6 +502,26 @@ export function createPassport(options: CreatePassportOptions): Passport {
       );
     },
 
+    async requestContractTransaction(intent) {
+      if (contractPending || activeExchanges.size > 0) return { status: 'failed', source: 'local', error: 'invalid-request', message: 'An exchange is already awaiting Passport approval.' };
+      contractPending = true;
+      try {
+        return await exchange<PassportPaymentResult>(
+          'contract-tx',
+          (channel) => createPassportContractTxRequest({ ...intent, ...channel.pair }),
+          (data, channel) => {
+            const parsed = readPassportContractTxResponse(data);
+            if (parsed.kind !== 'ok' || parsed.value.requestId !== channel.pair.requestId || parsed.value.nonce !== channel.pair.nonce) return null;
+            const response = parsed.value;
+            if (response.status === 'submitted') return { status: 'submitted', txId: response.txId as string, sponsored: response.sponsored === true, message: 'Contract transaction submitted to the node.' };
+            const error = response.error as PassportTxErrorCode;
+            return { status: response.status, source: 'passport', error, ...(response.detail ? { detail: response.detail } : {}), message: [passportErrorMessage(error), response.detail].filter(Boolean).join(' ') };
+          },
+          (error) => ({ status: 'failed', source: 'local', error, message: passportErrorMessage(error) }),
+        );
+      } finally { contractPending = false; }
+    },
+
     async reportIncentive(incentive) {
       /* Framed only, and it says so rather than pretending. There is no reply
          to this message and nothing to post to outside a frame — a pop-up is
@@ -535,6 +570,7 @@ export function createPassport(options: CreatePassportOptions): Passport {
 
     destroy() {
       destroyed = true;
+      for (const abandon of activeExchanges) abandon();
       transport.destroy();
       listeners.message.clear();
       listeners.ready.clear();

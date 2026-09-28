@@ -1,0 +1,48 @@
+{
+  "name": "midnight-passport-builder",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.16"
+  },
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "dev:web": "vite --host 127.0.0.1",
+    "dev:api": "tsx watch --env-file-if-exists=.env service/server.ts",
+    "build": "npm run build:runtime && tsc --noEmit && vite build",
+    "build:runtime": "node scripts/build-runtime.mjs",
+    "start": "tsx --env-file-if-exists=.env service/server.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test test/*.test.ts tests/*.test.ts src/hooks/*.test.ts"
+  },
+  "dependencies": {
+    "@midnight-ntwrk/compact-js": "2.5.5-rc.8",
+    "@midnight-ntwrk/compact-runtime": "0.19.0-rc.0",
+    "@midnight-ntwrk/midnight-js-contracts": "5.0.0-beta.7",
+    "@midnight-ntwrk/midnight-js-http-client-proof-provider": "5.0.0-beta.7",
+    "@midnight-ntwrk/midnight-js-indexer-public-data-provider": "5.0.0-beta.7",
+    "@midnight-ntwrk/midnight-js-network-id": "5.0.0-beta.7",
+    "@midnight-ntwrk/midnight-js-node-zk-config-provider": "5.0.0-beta.7",
+    "@midnight-ntwrk/midnight-js-types": "5.0.0-beta.7",
+    "@midnight-passport/connect": "file:../../packages/connect",
+    "@midnightntwrk/ledger-v9": "1.0.0-rc.3",
+    "@polkadot/api": "16.5.6",
+    "esbuild": "0.25.12",
+    "lucide-react": "0.468.0",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "rxjs": "^7.8.2",
+    "tsx": "^4.20.5",
+    "ws": "^8.19.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@types/ws": "^8.18.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.9.3",
+    "vite": "^6.4.3"
+  }
+}

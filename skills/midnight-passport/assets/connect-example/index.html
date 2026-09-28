@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Continue with Passport</title>
+    <style>
+      body { font-family: system-ui, sans-serif; max-width: 36rem; margin: 3rem auto; padding: 0 1rem; line-height: 1.5; }
+      button { font: inherit; padding: 0.6rem 1.1rem; border-radius: 0.5rem; border: 1px solid #333; background: #111; color: #fff; cursor: pointer; }
+      button[disabled] { opacity: 0.6; cursor: progress; }
+      #result { margin-top: 1.5rem; white-space: pre-wrap; }
+      code { word-break: break-all; }
+    </style>
+  </head>
+  <body>
+    <h1>My app</h1>
+    <p>Passport: <code id="origin"></code></p>
+    <button id="connect" type="button">Continue with Passport</button>
+    <div id="result" role="status" aria-live="polite"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

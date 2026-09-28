@@ -56,6 +56,7 @@ import { NoOpTransactionHistoryStorage } from '@midnight-ntwrk/wallet-sdk';
 import { makeWasmProvingService } from '@midnight-ntwrk/wallet-sdk/capabilities/proving';
 import { CustomDustWallet, DustWallet } from '@midnight-ntwrk/wallet-sdk/dust';
 import { V1Builder as DustV1Builder } from '@midnight-ntwrk/wallet-sdk/dust/v1';
+import { boundedDustTransacting } from './dustTransacting.js';
 import {
   WalletFacade,
   type BalancingRecipe,
@@ -1600,6 +1601,7 @@ export async function openBalancerWallet(
       cfg,
       new DustV1Builder()
         .withDefaults()
+        .withTransacting(boundedDustTransacting)
         .withCoinSelection((() => coins.guard(createDustFeeSelector(coins))) as never) as never,
     );
   /* Held here rather than inside the submission service, so `nodeHeight` can

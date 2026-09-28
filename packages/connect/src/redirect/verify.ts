@@ -15,11 +15,12 @@
 
 import { passportErrorMessage } from '../protocol/errors.js';
 import { fromBase64Url } from './encoding.js';
-import { verifyPassportKeyBinding, verifyPassportSignature } from './crypto.js';
+import { verifyPassportKeyBinding, verifyPassportSignature, verifyPassportEcdsaSignature } from './crypto.js';
 import {
   PASSPORT_CALLBACK_CLOCK_SKEW_MS,
   PASSPORT_CALLBACK_DEFAULT_MAX_AGE_MS,
   PASSPORT_CALLBACK_SIGNATURE_SCHEME,
+  PASSPORT_CALLBACK_ECDSA_SCHEME,
   parsePassportCallbackProfilePayload,
   parsePassportCallbackTxPayload,
   type PassportCallbackEnvelope,
@@ -87,23 +88,23 @@ function walk<T extends PassportCallbackProfilePayload | PassportCallbackTxPaylo
 
   const requireSignature = options.requireSignature !== false;
   let signed = false;
-  if (envelope.scheme === PASSPORT_CALLBACK_SIGNATURE_SCHEME) {
+  if (envelope.scheme === PASSPORT_CALLBACK_SIGNATURE_SCHEME || envelope.scheme === PASSPORT_CALLBACK_ECDSA_SCHEME) {
     if (!envelope.publicKey || !envelope.signature) {
       record('Signature present', false);
       return fail('the reply claims a signature it does not carry');
     }
     let valid = false;
     try {
-      valid = verifyPassportSignature(envelope.publicKey, bytes!, envelope.signature);
+      valid = (envelope.scheme === PASSPORT_CALLBACK_ECDSA_SCHEME ? verifyPassportEcdsaSignature : verifyPassportSignature)(envelope.publicKey, bytes!, envelope.signature);
     } catch (cause) {
-      record('BIP-340 signature over sha256(payload)', false, String(cause));
+      record(envelope.scheme === PASSPORT_CALLBACK_SIGNATURE_SCHEME ? 'BIP-340 signature over sha256(payload)' : 'ECDSA signature over sha256(payload)', false, String(cause));
       return fail('the signature could not be checked');
     }
     if (
       !record(
-        'BIP-340 signature over sha256(payload)',
+        envelope.scheme === PASSPORT_CALLBACK_SIGNATURE_SCHEME ? 'BIP-340 signature over sha256(payload)' : 'ECDSA signature over sha256(payload)',
         valid,
-        PASSPORT_CALLBACK_SIGNATURE_SCHEME,
+        envelope.scheme,
       )
     ) {
       return fail('the signature does not match the payload');

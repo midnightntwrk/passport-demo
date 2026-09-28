@@ -45,6 +45,7 @@ export const PASSPORT_WINDOW_NAME = 'midnight-passport';
 export const PASSPORT_LAUNCH_PARAMS = {
   profile: { requestId: 'passportRequestId', nonce: 'passportNonce' },
   tx: { requestId: 'passportTxRequestId', nonce: 'passportTxNonce' },
+  'contract-tx': { requestId: 'passportContractRequestId', nonce: 'passportContractNonce' },
 } as const;
 
 export interface PopupTransportOptions {
@@ -117,7 +118,7 @@ export function createPopupTransport(options: PopupTransportOptions): PassportTr
       }
       attach();
       const pair = randomExchangePair();
-      const names = kind === 'profile' ? PASSPORT_LAUNCH_PARAMS.profile : PASSPORT_LAUNCH_PARAMS.tx;
+      const names = PASSPORT_LAUNCH_PARAMS[kind];
       const query = new URLSearchParams({
         [names.requestId]: pair.requestId,
         [names.nonce]: pair.nonce,
