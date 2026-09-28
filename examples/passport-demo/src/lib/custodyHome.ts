@@ -387,8 +387,6 @@ export interface CustodyHomeView {
   /** Whether every setup step has landed. */
   readonly ready: boolean;
   readonly holdings: CustodyHoldings;
-  /** Live wallet sync, 0–100, or null when no figure is known. */
-  readonly syncPercent: number | null;
   /** A failure from any control, in one sentence, or null. */
   readonly error: string | null;
   /** A payment that stopped and has nothing left to press, or null. */

@@ -4449,11 +4449,21 @@ export function defaultCustodyDeps(): CustodyDeps {
        its snapshot and syncing on its own sockets (live, 2026/09/22: ten in
        the first five minutes of one walk). A connection is now shared and
        dropped only when a payment's submission was lost on it
-       (`releaseWallet`), so the next one opens afresh. */
+       (`releaseWallet`), so the next one opens afresh.
+
+       AND IT NEVER WALKS THE CHAIN (2026/09/27). What this Passport holds is
+       read from its account, its fees are paid on its behalf, and its circuits
+       are proved by the proving service, so nothing here reads what this
+       wallet has synced: a custody call leaves the wallet nothing to balance.
+       The walk cost minutes of CPU, memory, and data after every sign-up, and
+       filled the console with sync errors, for nothing. See "A wallet that
+       does not walk the chain at all" in `../lib/localWallet.ts`. */
     wallet: (user) => {
       const held = openWallets.get(user);
       if (held !== undefined) return held;
-      const opening = createLocalMidnightWallet(custodyWalletSeed(defaultCustodyDeps(), user));
+      const opening = createLocalMidnightWallet(custodyWalletSeed(defaultCustodyDeps(), user), {
+        chainSync: false,
+      });
       openWallets.set(user, opening);
       walletOpenedAt.set(user, Date.now());
       void opening.then((wallet) => walletUsers.set(wallet, user)).catch(() => undefined);
