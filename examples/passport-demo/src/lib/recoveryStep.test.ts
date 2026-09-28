@@ -16,8 +16,10 @@ import {
   recoveryRefusal,
   recoveryResumes,
   recoveryStepDue,
+  wayBackSignInStep,
   type RecoveryStepInput,
 } from './recoveryStep.js';
+import { WALLET_SIGN_IN_REFUSAL } from './dynamicSession.js';
 
 /** A Passport that has just claimed its name on a build that has sign-ins. */
 const JUST_NAMED: RecoveryStepInput = {
@@ -274,6 +276,54 @@ describe('whether the press can be answered', () => {
 
   it('asks for a moment while a signed-in session settles its key', () => {
     expect(recoveryRefusal({ status: 'signed-in', hasKey: false })).toBe(RECOVERY_COPY.settling);
+  });
+});
+
+describe('what the way back does with the sign-in in hand (2026/09/28)', () => {
+  it('adds an embedded key', () => {
+    expect(
+      wayBackSignInStep({ status: 'signed-in', hasKey: true, walletKind: 'embedded', pressed: true }),
+    ).toEqual({ kind: 'add' });
+    /* A session that says nothing about its wallet is the shape every build
+       before this one published, and it is not refused for that. */
+    expect(wayBackSignInStep({ status: 'signed-in', hasKey: true, pressed: false })).toEqual({ kind: 'add' });
+  });
+
+  it('opens a clean sign-in when nobody is signed in', () => {
+    expect(wayBackSignInStep({ status: 'signed-out', hasKey: false, pressed: true })).toEqual({
+      kind: 'sign-in',
+      signOutFirst: false,
+      sentence: null,
+    });
+  });
+
+  it('signs a wallet out FIRST, then opens a clean sign-in, when the reader presses', () => {
+    /* Live, 2026/09/28: an email sign-in made over a MetaMask one was linked
+       to the MetaMask user, and the add failed again. */
+    expect(
+      wayBackSignInStep({ status: 'signed-in', hasKey: true, walletKind: 'external', pressed: true }),
+    ).toEqual({ kind: 'sign-in', signOutFirst: true, sentence: WALLET_SIGN_IN_REFUSAL });
+  });
+
+  it('signs a wallet out, and says why, when one comes back from the sign-in', () => {
+    expect(
+      wayBackSignInStep({ status: 'signed-in', hasKey: true, walletKind: 'external', pressed: false }),
+    ).toEqual({ kind: 'sign-out', sentence: WALLET_SIGN_IN_REFUSAL });
+  });
+
+  it('never names the vendor, and names the remedy', () => {
+    expect(WALLET_SIGN_IN_REFUSAL).toBe("Wallets can't approve Passport actions. Use your email or Google.");
+    expect(WALLET_SIGN_IN_REFUSAL.toLowerCase()).not.toContain('dynamic');
+  });
+
+  it('waits, with the sentence it always had, while the sign-in is not answerable', () => {
+    expect(wayBackSignInStep({ status: 'loading', hasKey: false, pressed: true })).toEqual({
+      kind: 'wait',
+      sentence: RECOVERY_COPY.loading,
+    });
+    expect(
+      wayBackSignInStep({ status: 'signed-in', hasKey: false, walletKind: null, pressed: true }),
+    ).toEqual({ kind: 'wait', sentence: RECOVERY_COPY.settling });
   });
 });
 

@@ -45,10 +45,13 @@
  */
 
 import {
+  WALLET_SIGN_IN_REFUSAL,
+  isWalletSignIn,
   publishDynamicActions,
   publishDynamicSession,
   readDynamicSession,
   type DynamicActions,
+  type DynamicSession,
 } from './dynamicSession.js';
 
 /** The query parameter, and the address it carries. */
@@ -68,6 +71,8 @@ export const DYNAMIC_WALK_ADDRESS = '0x00a329c0648769a73afac7f9381e08fb43dbea72'
 /** What the walk says it signed in with. */
 export const DYNAMIC_WALK_PROVIDER = 'Google';
 export const DYNAMIC_WALK_HANDLE = 'walker';
+/** What the walk's email sign-in is signed in as. */
+export const DYNAMIC_WALK_EMAIL = 'walker@example.com';
 
 /**
  * Whether a URL is asking for the stand-in, and which address it wants.
@@ -85,7 +90,9 @@ export function dynamicWalkAddress(search: string): string | null {
     trimmed.length === 0 ||
     trimmed === '1' ||
     trimmed === DYNAMIC_WALK_SIGNED_OUT ||
-    trimmed === DYNAMIC_WALK_AWAY
+    trimmed === DYNAMIC_WALK_AWAY ||
+    trimmed === DYNAMIC_WALK_WALLET ||
+    trimmed === DYNAMIC_WALK_WALLET_IN
   ) {
     return DYNAMIC_WALK_ADDRESS;
   }
@@ -123,10 +130,38 @@ export const DYNAMIC_WALK_SIGNED_OUT = 'out';
  */
 export const DYNAMIC_WALK_AWAY = 'away';
 
-/** Whether this URL wants a signed-out seed, either kind. */
+/**
+ * The value whose FIRST overlay comes back as an external WALLET (2026/09/28).
+ *
+ * The live defect of that day: at "Add a way back" a tester connected MetaMask,
+ * which cannot sign what the account verifies. `?dynamicwalk=wallet` seeds
+ * `signed-out` like `out`; its first `openAuthFlow` publishes a sign-in held by
+ * an external wallet, and every one after that an email sign-in with an
+ * embedded key — the reader trying again the right way.
+ */
+export const DYNAMIC_WALK_WALLET = 'wallet';
+
+/**
+ * The value that STARTS signed in as an external wallet (2026/09/28) — a
+ * wallet session left over in this browser when the way back begins, which is
+ * what an email sign-in was then linked to live. Every overlay it opens ends
+ * that session first, as the real bridge does, and comes back as an email
+ * sign-in with an embedded key.
+ */
+export const DYNAMIC_WALK_WALLET_IN = 'wallet-in';
+
+/** The external wallet's address in the walk. Never the embedded key's. */
+export const DYNAMIC_WALK_WALLET_ADDRESS = '0x5afe00000000000000000000000000000000beef';
+
+/** Whether this URL wants a signed-out seed, any kind. */
 export function dynamicWalkStartsSignedOut(search: string): boolean {
   const value = new URLSearchParams(search).get(DYNAMIC_WALK_PARAM)?.trim();
-  return value === DYNAMIC_WALK_SIGNED_OUT || value === DYNAMIC_WALK_AWAY;
+  return value === DYNAMIC_WALK_SIGNED_OUT || value === DYNAMIC_WALK_AWAY || value === DYNAMIC_WALK_WALLET;
+}
+
+/** The walk's value, trimmed, or null. */
+function dynamicWalkValue(search: string): string | null {
+  return new URLSearchParams(search).get(DYNAMIC_WALK_PARAM)?.trim() ?? null;
 }
 
 /** Whether this URL's overlay takes the reader away and never publishes. */
@@ -143,35 +178,74 @@ export function seedDynamicWalk(search: string): boolean {
   const address = dynamicWalkAddress(search);
   if (address === null) return false;
 
-  const signedIn = {
-    status: 'signed-in' as const,
-    provider: DYNAMIC_WALK_PROVIDER,
-    handle: DYNAMIC_WALK_HANDLE,
-    evmAddress: address,
+  const mode = dynamicWalkValue(search);
+  const wallets = mode === DYNAMIC_WALK_WALLET || mode === DYNAMIC_WALK_WALLET_IN;
+
+  const signedIn: DynamicSession = wallets
+    ? {
+        /* The reader's second try: an email sign-in, with the embedded key
+           every other walk signs as. */
+        status: 'signed-in',
+        provider: 'Email',
+        handle: DYNAMIC_WALK_EMAIL,
+        evmAddress: address,
+        walletKind: 'embedded',
+      }
+    : {
+        status: 'signed-in',
+        provider: DYNAMIC_WALK_PROVIDER,
+        handle: DYNAMIC_WALK_HANDLE,
+        evmAddress: address,
+      };
+  /* What a wallet sign-in publishes: nobody's name, and an address that is
+     the extension's, not a key Passport can use. */
+  const walletSignedIn: DynamicSession = {
+    status: 'signed-in',
+    provider: null,
+    handle: null,
+    evmAddress: DYNAMIC_WALK_WALLET_ADDRESS,
+    walletKind: 'external',
+  };
+  let walletStillToCome = mode === DYNAMIC_WALK_WALLET;
+
+  const signOut = (): Promise<void> => {
+    walkSignInMetadata().signOuts += 1;
+    publishDynamicSession({
+      status: 'signed-out',
+      provider: null,
+      handle: null,
+      evmAddress: null,
+    });
+    return Promise.resolve();
   };
 
   const actions: DynamicActions = {
     /* The overlay, stood in for: it publishes what a completed sign-in would
-       publish, and the app picks the flow back up exactly as it does live. */
+       publish, and the app picks the flow back up exactly as it does live.
+       A wallet signed in is ended first, as the real bridge ends it. */
     openAuthFlow: dynamicWalkOverlayLeaves(search)
       ? () => undefined
-      : () => publishDynamicSession(signedIn),
+      : () => {
+          if (isWalletSignIn(readDynamicSession())) void signOut();
+          if (walletStillToCome) {
+            walletStillToCome = false;
+            publishDynamicSession(walletSignedIn);
+            return;
+          }
+          publishDynamicSession(signedIn);
+        },
     /* The EIP-191 path, refused with the sentence the real bridge refuses an
        externally connected wallet with. Nothing on this path uses it — the k256
        arm cannot verify a keccak of a prefixed string — and a stand-in that
        answered it would be offering a capability the product does not have. */
     signMessage: () =>
       Promise.reject(new Error('This sign-in cannot approve Passport actions yet.')),
-    signRaw: (digestHex: string) => signWalkDigest(digestHex, address),
-    signOut: () => {
-      publishDynamicSession({
-        status: 'signed-out',
-        provider: null,
-        handle: null,
-        evmAddress: null,
-      });
-      return Promise.resolve();
-    },
+    /* A wallet is refused before it is asked, as the real bridge refuses it. */
+    signRaw: (digestHex: string) =>
+      readDynamicSession().walletKind === 'external'
+        ? Promise.reject(new Error(WALLET_SIGN_IN_REFUSAL))
+        : signWalkDigest(digestHex, address),
+    signOut,
     /* The provider's copy of the person's metadata, which the walk plays. See
        {@link WalkSignInMetadata}. `fresh` changes nothing here: the stand-in IS
        the provider, so its copy is always the latest. */
@@ -196,7 +270,9 @@ export function seedDynamicWalk(search: string): boolean {
   publishDynamicSession(
     dynamicWalkStartsSignedOut(search)
       ? { status: 'signed-out', provider: null, handle: null, evmAddress: null }
-      : signedIn,
+      : mode === DYNAMIC_WALK_WALLET_IN
+        ? walletSignedIn
+        : signedIn,
   );
   return true;
 }
@@ -216,6 +292,8 @@ export function seedDynamicWalk(search: string): boolean {
 interface WalkSignInMetadata {
   metadata?: unknown;
   writes: unknown[];
+  /** How many times the sign-in was ended — a wallet refused is one. */
+  signOuts: number;
 }
 
 /** The page's stand-in store, made empty where the walk put none. */
@@ -223,6 +301,7 @@ function walkSignInMetadata(): WalkSignInMetadata {
   const scope = globalThis as { __passportWalkSignIn?: Partial<WalkSignInMetadata> };
   const store = scope.__passportWalkSignIn ?? {};
   if (!Array.isArray(store.writes)) store.writes = [];
+  if (typeof store.signOuts !== 'number') store.signOuts = 0;
   scope.__passportWalkSignIn = store;
   return store as WalkSignInMetadata;
 }

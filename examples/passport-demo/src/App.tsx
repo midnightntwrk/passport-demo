@@ -201,7 +201,7 @@ import RecoverByNameScreen from './screens/RecoverByName.js';
 /* Behind the two WASM runtimes, loaded one at a time — Safari evaluated the
    compiled contract before its runtime when they raced (`./lib/runtimeGate.ts`). */
 const CustodyPassport = lazy(() => runtimesReady().then(() => import('./screens/CustodyPassport.js')));
-import { choosePassportIdentity } from './lib/dynamicSession.js';
+import { WALLET_SIGN_IN_REFUSAL, choosePassportIdentity, isWalletSignIn } from './lib/dynamicSession.js';
 import { runtimesReady } from './lib/runtimeGate.js';
 import { useDynamicSession } from './lib/dynamic.js';
 import { useDynamicCustodyArm, usePasskeyCustodyArm } from './lib/custodyArms.js';
@@ -6463,6 +6463,7 @@ export default function PassportDemo() {
       dynamicStatus: dynamicSession.status,
       evmAddress: dynamicSession.evmAddress,
       passkeyRestoring,
+      walletKind: dynamicSession.walletKind,
     }) === 'dynamic';
 
   /* ------------------------------------------------------------------ */
@@ -6600,6 +6601,27 @@ export default function PassportDemo() {
    * the flag that says the landing should not come back underneath it.
    */
   const [recoverWithProvider, setRecoverWithProvider] = useState(false);
+  /**
+   * Whether the way-back road has just signed a WALLET out (2026/09/28).
+   *
+   * A wallet cannot approve anything a Passport verifies, and left signed in
+   * it captures the next sign-in: live, an email sign-in made over a MetaMask
+   * one was linked to the MetaMask user rather than replacing it. So on this
+   * road a wallet session is ended the moment it is seen, and the screen says
+   * why. `choosePassportIdentity` never lets one hold a Passport, so the road
+   * stays on its sign-in screen while this happens.
+   */
+  const [walletSignedOut, setWalletSignedOut] = useState(false);
+  const walletSignIn = isWalletSignIn(dynamicSession);
+  const signedInElsewise = dynamicSession.status === 'signed-in' && !walletSignIn;
+  const { signOut: signOutOfSignIn } = dynamicSession;
+  useEffect(() => {
+    /* A sign-in that CAN hold a Passport has landed: the sentence is spent. */
+    if (signedInElsewise) setWalletSignedOut(false);
+    if (!recoverWithProvider || !walletSignIn) return;
+    setWalletSignedOut(true);
+    void signOutOfSignIn();
+  }, [recoverWithProvider, signOutOfSignIn, signedInElsewise, walletSignIn]);
 
   const passkeyArm = usePasskeyCustodyArm({
     contractRoot: passportContractRoot,
@@ -6656,6 +6678,7 @@ export default function PassportDemo() {
             provider: dynamicSession.provider,
             handle: dynamicSession.handle,
             address: dynamicSession.evmAddress,
+            walletKind: dynamicSession.walletKind ?? null,
             openAuthFlow: dynamicSession.openAuthFlow,
             signOut: () => void dynamicSession.signOut(),
             device: async () => {
@@ -10868,8 +10891,12 @@ export default function PassportDemo() {
         <Suspense fallback={<div className="passport-experience-loading" role="status" />}>
           <RecoverWithProvider
             status={dynamicSession.status}
+            notice={walletSignedOut ? WALLET_SIGN_IN_REFUSAL : null}
             onSignIn={dynamicSession.openAuthFlow}
-            onBack={() => setRecoverWithProvider(false)}
+            onBack={() => {
+              setWalletSignedOut(false);
+              setRecoverWithProvider(false);
+            }}
           />
         </Suspense>
       ) : custodyArm !== null && adoptStage !== 'enrol' ? (

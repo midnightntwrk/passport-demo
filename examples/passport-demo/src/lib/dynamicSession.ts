@@ -58,7 +58,27 @@ export interface DynamicSession {
   handle: string | null
   /** The embedded Ethereum address created on sign-in. */
   evmAddress: string | null
+  /**
+   * What kind of wallet holds `evmAddress` (2026/09/28): Dynamic's own
+   * EMBEDDED wallet, or an EXTERNAL one connected to the sign-in — MetaMask, a
+   * browser extension, a hardware key. Null, or absent, while there is no
+   * wallet to ask. See {@link WALLET_SIGN_IN_REFUSAL} for why it matters.
+   */
+  walletKind?: DynamicWalletKind | null
 }
+
+/**
+ * The two kinds of wallet a Dynamic sign-in can be held by.
+ *
+ * Only `embedded` can approve anything on a Passport. The account contract
+ * verifies a k256 ECDSA signature over its OWN challenge hash, so the key has
+ * to sign 32 bytes exactly as given — `signRawMessage`, which only Dynamic's
+ * embedded wallet offers. An external wallet signs `personal_sign` (EIP-191):
+ * it wraps the bytes in a preamble and hashes them with keccak-256, and the
+ * contract cannot verify that ("we support secp256k1" is not MetaMask ECDSA,
+ * 2026/09/04).
+ */
+export type DynamicWalletKind = 'embedded' | 'external'
 
 /** The actions the bridge registers once the SDK is live. */
 export interface DynamicActions {
@@ -143,6 +163,83 @@ export type DynamicSocialProvider = (typeof DYNAMIC_SOCIAL_PROVIDERS)[number]
  * this screen could do. See `docs/demo/dynamic-evm-capability-audit.md`.
  */
 export const DYNAMIC_TEST_MESSAGE = 'Midnight Passport test message'
+
+/**
+ * What a person reads when the sign-in they chose is a wallet (2026/09/28).
+ *
+ * Live on production: a tester connected MetaMask at "Add a way back", and the
+ * add failed at the signature with "This sign-in cannot approve Passport
+ * actions yet." — then an email sign-in on top of it was LINKED to the MetaMask
+ * user (`422 This email is associated to another account`) instead of
+ * replacing it, and the add failed the same way again. The sentence names the
+ * cause and the remedy, and never the vendor.
+ */
+export const WALLET_SIGN_IN_REFUSAL = "Wallets can't approve Passport actions. Use your email or Google."
+
+/**
+ * The kind of wallet a connector is, or null when there is no wallet yet.
+ *
+ * Dynamic marks its own wallet `connector.isEmbeddedWallet`, on the public
+ * `WalletConnector` type. Anything else holding a wallet — MetaMask, any
+ * injected or WalletConnect wallet — is external, including a connector that
+ * says nothing: an unknown connector is not one Passport can ask to sign raw.
+ */
+export function dynamicWalletKind(
+  wallet: { readonly connector?: { readonly isEmbeddedWallet?: unknown } | null } | null | undefined,
+): DynamicWalletKind | null {
+  if (!wallet) return null
+  return wallet.connector?.isEmbeddedWallet === true ? 'embedded' : 'external'
+}
+
+/**
+ * Whether this session is a sign-in held by an external wallet — one that can
+ * never approve a Passport action, and that must be signed out before anyone
+ * signs in again, or the next sign-in is linked to it rather than replacing it.
+ */
+export function isWalletSignIn(session: {
+  readonly status: string
+  readonly walletKind?: DynamicWalletKind | null
+}): boolean {
+  return session.status === 'signed-in' && session.walletKind === 'external'
+}
+
+/**
+ * THE SIGN-IN OFFERS EMAIL AND SOCIAL, AND NEVER A WALLET (2026/09/28).
+ *
+ * Two settings, both on the provider, because each covers what the other
+ * cannot:
+ *
+ *   - {@link EMAIL_AND_SOCIAL_LOGIN_VIEW} is the login view, spelt out: an email
+ *     field and the social buttons, with no wallet section. It replaces the
+ *     layout the dashboard would otherwise supply.
+ *   - {@link offerNoWallets} is the wallet list's filter. It empties
+ *     the list, and the SDK drops the wallet section from ANY login view whose
+ *     list is empty (`useLoginView`'s `filterLoginViewSections`, 5.8.0) — so a
+ *     dashboard view that still names a wallet section shows none.
+ *
+ * Neither touches the embedded wallet, which is created by Dynamic after the
+ * sign-in and never offered in that list. The dashboard can still switch
+ * wallets off for everybody at once — see `docs/demo/dynamic-integration.md`.
+ *
+ * Plain strings rather than the SDK's enums, because this module imports
+ * nothing; the enum values ARE these strings (`SdkViewType.Login = "login"`,
+ * `SdkViewSectionType.Email = "email"`, …).
+ */
+export const EMAIL_AND_SOCIAL_LOGIN_VIEW = {
+  type: 'login',
+  sections: [{ type: 'email' }, { type: 'separator', label: 'Or' }, { type: 'social', defaultItem: 'google' }],
+} as const
+
+/**
+ * The wallet list's filter: no wallet is offered to sign in with, whatever the
+ * list holds. See {@link EMAIL_AND_SOCIAL_LOGIN_VIEW}.
+ *
+ * Empty rather than "embedded only": the embedded wallet is made by the
+ * provider after a sign-in, and is never something to connect FROM this list.
+ */
+export function offerNoWallets<T>(options: readonly T[]): T[] {
+  return options.slice(0, 0)
+}
 
 /** The session every build has today, and the one a screen renders against before anything loads. */
 export const DISABLED_SESSION: DynamicSession = {
@@ -263,6 +360,8 @@ export interface DynamicBridgeState {
   user: DynamicUserFields | null | undefined
   /** `primaryWallet.address`, when there is a primary wallet. */
   walletAddress: string | null | undefined
+  /** {@link dynamicWalletKind} of the primary wallet. Absent is null. */
+  walletKind?: DynamicWalletKind | null
 }
 
 /**
@@ -284,6 +383,7 @@ export function describeDynamicSession(state: DynamicBridgeState): DynamicSessio
     provider: identity.provider,
     handle: identity.handle,
     evmAddress: nonEmpty(state.walletAddress),
+    walletKind: state.walletKind ?? null,
   }
 }
 
@@ -326,6 +426,13 @@ export interface PassportIdentityInput {
    * or the restore has given up. Absent is false.
    */
   readonly passkeyRestoring?: boolean
+  /**
+   * {@link DynamicSession.walletKind}. An EXTERNAL wallet never holds a
+   * Passport here (2026/09/28): it cannot sign anything the account verifies,
+   * so the answer for it is `'none'`, and the road that asked for the sign-in
+   * signs it out and says why. Absent is not external.
+   */
+  readonly walletKind?: DynamicWalletKind | null
 }
 
 /**
@@ -355,6 +462,7 @@ export function choosePassportIdentity(input: PassportIdentityInput): PassportId
   if (input.hasPasskeyProfile) return 'passkey'
   if (input.passkeyRestoring === true) return 'none'
   if (input.dynamicStatus !== 'signed-in') return 'none'
+  if (input.walletKind === 'external') return 'none'
   return dynamicUserKey(input.evmAddress) === null ? 'none' : 'dynamic'
 }
 
@@ -409,7 +517,8 @@ export function publishDynamicSession(next: DynamicSession): void {
     currentSession.status === next.status &&
     currentSession.provider === next.provider &&
     currentSession.handle === next.handle &&
-    currentSession.evmAddress === next.evmAddress
+    currentSession.evmAddress === next.evmAddress &&
+    (currentSession.walletKind ?? null) === (next.walletKind ?? null)
   ) {
     return
   }

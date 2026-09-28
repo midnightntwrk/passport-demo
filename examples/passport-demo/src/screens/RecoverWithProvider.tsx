@@ -28,6 +28,11 @@ import { RECOVERY_COPY, providerRecoveryStage } from '../lib/recoveryStep.js'
 export default function RecoverWithProvider(props: {
   /** The sign-in's own status: `disabled`, `loading`, `signed-out`, … */
   status: string
+  /**
+   * A sentence to show above the sign-in, or null — a wallet that was just
+   * signed out, and why (2026/09/28).
+   */
+  notice?: string | null
   /** Opens the provider's overlay. */
   onSignIn: () => void
   /** Back to the landing. */
@@ -62,6 +67,11 @@ export default function RecoverWithProvider(props: {
             </div>
           ) : (
             <>
+              {props.notice ? (
+                <div className="mnob-unusable" role="alert" data-testid="recover-sign-in-notice">
+                  <p className="mnob-unusable-copy">{props.notice}</p>
+                </div>
+              ) : null}
               <button
                 type="button"
                 className="mnob-primary"

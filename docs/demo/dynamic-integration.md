@@ -226,7 +226,7 @@ which is the reason the screen is `lazy` rather than imported — `custodyContra
 imports the wallet statically, and a static import here would have put its WASM ledger and
 chain sync in front of every visitor of every build.
 
-## 11. Two more dashboard settings
+## 11. Three more dashboard settings
 
 Beside the table in §4, a staging environment driving this path also needs:
 
@@ -234,3 +234,4 @@ Beside the table in §4, a staging environment driving this path also needs:
 |---|---|---|
 | Security → Account Security → CORS Origins | **Origins** | `http://localhost:5175` is the origin the dev server pins itself to, and it is the one a local flag-set build must be served on. A build at any other port never leaves `loading`. |
 | Embedded Wallets → Security | **Raw signing** | The path is `primaryWallet.connector.signRawMessage`, not `wallet.signMessage`. Only Dynamic's own embedded connector exposes it; an externally connected wallet is refused with a sentence. |
+| Log in & User Profile → External Wallets | **Wallet Log in: off** (and no wallet connections) | Email and social only (2026/09/28). The app already hides wallets in its own overlay (`overrides.views` with no wallet section, and `walletsFilter` returning nothing), signs out any wallet session before opening a sign-in, and refuses one at the signature with "Wallets can't approve Passport actions. Use your email or Google." Switching them off here removes them for every build at once, including builds already deployed. |

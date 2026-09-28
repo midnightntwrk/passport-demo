@@ -4,10 +4,16 @@ import {
   DISABLED_SESSION,
   DYNAMIC_SOCIAL_PROVIDERS,
   DYNAMIC_TEST_MESSAGE,
+  EMAIL_AND_SOCIAL_LOGIN_VIEW,
+  WALLET_SIGN_IN_REFUSAL,
+  choosePassportIdentity,
   describeDynamicIdentity,
   describeDynamicSession,
   dynamicEnvironmentId,
+  dynamicWalletKind,
   isDynamicEnabled,
+  isWalletSignIn,
+  offerNoWallets,
   publishDynamicActions,
   publishDynamicSession,
   readDynamicActions,
@@ -188,7 +194,7 @@ describe('describeDynamicSession', () => {
         user: { verifiedCredentials: [{ oauthProvider: 'microsoft', oauthUsername: 'ada' }] },
         walletAddress: undefined,
       }),
-    ).toEqual({ status: 'signed-in', provider: 'Microsoft', handle: 'ada', evmAddress: null })
+    ).toEqual({ status: 'signed-in', provider: 'Microsoft', handle: 'ada', evmAddress: null, walletKind: null })
   })
 
   it('carries the address once it is there, and treats a blank one as absent', () => {
@@ -272,5 +278,82 @@ describe('the test message', () => {
 
   it('is not the envelope the account circuit verifies, which keccak makes unusable here', () => {
     expect(DYNAMIC_TEST_MESSAGE).not.toContain('midnight_signed_message')
+  })
+})
+
+describe('email and social only, never a wallet (2026/09/28)', () => {
+  it('offers no wallet to sign in with, whatever the list holds', () => {
+    const offered = [
+      { key: 'metamask', walletConnector: { isEmbeddedWallet: false } },
+      { key: 'walletconnect', walletConnector: {} },
+      { key: 'dynamicwaas', walletConnector: { isEmbeddedWallet: true } },
+    ]
+    expect(offerNoWallets(offered)).toEqual([])
+    expect(offerNoWallets([])).toEqual([])
+    /* The provider's own list is left as it was. */
+    expect(offered).toHaveLength(3)
+  })
+
+  it('lays the sign-in out as email and social, with no wallet section', () => {
+    expect(EMAIL_AND_SOCIAL_LOGIN_VIEW.type).toBe('login')
+    const sections = EMAIL_AND_SOCIAL_LOGIN_VIEW.sections.map((section) => section.type)
+    expect(sections).toEqual(['email', 'separator', 'social'])
+    expect(sections).not.toContain('wallet')
+    expect(EMAIL_AND_SOCIAL_LOGIN_VIEW.sections[2]).toMatchObject({ defaultItem: 'google' })
+  })
+
+  it('reads the provider’s own wallet as embedded, and anything else as external', () => {
+    expect(dynamicWalletKind({ connector: { isEmbeddedWallet: true } })).toBe('embedded')
+    expect(dynamicWalletKind({ connector: { isEmbeddedWallet: false } })).toBe('external')
+    /* A connector that says nothing cannot be asked to sign raw. */
+    expect(dynamicWalletKind({ connector: {} })).toBe('external')
+    expect(dynamicWalletKind({ connector: null })).toBe('external')
+    expect(dynamicWalletKind({})).toBe('external')
+    expect(dynamicWalletKind({ connector: { isEmbeddedWallet: 'true' } })).toBe('external')
+    /* No wallet yet — the beat after a sign-in, before the embedded one. */
+    expect(dynamicWalletKind(null)).toBeNull()
+    expect(dynamicWalletKind(undefined)).toBeNull()
+  })
+
+  it('calls only a signed-in external wallet a wallet sign-in', () => {
+    expect(isWalletSignIn({ status: 'signed-in', walletKind: 'external' })).toBe(true)
+    expect(isWalletSignIn({ status: 'signed-in', walletKind: 'embedded' })).toBe(false)
+    expect(isWalletSignIn({ status: 'signed-in', walletKind: null })).toBe(false)
+    expect(isWalletSignIn({ status: 'signed-in' })).toBe(false)
+    expect(isWalletSignIn({ status: 'signed-out', walletKind: 'external' })).toBe(false)
+  })
+
+  it('carries the wallet kind from the bridge onto the session', () => {
+    const user = { email: 'a@example.com' }
+    expect(
+      describeDynamicSession({ sdkHasLoaded: true, user, walletAddress: '0xabc', walletKind: 'external' })
+        .walletKind,
+    ).toBe('external')
+    expect(describeDynamicSession({ sdkHasLoaded: true, user, walletAddress: '0xabc' }).walletKind).toBeNull()
+  })
+
+  it('never lets a wallet hold a Passport', () => {
+    const input = { hasPasskeyProfile: false, dynamicStatus: 'signed-in', evmAddress: '0xAbC' }
+    expect(choosePassportIdentity({ ...input, walletKind: 'external' })).toBe('none')
+    expect(choosePassportIdentity({ ...input, walletKind: 'embedded' })).toBe('dynamic')
+    expect(choosePassportIdentity(input)).toBe('dynamic')
+    /* And a passkey is still asked first, absolutely. */
+    expect(choosePassportIdentity({ ...input, hasPasskeyProfile: true, walletKind: 'external' })).toBe('passkey')
+  })
+
+  it('tells a subscriber when only the wallet kind changed', () => {
+    const listener = vi.fn()
+    subscribeToDynamicSession(listener)
+    const base: DynamicSession = { status: 'signed-in', provider: null, handle: null, evmAddress: '0xabc' }
+    publishDynamicSession(base)
+    publishDynamicSession({ ...base, walletKind: null })
+    expect(listener).toHaveBeenCalledTimes(1)
+    publishDynamicSession({ ...base, walletKind: 'external' })
+    expect(listener).toHaveBeenCalledTimes(2)
+    expect(readDynamicSession().walletKind).toBe('external')
+  })
+
+  it('says it without the vendor’s name', () => {
+    expect(WALLET_SIGN_IN_REFUSAL.toLowerCase()).not.toContain('dynamic')
   })
 })

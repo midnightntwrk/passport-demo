@@ -41,6 +41,7 @@ import {
   CUSTODY_PHASE_PROVED,
   CUSTODY_STILL_FINISHING,
 } from '../identity/custodyContractPlan.js'
+import { WALLET_SIGN_IN_REFUSAL } from './dynamicSession.js'
 
 /* -------------------------------------------------------------------------- */
 /* Where the add is                                                           */
@@ -365,6 +366,9 @@ const SHOWN_AS_IS: readonly string[] = [
   CUSTODY_KEY_UNCONFIRMED,
   CUSTODY_STILL_FINISHING,
   RECOVERY_KEY_NOT_READY,
+  /* A wallet asked to sign (2026/09/28): refused before anything is handed
+     over, and the sentence names the remedy. */
+  WALLET_SIGN_IN_REFUSAL,
 ]
 
 /**
@@ -373,7 +377,7 @@ const SHOWN_AS_IS: readonly string[] = [
  * ONLY SENTENCES WRITTEN FOR THIS STEP ARE SHOWN AS THEY ARE. Anything else —
  * a library's message, a payment's sentence, a stack — is not a statement
  * about recovery and would be a wrong one, so it becomes "not added", which is
- * TRUE of every failure that is not one of the four above: each of those is
+ * TRUE of every failure that is not one of those above: each of them is
  * raised before anything is handed over, and every outcome after the handover
  * arrives as one of the two `CUSTODY_KEY_*` sentences.
  */
@@ -402,6 +406,7 @@ const ADOPTION_SHOWN_AS_IS: readonly string[] = [
   ADOPTION_OTHER_PASSPORT,
   CUSTODY_STILL_FINISHING,
   RECOVERY_KEY_NOT_READY,
+  WALLET_SIGN_IN_REFUSAL,
 ]
 
 /**
