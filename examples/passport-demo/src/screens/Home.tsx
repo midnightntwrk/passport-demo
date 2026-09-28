@@ -385,6 +385,8 @@ export interface HomeScreenProps {
     background?: boolean
     /** Why a second payment waits for the first. See {@link SendSheetProps.inFlightReason}. */
     inFlightReason?: string | null
+    /** The approval the Send press asks for itself. See {@link SendSheetProps.beginApproval}. */
+    beginApproval?: SendSheetProps['beginApproval']
   } | null
   /**
    * A PAYMENT RUNNING BEHIND THE PASSPORT (2026/09/25), or the outcome of the
@@ -1380,6 +1382,7 @@ export default function HomeScreen(props: HomeScreenProps) {
             onSignOut={onSignOut}
             {...(send.background ? { background: true } : {})}
             inFlightReason={send.inFlightReason ?? null}
+            {...(send.beginApproval ? { beginApproval: send.beginApproval } : {})}
             initialDraft={sendDraft}
             onClose={() => {
               setSendOpen(false)

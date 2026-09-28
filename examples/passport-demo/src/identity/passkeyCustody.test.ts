@@ -12,7 +12,12 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { passkeyCustodyDevice, passkeyCustodyUserKey, PASSKEY_CUSTODY_LABELS } from './passkeyCustody.js';
+import {
+  passkeyCustodyDevice,
+  passkeyCustodyUserKey,
+  PASSKEY_CUSTODY_LABELS,
+  PASSKEY_DEVICE_FORGOTTEN,
+} from './passkeyCustody.js';
 import { derivePassportContractSecrets } from './passportContract.js';
 import { deriveJubjubDeviceScalar, JUBJUB_DEVICE_LABEL } from './custodyJubjubSigner.js';
 import { bytesToHex, type CustodyPureCircuits } from './custodyContractSigning.js';
@@ -100,17 +105,54 @@ describe('passkeyCustodyDevice', () => {
     expect(auth.pk).toEqual(built.device.pk);
   });
 
-  it('zeroes what it can when the action is over', async () => {
+  it('zeroes what it can when the action is over, and is safe to forget twice', async () => {
     const built = await passkeyCustodyDevice({ pure, contractRoot: ROOT });
-    /* The hex strings the device holds are copies and stay readable — they are
-       what the deploy is built from. What `forget` clears is this module's own
-       byte arrays, so nothing of the root survives in a buffer somebody could
-       reach through a heap snapshot. It must not throw, and it must be safe to
-       call twice. */
+    /* `forget` clears this module's own byte arrays, so nothing of the root
+       survives in a buffer somebody could reach through a heap snapshot. It
+       must not throw, and it must be safe to call twice. */
     expect(() => {
       built.forget();
       built.forget();
     }).not.toThrow();
+  });
+
+  /* THE REVIEW OF 2026/09/27: payments were signed with no prompt because the
+     device built at the first ceremony was kept and used again. A forgotten
+     device is the end of that device — whoever still holds a reference to it
+     holds nothing that can sign. */
+  it('cannot sign, or hand over a secret, once it has been forgotten', async () => {
+    const built = await passkeyCustodyDevice({
+      pure,
+      contractRoot: ROOT,
+      randomBytes: (length) => new Uint8Array(length).fill(4),
+    });
+    /* Before: it signs, and the deploy can read what it is built from. */
+    expect(built.device.sign(() => new Uint8Array(32), 0n).arm).toBe('jubjub');
+    expect(built.device.encSecretKeyHex).toMatch(/^[0-9a-f]{64}$/);
+    expect(built.device.maintenanceSecretHex).toMatch(/^[0-9a-f]{64}$/);
+
+    built.forget();
+
+    expect(() => built.device.sign(() => new Uint8Array(32), 1n)).toThrow(PASSKEY_DEVICE_FORGOTTEN);
+    expect(() => built.device.encSecretKeyHex).toThrow(PASSKEY_DEVICE_FORGOTTEN);
+    /* A THROW, not undefined: the custody layer reads an absent maintenance key
+       as "retire the authority", and a forgotten device must never plan that. */
+    expect(() => built.device.maintenanceSecretHex).toThrow(PASSKEY_DEVICE_FORGOTTEN);
+    expect('maintenanceSecretHex' in built.device).toBe(true);
+    /* What is public stays: the point and the key the stores are filed under. */
+    expect(built.device.pk.x).toBe(await deriveJubjubDeviceScalar(ROOT));
+    expect(built.userKey).toBe(passkeyCustodyUserKey(built.device.pk.x));
+  });
+
+  it('forgets the viewing secret of a device that carries no maintenance key, too', async () => {
+    const built = await passkeyCustodyDevice({
+      pure,
+      contractRoot: ROOT,
+      keepMaintenanceAuthority: false,
+    });
+    built.forget();
+    expect(() => built.device.encSecretKeyHex).toThrow(PASSKEY_DEVICE_FORGOTTEN);
+    expect('maintenanceSecretHex' in built.device).toBe(false);
   });
 
   it('refuses a root that is not 32 bytes, before any of it is used', async () => {
