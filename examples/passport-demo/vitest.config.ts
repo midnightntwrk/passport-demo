@@ -695,7 +695,10 @@
  *                       subscription. A mocked indexer proves nothing about an
  *                       indexer; `e2e/stagenet.live.spec.ts` reads the real one.
  *   localWallet.ts      The wallet facade: WASM ledger, proof server, chain
- *                       sync. It cannot open without a live indexer.
+ *                       sync. It cannot open without a live indexer. Whether
+ *                       it starts that sync at all (`chainSync`, 2026/09/27)
+ *                       is drilled with the facade replaced, in
+ *                       `src/lib/localWallet.chainSync.test.ts`.
  *   passkeyPresence.ts  WebAuthn. Drilled through a CDP virtual authenticator
  *                       in `e2e/`, which is the only place it can be.
  *   proofWorker.ts      A `Worker` bootstrap.
