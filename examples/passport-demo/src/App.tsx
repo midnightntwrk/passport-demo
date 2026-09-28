@@ -323,7 +323,10 @@ import {
   aliasRegistrationSupported,
   configuredNetworkId,
   defaultSelectedNetwork,
+  explorerUrlFor,
   isLedgerTxHash,
+  isTxIdentifier,
+  resolveReceiptHash,
   txReceiptLink,
   walletNetwork,
 } from './lib/networks.js';
@@ -1191,16 +1194,68 @@ function forgetWelcomeSeen(credentialId: string): void {
  * Preview, pre-production, and stagenet each have a public explorer; mainnet is
  * not in the table. The explorer takes the 32-byte ledger transaction hash —
  * never the identifier `submitTransaction` answers with — so where that mapping
- * has not happened yet, `fallbackName` (a `.night` name) sends the user to the
- * step verifier instead, which finds the transaction by resolving the name.
- * Without either there is no link at all, rather than one that goes nowhere.
+ * has not happened yet there is no link at all, rather than one that goes
+ * nowhere or one to the step verifier searched by name (2026/09/28). The
+ * activity row gains its link once the hash is found; see
+ * {@link useActivityHashResolution}.
  */
 function explorerTxLink(
   txHash: string | null | undefined,
   network: string | null | undefined,
-  fallbackName?: string | null,
 ): { label: string; href: string } | undefined {
-  return txReceiptLink(network, txHash, fallbackName) ?? undefined;
+  return txReceiptLink(network, txHash) ?? undefined;
+}
+
+/**
+ * THE HASH BEHIND A ROW WRITTEN UNDER ITS SUBMIT ID (2026/09/28).
+ *
+ * A payment, a setup step, a device added on the way back — each is written to
+ * the trail the moment it is handed over, and at that moment it is usually
+ * known only by the 33-byte identifier the submit answered with. The explorer
+ * resolves ledger hashes only, so such a row showed no link at all, and the
+ * payment's own "View" went to the step verifier searched by name instead.
+ *
+ * This asks the indexer, once per row, for the ledger hash behind the
+ * identifier, and writes it onto the row when it comes back — at which point
+ * the row's "View" goes to that transaction on the explorer. Until then the row
+ * has no link; a window that closes with no answer leaves it that way. Only a
+ * row still carrying the SAME identifier is changed, so a row corrected by the
+ * chain history in the meantime is left as the history wrote it.
+ */
+function useActivityHashResolution(
+  activity: readonly ActivityEntry[],
+  setActivity: (update: (current: ActivityEntry[]) => ActivityEntry[]) => void,
+  selectedNetwork: string,
+): void {
+  const asked = useRef(new Set<string>());
+  useEffect(() => {
+    for (const entry of activity) {
+      const identifier = entry.txHash;
+      if (!isTxIdentifier(identifier)) continue;
+      if (explorerUrlFor(entry.network ?? selectedNetwork) === null) continue;
+      const key = `${entry.id}|${identifier}`;
+      if (asked.current.has(key)) continue;
+      asked.current.add(key);
+      void (async () => {
+        const [{ resolveTxHashOnce }, { localWalletNetworkConfig }] = await Promise.all([
+          import('./identity/contractRuntime.js'),
+          import('./lib/localWallet.js'),
+        ]);
+        const indexer = localWalletNetworkConfig().indexerHttpUrl;
+        const hash = await resolveReceiptHash(identifier, {
+          lookup: (id) => resolveTxHashOnce(indexer, id),
+        });
+        if (hash === null) return;
+        setActivity((current) =>
+          current.map((row) =>
+            row.id === entry.id && row.txHash === identifier ? { ...row, txHash: hash } : row,
+          ),
+        );
+      })().catch((cause: unknown) => {
+        console.info('[passport] a transaction hash could not be looked up', cause);
+      });
+    }
+  }, [activity, selectedNetwork, setActivity]);
 }
 
 /**
@@ -2016,6 +2071,10 @@ export default function PassportDemo() {
     },
     [selectedNetwork],
   );
+
+  /* A row written under its submit's identifier gains its explorer link once
+     the ledger hash is found (2026/09/28). */
+  useActivityHashResolution(activity, setActivity, selectedNetwork);
 
   const updateActivity = useCallback((id: string, patch: Partial<Omit<ActivityEntry, 'id' | 'createdAt'>>) => {
     setActivity((current) => current.map((entry) => (entry.id === id ? { ...entry, ...patch } : entry)));
@@ -5198,20 +5257,18 @@ export default function PassportDemo() {
                    than waiting for the name. It is the FIRST transaction this
                    Passport ever submits and the only one the passkey wallet
                    itself originates, so it is the one most worth being able to
-                   go and look at — and the indexer has usually not mapped its
-                   identifier to a ledger hash yet, which is what the verifier
-                   fallback is for. */
+                   go and look at. The indexer has usually not mapped its
+                   identifier to a ledger hash yet; the toast then carries no
+                   link, and the activity row gains its explorer link once the
+                   hash is found (2026/09/28). Never the verifier, never by
+                   name. */
                 pushToast({
                   tone: 'success',
                   title: 'Your account is set up',
                   body: `${compactAddress(deployment.address)} is ${
                     deployment.ledgerConfirmed ? 'live' : 'submitted'
                   } on ${deployment.network}. Registering ${alias}.night against it now.`,
-                  link: explorerTxLink(
-                    deployment.deployTxId,
-                    deployment.network,
-                    aliasDomainOf(alias),
-                  ),
+                  link: explorerTxLink(deployment.deployTxId, deployment.network),
                 });
                 void notify(
                   'Your account is set up',
@@ -5941,21 +5998,9 @@ export default function PassportDemo() {
         void refreshLocalBalances();
         return;
       }
-      /* The name this Passport already holds on this network, if any — read
-         from the store rather than from render state, because this callback
-         must not be rebuilt every time a record changes. It is only a fallback
-         link target. */
-      const deployedCredentialId = profileRef.current?.passkey.credentialId ?? null;
-      const deployedDomain = deployedCredentialId
-        ? loadAliasRecord(deployedCredentialId, deployment.network)?.domain ?? null
-        : null;
-      const deployLink = explorerTxLink(
-        deployment.deployTxId,
-        deployment.network,
-        /* Same fallback as the onboarding deploy: an unmapped identifier is the
-           norm this early, and the verifier resolves the name instead. */
-        deployedDomain,
-      );
+      /* The explorer, once the hash is known, and no link before it — never
+         the verifier searched by name (2026/09/28). */
+      const deployLink = explorerTxLink(deployment.deployTxId, deployment.network);
       addActivity({
         label: 'Your account is set up',
         detail: `It is ${
@@ -6855,7 +6900,11 @@ export default function PassportDemo() {
           },
           onLanded: (event) => {
             landed.push(event);
-            const href = event.explorerUrl;
+            /* Only a LEDGER hash has an explorer page. An identifier the
+               indexer had not mapped yet would be a link to "not found"; the
+               row stays unlinked here, and the trail's row gains its link once
+               the hash is found (2026/09/28). */
+            const href = isLedgerTxHash(event.txHash) ? event.explorerUrl : null;
             if (current() && href !== null) setAdoptLinks((links) => ({ ...links, [event.kind]: href }));
           },
         });
@@ -10801,6 +10850,7 @@ export default function PassportDemo() {
                         label: row.label,
                         state: row.state,
                         expectedSeconds: row.expectedSeconds,
+                        actor: row.actor,
                         elapsedMs: adoptElapsedFor(row),
                         /* The one row that is the reader's own hands. */
                         detail: row.id === 'passkey' && row.state === 'active' ? PASSKEY_APPROVAL_PROMPT : null,

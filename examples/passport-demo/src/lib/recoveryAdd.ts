@@ -27,7 +27,7 @@
  * `./custodySetupProgress.ts`.
  */
 
-import type { ClaimStepState } from './claimSteps.js'
+import type { ClaimStepState, StepActor } from './claimSteps.js'
 import {
   ADOPTION_NOT_ADDED,
   ADOPTION_OTHER_PASSPORT,
@@ -124,8 +124,10 @@ export interface RecoveryAddRow {
   readonly id: RecoveryAddRowId
   readonly label: string
   readonly state: ClaimStepState
-  /** Seconds, or null when the answer is "as long as you take". */
+  /** Seconds, or null when nobody can put a number on it. */
   readonly expectedSeconds: number | null
+  /** Whose move the row waits on while it runs: only the passkey row's is the reader's. */
+  readonly actor: StepActor
   /** The states the long row passes through, or null for a row that is one thing. */
   readonly subStages: readonly RecoveryAddSubStage[] | null
 }
@@ -173,19 +175,20 @@ const SUB_STAGES: readonly { id: RecoveryAddSubStageId; label: string }[] = [
  */
 export function recoveryAddRows(progress: RecoveryAddProgress): RecoveryAddRow[] {
   const rows: Omit<RecoveryAddRow, 'state' | 'subStages'>[] = [
-    { id: 'signed-in', label: 'Sign in to your recovery account', expectedSeconds: null },
-    { id: 'passkey', label: 'Approve with your passkey', expectedSeconds: null },
+    { id: 'signed-in', label: 'Sign in to your recovery account', expectedSeconds: null, actor: 'passport' },
+    { id: 'passkey', label: 'Approve with your passkey', expectedSeconds: null, actor: 'you' },
     ...(progress.finishing
       ? [
           {
             id: 'finish' as const,
             label: 'Finish setting up your Passport',
             expectedSeconds: RECOVERY_FINISH_EXPECTED_SECONDS,
+            actor: 'passport' as const,
           },
         ]
       : []),
-    { id: 'add', label: 'Add your recovery key', expectedSeconds: RECOVERY_ADD_EXPECTED_SECONDS },
-    { id: 'on', label: 'Recovery is on', expectedSeconds: null },
+    { id: 'add', label: 'Add your recovery key', expectedSeconds: RECOVERY_ADD_EXPECTED_SECONDS, actor: 'passport' },
+    { id: 'on', label: 'Recovery is on', expectedSeconds: null, actor: 'passport' },
   ]
   const done = progress.stage === 'done'
   const active = rows.findIndex((row) => row.id === ROW_OF_STAGE[progress.stage])

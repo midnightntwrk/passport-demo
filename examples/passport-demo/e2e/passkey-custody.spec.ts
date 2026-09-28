@@ -1914,7 +1914,7 @@ async function readStill(
  * `CustodyPassport.tsx`. `tidyUpMs` is a payment that kept change, whose note
  * of it takes that long to write after "Sent" (2026/09/26).
  */
-function walkPayment(options: { stepMs: number; fail?: string; tidyUpMs?: number }) {
+function walkPayment(options: { stepMs: number; fail?: string; tidyUpMs?: number; unresolved?: boolean }) {
   return async (page: Page): Promise<void> => {
     await page.addInitScript((asked) => {
       (window as unknown as { __passportWalkPayment?: unknown }).__passportWalkPayment = asked;
@@ -2030,7 +2030,12 @@ test.describe('a payment that runs behind the Passport (2026/09/25)', () => {
     /* It ends Sent, with the link to the transaction. */
     await expect(sendPill(page)).toHaveAttribute('data-state', 'sent', { timeout: 30_000 });
     await expect(sendPill(page)).toContainText(/Sent 10 mUSD to /);
-    await expect(sendPill(page).getByRole('link', { name: /View/ })).toHaveAttribute('href', /.+/);
+    /* The explorer's page for the transaction — never the step verifier
+       searched by name (2026/09/28). */
+    await expect(sendPill(page).getByRole('link', { name: /View/ })).toHaveAttribute(
+      'href',
+      `https://explorer.1am.xyz/tx/${'e5'.repeat(32)}?network=stagenet`,
+    );
     /* The pill reopens it too, and it says Sent, with the link. */
     await sendPill(page).locator('.mnsendp-open').click();
     await expect(page.getByTestId('send-progress-sheet')).toContainText('Sent');
@@ -2042,6 +2047,64 @@ test.describe('a payment that runs behind the Passport (2026/09/25)', () => {
     await expect(page.locator('.mnhome-activity')).toContainText(/Sent 10 mUSD to /);
     /* And "Sent" goes by itself. */
     await expect(sendPill(page)).toHaveCount(0, { timeout: 15_000 });
+    await close();
+  });
+
+  test('a payment known only by its submit id links to its transaction on the explorer once the hash is found, never to the verifier (2026/09/28)', async ({
+    browser,
+  }) => {
+    /* The tester's report: after sending mUSD the link was
+       `midnightpassport.com/verify/?q=<their name>`. The engine hands back the
+       33-byte identifier when the indexer has not mapped it in time; the
+       screen now looks the hash up and links the transaction itself. */
+    const identifier = `00${'e5'.repeat(32)}`;
+    const explorer = `https://explorer.1am.xyz/tx/${'e5'.repeat(32)}?network=stagenet`;
+    const { page, close } = await passkeyPassportOnHome(browser, {
+      beforeOpen: async (opening) => {
+        await walkPayment({ stepMs: 400, unresolved: true })(opening);
+        /* Every link this page ever carries, so a wrong one that came and
+           went is still caught. */
+        await opening.addInitScript(() => {
+          const seen: string[] = [];
+          (window as unknown as { __hrefs: string[] }).__hrefs = seen;
+          new MutationObserver(() => {
+            for (const anchor of Array.from(document.querySelectorAll('a[href]'))) {
+              const href = anchor.getAttribute('href') ?? '';
+              if (!seen.includes(href)) seen.push(href);
+            }
+          }).observe(document, { subtree: true, childList: true, attributes: true, attributeFilter: ['href'] });
+        });
+      },
+    });
+    /* The indexer maps the identifier a moment after it is asked. */
+    const asked: string[] = [];
+    await page.route('**/indexer.stagenet.shielded.tools/**', async (route) => {
+      const body = route.request().postData() ?? '';
+      /* The one question `resolveTxHashOnce` asks: which hash is this id. */
+      if (body.includes(identifier) && body.includes('{ hash } }')) {
+        asked.push('identifier');
+        await new Promise((resolve) => setTimeout(resolve, 3_000));
+        return route.fulfill({ json: { data: { transactions: [{ hash: 'e5'.repeat(32) }] } } });
+      }
+      return route.fallback();
+    });
+    await payTenMusd(page);
+
+    /* While it is looked for, the toast says so — as text, not a link. */
+    const toast = page.locator('.mntoast', { hasText: /accepted by the network/ }).first();
+    await expect(toast).toBeVisible({ timeout: 30_000 });
+    await expect(toast.locator('.mntoast-link-pending')).toHaveText('Finding it on the explorer…');
+    await expect(toast.locator('a.mntoast-link')).toHaveCount(0);
+    /* Then the toast, the pill, and the trail's row all go to the explorer. */
+    await expect(toast.locator('a.mntoast-link')).toHaveAttribute('href', explorer, { timeout: 30_000 });
+    await expect(sendPill(page).getByRole('link', { name: /View/ })).toHaveAttribute('href', explorer);
+    const row = page.locator('.mnhome-activity-row', { hasText: /Sent 10 mUSD to / });
+    await expect(row.locator('a.mnhome-activity-view')).toHaveAttribute('href', explorer, { timeout: 30_000 });
+    expect(asked.length).toBeGreaterThan(0);
+
+    /* And at no moment was anything linked to the verifier, or by name. */
+    const hrefs = await page.evaluate(() => (window as unknown as { __hrefs: string[] }).__hrefs);
+    expect(hrefs.filter((href) => /\/verify|\?q=/.test(href))).toEqual([]);
     await close();
   });
 

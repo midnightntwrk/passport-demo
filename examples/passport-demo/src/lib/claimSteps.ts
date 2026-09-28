@@ -72,6 +72,19 @@ export type ClaimPhase = AliasClaimProgress['phase']
 /** Which of the three steps a row is: done, running now, or still ahead. */
 export type ClaimStepState = 'done' | 'active' | 'todo'
 
+/**
+ * WHO A RUNNING STEP IS WAITING ON (2026/09/28).
+ *
+ * `'you'` is a step whose next move is the reader's own hands — a passkey
+ * prompt that is up. `'passport'` is everything else: a check, a proof, a
+ * sign-in's key signing by itself. Absent means `'passport'`, because a step
+ * is automatic unless somebody has said otherwise, and a row that claimed the
+ * reader's attention when nothing was theirs to do is what this field fixes:
+ * the recovery timeline said "Waiting for you" under "Google approves this
+ * device", which nobody presses anything for.
+ */
+export type StepActor = 'you' | 'passport'
+
 export interface ClaimStep {
   /** Stable identity, for React keys and for tests. */
   id: 'name' | 'passkey' | 'account'
@@ -90,6 +103,8 @@ export interface ClaimStep {
    * them instead of stalling at 100%.
    */
   expectedSeconds: number | null
+  /** Whose move a running step is waiting on. See {@link StepActor}. */
+  actor?: StepActor
 }
 
 /**
@@ -118,7 +133,7 @@ export const CLAIM_STEPS: readonly Omit<ClaimStep, 'state'>[] = [
   { id: 'name', label: 'Checking your name', expectedSeconds: 10 },
   /* No estimate, on purpose: this step is the USER'S, and a countdown against
      somebody's own hands is a deadline rather than an estimate. */
-  { id: 'passkey', label: 'Confirm with your passkey', expectedSeconds: null },
+  { id: 'passkey', label: 'Confirm with your passkey', expectedSeconds: null, actor: 'you' },
   { id: 'account', label: 'Setting up your account', expectedSeconds: 120 },
 ]
 
@@ -257,12 +272,20 @@ function expectedPhrase(seconds: number): string {
  * or a slow indexer looks like from the outside, and it is the difference
  * between a wait and a hang: the exact defect reported on 2026/08/26.
  *
- * The passkey step has no estimate, so its line names what is being waited on
- * instead — the reader — and counts.
+ * A step the READER is holding up — a passkey prompt that is on screen — has
+ * no estimate, so its line names who is being waited on and counts. Every
+ * other step with no estimate is Passport's own work that nobody can put a
+ * number on (a sign-in's key signing by itself, earlier payments being read
+ * back), and it says it is working rather than blaming a reader who has
+ * nothing to press (2026/09/28).
  */
-export function stepTimingLine(step: Pick<ClaimStep, 'expectedSeconds'>, elapsedMs: number): string {
+export function stepTimingLine(
+  step: Pick<ClaimStep, 'expectedSeconds' | 'actor'>,
+  elapsedMs: number,
+): string {
   const elapsed = formatElapsed(elapsedMs)
-  if (step.expectedSeconds === null) return `Waiting for you — ${elapsed}`
+  if (step.actor === 'you') return `Waiting for you — ${elapsed}`
+  if (step.expectedSeconds === null) return `Working — ${elapsed}`
   if (elapsedMs > step.expectedSeconds * 1000) {
     return `Taking a little longer than usual — ${elapsed}`
   }

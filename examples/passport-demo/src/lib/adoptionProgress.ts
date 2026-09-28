@@ -30,7 +30,7 @@
  * every branch is drilled directly, in `./adoptionProgress.test.ts`.
  */
 
-import type { ClaimStepState } from './claimSteps.js'
+import type { ClaimStepState, StepActor } from './claimSteps.js'
 
 /* -------------------------------------------------------------------------- */
 /* Where the second half is                                                   */
@@ -139,8 +139,14 @@ export interface AdoptionRow {
   readonly id: AdoptionRowId
   readonly label: string
   readonly state: ClaimStepState
-  /** Seconds, or null when the answer is "as long as you take". */
+  /** Seconds, or null when nobody can put a number on it. */
   readonly expectedSeconds: number | null
+  /**
+   * Whose move the row waits on while it runs. Only the passkey row is the
+   * reader's: checking the sign-in, the sign-in approving this device, and
+   * bringing back earlier payments all happen by themselves (2026/09/28).
+   */
+  readonly actor: StepActor
   /** The states the long row passes through, or null for a row that is one thing. */
   readonly subStages: readonly AdoptionSubStage[] | null
 }
@@ -195,21 +201,31 @@ export function adoptionRows(progress: {
       id: 'sign-in',
       label: provider.length > 0 ? `Check your ${provider} sign-in` : 'Check your sign-in',
       expectedSeconds: null,
+      actor: 'passport',
     },
-    { id: 'passkey', label: 'Make this device’s key', expectedSeconds: null },
+    /* The one row that is the reader's hands: the passkey prompt is up. */
+    { id: 'passkey', label: 'Make this device’s key', expectedSeconds: null, actor: 'you' },
     {
       id: 'approve',
       label: provider.length > 0 ? `${provider} approves this device` : 'Your sign-in approves this device',
       expectedSeconds: null,
+      /* The sign-in's key signs by itself; there is nothing to press. */
+      actor: 'passport',
     },
-    { id: 'add', label: 'Add this device to your Passport', expectedSeconds: ADOPTION_ADD_EXPECTED_SECONDS },
+    {
+      id: 'add',
+      label: 'Add this device to your Passport',
+      expectedSeconds: ADOPTION_ADD_EXPECTED_SECONDS,
+      actor: 'passport',
+    },
     {
       id: 'rotate',
       label: 'Point your payments at this device',
       expectedSeconds: ADOPTION_ROTATE_EXPECTED_SECONDS,
+      actor: 'passport',
     },
-    { id: 'earlier', label: 'Bring back earlier payments', expectedSeconds: null },
-    { id: 'home', label: 'Open your Passport', expectedSeconds: null },
+    { id: 'earlier', label: 'Bring back earlier payments', expectedSeconds: null, actor: 'passport' },
+    { id: 'home', label: 'Open your Passport', expectedSeconds: null, actor: 'passport' },
   ]
   const done = progress.step === 'done'
   const active = done ? rows.length : rows.findIndex((row) => row.id === ROW_OF_STEP[progress.step as Exclude<AdoptionStep, 'done'>])

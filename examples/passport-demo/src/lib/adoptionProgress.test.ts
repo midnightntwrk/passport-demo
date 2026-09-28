@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
+import { stepTimingLine } from './claimSteps.js'
 
 import {
   ADOPTION_ADD_EXPECTED_SECONDS,
@@ -91,6 +92,21 @@ describe('the rows', () => {
       null,
       null,
     ])
+  })
+
+  it('waits on the reader only for the passkey prompt, never for what happens by itself (2026/09/28)', () => {
+    /* "Check your Google sign-in", "Google approves this device", and "Bring
+       back earlier payments" all read "Waiting for you" while nobody had
+       anything to press. */
+    const rows = adoptionRows({ step: 'approve', provider: 'Google' })
+    expect(rows.filter((row) => row.actor === 'you').map((row) => row.id)).toEqual(['passkey'])
+    for (const step of ['sign-in', 'approve', 'earlier'] as const) {
+      const running = adoptionRows({ step, provider: 'Google' }).find((row) => row.state === 'active')
+      expect(running?.actor).toBe('passport')
+      expect(stepTimingLine(running!, 12_000)).toBe('Working — 0:12')
+    }
+    const passkey = adoptionRows({ step: 'passkey', provider: 'Google' }).find((row) => row.state === 'active')
+    expect(stepTimingLine(passkey!, 4_000)).toBe('Waiting for you — 0:04')
   })
 
   it('name no provider where none is known', () => {

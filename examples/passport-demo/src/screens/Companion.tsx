@@ -30,7 +30,7 @@ function reducedMotionQuery(): MediaQueryList | null {
  * The face's motion, for one control. The rule is `lib/companionMotion.ts`'s;
  * this is the wiring: the reduced-motion query, and the controller's lifetime.
  */
-function useCompanionMotion(): {
+export function useCompanionMotion(): {
   moving: boolean
   wake: () => void
   hold: (held: boolean) => void
@@ -60,7 +60,7 @@ function useCompanionMotion(): {
   }
 }
 
-function CompanionFace(props: { size: number; active: boolean; moving: boolean; fallbackSize: number }) {
+export function CompanionFace(props: { size: number; active: boolean; moving: boolean; fallbackSize: number }) {
   return (
     <span className="mncompanion-face" aria-hidden="true">
       <Suspense fallback={<MessageCircle size={props.fallbackSize} aria-hidden="true" />}>

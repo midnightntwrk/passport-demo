@@ -325,11 +325,15 @@ describe('restored rows, merged into the trail', () => {
       txHash: `0x${PAYMENT_ID.toUpperCase()}`,
     };
     const merged = mergeRestoredActivity<Entry>([mine], rows, make);
-    expect(merged.filter((entry) => entry.label.startsWith('Sent'))).toEqual([mine]);
+    /* Still ONE row, the device's own — and it now carries the ledger hash, so
+       its View link goes to the explorer rather than nowhere (2026/09/28). */
+    expect(merged.filter((entry) => entry.label.startsWith('Sent'))).toEqual([{ ...mine, txHash: PAYMENT }]);
     /* The change row is its own row, and is still written. */
     expect(merged.some((entry) => entry.label === 'Found 77 mUSD of change')).toBe(true);
     const byHash = mergeRestoredActivity<Entry>([{ ...mine, txHash: PAYMENT }], rows, make);
     expect(byHash.filter((entry) => entry.label.startsWith('Sent'))).toHaveLength(1);
+    /* And a second read changes nothing: the hash is already the chain's. */
+    expect(mergeRestoredActivity<Entry>(merged, rows, make)).toBe(merged);
   });
 
   it('put a setup row written at the wrong time at the right one, with its link, rather than writing it again', () => {

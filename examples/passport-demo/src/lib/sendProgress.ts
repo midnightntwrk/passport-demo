@@ -203,6 +203,13 @@ export type SendProgressEvent =
   | { readonly type: 'waiting' }
   | { readonly type: 'turn' }
   | { readonly type: 'sent'; readonly link: SendProgressLink | null }
+  /**
+   * The explorer link of a payment already `sent` without one — its ledger
+   * hash was found after it finished (2026/09/28). Ignored unless the payment
+   * on screen is sent and still has no link; the host only sends it for the
+   * payment it is about.
+   */
+  | { readonly type: 'link'; readonly link: SendProgressLink }
   | {
       readonly type: 'failed';
       readonly sentence: string;
@@ -266,6 +273,8 @@ export function sendProgressReduce(
             ...carryApprovalFirst(state),
           }
         : state;
+    case 'link':
+      return state?.kind === 'sent' && state.link === null ? { ...state, link: event.link } : state;
     case 'failed':
       if (state?.kind !== 'running') return state;
       if (event.handedOver) return null;

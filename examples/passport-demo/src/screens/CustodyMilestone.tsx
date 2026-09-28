@@ -3,6 +3,7 @@ import { BadgeCheck, ExternalLink, LoaderCircle } from 'lucide-react'
 
 import { useDynamicSession } from '../lib/dynamic.js'
 import { shortEvmAddress } from '../lib/dynamicSession.js'
+import { isLedgerTxHash } from '../lib/networks.js'
 import { recoverSecp256k1Point } from '../lib/custodyRecover.js'
 import { K256_ENVELOPE_NONE, type K256DeviceIdentity } from '../identity/custodyContractSigning.js'
 import {
@@ -128,7 +129,8 @@ export default function CustodyMilestone() {
         patch(id, {
           busy: false,
           txHash: result.txHash,
-          explorerUrl: result.explorerUrl,
+          /* Only a ledger hash has an explorer page (2026/09/28). */
+          explorerUrl: isLedgerTxHash(result.txHash) ? result.explorerUrl : null,
           detail: null,
         })
       } catch (cause) {
