@@ -129,6 +129,16 @@ import {
   type CustodyActivityEntry,
   type CustodyHomeView,
 } from '../lib/custodyHome.js'
+/* A Passport's history, read back from the chain at the times it happened, and
+   the one lookup the milestone observer shares with it. Pure — see
+   `../lib/custodyChainActivity.ts` and `../lib/activityFeed.ts`. */
+import {
+  custodyChainActivity,
+  custodyMilestoneAction,
+  custodyOutgoingTransactions,
+} from '../lib/custodyChainActivity.js'
+import type { RestoredActivityRow } from '../lib/activityFeed.js'
+import { describeColour } from '../lib/colour.js'
 import {
   awaitCustodyTurn,
   custodyArrivingCount,
@@ -396,6 +406,14 @@ export interface CustodyPassportProps {
    */
   onActivity?: (entry: CustodyActivityEntry) => void
   /**
+   * Hands the host this Passport's history as the chain records it — every
+   * row at the time its block was made, with its transaction for the View
+   * link (2026/09/27). A device that did not see a thing happen has no other
+   * way to know when it did. The host merges them once: see
+   * `../lib/activityFeed.ts#mergeRestoredActivity`.
+   */
+  onRestoreActivity?: (rows: readonly RestoredActivityRow[]) => void
+  /**
    * THE PROVIDER SIGN-IN, AS A WAY BACK — and as nothing else.
    *
    * Narrow on purpose: whether somebody is signed in, what to call the
@@ -472,6 +490,7 @@ export default function CustodyPassport({
   notice: browserNotice = null,
   renderHome,
   onActivity,
+  onRestoreActivity,
   social = null,
   onRecoverToDeviceKey = null,
   onLeaveRecovery = null,
@@ -1422,6 +1441,12 @@ export default function CustodyPassport({
   /* The account's chain history as the last delivery walk read it, so the
      opening-balance rows can link to the sponsor's deposits. */
   const lastActionsRef = useRef<Awaited<ReturnType<typeof readCustodyActions>>>(null)
+  /* Every note the last delivery walk could open, spent or not, with the
+     transaction that wrote it: where a change walk starts from, what a payment
+     received says, and how much the opening grant was (2026/09/27). */
+  const lastNotesRef = useRef<
+    readonly { colour: string; nonce: string; value: bigint; txHash: string | null }[]
+  >([])
   /* Bumped each time a history read finishes (answered or not), so the
      opening rows are reconsidered after it rather than before it. */
   const [historyReads, setHistoryReads] = useState(0)
@@ -1492,6 +1517,12 @@ export default function CustodyPassport({
          spendable — which is what "arriving" means. Counting only the store's
          own awaiting rows made those coins vanish off the screen entirely. */
       const unplaced = custodyUnplacedDeliveries(walked.outcomes)
+      lastNotesRef.current = walked.coins.map((coin) => ({
+        colour: coin.colour,
+        nonce: coin.nonce,
+        value: coin.value,
+        txHash: txIdFor(coin.inboxIndex),
+      }))
       console.info(
         `[account-custody] read ${walked.coins.length} of this Passport's own deliveries`,
       )
@@ -1515,6 +1546,116 @@ export default function CustodyPassport({
     )
     setArriving(custodyArrivingCount({ awaitingRows: awaitingK1Coins(account).length, unplaced: null }))
   }, [setTokens, view])
+
+  /* The host's merge, read live: it changes identity with the selected network,
+     and the follow-up below must not be rebuilt for that. */
+  const onRestoreActivityRef = useRef(onRestoreActivity)
+  useEffect(() => {
+    onRestoreActivityRef.current = onRestoreActivity
+  }, [onRestoreActivity])
+
+  /**
+   * THIS PASSPORT'S HISTORY, READ BACK INTO ACTIVITY AT THE TIMES IT HAPPENED
+   * (2026/09/27).
+   *
+   * A Passport brought back on a new phone had none of its history, and the
+   * setup rows the milestone observer wrote when it noticed them all said "1 min
+   * ago". The account's own history, which the delivery walk has just read,
+   * says when each thing happened; `../lib/custodyChainActivity.ts` turns it
+   * into rows — with the payment amounts the change walk learnt, and the
+   * payments received from the notes this device can open — and the host
+   * merges them once (`../lib/activityFeed.ts#mergeRestoredActivity`). The
+   * payments' ids are read first, from the same one read per tab, so a payment
+   * this device wrote down itself is never written twice.
+   *
+   * The setup rows it writes are marked as written, exactly as the observer
+   * marks its own, so the observer never writes one again at "now"; one the
+   * observer has already written is only corrected.
+   */
+  const restoreChainActivity = useCallback(
+    async (indexerHttpUrl: string, account: { network: string; address: string }): Promise<void> => {
+      const restore = onRestoreActivityRef.current
+      const record = view?.record ?? null
+      const actions = lastActionsRef.current
+      if (restore === undefined || record === null || actions === null) return
+      /* Only a history that carries its times: nothing is placed at a guess. */
+      if (!actions.some((row) => row.at !== undefined)) return
+      const [spentCoins, walk, reader] = await Promise.all([
+        import('../identity/custodySpentCoins.js'),
+        import('../identity/custodyChangeWalk.js'),
+        custodyChainReader(indexerHttpUrl),
+      ])
+      const { facts } = await spentCoins.readCustodyTransactions(custodyOutgoingTransactions(actions), reader)
+      const rows = custodyChainActivity({
+        actions,
+        network: account.network,
+        facts,
+        steps: walk.loadCustodyChangeSteps(account),
+        notes: lastNotesRef.current,
+        witnessed: record.txHashes.length > 0,
+        describe: (colour) => describeColour(colour),
+      })
+      if (rows.length === 0) return
+      const key = custodyActivityMarkKey(account.network, account.address)
+      const written = readActivityMarks(key)
+      const fresh = [
+        ...new Set(
+          rows.flatMap((row) => (row.milestone !== null && !written.includes(row.milestone) ? [row.milestone] : [])),
+        ),
+      ]
+      if (fresh.length > 0) writeActivityMarks(key, [...written, ...fresh])
+      restore(
+        rows.map((row) =>
+          row.milestone !== null && written.includes(row.milestone) ? { ...row, correctOnly: true } : row,
+        ),
+      )
+    },
+    [view],
+  )
+
+  /**
+   * WHAT FOLLOWS A READ, OFF TO ONE SIDE OF IT (2026/09/27): the change walk,
+   * then the history read back into Activity.
+   *
+   * Not awaited by the read, so Home's figures never wait on either: the walk
+   * is a few dozen hashes for every value this app holds, but it is bounded
+   * rather than assumed small (`../identity/custodyChangeWalk.ts`), and the
+   * figures are redrawn from the store when it has filed something. One at a
+   * time — a read that finds one running leaves it to finish, and whatever it
+   * wrote down for a walk is walked by the next.
+   */
+  const followUp = useRef<Promise<void> | null>(null)
+  const followFromChain = useCallback(
+    (indexerHttpUrl: string, account: { network: string; address: string }): void => {
+      if (followUp.current !== null) return
+      followUp.current = (async () => {
+        try {
+          const added = await recoverChangeFromChain(
+            indexerHttpUrl,
+            account,
+            lastActionsRef.current,
+            () => inFlight.current,
+          )
+          if (added > 0 && !inFlight.current) {
+            const { k1ColourHoldings } = await import('../identity/k1CoinStore.js')
+            setTokens(
+              k1ColourHoldings(account).map((holding) => ({ colourHex: holding.colour, amount: holding.value })),
+            )
+          }
+        } catch (cause) {
+          console.info('[account-custody] the change of a payment could not be looked for this time', cause)
+        }
+        try {
+          await restoreChainActivity(indexerHttpUrl, account)
+        } catch (cause) {
+          console.info('[account-custody] this Passport’s history could not be read back this time', cause)
+        }
+      })().finally(() => {
+        followUp.current = null
+      })
+    },
+    [restoreChainActivity, setTokens],
+  )
 
   /* ONE READ AT A TIME. Home's effect, the Send sheet opening, a refresh, and
      the read after a payment all ask; the second of two overlapping asks waits
@@ -1681,12 +1822,30 @@ export default function CustodyPassport({
          to a payment the node then refused. Asked of the history the walk has
          just read, so nothing is fetched twice; silent when it cannot be
          asked, so what is shown is what was shown before. See
-         `forgetCoinsTheChainSpent`. */
+         `forgetCoinsTheChainSpent`.
+
+         AND WHAT THOSE COINS BECAME IS LOOKED FOR (2026/09/27). A coin spent
+         by another device may have left change that no note describes — the
+         77 of a payment of 23 out of 100, on a phone whose trail showed 0. The
+         coins the check stopped counting, and every described coin already
+         counted as spent that no walk has followed, are written down first,
+         and followed after this read by `followFromChain`, which also reads
+         the history back into Activity. */
       try {
-        await forgetCoinsTheChainSpent(opened.network.indexerHttpUrl, account, lastActionsRef.current)
+        const forgotten = await forgetCoinsTheChainSpent(
+          opened.network.indexerHttpUrl,
+          account,
+          lastActionsRef.current,
+        )
+        const walk = await import('../identity/custodyChangeWalk.js')
+        walk.rememberCustodyChangeRoots(account, [
+          ...forgotten,
+          ...walk.custodyChangeRoots(account, lastNotesRef.current),
+        ])
       } catch (cause) {
         console.info('[account-custody] which coins are still held could not be checked this time', cause)
       }
+      followFromChain(opened.network.indexerHttpUrl, account)
     }
 
     try {
@@ -2047,23 +2206,28 @@ export default function CustodyPassport({
    *
    * NOTHING IS OWED ON A NULL. A balance nobody has read is not a balance of
    * zero — see `custodyMilestonesLanded`.
+   *
+   * AND NOTHING IS STAMPED "NOW" THAT HAPPENED EARLIER (2026/09/27). A device
+   * that did not see the Passport made — its record carries none of the
+   * setup's hashes, because it came to the Passport through a sign-in or a
+   * synced passkey — waits for the account's history before writing any of
+   * this. Where that history carries its times, the rows it can back are
+   * written from it with the time each happened (`restoreChainActivity`), not
+   * here; and the name's registration, which that history does not hold and
+   * this device did not see, is not written as having happened just now.
+   * Where the history cannot be read, or carries no times, nothing changes.
    */
   useEffect(() => {
     const record = view?.record ?? null
     const address = record?.address ?? null
     if (onActivity === undefined || record === null || address === null) return
     const key = custodyActivityMarkKey(record.network, address)
-    let written: string[] = []
-    try {
-      const raw = window.localStorage.getItem(key)
-      const parsed: unknown = raw === null ? [] : JSON.parse(raw)
-      if (Array.isArray(parsed)) written = parsed.filter((row): row is string => typeof row === 'string')
-    } catch {
-      /* Storage blocked or unreadable. A trail is a convenience; the worst this
-         costs is a row written twice, which is better than a Passport whose
-         history is blank. */
-      written = []
-    }
+    const written = readActivityMarks(key)
+    const witnessed = record.txHashes.length > 0
+    if (!witnessed && historyReads === 0 && !holdingsRead) return
+    const history = lastActionsRef.current
+    const restoring =
+      onRestoreActivity !== undefined && history !== null && history.some((row) => row.at !== undefined)
     const holdings = {
       night: balance,
       shielded: tokens,
@@ -2087,6 +2251,11 @@ export default function CustodyPassport({
     }), STABLECOIN_COLOUR)
     const writtenNow: typeof owed = []
     for (const milestone of owed) {
+      if (restoring && milestone !== 'named' && custodyMilestoneAction(milestone, history) !== null) continue
+      if (restoring && !witnessed && milestone === 'named') {
+        writtenNow.push(milestone)
+        continue
+      }
       const opening = milestone === 'opening-night' || milestone === 'opening-stablecoin'
       const txHash = opening
         ? custodyOpeningDepositTxHash(milestone, lastActionsRef.current)
@@ -2105,11 +2274,7 @@ export default function CustodyPassport({
       writtenNow.push(milestone)
     }
     if (writtenNow.length === 0) return
-    try {
-      window.localStorage.setItem(key, JSON.stringify([...written, ...writtenNow]))
-    } catch {
-      // As above: nothing on screen depends on the write succeeding.
-    }
+    writeActivityMarks(key, [...written, ...writtenNow])
   }, [
     arriving,
     balance,
@@ -2117,6 +2282,7 @@ export default function CustodyPassport({
     historyReads,
     holdingsRead,
     onActivity,
+    onRestoreActivity,
     registerTxId,
     tokens,
     view,
@@ -4319,24 +4485,17 @@ async function reconcileCustodySpends(
 }
 
 /**
- * THE HELD-COIN CHECK, WIRED (2026/09/26): the indexer, the ledger's event
- * decoder, and the Compact runtime's hash, handed to
- * `../identity/custodySpentCoins.ts`, which decides. One POST for the spends
- * this tab has not read yet, none when there are none, and the same ten-second
- * ceiling as every other indexer read here.
+ * How this screen asks the indexer about the account's own transactions, and
+ * reads what it answers: one POST with the same ten-second ceiling as every
+ * other indexer read here, and the ledger's own event decoder. Shared by the
+ * held-coin check, the change walk, and the history read back into Activity,
+ * which between them make ONE read of each transaction per tab
+ * (`../identity/custodySpentCoins.ts`, `readCustodyTransactions`).
  */
-async function forgetCoinsTheChainSpent(
-  indexerHttpUrl: string,
-  account: { network: string; address: string },
-  actions: Awaited<ReturnType<typeof readCustodyActions>>,
-): Promise<void> {
-  const [spentCoins, ledger, runtime] = await Promise.all([
-    import('../identity/custodySpentCoins.js'),
-    import('@midnightntwrk/ledger-v9'),
-    import('@midnight-ntwrk/compact-runtime'),
-  ])
-  const result = await spentCoins.forgetSpentCustodyCoins(account, actions, {
-    ask: async (query) => {
+async function custodyChainReader(indexerHttpUrl: string) {
+  const ledger = await import('@midnightntwrk/ledger-v9')
+  return {
+    ask: async (query: string): Promise<unknown> => {
       const response = await fetch(indexerHttpUrl, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -4345,13 +4504,95 @@ async function forgetCoinsTheChainSpent(
       })
       return (await response.json()) as unknown
     },
-    decode: (raw) => ledger.Event.deserialize(hexToBytes(raw)).content,
+    decode: (raw: string) => ledger.Event.deserialize(hexToBytes(raw)).content,
+  }
+}
+
+/**
+ * THE HELD-COIN CHECK, WIRED (2026/09/26): the indexer, the ledger's event
+ * decoder, and the Compact runtime's hash, handed to
+ * `../identity/custodySpentCoins.ts`, which decides. One POST for the spends
+ * this tab has not read yet, none when there are none, and the same ten-second
+ * ceiling as every other indexer read here.
+ *
+ * Answers the coins it stopped counting, which the change walk then starts
+ * from (2026/09/27): a coin spent by another device may have left change no
+ * note describes.
+ */
+async function forgetCoinsTheChainSpent(
+  indexerHttpUrl: string,
+  account: { network: string; address: string },
+  actions: Awaited<ReturnType<typeof readCustodyActions>>,
+): Promise<readonly { colour: string; nonce: string; value: bigint }[]> {
+  const [spentCoins, reader, runtime] = await Promise.all([
+    import('../identity/custodySpentCoins.js'),
+    custodyChainReader(indexerHttpUrl),
+    import('@midnight-ntwrk/compact-runtime'),
+  ])
+  const result = await spentCoins.forgetSpentCustodyCoins(account, actions, {
+    ...reader,
     nullifierOf: (coin) => spentCoins.custodyCoinNullifier(runtime, coin, account.address),
   })
   if (result.forgotten.length > 0) {
     console.info(
       `[account-custody] ${result.forgotten.length} coin(s) described here were already spent on the chain; no longer counted`,
     )
+  }
+  return result.forgotten
+}
+
+/**
+ * THE CHANGE WALK, WIRED (2026/09/27): the coins the chain says were spent,
+ * followed through each payment's change to the coin the account still holds,
+ * which is filed at the position the chain gave it. The derivation, the
+ * search and its bound, and every rule are `../identity/custodyChangeWalk.ts`;
+ * what is here is the indexer, the decoder, the Compact runtime, and `busy` —
+ * a payment owns the store while it runs, so the walk stops rather than write
+ * beside it, and the next read carries on. Answers how many coins it filed.
+ */
+async function recoverChangeFromChain(
+  indexerHttpUrl: string,
+  account: { network: string; address: string },
+  actions: Awaited<ReturnType<typeof readCustodyActions>>,
+  busy: () => boolean,
+): Promise<number> {
+  const [walk, reader, runtime] = await Promise.all([
+    import('../identity/custodyChangeWalk.js'),
+    custodyChainReader(indexerHttpUrl),
+    import('@midnight-ntwrk/compact-runtime'),
+  ])
+  const result = await walk.recoverCustodyChange(account, actions, [], {
+    ...reader,
+    ...walk.custodyChangeHashes(runtime, account.address),
+    search: { shouldStop: busy },
+  })
+  if (result.added.length > 0) {
+    console.info(
+      `[account-custody] found the change of ${result.added.length} payment(s) on the chain; now counted`,
+    )
+  }
+  return result.added.length
+}
+
+/** The setup rows this device has written for an account, or none where storage says nothing. */
+function readActivityMarks(key: string): string[] {
+  try {
+    const raw = window.localStorage.getItem(key)
+    const parsed: unknown = raw === null ? [] : JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed.filter((row): row is string => typeof row === 'string') : []
+  } catch {
+    /* Storage blocked or unreadable. A trail is a convenience; the worst this
+       costs is a row written twice, which is better than a Passport whose
+       history is blank. */
+    return []
+  }
+}
+
+function writeActivityMarks(key: string, marks: readonly string[]): void {
+  try {
+    window.localStorage.setItem(key, JSON.stringify(marks))
+  } catch {
+    // Nothing on screen depends on the write succeeding.
   }
 }
 

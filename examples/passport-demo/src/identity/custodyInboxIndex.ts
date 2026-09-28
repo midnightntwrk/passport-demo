@@ -131,6 +131,15 @@ export const CUSTODY_ACTION_HISTORY_LIMIT = 200;
  * arriving — a Passport saying a payment it had already spent was on its way
  * (live, 2026/09/18). `src/verify/indexer.ts` and `src/lib/indexerTx.ts` both
  * put the field inside the fragment; this is the same shape.
+ *
+ * `block { timestamp }` SITS OUTSIDE IT, and the one extra field is what lets
+ * a device that did not see a Passport's history happen lay it down at the
+ * times it happened (2026/09/27). A Passport brought back on a new phone wrote
+ * its whole setup into Activity as "1 min ago", because the only clock it had
+ * was its own; the block's is the real one. `block` is declared on the
+ * `Transaction` interface, so it needs no fragment — asked this way of
+ * `indexer.stagenet.shielded.tools/api/v4` on 2026/09/27, it answered every
+ * action of a real account with its block's milliseconds.
  */
 export function custodyActionHistoryQuery(
   address: string,
@@ -141,7 +150,7 @@ export function custodyActionHistoryQuery(
     actions(limit: ${limit}) {
       __typename
       ... on ContractCall { entryPoint }
-      transaction { hash ... on RegularTransaction { transactionResult { status } } }
+      transaction { hash block { timestamp } ... on RegularTransaction { transactionResult { status } } }
     }
   }
 }`;
@@ -174,6 +183,12 @@ export interface CustodyActionRow {
    * transaction that did not do what its entry point names.
    */
   readonly status?: string | null;
+  /**
+   * When the block that carried it was made, in milliseconds — or ABSENT where
+   * the answer carried no time. Never a guess: a row with no time is a row
+   * Activity does not place, rather than one it places at "now".
+   */
+  readonly at?: number;
 }
 
 /** The action types that run no circuit and therefore append nothing. */
@@ -185,6 +200,19 @@ const KNOWN_ACTION_KINDS: readonly CustodyActionKind[] = [
   'ContractDeploy',
   'ContractUpdate',
 ];
+
+/**
+ * A block's time in milliseconds, or undefined where the answer carried no
+ * readable one. The indexer answers a number; a numeric string is read the
+ * same way, and anything that is not a whole, positive number of milliseconds
+ * is not a time.
+ */
+function blockTime(block: unknown): number | undefined {
+  if (!block || typeof block !== 'object') return undefined;
+  const raw = (block as { timestamp?: unknown }).timestamp;
+  const value = typeof raw === 'string' && /^\d+$/.test(raw) ? Number(raw) : raw;
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
 
 /**
  * The account's actions OLDEST FIRST, or null when the answer was not one.
@@ -226,7 +254,7 @@ export function custodyActionRowsFrom(
     const row = action as { __typename?: unknown; entryPoint?: unknown; transaction?: unknown };
     const transaction =
       row.transaction && typeof row.transaction === 'object'
-        ? (row.transaction as { hash?: unknown; transactionResult?: unknown })
+        ? (row.transaction as { hash?: unknown; transactionResult?: unknown; block?: unknown })
         : null;
     const result =
       transaction && transaction.transactionResult && typeof transaction.transactionResult === 'object'
@@ -236,6 +264,7 @@ export function custodyActionRowsFrom(
        null: the count treats "not said" and "said, and it was not SUCCESS" as
        different answers. */
     const status = result && typeof result.status === 'string' ? result.status : undefined;
+    const at = blockTime(transaction?.block);
     rows.push({
       kind: KNOWN_ACTION_KINDS.includes(row.__typename as CustodyActionKind)
         ? (row.__typename as CustodyActionKind)
@@ -246,6 +275,7 @@ export function custodyActionRowsFrom(
           ? transaction.hash
           : null,
       ...(status === undefined ? {} : { status }),
+      ...(at === undefined ? {} : { at }),
     });
   }
   /* A FULL PAGE IS A TRUNCATED ONE, and a truncated history counts SHORT.
