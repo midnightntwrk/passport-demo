@@ -310,13 +310,10 @@ test.describe('coming back on a new device, from a browser that holds nothing (2
       );
       await saysNothingForbidden(page);
 
-      /* HOME, by way of the one question a Passport that has just come back
-         is asked (#108): its earlier payments. */
-      await expect(page.getByRole('heading', { name: 'Bring back your earlier payments' })).toBeVisible({
-        timeout: 120_000,
-      });
-      await page.getByRole('button', { name: 'Not now' }).click();
-      await expect(greeting(page)).toBeVisible({ timeout: 60_000 });
+      /* HOME, with no question asked: the earlier payments come back from the
+         sign-in's own metadata, not from a password backup. */
+      await expect(greeting(page)).toBeVisible({ timeout: 120_000 });
+      await expect(page.getByRole('heading', { name: 'Bring back your earlier payments' })).toHaveCount(0);
       await expect(page.locator('.mnid-alias')).toHaveText(`${RESOLVABLE_NAME}.night`);
       /* The way back that brought it here is ON, not offered again. */
       await expect(page.getByRole('heading', { name: 'Add a way back' })).toHaveCount(0);
@@ -376,11 +373,7 @@ test.describe('coming back on a new device, from a browser that holds nothing (2
 
       /* TRY AGAIN RESUMES IT, from the same records. */
       await page.getByTestId('adopt-retry').click();
-      await expect(page.getByRole('heading', { name: 'Bring back your earlier payments' })).toBeVisible({
-        timeout: 120_000,
-      });
-      await page.getByRole('button', { name: 'Not now' }).click();
-      await expect(greeting(page)).toBeVisible({ timeout: 60_000 });
+      await expect(greeting(page)).toBeVisible({ timeout: 120_000 });
       await expect(page.locator('.mnid-alias')).toHaveText(`${RESOLVABLE_NAME}.night`);
       expect(chain.handedOver).toEqual(['add_device_with_k256', 'add_device_with_k256', 'rotate_enc_key_with_jubjub']);
     } finally {

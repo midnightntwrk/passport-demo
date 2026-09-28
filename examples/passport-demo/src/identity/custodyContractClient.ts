@@ -3844,8 +3844,9 @@ function deviceIsEnrolled(
  * the honest limit of this circuit on its own.
  *
  * WHAT READS THE PAST INSTEAD (2026/09/26), with no contract change: the old
- * key itself, carried in the person's password backup (`./backup.ts`) and kept
- * on the new device as an EARLIER key beside the new one (`./viewingKeys.ts`).
+ * key itself, kept in the sign-in's metadata when the sign-in was added as the
+ * way back (`./signInViewingKeys.ts`), and kept on the new device as an EARLIER
+ * key beside the new one (`./viewingKeys.ts`).
  * The inbox walk tries both, so the rotation still does what it is for — every
  * delivery from now on is readable by the new passkey alone — and the notes
  * sealed before it are read with the key they were sealed to. Nothing is

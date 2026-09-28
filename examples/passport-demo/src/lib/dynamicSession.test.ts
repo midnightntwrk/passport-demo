@@ -254,6 +254,9 @@ describe('the store', () => {
          `0x` + r‖s‖v out, with nothing added to it on the way. */
       signRaw: vi.fn(() => Promise.resolve('0xrawsig')),
       signOut: vi.fn(() => Promise.resolve()),
+      /* The metadata the viewing key is kept in beside the way back. */
+      readMetadata: vi.fn(() => Promise.resolve(undefined)),
+      writeMetadata: vi.fn((metadata: Readonly<Record<string, unknown>>) => Promise.resolve(metadata)),
     }
     publishDynamicActions(actions)
     expect(readDynamicActions()).toBe(actions)

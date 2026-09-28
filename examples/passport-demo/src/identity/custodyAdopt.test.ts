@@ -46,7 +46,6 @@ import {
 } from './custodyContractClient.js';
 import { k1PrivateStateId, loadCustodyName } from './custodyContractSession.js';
 import { passkeyCustodyDevice } from './passkeyCustody.js';
-import { earlierPaymentsOfferDue } from './viewingKeys.js';
 import { loadK1CoinStore } from './k1CoinStore.js';
 import { adoptDeviceKey, bringPassportHere, type AdoptDeviceKeyOptions } from './custodyAdopt.js';
 import { loadCustodyPasskeyPointer } from '../lib/custodyRoute.js';
@@ -419,7 +418,6 @@ describe('bringing a Passport to a device that has never held anything', () => {
     expect(typeof loadBackupRecord(storage, userKey, NETWORK)?.doneAt).toBe('number');
     /* The account's deliveries point at this device now, and it holds the key. */
     expect(loadK1CoinStore({ network: NETWORK, address: ADDRESS }).encSecretKeyHex).toMatch(/^[0-9a-f]{64}$/u);
-    expect(earlierPaymentsOfferDue(storage, { network: NETWORK, address: ADDRESS })).toBe(true);
   });
 
   it('writes no provider it was not given', async () => {
@@ -515,7 +513,6 @@ describe('a second half that is run again', () => {
 
     expect(result.pointedAtNewKey).toBe(false);
     expect(loadCustodyPasskeyPointer(storage, 'credential-on-the-new-device', NETWORK)).toBe(result.userKey);
-    expect(earlierPaymentsOfferDue(storage, { network: NETWORK, address: ADDRESS })).toBe(true);
   });
 });
 
