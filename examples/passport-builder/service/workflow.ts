@@ -13,6 +13,7 @@ import type { GenerationProgress } from '../shared/generation.js';
 import { resolveAssets } from './assets.js';
 import { ModelServiceError } from './model-stream.js';
 import { GenerationValidationError, UnsupportedAppError } from './validation.js';
+import { checkApp } from './app-typecheck.js';
 
 type DeploymentJournal = Pick<DeploymentResult, 'network' | 'txId' | 'contractAddress'>;
 type WorkflowDependencies = {
@@ -124,6 +125,9 @@ export class Workflow {
     if (this.dependencies.compile) return this.dependencies.compile(project);
     project.status = 'compiling'; project.build = undefined; project.previewUrl = undefined;
     this.registry.snapshot(project);
+    // Reject broken runtime calls before paying for assets or building proofs.
+    // bundleApp verifies this again through the bounded source cache.
+    if (!this.dependencies.bundle) await checkApp(project.files['src/App.tsx']);
     const id = randomUUID();
     const directory = this.buildDirectory(id);
     await mkdir(directory, { recursive: true, mode: 0o700 });

@@ -23,6 +23,15 @@ shell. A CSS-only revision corrected the colours, reused the cached image and
 existing contract, and retained its state. Generation guidance now explicitly
 documents the shared theme tokens and foreground/background pairing.
 
+A later source review found a UI integration defect that contract execution alone
+did not catch: the generated action handler supplied named arguments where the
+runtime requires an ordered array. The UI was corrected without changing the
+contract. Generated applications now pass TypeScript validation against the
+actual maintained runtime before image generation, compilation, or publication.
+This runs in a bounded, credential-free process and feeds errors into the repair
+loop. Regression tests reproduce the original defect and verify repair. The
+116-second generation timing above does not include these manual corrections.
+
 ## Actual chain writes
 
 These were explicit operator calls to the permissionless test contract, with no
@@ -49,7 +58,7 @@ A fresh ledger query returned an empty records map.
 
 ## Automated checks and remaining release boundary
 
-- Builder: 111 tests passed; four opt-in real-compiler tests skipped. The live
+- Builder: 114 tests passed; four opt-in real-compiler tests skipped. The live
   application above exercised compilation, proving, deployment, and reads.
 - Passport: 3,427 tests passed; the explicit pure-helper coverage denominator
   passed at 100%. Typecheck, production build, and all 84 PWA checks passed.

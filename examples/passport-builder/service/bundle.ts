@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { previewSupport } from '../runtime/preview-support.js';
 import type { ProjectFiles } from '../shared/types.js';
+import { checkApp } from './app-typecheck.js';
 const require = createRequire(import.meta.url);
 const runtimeClient = fileURLToPath(new URL('../runtime/client.tsx', import.meta.url));
 const runtimeUi = fileURLToPath(new URL('../runtime/ui.tsx', import.meta.url));
@@ -11,6 +12,7 @@ const runtimeUiStyles = fileURLToPath(new URL('../runtime/ui-styles.ts', import.
 const packageDirectory = fileURLToPath(new URL('../', import.meta.url));
 
 export async function bundleApp(files: ProjectFiles, images: Record<string, { src: string; alt: string }> = {}): Promise<string> {
+  await checkApp(files['src/App.tsx']);
   const [clientSource, uiSource, uiStylesSource] = await Promise.all([readFile(runtimeClient, 'utf8'), readFile(runtimeUi, 'utf8'), readFile(runtimeUiStyles, 'utf8')]);
   const maintainedSources: Record<string, string> = { '@midnight-passport/app': clientSource, '@midnight-passport/ui': uiSource, 'ui-styles': uiStylesSource };
   maintainedSources['@midnight-passport/assets'] = `import React from 'react'; const images=${JSON.stringify(images)}; export function Asset({name,alt,...props}){const image=images[name]; return image ? <img {...props} src={image.src} alt={alt ?? image.alt} loading="lazy" decoding="async"/> : <div {...props} role="img" aria-label={alt || 'Image unavailable'} style={{aspectRatio:'16 / 9',background:'linear-gradient(135deg,#181b2b,#313c59)',...props.style}}/>; }`;

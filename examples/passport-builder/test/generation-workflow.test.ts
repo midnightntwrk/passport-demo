@@ -5,12 +5,33 @@ import { Workflow } from '../service/workflow.js';
 import { readGenerationStream } from '../service/generation.js';
 import type { Project } from '../shared/types.js';
 import type { GenerationProgress } from '../shared/generation.js';
+import { checkApp } from '../service/app-typecheck.js';
 
 function project(): Project {
   return { id: 'stream-test', name: 'Existing', description: '', model: 'test/model', status: 'draft', revision: 1,
     files: { 'contract.compact': 'old contract', 'src/App.tsx': 'old app', 'src/styles.css': 'old css' }, messages: [], logs: [], deployments: [], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
 }
 function deferred() { let resolve!: () => void; const promise = new Promise<void>(done => { resolve = done; }); return { promise, resolve }; }
+
+test('UI integration errors enter compiler repair before the application can become ready', async () => {
+  const registry = new Registry(':memory:'); const p = project(); registry.save(p); let calls = 0;
+  const ui = (args: string) => `import {usePassport} from '@midnight-passport/app'; export default function App(){const {callContract}=usePassport(); return <button onClick={()=>void callContract('createOffer',${args},'Create offer')}>Create</button>}`;
+  const workflow = new Workflow(registry, {
+    autoPublish: false,
+    generate: async (_project, prompt) => {
+      calls++;
+      if (calls > 1) assert.match(prompt, /Generated UI integration errors/);
+      return { name: 'Offers', description: '', files: { ...p.files, 'src/App.tsx': ui(calls === 1 ? "{id:'1'}" : "['1']") } };
+    },
+    compile: async value => { await checkApp(value.files['src/App.tsx']); value.status = 'ready'; },
+  });
+  try {
+    workflow.run(p, 'generate', 'Build real offers');
+    for (let attempt = 0; attempt < 1500 && workflow.active.has(p.id); attempt++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.equal(workflow.active.has(p.id), false); assert.equal(p.status, 'ready'); assert.equal(calls, 2);
+    assert.match(p.files['src/App.tsx'], /\['1'\]/); assert.equal(p.deployments.length, 0);
+  } finally { registry.close(); }
+});
 async function settled(workflow: Workflow, id: string) {
   for (let attempt = 0; attempt < 200 && workflow.active.has(id); attempt++) await new Promise(resolve => setTimeout(resolve, 10));
   assert.equal(workflow.active.has(id), false, 'workflow must finish');
