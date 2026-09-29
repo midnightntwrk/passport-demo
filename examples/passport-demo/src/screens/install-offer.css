@@ -108,30 +108,63 @@
   outline-offset: 2px;
 }
 
-/* THE LANDING'S SECONDARY ACTION, under Sign up and Log in: an outlined pill,
-   quieter than the two doors above it and louder than the text links below. */
+/* THE LANDING'S INSTALL BUTTON, under Sign up and Log in (2026/09/29): a
+   full-width row with a badge, a title, and where Passport will live once
+   installed — quieter than the two doors above it, and plainly a button.
+   Shown on every browser unless Passport is installed. */
 .mninstall-landing {
-  display: inline-flex;
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) 20px;
   align-items: center;
-  justify-content: center;
-  gap: 8px;
+  gap: 12px;
   width: 100%;
-  min-height: 46px;
+  min-height: 60px;
   margin-top: 12px;
-  padding: 0 18px;
+  padding: 10px 14px 10px 10px;
   border: var(--mn-hairline) solid var(--mn-border-medium);
-  border-radius: var(--mn-radius-pill);
+  border-radius: 16px;
   color: var(--mn-text-primary);
-  background: transparent;
+  background:
+    radial-gradient(120% 160% at 0% 0%, var(--mn-accent-soft) 0%, transparent 58%),
+    var(--mn-surface-raised);
   font-family: var(--mn-font-body);
-  font-size: 14px;
-  font-weight: 650;
+  text-align: left;
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
-  transition: background .15s ease, border-color .15s ease;
+  transition: background .15s ease, border-color .15s ease, transform .12s ease;
 }
-.mninstall-landing:hover { background: var(--mn-surface-hover); border-color: var(--mn-border-strong); }
-.mninstall-landing svg { color: var(--mn-accent-ink); }
+.mninstall-landing:hover { border-color: var(--mn-accent-ink); background: var(--mn-accent-soft); }
+.mninstall-landing:active { transform: scale(.99); }
+
+.mninstall-landing-badge {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  color: var(--mn-accent-text, #fff);
+  background: var(--mn-accent);
+  box-shadow: 0 4px 12px rgb(0 0 254 / 16%);
+}
+
+.mninstall-landing-copy { display: grid; gap: 2px; min-width: 0; }
+.mninstall-landing-title { font-size: 15px; font-weight: 650; line-height: 1.25; letter-spacing: -.005em; }
+.mninstall-landing-line {
+  overflow: hidden;
+  color: var(--mn-text-secondary);
+  font-size: 13px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mninstall-landing-chevron { color: var(--mn-text-muted); transition: transform .15s ease, color .15s ease; }
+.mninstall-landing:hover .mninstall-landing-chevron { color: var(--mn-accent-ink); transform: translateX(2px); }
+
+@media (prefers-reduced-motion: reduce) {
+  .mninstall-landing,
+  .mninstall-landing-chevron { transition: none; }
+  .mninstall-landing:active { transform: none; }
+}
 
 /* THE IPHONE'S TWO TAPS, illustrated: the number, the glyph Safari itself
    shows, and the words. */
@@ -165,4 +198,23 @@
   .mninstall-card-primary,
   .mninstall-landing { transition: none; }
   .mninstall-card-primary:active { transform: none; }
+}
+
+/* THE STEPS ON A WIDE SCREEN (2026/09/29): a sheet from the bottom edge is a
+   phone's shape. On a desktop it spanned the whole window, so there it is a
+   centred card instead. */
+@media (min-width: 720px) {
+  .pwainstall-sheet[data-testid='install-steps'] {
+    top: 50%;
+    right: auto;
+    bottom: auto;
+    left: 50%;
+    width: min(440px, calc(100vw - 48px));
+    padding: 22px;
+    border: var(--mn-hairline) solid var(--mn-border-medium);
+    border-radius: var(--mn-radius-lg);
+    transform: translate(-50%, -50%);
+    animation: none;
+  }
+  .pwainstall-sheet[data-testid='install-steps'] .pwainstall-grip { display: none; }
 }

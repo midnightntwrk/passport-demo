@@ -189,3 +189,108 @@ export function installCardVisible(input: InstallCardInput): boolean {
   if (installAffordance(input) === 'hidden') return false;
   return !installSnoozed(input.snoozedUntil, input.now);
 }
+
+/* -------------------------------------------------------------------------- */
+/* The landing's button, on every browser (2026/09/29)                        */
+/* -------------------------------------------------------------------------- */
+/*
+ * THE REVIEW. The landing's "Install Passport" appeared only on a phone whose
+ * browser could install right then, so a reviewer on a desktop saw nothing,
+ * and a desktop Chrome that had not yet offered its prompt saw nothing either.
+ * Every browser a reader is likely to hold CAN install Passport, or can say
+ * where to go to: Chromium from its menu, Safari on a Mac from File → Add to
+ * Dock (Safari 17), iOS from the Share sheet. So the landing always offers it,
+ * unless Passport is already installed, and the press does the most it can:
+ * the browser's own dialogue where the page holds one, and the right steps for
+ * this browser where it does not.
+ */
+
+/** Which steps install Passport in this browser, when it cannot be asked directly. */
+export type InstallGuide = 'ios' | 'android' | 'mac-safari' | 'chrome' | 'edge' | 'other';
+
+/** One step, and the glyph beside it. */
+export interface InstallGuideStep {
+  readonly glyph: 'share' | 'add' | 'menu' | 'dock' | 'install' | 'browser';
+  readonly text: string;
+}
+
+/** What the steps sheet says for one browser. */
+export interface InstallGuideCopy {
+  readonly title: string;
+  readonly lede: string;
+  readonly steps: readonly InstallGuideStep[];
+}
+
+/** The browser, read off the user agent — order matters: Edge and Chrome both say "Chrome", every iOS browser says "Safari". */
+export function installGuide(userAgent: string, maxTouchPoints: number): InstallGuide {
+  if (isIosDevice(userAgent, maxTouchPoints)) return 'ios';
+  if (/Android/i.test(userAgent)) return 'android';
+  if (/Edg\//.test(userAgent)) return 'edge';
+  if (/Chrome|Chromium|CriOS/.test(userAgent) && !/OPR\//.test(userAgent)) return 'chrome';
+  if (/Macintosh/.test(userAgent) && isSafariBrowser(userAgent)) return 'mac-safari';
+  return 'other';
+}
+
+/** The steps for each browser. Shown, never performed. */
+export const INSTALL_GUIDES: Readonly<Record<InstallGuide, InstallGuideCopy>> = {
+  ios: {
+    title: 'Add Passport to your home screen',
+    lede: 'It opens full screen, like any other app.',
+    steps: [
+      { glyph: 'share', text: 'Tap Share in the browser’s toolbar.' },
+      { glyph: 'add', text: 'Choose “Add to Home Screen”.' },
+    ],
+  },
+  android: {
+    title: 'Add Passport to your home screen',
+    lede: 'It opens full screen, like any other app.',
+    steps: [
+      { glyph: 'menu', text: 'Open the browser’s menu (⋮).' },
+      { glyph: 'install', text: 'Choose “Install app” or “Add to Home screen”.' },
+    ],
+  },
+  'mac-safari': {
+    title: 'Add Passport to your Dock',
+    lede: 'It opens in its own window, one click away.',
+    steps: [
+      { glyph: 'menu', text: 'In the menu bar, choose File.' },
+      { glyph: 'dock', text: 'Choose “Add to Dock”.' },
+    ],
+  },
+  chrome: {
+    title: 'Install Passport on this computer',
+    lede: 'It opens in its own window, one click away.',
+    steps: [
+      { glyph: 'menu', text: 'Open Chrome’s menu (⋮) at the top right.' },
+      { glyph: 'install', text: 'Choose “Cast, save, and share”, then “Install page as app”.' },
+    ],
+  },
+  edge: {
+    title: 'Install Passport on this computer',
+    lede: 'It opens in its own window, one click away.',
+    steps: [
+      { glyph: 'menu', text: 'Open Edge’s menu (…) at the top right.' },
+      { glyph: 'install', text: 'Choose “Apps”, then “Install this site as an app”.' },
+    ],
+  },
+  other: {
+    title: 'Install Passport',
+    lede: 'This browser cannot install apps from a website.',
+    steps: [
+      { glyph: 'browser', text: 'Open this page in Chrome, Edge, or Safari.' },
+      { glyph: 'install', text: 'Choose “Install Passport” there.' },
+    ],
+  },
+};
+
+/** The line under the landing's button: where Passport will live once installed. */
+export function installLandingLine(guide: InstallGuide): string {
+  if (guide === 'ios' || guide === 'android') return 'Keep it on your home screen';
+  if (guide === 'mac-safari') return 'Keep it in your Dock';
+  return 'Open it like an app, in its own window';
+}
+
+/** Whether the landing offers to install: always, unless Passport is installed already. */
+export function landingInstallVisible(environment: InstallEnvironment): boolean {
+  return !alreadyInstalled(environment);
+}
