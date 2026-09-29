@@ -1,0 +1,13 @@
+{
+  "protocol": "org.midnight.passport.capabilities/v1",
+  "networks": ["stagenet"],
+  "profile": { "popup": true, "signedRedirect": true, "custody": true },
+  "contracts": {
+    "protocol": "org.midnight.passport.contract-tx/v1",
+    "approval": true,
+    "publicState": true,
+    "assetTransfers": false,
+    "privateState": false,
+    "onChainCallerIdentity": false
+  }
+}

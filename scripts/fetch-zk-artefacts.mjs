@@ -92,7 +92,11 @@ function artefactsVerify({ quiet } = {}) {
     cwd: repositoryRoot,
     stdio: quiet ? 'ignore' : 'inherit',
   });
-  return result.status === 0;
+  const required = lock.requiredContracts || ['account', 'midnames'];
+  const managedRoot = resolve(repositoryRoot, 'examples/passport-balancer/contracts-stagenet/managed');
+  const complete = required.every(name => ['keys', 'zkir'].every(part => existsSync(resolve(managedRoot, name, part))));
+  if (!quiet && !complete) console.error(`fetch-zk-artefacts: required contract artefacts are missing (${required.join(', ')}).`);
+  return result.status === 0 && complete;
 }
 
 if (artefactsVerify({ quiet: true })) {

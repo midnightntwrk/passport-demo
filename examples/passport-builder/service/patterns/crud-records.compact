@@ -1,0 +1,35 @@
+pragma language_version >= 0.26;
+import CompactStandardLibrary;
+
+struct RecordData {
+  label: Bytes<32>;
+  value: Bytes<32>;
+}
+
+export ledger records: Map<Uint<64>, RecordData>;
+
+constructor() {}
+
+export circuit createRecord(recordId: Uint<64>, label: Bytes<32>, value: Bytes<32>): [] {
+  const id = disclose(recordId);
+  assert(!records.member(id), "Record ID already exists");
+  records.insert(id, RecordData {
+    label: disclose(label),
+    value: disclose(value),
+  });
+}
+
+export circuit updateRecord(recordId: Uint<64>, label: Bytes<32>, value: Bytes<32>): [] {
+  const id = disclose(recordId);
+  assert(records.member(id), "Record does not exist");
+  records.insert(id, RecordData {
+    label: disclose(label),
+    value: disclose(value),
+  });
+}
+
+export circuit deleteRecord(recordId: Uint<64>): [] {
+  const id = disclose(recordId);
+  assert(records.member(id), "Record does not exist");
+  records.remove(id);
+}

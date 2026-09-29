@@ -1,0 +1,8 @@
+node_modules/
+dist/
+data/
+.env
+.env.local
+public/runtime.js
+public/runtime.js.map
+.railway/

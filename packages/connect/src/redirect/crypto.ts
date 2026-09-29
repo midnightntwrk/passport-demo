@@ -13,7 +13,7 @@
  * package's core stays at zero runtime dependencies.
  * ========================================================================= */
 
-import { schnorr } from '@noble/curves/secp256k1.js';
+import { schnorr, secp256k1 } from '@noble/curves/secp256k1.js';
 import { hexToBytes } from '@noble/curves/utils.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { bech32m } from '@scure/base';
@@ -101,4 +101,9 @@ export function verifyPassportKeyBinding(publicKeyHex: string, address: string):
     if (payload[index] !== expected[index]) equal = false;
   }
   return equal;
+}
+
+/** Provider-held custody keys sign the exact SHA-256 digest, without EIP-191. */
+export function verifyPassportEcdsaSignature(key: string, payload: Uint8Array, signature: string): boolean {
+  return secp256k1.verify(hexToBytes(signature), sha256(payload), hexToBytes(key), { prehash: false, lowS: false });
 }

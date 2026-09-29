@@ -10,6 +10,7 @@ import {
   selectPassportCallbackProfile,
   type PassportCallbackLaunch,
   type PassportCallbackSigner,
+  type PassportCallbackEnvelope,
 } from '../identity/callbackProtocol.js';
 import {
   settlePassportCallbackLaunch,
@@ -60,6 +61,7 @@ import {
  */
 
 interface CallbackConsentProps {
+  signResponse?: (bytes: Uint8Array, encoded: string) => Promise<PassportCallbackEnvelope>;
   /** The launch captured at import time. Absent on an ordinary Passport visit. */
   launch: PassportCallbackLaunchRecord;
   /**
@@ -171,7 +173,11 @@ export function PassportCallbackConsent({
   displayName,
   passportContract,
   getSigningKeystore,
+  signResponse,
 }: CallbackConsentProps) {
+  const [signing, setSigning] = useState(false);
+  const [signError, setSignError] = useState<string | null>(null);
+  const signingLock = useRef(false);
   /**
    * THE PIN. Captured once, on first render, and never recomputed. Everything
    * below — the origin shown to the user, the fields listed, the redirect
@@ -279,26 +285,34 @@ export function PassportCallbackConsent({
   }
   if (!everythingResolved && !graceElapsed && phase.kind === 'asking') return null;
 
-  const approve = () => {
-    const profile = selectPassportCallbackProfile(pinned.fields, {
-      displayName,
-      passportContract,
-    });
-    const { bytes, encoded } = buildPassportCallbackPayload({ launch: pinned, profile });
+  const approve = async () => {
+    if (signingLock.current) return;
+    signingLock.current = true;
+    setSigning(true);
+    setSignError(null);
+    try {
+      const profile = selectPassportCallbackProfile(pinned.fields, {
+        displayName,
+        passportContract,
+      });
+      const { bytes, encoded } = buildPassportCallbackPayload({ launch: pinned, profile });
 
-    /* The keystore is read here and nowhere else — one read, at the moment the
-       user consented, so a wallet that opened while the sheet was on screen is
-       used and a wallet that closed is not signed with. */
-    const keystore = getSigningKeystore?.() ?? null;
-    let signer: PassportCallbackSigner | null = null;
-    if (keystore) {
-      signer = {
-        publicKey: encodeTagged(keystore.getPublicKey()),
-        sign: (payload) => encodeTagged(keystore.signData(payload)),
-      };
-    }
-    const envelope = sealPassportCallbackResponse(encoded, bytes, signer);
-    leave(passportCallbackSuccessUrl(pinned, envelope), 'shared');
+      /* The keystore is read here and nowhere else — one read, at the moment the
+         user consented, so a wallet that opened while the sheet was on screen is
+         used and a wallet that closed is not signed with. */
+      const keystore = getSigningKeystore?.() ?? null;
+      let signer: PassportCallbackSigner | null = null;
+      if (keystore) {
+        signer = {
+          publicKey: encodeTagged(keystore.getPublicKey()),
+          sign: (payload) => encodeTagged(keystore.signData(payload)),
+        };
+      }
+      const envelope = signResponse ? await signResponse(bytes, encoded) : sealPassportCallbackResponse(encoded, bytes, signer);
+      leave(passportCallbackSuccessUrl(pinned, envelope), 'shared');
+    } catch (cause) {
+      setSignError(cause instanceof Error ? cause.message : 'Passport could not sign this reply. Nothing was shared.');
+    } finally { signingLock.current = false; setSigning(false); }
   };
 
   const deny = () => leave(passportCallbackErrorUrl(pinned, 'denied'), 'declined');
@@ -365,14 +379,15 @@ export function PassportCallbackConsent({
               check it was not altered on the way.
             </div>
             <div className="profile-consent-actions">
-              <button type="button" className="deny" onClick={deny}>
+              <button type="button" className="deny" onClick={deny} disabled={signing}>
                 Don’t share
               </button>
-              <button type="button" className="approve" onClick={approve}>
-                Share and return to {pinned.callbackOrigin.replace(/^https?:\/\//, '')}
+              <button type="button" className="approve" onClick={() => void approve()} disabled={signing}>
+                {signing ? 'Confirming your Passport…' : `Share and return to ${pinned.callbackOrigin.replace(/^https?:\/\//, '')}`}
                 <ArrowRight size={16} aria-hidden />
               </button>
             </div>
+            {signError ? <p role="alert">{signError}</p> : null}
           </>
         )}
       </section>

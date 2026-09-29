@@ -263,7 +263,7 @@ export interface PassportCallbackEnvelope {
   readonly type: 'passport.callback.response';
   /** base64url of the exact bytes that were signed. */
   readonly payload: string;
-  readonly scheme: typeof PASSPORT_CALLBACK_SIGNATURE_SCHEME | 'none';
+  readonly scheme: typeof PASSPORT_CALLBACK_SIGNATURE_SCHEME | 'ecdsa-secp256k1-sha256' | 'none';
   readonly publicKey?: string;
   readonly signature?: string;
 }
@@ -819,6 +819,8 @@ export function verifyPassportCallbackResponse(
     }
     if (!valid) return { ok: false, reason: 'the signature does not match the payload' };
     signed = true;
+  } else if (envelope.scheme !== 'none') {
+    return { ok: false, reason: 'no verifier was supplied for this signature scheme' };
   } else if (requireSignature) {
     return { ok: false, reason: 'the reply is unsigned and this app requires a signature' };
   }

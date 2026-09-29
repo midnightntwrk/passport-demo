@@ -1,0 +1,20 @@
+# Passport Builder Docker context: only the service and its maintained SDK.
+**
+!packages/
+!packages/connect/
+!packages/connect/**
+!skills/
+!skills/midnight-passport/
+!skills/midnight-passport/**
+!examples/
+!examples/passport-builder/
+!examples/passport-builder/**
+**/node_modules
+**/dist
+**/data
+**/.env
+**/.env.local
+**/.git
+**/.railway
+**/public/runtime.js
+**/public/runtime.js.map

@@ -23,7 +23,7 @@
 
 export type PassportMode = 'iframe' | 'popup';
 
-export type PassportExchangeKind = 'profile' | 'tx' | 'incentive';
+export type PassportExchangeKind = 'profile' | 'tx' | 'contract-tx' | 'incentive';
 
 export interface PassportExchangePair {
   readonly requestId: string;

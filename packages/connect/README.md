@@ -151,3 +151,38 @@ into this package: sign in with a name and no address, pay a cover charge
 through the pop-up, and verify a signed redirect reply in the browser with its
 whole check trail on screen. `docs/demo/integrating.md` is the ten-minute
 version.
+
+## Restricted stagenet contract calls
+
+The builder integration adds `passport.requestContractTransaction(intent)`.
+Use a Passport build containing the `contract-tx/v1` receiver. Older deployed
+Passport versions do not implement this channel. For local development,
+run the Passport demo at `http://localhost:5175` and use that exact SDK origin.
+Passkeys remain scoped to their original relying party; a production Passport
+credential is not automatically available on localhost.
+
+```ts
+const outcome = await passport.requestContractTransaction({
+  networkId: 'stagenet',
+  transaction: prepared.transaction, // hex-encoded proven, unbound ledger-v9 bytes
+  contractAddress: deployment.contractAddress, // raw 64-character lower-case hex
+  entryPoint: 'increment',
+  purpose: 'Add one vote',
+});
+if (outcome.status === 'submitted') console.log(outcome.txId);
+```
+
+Prepare the transaction with the coherent ledger-9 Midnight stack, then call
+`proofProvider.proveTx` before serialising it. The accepted representation is
+`Transaction<SignatureEnabled, Proof, PreBinding>`: the decoder markers are
+`signature`, `proof`, and `pre-binding`. The request carries no wallet keys.
+Call the SDK from a user gesture when using popup transport.
+
+Passport checks the actual network, contract address, circuit, expiry, and
+transaction effects before showing consent, and checks again after passkey
+verification. This first version permits exactly one call with no asset
+transfers, no pre-attached fee inputs, and no deployment or maintenance actions.
+The existing sponsor then supplies the fee and Passport submits the transaction.
+Contract-specific witnesses and proofs of the caller's identity are separate
+requirements; this channel does not add an authorisation rule to a circuit.
+`submitted` records node submission, not finality or indexed success.

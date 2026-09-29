@@ -17,6 +17,16 @@
  * that is NOT in it is named below with the reason. There are no silent
  * exclusions and no wildcards standing in for a decision.
  *
+ * Builder integration (2026/09/28): contractApprovalLock and contractTxSource
+ * are pure approval/channel guards and are in the denominator. The separate
+ * contractTxApproval module loads ledger WASM and inspects real serialised
+ * transactions; its fixtures and the stage-net operator drill cover that boundary.
+ * custodyAppBridge signs through the wallet/provider SDK and is verified with
+ * real BIP340/ECDSA signatures. executeAppContract combines that inspection with
+ * browser sessionStorage and provider I/O; targeted tests cover retained IDs,
+ * explicit rejection, session changes, and lost replies. These three integration
+ * modules are outside the pure-helper denominator for those stated reasons.
+ *
  * WHAT IS OUT, AND WHY — `src/lib`
  * --------------------------------
  * `src/lib/accountOnPasskey.ts` went IN on 2026/08/31, the day it was written,
@@ -965,6 +975,8 @@ export default mergeConfig(
           'src/lib/companionLink.ts',
           'src/lib/companionMotion.ts',
           'src/lib/colour.ts',
+          'src/lib/contractApprovalLock.ts',
+          'src/lib/contractTxSource.ts',
           'src/lib/custodyAdoption.ts',
           'src/lib/adoptionProgress.ts',
           'src/lib/adoptionResume.ts',

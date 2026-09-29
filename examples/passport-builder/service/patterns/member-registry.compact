@@ -1,0 +1,32 @@
+pragma language_version >= 0.26;
+import CompactStandardLibrary;
+
+export ledger memberLabels: Map<Bytes<32>, Bytes<32>>;
+export ledger activeMembers: Set<Bytes<32>>;
+
+constructor() {}
+
+export circuit registerMember(memberId: Bytes<32>, label: Bytes<32>): [] {
+  const id = disclose(memberId);
+  assert(!memberLabels.member(id), "Member ID is already registered");
+  memberLabels.insert(id, disclose(label));
+  activeMembers.insert(id);
+}
+
+export circuit updateLabel(memberId: Bytes<32>, label: Bytes<32>): [] {
+  const id = disclose(memberId);
+  assert(memberLabels.member(id), "Member ID is not registered");
+  memberLabels.insert(id, disclose(label));
+}
+
+export circuit setActive(memberId: Bytes<32>, active: Boolean): [] {
+  const id = disclose(memberId);
+  const enabled = disclose(active);
+  assert(memberLabels.member(id), "Member ID is not registered");
+  assert(activeMembers.member(id) != enabled, "Member already has the requested status");
+  if (enabled) {
+    activeMembers.insert(id);
+  } else {
+    activeMembers.remove(id);
+  }
+}

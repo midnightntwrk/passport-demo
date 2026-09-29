@@ -7,6 +7,8 @@
  * rules in the tree.
  */
 
+export * from './contractTx.js';
+
 export {
   MAX_DETAIL_LENGTH,
   MAX_FEE_NOTE_LENGTH,

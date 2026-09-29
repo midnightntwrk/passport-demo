@@ -1,3 +1,4 @@
+import { contractApprovalIsOpen } from '../lib/contractApprovalLock.js';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
@@ -395,7 +396,7 @@ export default function AppBrowser(props: AppBrowserProps) {
         /* A sheet is already up. A second request must never replace the one the
            user is reading — that would swap the origin, the field list, and the
            ticks underneath them mid-decision. Refuse it outright. */
-        if (pending || pendingTx) {
+        if (pending || pendingTx || contractApprovalIsOpen()) {
           post(request, { approved: false, error: 'invalid_request' })
           return
         }
@@ -459,7 +460,7 @@ export default function AppBrowser(props: AppBrowserProps) {
          same one, in exactly the same order, answering with exactly the same
          codes and sentences. */
       const verdict = evaluateTxRequest(txRequest, {
-        sheetOpen: Boolean(pending || pendingTx),
+        sheetOpen: Boolean(pending || pendingTx || contractApprovalIsOpen()),
         walletReady: Boolean(executeTransferRef.current),
         transferContext: transferContext ?? null,
       })

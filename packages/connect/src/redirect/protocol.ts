@@ -106,6 +106,7 @@ export const PASSPORT_CALLBACK_PROTOCOL = 'org.midnight.passport.callback/v1' as
  * signature construction, and the pre-hash, because "signed with the Midnight
  * key" is not something a receiver can implement.
  */
+export const PASSPORT_CALLBACK_ECDSA_SCHEME = 'ecdsa-secp256k1-sha256' as const;
 export const PASSPORT_CALLBACK_SIGNATURE_SCHEME = 'bip340-schnorr-secp256k1-sha256' as const;
 
 /**
@@ -212,7 +213,7 @@ export interface PassportCallbackEnvelope {
   readonly type: 'passport.callback.response';
   /** base64url of the exact bytes that were signed. */
   readonly payload: string;
-  readonly scheme: typeof PASSPORT_CALLBACK_SIGNATURE_SCHEME | 'none';
+  readonly scheme: typeof PASSPORT_CALLBACK_SIGNATURE_SCHEME | typeof PASSPORT_CALLBACK_ECDSA_SCHEME | 'none';
   /**
    * 64 hex characters — the x-only BIP-340 verifying key, with any
    * `schnorr:` tag already stripped by {@link parsePassportCallbackReturn}.
@@ -338,7 +339,7 @@ function parseEnvelope(raw: string): PassportCallbackReturn {
       },
     };
   }
-  if (value.scheme !== PASSPORT_CALLBACK_SIGNATURE_SCHEME) {
+  if (value.scheme !== PASSPORT_CALLBACK_SIGNATURE_SCHEME && value.scheme !== PASSPORT_CALLBACK_ECDSA_SCHEME) {
     return {
       kind: 'malformed',
       reason: 'the reply names a signature scheme this app cannot check',
@@ -349,9 +350,10 @@ function parseEnvelope(raw: string): PassportCallbackReturn {
      here so a curve implementation is never handed something shapeless, and
      the tag is stripped here so nothing below this line has to know the wire
      had two shapes. */
-  const key = readTaggedHex(value.publicKey, 64, PASSPORT_CALLBACK_SIGNATURE_TAG);
+  const ecdsa = value.scheme === PASSPORT_CALLBACK_ECDSA_SCHEME;
+  const key = readTaggedHex(value.publicKey, ecdsa ? 66 : 64, ecdsa ? 'ecdsa' : PASSPORT_CALLBACK_SIGNATURE_TAG);
   if (key.kind !== 'hex') return { kind: 'malformed', reason: taggedHexReason('key', key) };
-  const signature = readTaggedHex(value.signature, 128, PASSPORT_CALLBACK_SIGNATURE_TAG);
+  const signature = readTaggedHex(value.signature, 128, ecdsa ? 'ecdsa' : PASSPORT_CALLBACK_SIGNATURE_TAG);
   if (signature.kind !== 'hex') {
     return { kind: 'malformed', reason: taggedHexReason('signature', signature) };
   }
@@ -361,7 +363,7 @@ function parseEnvelope(raw: string): PassportCallbackReturn {
       protocol: PASSPORT_CALLBACK_PROTOCOL,
       type: 'passport.callback.response',
       payload: value.payload,
-      scheme: PASSPORT_CALLBACK_SIGNATURE_SCHEME,
+      scheme: value.scheme,
       publicKey: key.value,
       signature: signature.value,
     },

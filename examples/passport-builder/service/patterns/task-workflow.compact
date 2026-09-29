@@ -1,0 +1,50 @@
+pragma language_version >= 0.26;
+import CompactStandardLibrary;
+
+export enum TaskPhase { Open, InProgress, Done }
+
+struct TaskRecord {
+  title: Bytes<32>;
+  priority: Uint<8>;
+  phase: TaskPhase;
+}
+
+export ledger tasks: Map<Uint<64>, TaskRecord>;
+
+constructor() {}
+
+export circuit createTask(taskId: Uint<64>, title: Bytes<32>, priority: Uint<8>): [] {
+  const id = disclose(taskId);
+  const level = disclose(priority);
+  assert(!tasks.member(id), "Task ID already exists");
+  assert(level <= (3 as Uint<8>), "Priority must be between zero and three");
+  tasks.insert(id, TaskRecord {
+    title: disclose(title),
+    priority: level,
+    phase: TaskPhase.Open,
+  });
+}
+
+export circuit startTask(taskId: Uint<64>): [] {
+  const id = disclose(taskId);
+  assert(tasks.member(id), "Task does not exist");
+  const task = tasks.lookup(id);
+  assert(task.phase == TaskPhase.Open, "Only an open task can start");
+  tasks.insert(id, TaskRecord {
+    title: task.title,
+    priority: task.priority,
+    phase: TaskPhase.InProgress,
+  });
+}
+
+export circuit finishTask(taskId: Uint<64>): [] {
+  const id = disclose(taskId);
+  assert(tasks.member(id), "Task does not exist");
+  const task = tasks.lookup(id);
+  assert(task.phase == TaskPhase.InProgress, "Start the task before finishing it");
+  tasks.insert(id, TaskRecord {
+    title: task.title,
+    priority: task.priority,
+    phase: TaskPhase.Done,
+  });
+}
