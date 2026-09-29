@@ -3,8 +3,12 @@ import { useCallback, useEffect, useSyncExternalStore } from 'react'
 import {
   DISABLED_SESSION,
   DYNAMIC_SOCIAL_PROVIDERS,
+  EMAIL_AND_SOCIAL_LOGIN_VIEW,
+  WALLET_SIGN_IN_REFUSAL,
   describeDynamicSession,
   dynamicEnvironmentId,
+  dynamicWalletKind,
+  offerNoWallets,
   publishDynamicActions,
   publishDynamicSession,
   readDynamicActions,
@@ -84,6 +88,10 @@ export async function mountDynamic(): Promise<void> {
     document.body.appendChild(host)
 
     const { DynamicContextProvider, useDynamicContext, useRefreshUser, useUserUpdateRequest } = core
+    /** The login view's type, as the provider's settings spell it. */
+    type SdkLoginView = NonNullable<
+      NonNullable<Parameters<typeof DynamicContextProvider>[0]['settings']['overrides']>['views']
+    >[number]
 
     /**
      * Reads Dynamic's context and publishes it. Renders nothing: the only
@@ -96,6 +104,7 @@ export async function mountDynamic(): Promise<void> {
          than on the whole context object, which is rebuilt on every one of the
          SDK's own renders and would re-register the actions each time. */
       const { setShowAuthFlow, handleLogOut, sdkHasLoaded, user } = context
+      const walletKind = dynamicWalletKind(wallet)
       /* THE USER'S METADATA, READ AND WRITTEN (2026/09/26), for the key that
          reads a Passport's payments, kept beside its way back — see
          `../identity/signInViewingKeys.ts`. `updateUser` is the SDK's own
@@ -115,13 +124,31 @@ export async function mountDynamic(): Promise<void> {
             sdkHasLoaded,
             user,
             walletAddress: wallet?.address,
+            walletKind,
           }),
         )
-      }, [sdkHasLoaded, user, wallet?.address])
+      }, [sdkHasLoaded, user, wallet?.address, walletKind])
 
       useEffect(() => {
         publishDynamicActions({
-          openAuthFlow: () => setShowAuthFlow(true),
+          /* A WALLET SESSION IS ENDED BEFORE THE OVERLAY OPENS (2026/09/28).
+             Opened over a signed-in user, the overlay LINKS what is proved
+             next to that user instead of replacing them: live, an email
+             sign-in over a MetaMask one was refused with a 422 ("This email
+             is associated to another account") and the MetaMask user stayed.
+             Signing the wallet out first makes the next sign-in a new one. */
+          openAuthFlow: () => {
+            if (user && walletKind === 'external') {
+              /* A sign-out that fails opens nothing: an overlay over the
+                 wallet user is the linking this exists to prevent. */
+              void handleLogOut().then(
+                () => setShowAuthFlow(true),
+                () => undefined,
+              )
+              return
+            }
+            setShowAuthFlow(true)
+          },
           signMessage: async (text: string) => {
             if (!wallet) throw new Error('Sign in first — there is no key to sign with yet.')
             const signature = await wallet.signMessage(text)
@@ -146,6 +173,9 @@ export async function mountDynamic(): Promise<void> {
              `RAW_MESSAGE_MESSAGE_REQUIRED_LENGTH = 64` and throws otherwise. */
           signRaw: async (digestHex: string) => {
             if (!wallet) throw new Error('Sign in first — there is no key to sign with yet.')
+            /* Asked BEFORE the signature, and answered with the cause: a
+               wallet connected to the sign-in is not a key Passport can use. */
+            if (walletKind !== 'embedded') throw new Error(WALLET_SIGN_IN_REFUSAL)
             const connector = wallet.connector as unknown as {
               signRawMessage?: (input: {
                 accountAddress: string
@@ -185,7 +215,7 @@ export async function mountDynamic(): Promise<void> {
             return result.updateUserProfileResponse.user.metadata
           },
         })
-      }, [setShowAuthFlow, handleLogOut, wallet, user, updateUser, refreshUser])
+      }, [setShowAuthFlow, handleLogOut, wallet, walletKind, user, updateUser, refreshUser])
 
       return null
     }
@@ -204,6 +234,13 @@ export async function mountDynamic(): Promise<void> {
              `string`. Writing `string[]` here compiled against 4.96.0 and does
              not against 5.8.0, and the version that does not is the honest
              one — this narrows a list the vendor owns. */
+          /* EMAIL AND SOCIAL, AND NEVER A WALLET (2026/09/28). A wallet cannot
+             sign what a Passport verifies; see `WALLET_SIGN_IN_REFUSAL`. The
+             view's type is the SDK's enum, whose values are these strings. */
+          overrides: {
+            views: [EMAIL_AND_SOCIAL_LOGIN_VIEW as unknown as SdkLoginView],
+          },
+          walletsFilter: offerNoWallets,
           socialProvidersFilter: (providers) =>
             providers.filter((provider) =>
               (DYNAMIC_SOCIAL_PROVIDERS as readonly string[]).includes(provider),

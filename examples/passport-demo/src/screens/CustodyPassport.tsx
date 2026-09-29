@@ -19,11 +19,12 @@ import {
   loadRecoveryRecord,
   recoveryHeld,
   recoveryHomeEntry,
-  recoveryRefusal,
   recoveryResumes,
   recoveryStepDue,
   saveRecoveryIntent,
+  wayBackSignInStep,
 } from '../lib/recoveryStep.js'
+import type { DynamicWalletKind } from '../lib/dynamicSession.js'
 import { holdCriticalWork } from '../lib/appBusy.js'
 import { guardUnsentPayment } from '../lib/paymentLeaveGuard.js'
 import type { CustodyArm, CustodyIdentity } from '../lib/custodyArm.js'
@@ -463,7 +464,17 @@ export interface CustodySocialSignIn {
   readonly handle: string | null
   /** Whether the session has a key behind it yet. */
   readonly address: string | null
-  /** Opens the provider's own overlay. */
+  /**
+   * Whether that key is the provider's EMBEDDED wallet or an EXTERNAL one
+   * (MetaMask and the like), which can never approve a Passport action. Absent
+   * or null while there is no wallet. See `../lib/dynamicSession.ts`.
+   */
+  readonly walletKind?: DynamicWalletKind | null
+  /**
+   * Opens the provider's own overlay — ending an external wallet's session
+   * first, so what is signed in next replaces it rather than being linked to
+   * it.
+   */
   openAuthFlow(): void
   /** The key behind the sign-in, recovered from a signature it makes. */
   device(): Promise<K256DeviceIdentity>
@@ -3570,25 +3581,29 @@ export default function CustodyPassport({
   const addRecovery = useCallback((): void => {
     const signIn = socialRef.current
     if (signIn === null) return
-    const refusal = recoveryRefusal({
+    const step = wayBackSignInStep({
       status: signIn.status,
       hasKey: (signIn.address ?? '').length > 0,
+      walletKind: signIn.walletKind,
+      pressed: true,
     })
-    if (refusal !== null) {
-      setError(refusal)
+    if (step.kind === 'wait' || step.kind === 'sign-out') {
+      setError(step.sentence)
       return
     }
-    if (signIn.status !== 'signed-in') {
+    if (step.kind === 'sign-in') {
       /* The overlay is opened and the press is REMEMBERED — in this render
          and in `sessionStorage` — because the reader may not come back to this
-         render. See {@link recoveryIntended}. */
+         render. See {@link recoveryIntended}. A wallet signed in here is ended
+         by `openAuthFlow` before the overlay opens, and the sentence says why
+         (2026/09/28). */
       setRecoveryIntended(true)
       const settled = userRef.current
       const intents = intentStorage()
       if (settled !== null && intents !== null) {
         saveRecoveryIntent(intents, settled, network, Date.now())
       }
-      setError(null)
+      setError(step.sentence)
       signIn.openAuthFlow()
       return
     }
@@ -3649,6 +3664,21 @@ export default function CustodyPassport({
     const intents = intentStorage()
     if (settled !== null && intents !== null) {
       consumeRecoveryIntent(intents, settled, network, Date.now())
+    }
+    /* A WALLET CAME BACK FROM THE OVERLAY (2026/09/28). It cannot approve the
+       add, so it is signed out before anything is asked of it, and the
+       sentence says so; "Try again" under it opens a clean sign-in. */
+    const step = wayBackSignInStep({
+      status: social.status,
+      hasKey: true,
+      walletKind: social.walletKind,
+      pressed: false,
+    })
+    if (step.kind === 'sign-out') {
+      setRecoveryIntended(false)
+      setError(step.sentence)
+      social.signOut()
+      return
     }
     void runRecoveryAdd(social)
   }, [busy, network, recoveryIntended, recoveryRecord, runRecoveryAdd, screen, social])

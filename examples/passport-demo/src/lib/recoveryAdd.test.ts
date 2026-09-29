@@ -32,6 +32,7 @@ import {
   type RecoveryAddStage,
   type RecoveryAddSteps,
 } from './recoveryAdd.js'
+import { WALLET_SIGN_IN_REFUSAL } from './dynamicSession.js'
 
 /* -------------------------------------------------------------------------- */
 /* The rows                                                                   */
@@ -322,7 +323,13 @@ describe('adding recovery, start to end', () => {
 /* -------------------------------------------------------------------------- */
 
 describe('the one sentence a failed add shows', () => {
-  it.each([CUSTODY_KEY_NOT_ADDED, CUSTODY_KEY_UNCONFIRMED, CUSTODY_STILL_FINISHING, RECOVERY_KEY_NOT_READY])(
+  it.each([
+    CUSTODY_KEY_NOT_ADDED,
+    CUSTODY_KEY_UNCONFIRMED,
+    CUSTODY_STILL_FINISHING,
+    RECOVERY_KEY_NOT_READY,
+    WALLET_SIGN_IN_REFUSAL,
+  ])(
     'shows "%s" as it is',
     (sentence) => {
       expect(recoveryAddFailureSentence(new Error(sentence))).toBe(sentence)
@@ -358,6 +365,7 @@ describe('the one sentence a hand-off that did not finish shows', () => {
     ADOPTION_OTHER_PASSPORT,
     CUSTODY_STILL_FINISHING,
     RECOVERY_KEY_NOT_READY,
+    WALLET_SIGN_IN_REFUSAL,
   ])('shows "%s" as it is', (sentence) => {
     expect(adoptionFailureSentence(new Error(sentence))).toBe(sentence)
   })

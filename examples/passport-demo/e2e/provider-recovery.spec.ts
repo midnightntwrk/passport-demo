@@ -1250,6 +1250,8 @@ const SIGN_IN_SLOT = `${WALK_NETWORK}:${ACCOUNT_CUSTODY_ADDRESS}`;
 interface SignInMetadataStore {
   metadata?: unknown;
   writes: unknown[];
+  /** How many times the stand-in sign-in was ended. */
+  signOuts?: number;
 }
 
 /**
@@ -1272,7 +1274,8 @@ async function passkeyPassportHere(
   options: {
     viewingSecret: string;
     wayBack: boolean;
-    signIn: 'out' | 'in';
+    /** `wallet`: the first sign-in is an external wallet. `wallet-in`: one is already signed in. */
+    signIn: 'out' | 'in' | 'wallet' | 'wallet-in';
     metadata: unknown;
     moreHistory?: (page: Page) => Promise<void>;
   },
@@ -1356,7 +1359,8 @@ async function passkeyPassportHere(
       options.wayBack ? `${identity.userKey.toLowerCase()}|${WALK_NETWORK}` : null,
     ] as const,
   );
-  await page.goto(`${CUSTODY_WALK}&dynamicwalk=${options.signIn === 'in' ? '1' : 'out'}`);
+  const walkValue = options.signIn === 'in' ? '1' : options.signIn;
+  await page.goto(`${CUSTODY_WALK}&dynamicwalk=${walkValue}`);
   return {
     page,
     close: async () => {
@@ -1749,5 +1753,126 @@ test.describe('a coin the old device had already spent (2026/09/26)', () => {
     await expect(pill).toHaveAttribute('data-state', 'sent', { timeout: 60_000 });
     await expect(pill).toContainText(/Sent 25 mUSD to /);
     await close();
+  });
+});
+
+
+/* -------------------------------------------------------------------------- */
+/* Email and social only: a wallet can never be the way back (2026/09/28)      */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * LIVE ON PRODUCTION, 2026/09/28. A tester made a passkey Passport and, at "Add
+ * a way back", connected MetaMask. The add failed at the signature — a wallet
+ * signs `personal_sign`, which the account cannot verify. They then signed in
+ * with email and a code, and the provider LINKED the email to the MetaMask user
+ * (422, "This email is associated to another account") instead of replacing
+ * it; the session stayed MetaMask and the add failed the same way.
+ *
+ * The stand-in plays both halves: `?dynamicwalk=wallet` brings a wallet back
+ * from the first overlay, `?dynamicwalk=wallet-in` has one signed in already,
+ * and every later overlay is an email sign-in with an embedded key. See
+ * `src/lib/dynamicWalk.ts`.
+ */
+const WALLET_REFUSAL = "Wallets can't approve Passport actions. Use your email or Google.";
+
+test.describe('a wallet offered as the way back (2026/09/28)', () => {
+  test('is refused in one sentence and signed out, and an email sign-in after it adds the way back', async ({
+    browser,
+  }) => {
+    test.setTimeout(240_000);
+    const stateBody = await recordedStateWithEarlierNote();
+    const { page, close } = await passkeyPassportHere(browser, stateBody, {
+      viewingSecret: OLD_VIEWING_SECRET,
+      wayBack: false,
+      signIn: 'wallet',
+      metadata: {},
+    });
+    await expect(page.getByRole('heading', { name: /Add a way\s*back/ })).toBeVisible({ timeout: 60_000 });
+
+    /* THE WALLET COMES BACK FROM THE SIGN-IN. It is refused before anything is
+       asked of it, it is signed out, and the step says why — with the same
+       press, and the way on to the Passport, under it. */
+    await page.getByTestId('add-recovery').click();
+    await expect(page.locator('.mnob-unusable-copy')).toHaveText(WALLET_REFUSAL, { timeout: 60_000 });
+    await expect(page.getByTestId('add-recovery')).toContainText('Try again');
+    await expect(page.getByTestId('skip-recovery')).toHaveText('Continue to my Passport');
+    await expect.poll(async () => (await signInMetadata(page)).signOuts, { timeout: 30_000 }).toBe(1);
+    /* Nothing was written to a wallet's user, and no approval was used up. */
+    expect((await signInMetadata(page)).writes).toEqual([]);
+    await expect(page.getByTestId('recovery-state')).toHaveCount(0);
+    const body = (await page.locator('body').innerText()).toLowerCase();
+    for (const forbidden of FORBIDDEN_ON_SCREEN) {
+      expect(body, `"${forbidden}" is on screen`).not.toContain(forbidden);
+    }
+
+    /* TRY AGAIN, WITH EMAIL: a clean sign-in, and the way back is added. */
+    await page.getByTestId('add-recovery').click();
+    await expect(greeting(page)).toBeVisible({ timeout: 120_000 });
+    await expect(page.getByTestId('recovery-state')).toHaveText('Recovery: on');
+    await expect(page.locator('.mnhome-notice')).toHaveText(/Your Passport has a way back, with Email\./);
+    await expect(page.getByText(WALLET_REFUSAL)).toHaveCount(0);
+    /* The key that reads payments went to the EMAIL user, once. */
+    await expect.poll(async () => (await signInMetadata(page)).writes.length, { timeout: 60_000 }).toBe(1);
+    expect((await signInMetadata(page)).signOuts).toBe(1);
+    await close();
+  });
+
+  test('already signed in when the way back starts, is signed out first, so the email sign-in is a new one', async ({
+    browser,
+  }) => {
+    test.setTimeout(240_000);
+    const stateBody = await recordedStateWithEarlierNote();
+    const { page, close } = await passkeyPassportHere(browser, stateBody, {
+      viewingSecret: OLD_VIEWING_SECRET,
+      wayBack: false,
+      signIn: 'wallet-in',
+      metadata: {},
+    });
+    await expect(page.getByRole('heading', { name: /Add a way\s*back/ })).toBeVisible({ timeout: 60_000 });
+    expect((await signInMetadata(page)).signOuts ?? 0).toBe(0);
+
+    /* THE PRESS ENDS THE WALLET'S SESSION BEFORE THE SIGN-IN OPENS — the
+       order that keeps the email from being linked to it — and the add runs
+       on the email sign-in that comes back. */
+    await page.getByTestId('add-recovery').click();
+    await expect(greeting(page)).toBeVisible({ timeout: 120_000 });
+    await expect(page.getByTestId('recovery-state')).toHaveText('Recovery: on');
+    await expect(page.locator('.mnhome-notice')).toHaveText(/Your Passport has a way back, with Email\./);
+    expect((await signInMetadata(page)).signOuts).toBe(1);
+    await expect.poll(async () => (await signInMetadata(page)).writes.length, { timeout: 60_000 }).toBe(1);
+    await close();
+  });
+
+  test('on the recovery road, is signed out and explained, and an email sign-in goes on to the name', async ({
+    browser,
+  }) => {
+    const context = await browser.newContext(walkContextOptions({ viewport: { width: 420, height: 900 } }));
+    const page = await context.newPage();
+    await installNetworkBoundary(page);
+    await page.addInitScript(() => {
+      (window as unknown as Record<string, unknown>).__passportWalkSignIn = { writes: [] };
+    });
+    await page.goto('/?dynamicwalk=wallet-in');
+
+    /* A WALLET NEVER HOLDS A PASSPORT: signed in as one, the landing is the
+       landing, not the new-device road. */
+    await expect(page.getByRole('button', { name: LOST_DEVICE_LINK, exact: true })).toBeVisible({
+      timeout: 60_000,
+    });
+    await expect(page.getByRole('heading', { name: /Find it\s*by its name/ })).toHaveCount(0);
+
+    await page.getByRole('button', { name: LOST_DEVICE_LINK, exact: true }).click();
+    await expect(page.getByRole('heading', { name: /Open your\s*Passport here/ })).toBeVisible();
+    await expect(page.getByTestId('recover-sign-in-notice')).toHaveText(WALLET_REFUSAL);
+    await expect.poll(async () => (await signInMetadata(page)).signOuts, { timeout: 30_000 }).toBe(1);
+    const body = (await page.locator('body').innerText()).toLowerCase();
+    expect(body).not.toContain('dynamic');
+
+    await page.getByTestId('recover-sign-in').click();
+    await expect(page.getByRole('heading', { name: /Find it\s*by its name/ })).toBeVisible({ timeout: 60_000 });
+    await expect(page.getByText(WALLET_REFUSAL)).toHaveCount(0);
+    expect((await signInMetadata(page)).signOuts).toBe(1);
+    await context.close();
   });
 });

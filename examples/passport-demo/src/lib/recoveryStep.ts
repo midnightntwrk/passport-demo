@@ -27,6 +27,7 @@
 
 import { loadBackupRecord, type BackupRecord } from './backupDevice.js';
 import type { CustodyStorage } from '../identity/custodyContractPlan.js';
+import { WALLET_SIGN_IN_REFUSAL, isWalletSignIn, type DynamicWalletKind } from './dynamicSession.js';
 
 /* -------------------------------------------------------------------------- */
 /* Whether the step is due                                                    */
@@ -317,6 +318,48 @@ export function recoveryRefusal(input: {
   if (input.status === 'loading') return RECOVERY_COPY.loading;
   if (input.status === 'signed-in' && !input.hasKey) return RECOVERY_COPY.settling;
   return null;
+}
+
+/**
+ * WHAT THE WAY BACK DOES WITH THE SIGN-IN IN HAND (2026/09/28).
+ *
+ * A sign-in held by an external wallet is never used, and never left signed
+ * in. Live on production a MetaMask sign-in reached the signature and failed
+ * there; and while it stayed signed in, an email sign-in made over it was
+ * LINKED to the MetaMask user instead of replacing it, and failed the same
+ * way. So:
+ *
+ *   - `sign-in`, `signOutFirst: true` — the reader PRESSED with a wallet
+ *     already signed in. It is signed out, and a clean sign-in is opened, with
+ *     the sentence saying why.
+ *   - `sign-out` — a wallet came back from the overlay (the add was resuming).
+ *     It is signed out and the sentence is shown, with "Try again" under it.
+ *   - `sign-in` — nobody is signed in: open the overlay.
+ *   - `wait` — {@link recoveryRefusal}'s sentence: not yet answerable.
+ *   - `add` — an embedded key is here: add it.
+ */
+export type WayBackSignInStep =
+  | { readonly kind: 'wait'; readonly sentence: string }
+  | { readonly kind: 'sign-in'; readonly signOutFirst: boolean; readonly sentence: string | null }
+  | { readonly kind: 'sign-out'; readonly sentence: string }
+  | { readonly kind: 'add' };
+
+export function wayBackSignInStep(input: {
+  readonly status: string;
+  readonly hasKey: boolean;
+  readonly walletKind?: DynamicWalletKind | null;
+  /** True for a press on the offer; false for the add resuming on its own. */
+  readonly pressed: boolean;
+}): WayBackSignInStep {
+  if (isWalletSignIn(input)) {
+    return input.pressed
+      ? { kind: 'sign-in', signOutFirst: true, sentence: WALLET_SIGN_IN_REFUSAL }
+      : { kind: 'sign-out', sentence: WALLET_SIGN_IN_REFUSAL };
+  }
+  const refusal = recoveryRefusal(input);
+  if (refusal !== null) return { kind: 'wait', sentence: refusal };
+  if (input.status !== 'signed-in') return { kind: 'sign-in', signOutFirst: false, sentence: null };
+  return { kind: 'add' };
 }
 
 /* What a failed add says is `./recoveryAdd.ts#recoveryAddFailureSentence`
