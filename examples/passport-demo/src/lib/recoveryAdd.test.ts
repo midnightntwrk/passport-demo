@@ -89,6 +89,8 @@ describe('the rows of adding recovery', () => {
   it('estimates the rows that are machinery, and not the ones that are the reader’s', () => {
     const rows = recoveryAddRows({ stage: 'passkey', finishing: true })
     expect(rows.map((row) => row.expectedSeconds)).toEqual([null, null, 90, 60, null])
+    /* And only the passkey row is the reader's to wait on (2026/09/28). */
+    expect(rows.map((row) => row.actor)).toEqual(['passport', 'you', 'passport', 'passport', 'passport'])
   })
 
   it('says none of the words a reader has no use for', () => {

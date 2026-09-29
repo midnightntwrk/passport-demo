@@ -203,10 +203,10 @@ import {
 import { NETWORK_LABELS, type PassportNetwork } from './NetworkSwitcher.js'
 import type { PassportContractName } from '../identity/contractRuntime.js'
 import type { LocalMidnightWallet } from '../lib/localWallet.js'
-import { pushToast } from './ToastStack.js'
+import { pushToast, updateToast } from './ToastStack.js'
 /* The explorer link a finished payment's toast and trail row carry. Pure, and
    free of the wallet SDK — see `../lib/networks.ts`. */
-import { txReceiptLink } from '../lib/networks.js'
+import { explorerUrlFor, isLedgerTxHash, isTxIdentifier, resolveReceiptHash, txReceiptLink } from '../lib/networks.js'
 /* A payment that runs behind the Passport rather than in front of it: the one
    transition function, and the view the pill and the live row paint. Pure —
    see `../lib/sendProgress.ts`. */
@@ -328,6 +328,12 @@ const STABLECOIN_COLOUR = custodyStablecoinColour(
 const RECOVERY_DONE_HOLD_MS = 1_500
 
 /** What the screen is doing right now, for the one busy line it shows. */
+/**
+ * Where a payment's "View" will be, while its ledger hash is being looked for
+ * (2026/09/28). Never a link, and never the verifier.
+ */
+const CUSTODY_FINDING_ON_EXPLORER = 'Finding it on the explorer…'
+
 const PHASE_LABELS: Record<CustodyPhase['step'], string> = {
   wallet: 'Opening your Passport',
   deploy: 'Setting up your Passport',
@@ -627,6 +633,10 @@ export default function CustodyPassport({
   /* Where the finished payment can be looked at, written by `reportSent` and
      read by the runner that reports it, in the same tick. */
   const lastSentLink = useRef<SendProgressLink | null>(null)
+  /* The payment whose explorer link is being looked for, by the id it was
+     handed over with — so a hash found for one payment is never painted on the
+     next one (2026/09/28). */
+  const receiptFor = useRef<string | null>(null)
   /* "Sent" goes by itself after a few seconds; the trail keeps the row. */
   useEffect(() => {
     if (progress?.kind !== 'sent') return undefined
@@ -1042,18 +1052,55 @@ export default function CustodyPassport({
           txHash,
         }),
       )
-      /* The explorer where the id is a ledger hash, and otherwise the step
-         verifier, which finds the payment by this Passport's name. */
-      const receipt = txHash ? txReceiptLink(sent.network, txHash, view?.name ?? null) : null
+      /* THE EXPLORER, AND ONLY THE EXPLORER (2026/09/28). This fell back to
+         the step verifier searched by this Passport's NAME whenever the id was
+         the submit's identifier — which for a payment is most of the time — so
+         a tester who sent mUSD was shown their whole history on an operator
+         tool instead of the one transaction. An identifier now gets no link;
+         the hash is looked for, and the toast, the pill, and the trail's row
+         all gain the explorer link once it is found. */
+      const receipt = txHash ? txReceiptLink(sent.network, txHash) : null
       lastSentLink.current = receipt ? { label: 'View', href: receipt.href } : null
-      pushToast({
+      const finding =
+        txHash !== null && receipt === null && isTxIdentifier(txHash) && explorerUrlFor(sent.network) !== null
+      const toastId = pushToast({
         tone: 'success',
         /* Accepted, not yet included — the same claim every other send on this
            app makes, and the only one that is true at this moment. */
         title: custodySentToastTitle(sent.asset.mode === 'unshielded' ? 'unshielded' : 'shielded'),
         body: 'The network fee was covered on your behalf.',
-        ...(txHash ? { link: txReceiptLink(sent.network, txHash) ?? undefined } : {}),
+        ...(receipt ? { link: receipt } : finding ? { pendingLink: CUSTODY_FINDING_ON_EXPLORER } : {}),
       })
+      receiptFor.current = txHash
+      if (finding) {
+        const identifier = txHash
+        const network = sent.network
+        void (async () => {
+          const [{ resolveTxHashOnce }, { localWalletNetworkConfig }] = await Promise.all([
+            import('../identity/contractRuntime.js'),
+            import('../lib/localWallet.js'),
+          ])
+          const indexer = localWalletNetworkConfig().indexerHttpUrl
+          const hash = await resolveReceiptHash(identifier, {
+            lookup: (id) => resolveTxHashOnce(indexer, id),
+            cancelled: () => receiptFor.current !== identifier,
+          })
+          const found = hash === null ? null : txReceiptLink(network, hash)
+          if (found === null || receiptFor.current !== identifier) {
+            updateToast(toastId, { pendingLink: undefined })
+            return
+          }
+          updateToast(toastId, { link: found, pendingLink: undefined })
+          /* The pill, whether "Sent" has been painted yet or not: the runner
+             reads this when it paints, and the reducer takes it after. */
+          const pill = { label: 'View', href: found.href }
+          lastSentLink.current = pill
+          dispatchProgress({ type: 'link', link: pill })
+        })().catch((cause: unknown) => {
+          console.info('[account-custody] the payment’s hash could not be looked up', cause)
+          updateToast(toastId, { pendingLink: undefined })
+        })
+      }
       sentTxId.current = null
     },
     [onActivity, view],
@@ -2537,6 +2584,10 @@ export default function CustodyPassport({
         },
         sendPhase(stoppedRecord),
       ))
+      /* The chain's own hash where the engine found it, so the payment's
+         "View" goes straight to the explorer; otherwise the identifier its
+         phases reported, which `reportSent` looks up (2026/09/28). */
+      if (isLedgerTxHash(sent.txHash)) sentTxId.current = sent.txHash
       clearCustodyShieldedSend(window.localStorage, {
         network: record.network,
         accountAddress: account.address,
@@ -2638,6 +2689,10 @@ export default function CustodyPassport({
         },
         sendPhase(stoppedRecord),
       ))
+      /* The chain's own hash where the engine found it, so the payment's
+         "View" goes straight to the explorer; otherwise the identifier its
+         phases reported, which `reportSent` looks up (2026/09/28). */
+      if (isLedgerTxHash(sent.txHash)) sentTxId.current = sent.txHash
       clearCustodyShieldedSend(window.localStorage, {
         network: record.network,
         accountAddress: account.address,
@@ -2790,6 +2845,7 @@ export default function CustodyPassport({
       }
       setError(null)
       lastSentLink.current = null
+      receiptFor.current = null
       /* ASKED FOR WHEN IT RUNS: the press's own approval, or — for a payment
          that waited for the last one — a new one now, in the same turn the
          wait ended, so it is never an approval given before the payment in
@@ -3704,11 +3760,18 @@ export default function CustodyPassport({
             label: row.label,
             state: row.state,
             expectedSeconds: row.expectedSeconds,
+            actor: row.actor,
             elapsedMs: elapsedFor(row),
-            /* The arm's own sentence, for the one row that is the reader's.
-               Dropped where it repeats the label, which is what
-               `./ProgressTimeline.tsx` does with a detail equal to it. */
-            detail: row.id === 'identity' && row.state === 'active' ? arm.approvalPrompt : null,
+            /* The arm's own sentence, for the one row that is the reader's —
+               and only while it IS theirs: a sign-in's key signs by itself, so
+               telling that reader to approve something would send them looking
+               for a button that is not there (2026/09/28). Dropped where it
+               repeats the label, which is what `./ProgressTimeline.tsx` does
+               with a detail equal to it. */
+            detail:
+              row.id === 'identity' && row.state === 'active' && row.actor === 'you'
+                ? arm.approvalPrompt
+                : null,
             subStages:
               row.id === 'account'
                 ? custodySetupSubStages(
@@ -3780,6 +3843,7 @@ export default function CustodyPassport({
             label: row.label,
             state: row.state,
             expectedSeconds: row.expectedSeconds,
+            actor: row.actor,
             elapsedMs: recoveryElapsedFor(row),
             subStages: row.subStages,
           }))}
@@ -4896,7 +4960,7 @@ const PAYMENT_ENGINE = {
  * service and no chain to take a transaction, so a payment there always stops
  * at the proof — and the in-progress pill's whole job is what happens AFTER the
  * hand-over: the phases, "Sent" with its link, a failure's one sentence. A walk
- * sets `window.__passportWalkPayment = { stepMs, fail?, tidyUpMs? }` before the
+ * sets `window.__passportWalkPayment = { stepMs, fail?, tidyUpMs?, unresolved? }` before the
  * app loads, and the stand-in reports the same phases the engine reports, a
  * step apart, then answers or fails. `tidyUpMs` (2026/09/26) is a payment
  * that kept change, and whose note of it takes that long to write: the window
@@ -4911,10 +4975,14 @@ function paymentEngine(): typeof PAYMENT_ENGINE {
   if (import.meta.env.VITE_PASSPORT_ACC_WALK !== '1') return PAYMENT_ENGINE
   const hook = (globalThis as { __passportWalkPayment?: unknown }).__passportWalkPayment
   if (!hook || typeof hook !== 'object') return PAYMENT_ENGINE
-  const asked = hook as { stepMs?: unknown; fail?: unknown; tidyUpMs?: unknown }
+  const asked = hook as { stepMs?: unknown; fail?: unknown; tidyUpMs?: unknown; unresolved?: unknown }
   const stepMs = typeof asked.stepMs === 'number' && asked.stepMs >= 0 ? asked.stepMs : 1_000
   const fail = typeof asked.fail === 'string' ? asked.fail : null
   const tidyUpMs = typeof asked.tidyUpMs === 'number' && asked.tidyUpMs > 0 ? asked.tidyUpMs : 0
+  /* `unresolved` (2026/09/28) is the engine's answer when the indexer had not
+     mapped the submit's identifier to a ledger hash in time: the identifier
+     comes back as itself, and the screen has to look the hash up. */
+  const unresolved = asked.unresolved === true
   const walk = async (onPhase?: (phase: CustodyPhase) => void): Promise<CustodyShieldedSpendResult> => {
     const wait = () => new Promise<void>((resolve) => setTimeout(resolve, stepMs))
     onPhase?.({ step: 'sign' })
@@ -4926,7 +4994,7 @@ function paymentEngine(): typeof PAYMENT_ENGINE {
     onPhase?.({ step: 'confirm', txId: `00${txHash}` })
     await wait()
     return {
-      txHash,
+      txHash: unresolved ? `00${txHash}` : txHash,
       explorerUrl: null,
       change: tidyUpMs > 0 ? { outcome: 'none' } : null,
       changePosition: 'none',

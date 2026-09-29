@@ -99,6 +99,13 @@
   outline-offset: 2px;
 }
 .mntoast-link svg { flex: 0 0 auto; }
+/* Where the link will be, while it is found: the same row, muted, and not a
+   target (2026/09/28). */
+.mntoast-link-pending {
+  color: var(--mn-text-muted);
+  font-weight: 500;
+  pointer-events: none;
+}
 
 /* With a link to reach for, the card is anchored to the toast's top edge
    rather than centred on a now-taller body. */

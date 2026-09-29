@@ -19,7 +19,7 @@
  * Run from the workspace root: `npx vitest run examples/passport-demo/src/lib`.
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   CLAIMABLE_NETWORKS,
@@ -33,8 +33,10 @@ import {
   defaultSelectedNetwork,
   explorerTxUrl,
   txReceiptLink,
-  verifierNameUrl,
-  VERIFIER_URL,
+  isTxIdentifier,
+  resolveReceiptHash,
+  RECEIPT_HASH_ATTEMPTS,
+  RECEIPT_HASH_INTERVAL_MS,
   explorerUrlFor,
   faucetAvailable,
   faucetUrlFor,
@@ -228,43 +230,136 @@ describe('the link a submitted transaction gets', () => {
       label: 'View on explorer',
       href: `https://explorer.1am.xyz/tx/${TX_HASH}?network=stagenet`,
     });
-    // A fallback name is ignored while the explorer can answer.
-    expect(txReceiptLink('stagenet', TX_HASH, 'alice.night')?.href).toBe(
-      `https://explorer.1am.xyz/tx/${TX_HASH}?network=stagenet`,
-    );
   });
 
-  it('sends an unmapped 66-hex identifier to the verifier instead', () => {
-    /* The account-contract deploy hits this every time: it is the first thing
-       a Passport submits, and the toast fires before the indexer has mapped the
-       identifier to a ledger hash. The verifier is asked for the NAME and finds
-       the deploy itself. */
-    expect(txReceiptLink('stagenet', TX_IDENTIFIER, 'alice.night')).toEqual({
-      label: 'View on the verifier',
-      href: 'https://midnightpassport.com/verify/?q=alice.night',
-    });
-    // The same fallback carries a network with no explorer at all.
-    expect(txReceiptLink('mainnet', TX_HASH, 'alice.night')?.href).toBe(
-      'https://midnightpassport.com/verify/?q=alice.night',
-    );
+  it('never links a payment to the verifier, or to anything by name (2026/09/28)', () => {
+    /* A tester who sent mUSD was handed the verifier searched by their own
+       name. An identifier the indexer has not mapped yet now gets NO link, and
+       the link arrives once the hash does. */
+    for (const value of [TX_HASH, TX_IDENTIFIER, 'alice.night', 'alice', null, undefined, '']) {
+      for (const network of ['stagenet', 'preview', 'preprod', 'mainnet', null]) {
+        const link = txReceiptLink(network, value);
+        if (link === null) continue;
+        expect(link.href).toMatch(/^https:\/\/explorer\.1am\.xyz\/tx\/[0-9a-f]{64}\?network=/);
+        expect(link.href).not.toMatch(/verify|\?q=|night/);
+      }
+    }
+    // The function no longer takes a name at all.
+    expect(txReceiptLink.length).toBe(2);
   });
 
   it('gives no link when there is genuinely nowhere to send anyone', () => {
     expect(txReceiptLink('stagenet', TX_IDENTIFIER)).toBeNull();
-    expect(txReceiptLink('stagenet', TX_IDENTIFIER, null)).toBeNull();
-    expect(txReceiptLink('stagenet', TX_IDENTIFIER, '   ')).toBeNull();
     expect(txReceiptLink('mainnet', TX_HASH)).toBeNull();
     expect(txReceiptLink(null, null)).toBeNull();
   });
+});
 
-  it('escapes what it puts in the verifier query', () => {
-    expect(verifierNameUrl('a name/with?stuff')).toBe(
-      'https://midnightpassport.com/verify/?q=a%20name%2Fwith%3Fstuff',
-    );
-    // `q` is the parameter `src/verify/main.ts` reads on load.
-    expect(verifierNameUrl('alice.night')).toBe(`${VERIFIER_URL}?q=alice.night`);
-    expect(verifierNameUrl(null)).toBeNull();
-    expect(verifierNameUrl(undefined)).toBeNull();
-    expect(verifierNameUrl(7 as unknown as string)).toBeNull();
+describe('finding the hash a receipt links to', () => {
+  it('knows an identifier when it sees one', () => {
+    expect(isTxIdentifier(TX_IDENTIFIER)).toBe(true);
+    expect(isTxIdentifier(TX_IDENTIFIER.toUpperCase())).toBe(true);
+    expect(isTxIdentifier(TX_HASH)).toBe(false);
+    expect(isTxIdentifier(`0x${TX_HASH}`)).toBe(false);
+    expect(isTxIdentifier(null)).toBe(false);
+    expect(isTxIdentifier(undefined)).toBe(false);
   });
+
+  it('takes a ledger hash as its own answer, without asking anybody', async () => {
+    let asked = 0;
+    const lookup = () => {
+      asked += 1;
+      return Promise.resolve(null);
+    };
+    await expect(resolveReceiptHash(TX_HASH.toUpperCase(), { lookup })).resolves.toBe(TX_HASH);
+    expect(asked).toBe(0);
+  });
+
+  it('asks nothing about a value that is neither', async () => {
+    let asked = 0;
+    const lookup = () => {
+      asked += 1;
+      return Promise.resolve(TX_HASH);
+    };
+    for (const value of ['alice.night', '', null, undefined, `0x${TX_HASH}`]) {
+      await expect(resolveReceiptHash(value, { lookup })).resolves.toBeNull();
+    }
+    expect(asked).toBe(0);
+  });
+
+  it('asks about an identifier until the indexer answers, and waits between asks', async () => {
+    const answers: (string | null | Error)[] = [null, new Error('socket dropped'), 'not-a-hash', TX_HASH.toUpperCase()];
+    const asked: string[] = [];
+    const waits: number[] = [];
+    const hash = await resolveReceiptHash(TX_IDENTIFIER, {
+      lookup: (identifier) => {
+        asked.push(identifier);
+        const next = answers.shift() ?? null;
+        return next instanceof Error ? Promise.reject(next) : Promise.resolve(next);
+      },
+      intervalMs: 250,
+      sleep: (ms) => {
+        waits.push(ms);
+        return Promise.resolve();
+      },
+    });
+    expect(hash).toBe(TX_HASH);
+    expect(asked).toEqual([TX_IDENTIFIER, TX_IDENTIFIER, TX_IDENTIFIER, TX_IDENTIFIER]);
+    expect(waits).toEqual([250, 250, 250]);
+  });
+
+  it('gives up after its window with no answer, and never waits after the last ask', async () => {
+    let asked = 0;
+    let waited = 0;
+    const hash = await resolveReceiptHash(TX_IDENTIFIER, {
+      lookup: () => {
+        asked += 1;
+        return Promise.resolve(null);
+      },
+      attempts: 3,
+      sleep: () => {
+        waited += 1;
+        return Promise.resolve();
+      },
+    });
+    expect(hash).toBeNull();
+    expect(asked).toBe(3);
+    expect(waited).toBe(2);
+  });
+
+  it('stops when the caller has gone, before or after an ask', async () => {
+    await expect(
+      resolveReceiptHash(TX_IDENTIFIER, { lookup: () => Promise.resolve(TX_HASH), cancelled: () => true }),
+    ).resolves.toBeNull();
+    let gone = false;
+    await expect(
+      resolveReceiptHash(TX_IDENTIFIER, {
+        lookup: () => {
+          gone = true;
+          return Promise.resolve(TX_HASH);
+        },
+        cancelled: () => gone,
+      }),
+    ).resolves.toBeNull();
+  });
+
+  it('by default asks every five seconds for two and a half minutes, on a real clock', async () => {
+    expect(RECEIPT_HASH_ATTEMPTS * RECEIPT_HASH_INTERVAL_MS).toBe(150_000);
+    vi.useFakeTimers();
+    try {
+      let asked = 0;
+      const pending = resolveReceiptHash(TX_IDENTIFIER, {
+        lookup: () => {
+          asked += 1;
+          return Promise.resolve(asked === 2 ? TX_HASH : null);
+        },
+      });
+      await vi.advanceTimersByTimeAsync(RECEIPT_HASH_INTERVAL_MS);
+      await expect(pending).resolves.toBe(TX_HASH);
+      expect(asked).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
 });

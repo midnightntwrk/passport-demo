@@ -590,6 +590,7 @@ export default function AliasClaimScreen(props: AliasClaimProps) {
               label: step.label,
               state: step.state,
               expectedSeconds: step.expectedSeconds,
+              actor: step.actor,
               elapsedMs: elapsedFor(step),
               /* The phase's own sentence, for the two steps that are ONE
                  thing. The third is four things and says so beneath itself

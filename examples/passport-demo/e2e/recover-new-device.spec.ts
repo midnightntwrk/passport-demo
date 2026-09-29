@@ -464,6 +464,23 @@ test.describe('bringing a Passport here, as it happens (2026/09/27)', () => {
     await installNetworkBoundary(page);
     const chain = await serveTheAccount(page);
     const authenticator = await installVirtualAuthenticator(context, page);
+    /* EVERY TIMING LINE A RUNNING ROW SHOWS, as it shows it (2026/09/28): the
+       timeline said "Waiting for you" under rows nobody has anything to do
+       for — checking the sign-in, the sign-in approving this device, and
+       bringing back earlier payments. */
+    await page.addInitScript(() => {
+      const seen: { label: string; timing: string }[] = [];
+      (window as unknown as { __timings: typeof seen }).__timings = seen;
+      new MutationObserver(() => {
+        for (const row of Array.from(document.querySelectorAll('.mnid-stepper-item[data-state="active"]'))) {
+          const label = row.querySelector('.mnid-stepper-label')?.textContent ?? '';
+          const timing = row.querySelector('.mnid-stepper-timing')?.textContent ?? '';
+          if (timing.length > 0 && !seen.some((it) => it.label === label && it.timing.split(' — ')[0] === timing.split(' — ')[0])) {
+            seen.push({ label, timing });
+          }
+        }
+      }).observe(document, { subtree: true, childList: true, characterData: true });
+    });
     try {
       await findItByName(page);
 
@@ -493,6 +510,18 @@ test.describe('bringing a Passport here, as it happens (2026/09/27)', () => {
 
       await reachHome(page);
       expect(chain.handedOver).toEqual(['add_device_with_k256', 'rotate_enc_key_with_jubjub']);
+
+      /* "WAITING FOR YOU" ONLY WHERE THE READER'S HANDS ARE: the passkey
+         prompt. Every automatic row says it is working, or how long it
+         usually takes, instead. */
+      const timings = await page.evaluate(
+        () => (window as unknown as { __timings: { label: string; timing: string }[] }).__timings,
+      );
+      const waiting = timings.filter((it) => it.timing.startsWith('Waiting for you'));
+      expect(waiting.filter((it) => it.label !== 'Make this device’s key')).toEqual([]);
+      const automatic = timings.filter((it) => it.label !== 'Make this device’s key');
+      expect(automatic.length).toBeGreaterThan(0);
+      for (const it of automatic) expect(it.timing).toMatch(/^(Working|Usually|Taking a little longer)/);
 
       /* THE TRAIL: both transactions, each with the same "View" every row has. */
       for (const label of ['This device was added to your Passport', 'Payments now come to this device']) {

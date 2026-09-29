@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState, type ReactNode } from 'react';
-import { Bell, Download, Share, SquarePlus, WifiOff } from 'lucide-react';
+import { useCallback, useEffect, useState, useSyncExternalStore, type ReactNode } from 'react';
+import { WifiOff } from 'lucide-react';
 
 import {
   askWorkerBuildId,
@@ -11,7 +11,14 @@ import {
   WAITING_NUDGE_INTERVAL_MS,
 } from './lib/appUpdate.js';
 import { BUILD_ID } from './lib/buildId.js';
-import './pwa-install.css';
+import {
+  INSTALL_SNOOZE_KEY,
+  installAffordance,
+  installCardVisible,
+  installSnoozeValue,
+  isMobileBrowser,
+  type InstallAffordance,
+} from './lib/installPrompt.js';
 
 interface BeforeInstallPromptEvent extends Event {
   prompt(): Promise<void>;
@@ -52,41 +59,142 @@ function isStandaloneDisplay(): boolean {
   );
 }
 
+/* -------------------------------------------------------------------------- */
+/* The browser's install offer, held for the whole page (2026/09/28)          */
+/*                                                                            */
+/* Chromium fires `beforeinstallprompt` ONCE, usually within a second of the  */
+/* page loading — long before Home or the landing has mounted. So it is       */
+/* caught here, as the module loads, and held where every install control    */
+/* reads it: the card on Home, the landing's secondary action, and the top    */
+/* bar's modest control. `prompt()` still runs on a press and nowhere else.   */
+/*                                                                            */
+/* THE TIMED INVITATION IS GONE. It was a sheet four seconds into a clear     */
+/* screen that any dismissal retired for ever, and the reviewer could still   */
+/* not tell how to install Passport. The card on Home replaces it; the sheet  */
+/* it used is kept as the iPhone's step-by-step (`screens/InstallOffer.tsx`). */
+/* -------------------------------------------------------------------------- */
+
+interface InstallOfferState {
+  /** The captured event, while the browser is willing to be asked. */
+  readonly prompt: BeforeInstallPromptEvent | null;
+  /** `appinstalled` has fired on this page. */
+  readonly installed: boolean;
+}
+
+let installOfferState: InstallOfferState = { prompt: null, installed: false };
+const installOfferListeners = new Set<() => void>();
+
+function setInstallOfferState(next: InstallOfferState): void {
+  installOfferState = next;
+  for (const listener of installOfferListeners) listener();
+}
+
+function subscribeInstallOffer(listener: () => void): () => void {
+  installOfferListeners.add(listener);
+  return () => {
+    installOfferListeners.delete(listener);
+  };
+}
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('beforeinstallprompt', (event: Event) => {
+    /* Held rather than acted on: Chromium's own mini-infobar is suppressed,
+       and the page replays the event from a press. */
+    event.preventDefault();
+    setInstallOfferState({ ...installOfferState, prompt: event as BeforeInstallPromptEvent });
+  });
+  window.addEventListener('appinstalled', () => {
+    setInstallOfferState({ prompt: null, installed: true });
+  });
+}
+
+/**
+ * Replays the browser's own install dialogue, from a press. `'unavailable'`
+ * where there is nothing held — iOS, or an event already spent.
+ */
+export async function promptInstall(): Promise<'accepted' | 'dismissed' | 'unavailable'> {
+  const held = installOfferState.prompt;
+  if (held === null) return 'unavailable';
+  try {
+    await held.prompt();
+    const choice = await held.userChoice;
+    /* An accepted prompt cannot be replayed, and is gone. A declined one is
+       kept for the session: Chromium hands the page a fresh event when it is
+       willing to be asked again, and a replay it refuses lands below. */
+    if (choice.outcome === 'accepted') {
+      setInstallOfferState({ ...installOfferState, prompt: null });
+    }
+    return choice.outcome;
+  } catch {
+    setInstallOfferState({ ...installOfferState, prompt: null });
+    return 'unavailable';
+  }
+}
+
+function readSnooze(): string | null {
+  try {
+    return window.localStorage.getItem(INSTALL_SNOOZE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+/** What every install control needs to know, read off this browser. */
+export interface InstallOffer {
+  /** What a control offers: the browser's prompt, the iPhone's steps, or nothing. */
+  readonly affordance: InstallAffordance;
+  /** A phone or tablet, where "your home screen" means something. */
+  readonly mobile: boolean;
+  /** Whether Home shows the install card: see `installCardVisible`. */
+  readonly cardVisible: boolean;
+  /** "Not now": the card goes for a week. */
+  readonly snooze: () => void;
+}
+
+/**
+ * The install offer, as a hook. Re-renders when the browser offers a prompt,
+ * when Passport is installed, when the display mode changes, and on a snooze.
+ * The rules are `lib/installPrompt.ts`'s, where they are drilled.
+ */
+export function useInstallOffer(): InstallOffer {
+  const offer = useSyncExternalStore(subscribeInstallOffer, () => installOfferState);
+  const [standalone, setStandalone] = useState(isStandaloneDisplay);
+  const [snoozedUntil, setSnoozedUntil] = useState(readSnooze);
+  useEffect(() => {
+    /* An app opened in a tab and then launched from the home screen into the
+       same document changes display mode without reloading. */
+    const media = window.matchMedia('(display-mode: standalone)');
+    const onChange = () => setStandalone(isStandaloneDisplay());
+    media.addEventListener('change', onChange);
+    return () => media.removeEventListener('change', onChange);
+  }, []);
+  const snooze = useCallback(() => {
+    const value = installSnoozeValue(Date.now());
+    try {
+      window.localStorage.setItem(INSTALL_SNOOZE_KEY, value);
+    } catch {
+      /* Without storage the card is put away for this visit only. */
+    }
+    setSnoozedUntil(value);
+  }, []);
+  const environment = {
+    standaloneDisplay: standalone || offer.installed,
+    iosStandalone: (navigator as NavigatorWithStandalone).standalone,
+    promptHeld: offer.prompt !== null,
+    userAgent: navigator.userAgent,
+    maxTouchPoints: navigator.maxTouchPoints,
+  };
+  return {
+    affordance: installAffordance(environment),
+    mobile: isMobileBrowser(environment.userAgent, environment.maxTouchPoints),
+    cardVisible: installCardVisible({ ...environment, snoozedUntil, now: Date.now() }),
+    snooze,
+  };
+}
+
 function pwaRegistrationEnabled(): boolean {
   return import.meta.env.PROD || import.meta.env.VITE_ENABLE_PWA_DEV === 'true';
 }
-
-/* -------------------------------------------------------------------------- */
-/* Mobile install and notifications invitation (2026/08/06)                   */
-/*                                                                            */
-/* On a phone, "install" is the difference between a tab someone loses and an */
-/* icon on their home screen. Desktop keeps the quiet corner button it always */
-/* had; only mobile gets the sheet, and only once — a prompt that reappears   */
-/* after it has been declined is a nag, so ANY dismissal is permanent.        */
-/*                                                                            */
-/* Nothing here asks the browser for anything on load. `prompt()` runs on an  */
-/* affirmative tap and nowhere else, and the notification permission is       */
-/* requested only from its own explicit button, because a permission dialog   */
-/* nobody asked for is the fastest way to a permanent "denied".               */
-/* -------------------------------------------------------------------------- */
-
-const INSTALL_DISMISSED_KEY = 'mn-passport:install-dismissed';
-const NOTIFICATIONS_DECLINED_KEY = 'mn-passport:notifications-declined';
-
-/**
- * Written by the app the first time a passkey Passport is created or signed
- * in to. Read here — never written — as the signal that the invitation is
- * worth making: "add this to your home screen" is a question for somebody who
- * has a Passport, not for somebody looking at the welcome screen, and a modal
- * sheet over an onboarding ceremony would be actively in the way.
- */
-const PASSPORT_SESSION_KEY = 'passport-last-passkey';
-
-/** How long the app is left alone after that before the invitation appears. */
-const INSTALL_SHEET_DELAY_MS = 4_000;
-
-/** How often the session signal is re-read while an invitation is pending. */
-const SESSION_POLL_MS = 1_500;
 
 /**
  * The floor on how often the browser is asked whether `/sw.js` has changed.
@@ -103,14 +211,6 @@ const UPDATE_CHECK_INTERVAL_MS = 15 * 60 * 1_000;
 /** How long an update check is left alone after one has just run. */
 const UPDATE_CHECK_MIN_GAP_MS = 60 * 1_000;
 
-function hasPassportSession(): boolean {
-  try {
-    return Boolean(window.localStorage.getItem(PASSPORT_SESSION_KEY));
-  } catch {
-    return false;
-  }
-}
-
 /**
  * `sessionStorage`, or `null` where reading it throws — a sandboxed frame, or
  * site data blocked outright. Without it the chunk reload has nowhere to note
@@ -122,44 +222,6 @@ function sessionFlags(): SessionFlags | null {
   } catch {
     return null;
   }
-}
-
-function readFlag(key: string): boolean {
-  try {
-    return window.localStorage.getItem(key) === '1';
-  } catch {
-    return false;
-  }
-}
-
-function writeFlag(key: string): void {
-  try {
-    window.localStorage.setItem(key, '1');
-  } catch {
-    // Without storage the invitation may be offered once more. Acceptable;
-    // silently failing to record it is not worth blocking the flow over.
-  }
-}
-
-function isMobileViewport(): boolean {
-  return window.matchMedia('(max-width: 860px)').matches;
-}
-
-/**
- * iOS, including iPadOS, which reports itself as a Mac with a touchscreen.
- * iOS has no `beforeinstallprompt` at all, so it gets instructions instead of
- * a button that cannot work.
- */
-function isIosDevice(): boolean {
-  const ua = navigator.userAgent;
-  if (/iPhone|iPad|iPod/.test(ua)) return true;
-  return /Macintosh/.test(ua) && navigator.maxTouchPoints > 1;
-}
-
-/** Safari proper — not Chrome, Firefox, or Edge wearing its engine. */
-function isSafariBrowser(): boolean {
-  const ua = navigator.userAgent;
-  return /Safari/.test(ua) && !/CriOS|FxiOS|EdgiOS|OPiOS|Chrome|Chromium|Android/.test(ua);
 }
 
 /**
@@ -201,44 +263,17 @@ export async function requestPassportStoragePersistence(
 
 export function PassportPwaShell({ children }: { children: ReactNode }) {
   const [online, setOnline] = useState(() => navigator.onLine);
-  const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null);
-  const [standalone, setStandalone] = useState(isStandaloneDisplay);
-  const [installSheetOpen, setInstallSheetOpen] = useState(false);
-  const [installSheetSettled, setInstallSheetSettled] = useState(() =>
-    readFlag(INSTALL_DISMISSED_KEY),
-  );
-  const [notificationsAsked, setNotificationsAsked] = useState(() =>
-    readFlag(NOTIFICATIONS_DECLINED_KEY),
-  );
-  const [mobile] = useState(isMobileViewport);
-  const [ios] = useState(isIosDevice);
 
   useEffect(() => {
     const onOnline = () => setOnline(true);
     const onOffline = () => setOnline(false);
-    const onInstallPrompt = (event: Event) => {
-      event.preventDefault();
-      setInstallPrompt(event as BeforeInstallPromptEvent);
-    };
-    const onInstalled = () => {
-      setInstallPrompt(null);
-      setStandalone(true);
-      // Installed is the strongest possible "do not ask again".
-      setInstallSheetOpen(false);
-      setInstallSheetSettled(true);
-      writeFlag(INSTALL_DISMISSED_KEY);
-    };
 
     window.addEventListener('online', onOnline);
     window.addEventListener('offline', onOffline);
-    window.addEventListener('beforeinstallprompt', onInstallPrompt);
-    window.addEventListener('appinstalled', onInstalled);
 
     return () => {
       window.removeEventListener('online', onOnline);
       window.removeEventListener('offline', onOffline);
-      window.removeEventListener('beforeinstallprompt', onInstallPrompt);
-      window.removeEventListener('appinstalled', onInstalled);
     };
   }, []);
 
@@ -403,98 +438,6 @@ export function PassportPwaShell({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  /* --- The mobile invitation ---------------------------------------------- */
-
-  /**
-   * Android and other Chromium browsers can only be invited once the browser
-   * has told us it is installable. iOS never will, so it is invited on the
-   * strength of being iOS Safari — and shown instructions, not a button.
-   */
-  const iosInstructional = ios && isSafariBrowser();
-  const installSheetEligible =
-    mobile && !standalone && !installSheetSettled && (Boolean(installPrompt) || iosInstructional);
-
-  useEffect(() => {
-    if (!installSheetEligible) return;
-    /**
-     * The invitation may only open once the user is clear of onboarding: a
-     * session exists AND no identity screen (`.mnid-screen` — the name step,
-     * and Backup/Ecosystem when routed to) is on show. The session key is
-     * written the moment the wallet opens, which is BEFORE the name step, so
-     * the session alone is not enough — on iOS, where no install event gates
-     * the sheet, it would slide over "Choose your .night name" four seconds
-     * into it (observed live, 2026/08/06).
-     */
-    const clearToOpen = () =>
-      hasPassportSession() && !document.querySelector('.mnid-screen');
-    // `localStorage` fires no same-tab event, so the signal is polled rather
-    // than subscribed to. The sheet opens only after the app has been clear
-    // for a full INSTALL_SHEET_DELAY_MS — an identity screen appearing mid-
-    // countdown resets it, so the invitation follows the flow, it never
-    // interrupts one.
-    let clearSince: number | undefined;
-    const tick = () => {
-      if (!clearToOpen()) {
-        clearSince = undefined;
-        return;
-      }
-      clearSince = clearSince ?? Date.now();
-      if (Date.now() - clearSince >= INSTALL_SHEET_DELAY_MS) {
-        window.clearInterval(poll);
-        setInstallSheetOpen(true);
-      }
-    };
-    const poll = window.setInterval(tick, SESSION_POLL_MS);
-    tick();
-    return () => window.clearInterval(poll);
-  }, [installSheetEligible]);
-
-  /** Any dismissal is permanent — no second invitation, ever. */
-  const dismissInstallSheet = useCallback(() => {
-    setInstallSheetOpen(false);
-    setInstallSheetSettled(true);
-    writeFlag(INSTALL_DISMISSED_KEY);
-  }, []);
-
-  const acceptInstall = async () => {
-    if (!installPrompt) return;
-    // The affirmative tap, and the only place `prompt()` is ever called from
-    // on mobile.
-    setInstallSheetOpen(false);
-    try {
-      await installPrompt.prompt();
-      const choice = await installPrompt.userChoice;
-      if (choice.outcome === 'accepted') setInstallPrompt(null);
-    } finally {
-      setInstallSheetSettled(true);
-      writeFlag(INSTALL_DISMISSED_KEY);
-    }
-  };
-
-  /**
-   * Notifications are unavailable to an iOS Safari tab — the API only exists
-   * for an installed app from 16.4 — so the button is not offered where it
-   * could only fail. A previous refusal is remembered and never revisited.
-   */
-  const notificationsOfferable =
-    typeof Notification !== 'undefined' &&
-    Notification.permission === 'default' &&
-    !notificationsAsked &&
-    (!ios || standalone);
-
-  const enableNotifications = async () => {
-    if (!notificationsOfferable) return;
-    setNotificationsAsked(true);
-    try {
-      const permission = await Notification.requestPermission();
-      // "Denied" and "dismissed" both mean: do not put this in front of them
-      // again. Only a grant leaves the flag unwritten.
-      if (permission !== 'granted') writeFlag(NOTIFICATIONS_DECLINED_KEY);
-    } catch {
-      writeFlag(NOTIFICATIONS_DECLINED_KEY);
-    }
-  };
-
   return (
     <>
       {children}
@@ -517,99 +460,11 @@ export function PassportPwaShell({ children }: { children: ReactNode }) {
           there is nothing for anybody to do: the reload happens only at a
           moment when there is nothing on screen to lose.
 
-          The install button that shared the corner went on 2026/09/03.
-          Installing is offered from Home's top bar (`screens/InstallPassport.tsx`),
-          where a person looks for it, on every browser that can do it. */}
+          The install button that shared the corner went on 2026/09/03, and
+          the timed invitation sheet on 2026/09/28. Installing is offered on
+          Home — a card on a phone, the top bar's control everywhere — and on
+          the landing; see `screens/InstallOffer.tsx`. */}
 
-      {installSheetOpen && (
-        <>
-          <div
-            className="pwainstall-scrim"
-            role="presentation"
-            onClick={dismissInstallSheet}
-          />
-          <section
-            className="pwainstall-sheet"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="pwainstall-title"
-          >
-            <span className="pwainstall-grip" aria-hidden="true" />
-
-            <header className="pwainstall-head">
-              <span className="pwainstall-mark" aria-hidden="true">
-                <SquarePlus size={20} strokeWidth={2} />
-              </span>
-              <div>
-                <h2 id="pwainstall-title">Add Passport to your home screen</h2>
-                {/* WHAT IS TRUE ON EACH PLATFORM, AND NOT A WORD MORE
-                    (2026/09/05). This used to promise "keeps you signed in" to
-                    everybody. On iOS it is false: an installed web app gets a
-                    storage container of its own, so the passkey follows through
-                    iCloud Keychain but every local record — the profile, the
-                    encrypted state — stays behind in Safari, and the first
-                    thing the new app does is ask for the passkey. Somebody who
-                    read that sentence and then met a sign-in screen has been
-                    told the app is broken by the app itself. Where the browser
-                    offers the install itself, the app shares the browser's
-                    storage and the original sentence was true, so it stands. */}
-                <p>{iosInstructional && !installPrompt ? INSTALL_LEDE_IOS : INSTALL_LEDE}</p>
-              </div>
-            </header>
-
-            {iosInstructional && !installPrompt ? (
-              /* iOS fires no install event, so the only honest thing to offer
-                 is the two taps the user has to make themselves. */
-              <ol className="pwainstall-steps">
-                <li>
-                  <Share size={16} strokeWidth={2} aria-hidden="true" />
-                  <span>Tap the Share button in Safari&rsquo;s toolbar.</span>
-                </li>
-                <li>
-                  <SquarePlus size={16} strokeWidth={2} aria-hidden="true" />
-                  <span>Choose &ldquo;Add to Home Screen&rdquo;.</span>
-                </li>
-              </ol>
-            ) : null}
-
-            <div className="pwainstall-actions">
-              {installPrompt ? (
-                <button
-                  type="button"
-                  className="pwainstall-primary"
-                  onClick={() => void acceptInstall()}
-                >
-                  <Download size={17} strokeWidth={2} aria-hidden="true" />
-                  Add to home screen
-                </button>
-              ) : null}
-
-              {notificationsOfferable ? (
-                <button
-                  type="button"
-                  className="pwainstall-secondary"
-                  onClick={() => void enableNotifications()}
-                >
-                  <Bell size={16} strokeWidth={2} aria-hidden="true" />
-                  Enable notifications
-                </button>
-              ) : null}
-
-              <button
-                type="button"
-                className="pwainstall-secondary"
-                onClick={dismissInstallSheet}
-              >
-                Not now
-              </button>
-            </div>
-
-            <p className="pwainstall-note">
-              Asked once. Dismiss it and Passport will not bring it up again.
-            </p>
-          </section>
-        </>
-      )}
     </>
   );
 }

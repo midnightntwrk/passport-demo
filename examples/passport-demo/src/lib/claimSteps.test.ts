@@ -221,8 +221,24 @@ describe('stepTimingLine', () => {
   });
 
   it('waits on the reader rather than on a clock, where the step is theirs', () => {
+    expect(passkey.actor).toBe('you');
     expect(stepTimingLine(passkey, 0)).toBe('Waiting for you — 0:00');
     expect(stepTimingLine(passkey, 95_000)).toBe('Waiting for you — 1:35');
+  });
+
+  it('never says "Waiting for you" over work nobody has to do anything for (2026/09/28)', () => {
+    /* The recovery timeline said "Waiting for you" under "Google approves this
+       device", whose key signs by itself. A row with no estimate is Passport's
+       own work unless it says it is the reader's. */
+    expect(stepTimingLine({ expectedSeconds: null }, 7_000)).toBe('Working — 0:07');
+    expect(stepTimingLine({ expectedSeconds: null, actor: 'passport' }, 65_000)).toBe('Working — 1:05');
+    // Only the steps that are the reader's own hands name the reader.
+    expect(claimSteps('checking').filter((step) => step.actor === 'you').map((step) => step.id)).toEqual([
+      'passkey',
+    ]);
+    // And an actor of `'you'` wins even over an estimate, because a prompt that
+    // is up is not something a clock can speak for.
+    expect(stepTimingLine({ expectedSeconds: 10, actor: 'you' }, 3_000)).toBe('Waiting for you — 0:03');
   });
 
   it('says a singular unit as a singular unit', () => {

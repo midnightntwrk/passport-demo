@@ -66,6 +66,8 @@ import { EcosystemIdentity } from './Ecosystem.js'
    at all when Passport is already installed, or in a browser that cannot
    install it — see `lib/installPrompt.ts`. */
 import InstallPassport from './InstallPassport.js'
+/* The prominent offer, on a phone that has not installed Passport (2026/09/28). */
+import { InstallCard } from './InstallOffer.js'
 import { type PassportNetwork } from './NetworkSwitcher.js'
 import NotificationToggle from './NotificationToggle.js'
 import PassportContractCard, { type PassportContractCardProps } from './PassportContract.js'
@@ -1296,6 +1298,15 @@ export default function HomeScreen(props: HomeScreenProps) {
             </div>
           </article>
         ))}
+
+        {/* INSTALL PASSPORT, WHERE A PHONE CANNOT MISS IT (2026/09/28): the
+            first thing under the money, with the Companion, until it is
+            installed or put away for the week. Above the apps and the activity
+            rather than inside the assets panel, so a card that arrives a
+            moment after Home (the browser's offer) moves nothing a person is
+            reading. Renders nothing on a desktop, which keeps the bar's modest
+            control. */}
+        <InstallCard />
 
         <div className="mnhome-discover">
         {/* The applications, directly below the wallet summary — the same

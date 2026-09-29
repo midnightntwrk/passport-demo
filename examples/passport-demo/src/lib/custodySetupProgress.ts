@@ -29,7 +29,7 @@
  * `./custodyNameFirst.ts` and `./claimSteps.ts`.
  */
 
-import type { ClaimStepState } from './claimSteps.js'
+import type { ClaimStepState, StepActor } from './claimSteps.js'
 
 /* -------------------------------------------------------------------------- */
 /* Where the setup is                                                         */
@@ -158,6 +158,12 @@ export interface CustodySetupStep {
   readonly state: ClaimStepState
   /** Seconds, or null when the answer is "as long as you take". */
   readonly expectedSeconds: number | null
+  /**
+   * Whose move the row waits on while it runs. The ceremony row is the
+   * reader's on the passkey road — the prompt is up — and Passport's on the
+   * sign-in road, whose key signs by itself (2026/09/28).
+   */
+  readonly actor: StepActor
 }
 
 /**
@@ -202,12 +208,22 @@ export function custodySetupSteps(
 ): CustodySetupStep[] {
   const active = rowOfPhase(phase)
   const rows: readonly Omit<CustodySetupStep, 'state'>[] = [
-    { id: 'name', label: 'Checking your name', expectedSeconds: 10 },
-    /* No estimate, on purpose and for `./claimSteps.ts`'s reason: this row is
-       the READER'S, and a countdown against somebody's own hands is a deadline
-       rather than an estimate. */
-    { id: 'identity', label: custodyIdentityStepLabel(arm), expectedSeconds: null },
-    { id: 'account', label: 'Setting up your account', expectedSeconds: CUSTODY_SETUP_EXPECTED_SECONDS },
+    { id: 'name', label: 'Checking your name', expectedSeconds: 10, actor: 'passport' },
+    /* No estimate, on purpose and for `./claimSteps.ts`'s reason: on the
+       passkey road this row is the READER'S, and a countdown against
+       somebody's own hands is a deadline rather than an estimate. */
+    {
+      id: 'identity',
+      label: custodyIdentityStepLabel(arm),
+      expectedSeconds: null,
+      actor: arm === 'passkey' ? 'you' : 'passport',
+    },
+    {
+      id: 'account',
+      label: 'Setting up your account',
+      expectedSeconds: CUSTODY_SETUP_EXPECTED_SECONDS,
+      actor: 'passport',
+    },
   ]
   return rows.map((row, index) => ({
     ...row,

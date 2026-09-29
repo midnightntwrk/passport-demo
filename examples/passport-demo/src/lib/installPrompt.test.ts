@@ -12,11 +12,21 @@ import { describe, expect, it } from 'vitest';
 
 import {
   alreadyInstalled,
+  INSTALL_CARD_LINE,
   INSTALL_HINT_STEPS,
   INSTALL_LABEL,
+  INSTALL_NOT_NOW,
+  INSTALL_SHOW_HOW,
+  INSTALL_SNOOZE_KEY,
+  INSTALL_SNOOZE_MS,
   installAffordance,
+  installCardVisible,
+  installSnoozed,
+  installSnoozeValue,
   isIosDevice,
+  isMobileBrowser,
   isSafariBrowser,
+  type InstallCardInput,
   type InstallEnvironment,
 } from './installPrompt.js';
 
@@ -149,9 +159,96 @@ describe('the copy', () => {
   it('says what it does, and names no machinery', () => {
     expect(INSTALL_LABEL).toBe('Install Passport');
     expect(INSTALL_HINT_STEPS).toHaveLength(2);
-    const copy = [INSTALL_LABEL, ...INSTALL_HINT_STEPS].join(' ').toLowerCase();
-    for (const word of ['wallet', 'dust', 'contract', 'registry', 'indexer', 'resolver']) {
+    expect(INSTALL_CARD_LINE).toBe('Open it from your home screen, full screen, one tap away.');
+    const copy = [INSTALL_LABEL, ...INSTALL_HINT_STEPS, INSTALL_CARD_LINE, INSTALL_SHOW_HOW, INSTALL_NOT_NOW]
+      .join(' ')
+      .toLowerCase();
+    for (const word of [
+      'wallet',
+      'dust',
+      'contract',
+      'registry',
+      'indexer',
+      'resolver',
+      'sponsor',
+      'sdk',
+      'dynamic',
+      'pwa',
+    ]) {
       expect(copy).not.toContain(word);
     }
+  });
+});
+
+describe('the install card on Home (2026/09/28)', () => {
+  const NOW = Date.UTC(2026, 8, 28, 12);
+  const card = (over: Partial<InstallCardInput>): InstallCardInput => ({
+    ...environment({ userAgent: AGENTS.androidChrome, maxTouchPoints: 5, promptHeld: true }),
+    snoozedUntil: null,
+    now: NOW,
+    ...over,
+  });
+
+  it('knows a phone or a tablet by what it is, not by how wide its window is', () => {
+    expect(isMobileBrowser(AGENTS.androidChrome, 5)).toBe(true);
+    expect(isMobileBrowser(AGENTS.iphoneSafari, 5)).toBe(true);
+    expect(isMobileBrowser(AGENTS.iphoneChrome, 5)).toBe(true);
+    expect(isMobileBrowser(AGENTS.ipadSafari, 5)).toBe(true);
+    expect(isMobileBrowser(AGENTS.desktopChrome, 0)).toBe(false);
+    expect(isMobileBrowser(AGENTS.desktopSafari, 0)).toBe(false);
+    expect(isMobileBrowser(AGENTS.firefox, 0)).toBe(false);
+  });
+
+  it('shows on a phone that can install Passport and has not', () => {
+    // Android, with the browser's own prompt held.
+    expect(installCardVisible(card({}))).toBe(true);
+    // iPhone Safari, which has no prompt and is shown the two taps instead.
+    expect(
+      installCardVisible(card({ userAgent: AGENTS.iphoneSafari, promptHeld: false })),
+    ).toBe(true);
+  });
+
+  it('never shows once Passport is installed', () => {
+    expect(installCardVisible(card({ standaloneDisplay: true }))).toBe(false);
+    expect(
+      installCardVisible(card({ userAgent: AGENTS.iphoneSafari, promptHeld: false, iosStandalone: true })),
+    ).toBe(false);
+  });
+
+  it('never shows where there is nothing to install with, or no home screen', () => {
+    // Android before the browser has offered anything: a button would do nothing.
+    expect(installCardVisible(card({ promptHeld: false }))).toBe(false);
+    // Chrome on iOS has no Add to Home Screen the steps could name.
+    expect(installCardVisible(card({ userAgent: AGENTS.iphoneChrome, promptHeld: false }))).toBe(false);
+    // A desktop keeps its modest control in the bar, and gets no card.
+    expect(installCardVisible(card({ userAgent: AGENTS.desktopChrome, maxTouchPoints: 0 }))).toBe(false);
+  });
+
+  it('goes away for a week on "not now", and comes back when the week is up', () => {
+    const stored = installSnoozeValue(NOW);
+    expect(Number(stored)).toBe(NOW + INSTALL_SNOOZE_MS);
+    expect(INSTALL_SNOOZE_MS).toBe(7 * 24 * 60 * 60 * 1000);
+    expect(INSTALL_SNOOZE_KEY).toBe('mn-passport:install-snoozed-until');
+    expect(installCardVisible(card({ snoozedUntil: stored }))).toBe(false);
+    expect(installCardVisible(card({ snoozedUntil: stored, now: NOW + INSTALL_SNOOZE_MS - 1 }))).toBe(false);
+    // The snooze expiring: the card is back, because installing is encouraged.
+    expect(installCardVisible(card({ snoozedUntil: stored, now: NOW + INSTALL_SNOOZE_MS }))).toBe(true);
+    expect(installCardVisible(card({ snoozedUntil: stored, now: NOW + INSTALL_SNOOZE_MS + 1 }))).toBe(true);
+  });
+
+  it('reads anything it does not recognise as no snooze, and never more than a week', () => {
+    expect(installSnoozed(null, NOW)).toBe(false);
+    expect(installSnoozed(undefined, NOW)).toBe(false);
+    expect(installSnoozed('', NOW)).toBe(false);
+    expect(installSnoozed('1', NOW)).toBe(false);
+    expect(installSnoozed('soon', NOW)).toBe(false);
+    expect(installSnoozed('-5', NOW)).toBe(false);
+    expect(installSnoozed(`${NOW + 1000}.5`, NOW)).toBe(false);
+    expect(installSnoozed(` ${NOW + 1000} `, NOW)).toBe(true);
+    // A date further ahead than any "not now" could write is not a snooze, so
+    // it can never become the old "dismissed for ever" by another route.
+    expect(installSnoozed(String(NOW + INSTALL_SNOOZE_MS), NOW)).toBe(true);
+    expect(installSnoozed(String(NOW + INSTALL_SNOOZE_MS + 1), NOW)).toBe(false);
+    expect(installSnoozed(String(NOW + 10 * INSTALL_SNOOZE_MS), NOW)).toBe(false);
   });
 });
