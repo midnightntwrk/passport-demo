@@ -26,6 +26,10 @@ import {
   isIosDevice,
   isMobileBrowser,
   isSafariBrowser,
+  INSTALL_GUIDES,
+  installGuide,
+  installLandingLine,
+  landingInstallVisible,
   type InstallCardInput,
   type InstallEnvironment,
 } from './installPrompt.js';
@@ -250,5 +254,47 @@ describe('the install card on Home (2026/09/28)', () => {
     expect(installSnoozed(String(NOW + INSTALL_SNOOZE_MS), NOW)).toBe(true);
     expect(installSnoozed(String(NOW + INSTALL_SNOOZE_MS + 1), NOW)).toBe(false);
     expect(installSnoozed(String(NOW + 10 * INSTALL_SNOOZE_MS), NOW)).toBe(false);
+  });
+});
+
+describe('the landing offers to install on every browser (2026/09/29)', () => {
+  it('shows on a desktop with no prompt held — the case a reviewer found empty', () => {
+    expect(landingInstallVisible(environment({ userAgent: AGENTS.desktopChrome }))).toBe(true);
+    expect(landingInstallVisible(environment({ userAgent: AGENTS.desktopSafari }))).toBe(true);
+    expect(landingInstallVisible(environment({ userAgent: AGENTS.firefox }))).toBe(true);
+  });
+
+  it('never shows inside the installed app, by either way of saying so', () => {
+    expect(landingInstallVisible(environment({ standaloneDisplay: true }))).toBe(false);
+    expect(
+      landingInstallVisible(environment({ userAgent: AGENTS.iphoneSafari, iosStandalone: true })),
+    ).toBe(false);
+  });
+});
+
+describe('installGuide picks the steps for the browser in hand', () => {
+  it.each([
+    ['desktopChrome', 0, 'chrome'],
+    ['desktopSafari', 0, 'mac-safari'],
+    ['ipadSafari', 5, 'ios'],
+    ['iphoneSafari', 5, 'ios'],
+    ['iphoneChrome', 5, 'ios'],
+    ['androidChrome', 5, 'android'],
+    ['firefox', 0, 'other'],
+  ] as const)('%s → %s', (agent, touch, guide) => {
+    expect(installGuide(AGENTS[agent], touch)).toBe(guide);
+  });
+
+  it('tells Edge from Chrome, though Edge says "Chrome" too', () => {
+    const edge =
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0';
+    expect(installGuide(edge, 0)).toBe('edge');
+  });
+
+  it('gives every browser two steps and says where Passport will live', () => {
+    for (const copy of Object.values(INSTALL_GUIDES)) expect(copy.steps).toHaveLength(2);
+    expect(INSTALL_GUIDES['mac-safari'].steps[1]?.text).toContain('Add to Dock');
+    expect(installLandingLine('mac-safari')).toContain('Dock');
+    expect(installLandingLine('android')).toContain('home screen');
   });
 });

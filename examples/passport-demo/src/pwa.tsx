@@ -15,9 +15,12 @@ import {
   INSTALL_SNOOZE_KEY,
   installAffordance,
   installCardVisible,
+  installGuide,
   installSnoozeValue,
   isMobileBrowser,
+  landingInstallVisible,
   type InstallAffordance,
+  type InstallGuide,
 } from './lib/installPrompt.js';
 
 interface BeforeInstallPromptEvent extends Event {
@@ -147,6 +150,10 @@ export interface InstallOffer {
   readonly mobile: boolean;
   /** Whether Home shows the install card: see `installCardVisible`. */
   readonly cardVisible: boolean;
+  /** Whether the landing offers to install: always, unless installed (2026/09/29). */
+  readonly landingVisible: boolean;
+  /** Which browser's steps to show when the page holds no prompt to replay. */
+  readonly guide: InstallGuide;
   /** "Not now": the card goes for a week. */
   readonly snooze: () => void;
 }
@@ -188,6 +195,8 @@ export function useInstallOffer(): InstallOffer {
     affordance: installAffordance(environment),
     mobile: isMobileBrowser(environment.userAgent, environment.maxTouchPoints),
     cardVisible: installCardVisible({ ...environment, snoozedUntil, now: Date.now() }),
+    landingVisible: landingInstallVisible(environment),
+    guide: installGuide(environment.userAgent, environment.maxTouchPoints),
     snooze,
   };
 }

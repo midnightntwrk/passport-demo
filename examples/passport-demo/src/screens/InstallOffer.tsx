@@ -1,13 +1,18 @@
-import { Download, Share, SquarePlus, X } from 'lucide-react'
+import { AppWindow, ChevronRight, Compass, Download, EllipsisVertical, Menu, MonitorDown, Share, SquarePlus, X } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 
 import {
   INSTALL_CARD_LINE,
+  INSTALL_GUIDES,
   INSTALL_HINT_STEPS,
   INSTALL_LABEL,
   INSTALL_NOT_NOW,
   INSTALL_SHOW_HOW,
+  installLandingLine,
+  isSafariBrowser,
+  type InstallGuide,
+  type InstallGuideStep,
 } from '../lib/installPrompt.js'
 import { INSTALL_LEDE_IOS, promptInstall, useInstallOffer } from '../pwa.js'
 import { CompanionFace, useCompanionMotion } from './Companion.js'
@@ -41,13 +46,19 @@ import './install-offer.css'
  */
 
 /** Opens the browser's dialogue where there is one, and the steps where there is not. */
-function useInstallPress(): { press: () => void; stepsOpen: boolean; closeSteps: () => void } {
+function useInstallPress(): {
+  press: () => void
+  stepsOpen: boolean
+  closeSteps: () => void
+} {
   const offer = useInstallOffer()
   const [stepsOpen, setStepsOpen] = useState(false)
   return {
     press: () => {
-      if (offer.affordance === 'hint') setStepsOpen(true)
-      else void promptInstall()
+      /* The browser's own dialogue when the page holds one; otherwise the
+         steps for this browser, which is the most any page can do. */
+      if (offer.affordance === 'prompt') void promptInstall()
+      else setStepsOpen(true)
     },
     stepsOpen,
     closeSteps: () => setStepsOpen(false),
@@ -70,6 +81,7 @@ export function InstallCard() {
 /* The card itself, mounted only while it shows, so the Companion's motion runs
    for a card somebody can see and for nothing else. */
 function InstallCardBody({ hint, onNotNow }: { hint: boolean; onNotNow: () => void }) {
+  const offer = useInstallOffer()
   const { press, stepsOpen, closeSteps } = useInstallPress()
   const { moving, wake } = useCompanionMotion()
   return (
@@ -101,37 +113,68 @@ function InstallCardBody({ hint, onNotNow }: { hint: boolean; onNotNow: () => vo
         {hint ? <Share size={17} aria-hidden="true" /> : <Download size={17} aria-hidden="true" />}
         <span>{hint ? INSTALL_SHOW_HOW : 'Install'}</span>
       </button>
-      {stepsOpen ? <InstallSteps onClose={closeSteps} /> : null}
+      {stepsOpen ? <InstallSteps guide={offer.guide} onClose={closeSteps} /> : null}
     </section>
   )
 }
 
 /**
- * The landing's secondary action, under Sign up and Log in, for a phone that
- * can install Passport and holds no Passport yet. It is a control, not an
- * invitation, so a "not now" on Home does not hide it.
+ * The landing's install button, under Sign up and Log in (2026/09/29).
+ *
+ * ON EVERY BROWSER, unless Passport is installed already. It used to render
+ * only on a phone that could install right then, so a desktop reviewer saw no
+ * way to install at all. The press opens the browser's own dialogue where the
+ * page holds one, and the steps for this browser where it does not — see
+ * `INSTALL_GUIDES`. A control, not an invitation: a "not now" on Home does
+ * not hide it, and neither does a Passport already on this device.
  */
-export function LandingInstall({ hasExistingPassport }: { hasExistingPassport: boolean | null }) {
+export function LandingInstall(_props: { hasExistingPassport: boolean | null }) {
   const offer = useInstallOffer()
   const { press, stepsOpen, closeSteps } = useInstallPress()
-  if (!offer.mobile || offer.affordance === 'hidden' || hasExistingPassport === true) return null
+  if (!offer.landingVisible) return null
   return (
     <>
       <button type="button" className="mninstall-landing" onClick={press} data-testid="landing-install">
-        <Download size={16} aria-hidden="true" />
-        <span>{INSTALL_LABEL}</span>
+        <span className="mninstall-landing-badge" aria-hidden="true">
+          {offer.mobile ? <Download size={18} strokeWidth={2} /> : <MonitorDown size={18} strokeWidth={2} />}
+        </span>
+        <span className="mninstall-landing-copy">
+          <span className="mninstall-landing-title">{INSTALL_LABEL}</span>
+          <span className="mninstall-landing-line">{installLandingLine(offer.guide)}</span>
+        </span>
+        <ChevronRight className="mninstall-landing-chevron" size={18} aria-hidden="true" />
       </button>
-      {stepsOpen ? <InstallSteps onClose={closeSteps} /> : null}
+      {stepsOpen ? <InstallSteps guide={offer.guide} onClose={closeSteps} /> : null}
     </>
   )
 }
 
+/** The glyph a step shows beside its words: the one the browser itself shows. */
+function StepGlyph({ glyph }: { glyph: InstallGuideStep['glyph'] }) {
+  const props = { size: 18, strokeWidth: 2 } as const
+  if (glyph === 'share') return <Share {...props} />
+  if (glyph === 'add') return <SquarePlus {...props} />
+  if (glyph === 'menu') return /Macintosh/.test(navigator.userAgent) && isSafariBrowser(navigator.userAgent) ? <Menu {...props} /> : <EllipsisVertical {...props} />
+  if (glyph === 'dock') return <AppWindow {...props} />
+  if (glyph === 'browser') return <Compass {...props} />
+  return <Download {...props} />
+}
+
 /**
- * The iPhone's two taps, as a sheet from the bottom of the screen: what
- * installing gives, what the installed app will ask once, and the two steps
- * with the icons Safari's own toolbar and menu show.
+ * The steps that install Passport in this browser, as a sheet from the bottom
+ * of the screen: what installing gives and the two steps, with the glyphs the
+ * browser itself shows. On iOS it also says what the installed app will ask
+ * once, and Safari's steps name Safari's toolbar.
  */
-export function InstallSteps({ onClose }: { onClose: () => void }) {
+export function InstallSteps({ guide = 'ios', onClose }: { guide?: InstallGuide; onClose: () => void }) {
+  const copy = INSTALL_GUIDES[guide]
+  const iosSafari = guide === 'ios' && isSafariBrowser(navigator.userAgent)
+  const steps: readonly InstallGuideStep[] = iosSafari
+    ? [
+        { glyph: 'share', text: INSTALL_HINT_STEPS[0] ?? copy.steps[0]?.text ?? '' },
+        { glyph: 'add', text: INSTALL_HINT_STEPS[1] ?? copy.steps[1]?.text ?? '' },
+      ]
+    : copy.steps
   const done = useRef<HTMLButtonElement | null>(null)
   useEffect(() => {
     done.current?.focus()
@@ -157,32 +200,25 @@ export function InstallSteps({ onClose }: { onClose: () => void }) {
             <SquarePlus size={20} strokeWidth={2} />
           </span>
           <div>
-            <h2 id="pwainstall-title">Add Passport to your home screen</h2>
-            {/* The honest note, kept from the sheet this replaces: an
-                installed web app on iOS has storage of its own, so the passkey
+            <h2 id="pwainstall-title">{copy.title}</h2>
+            {/* The honest note on iOS, kept from the sheet this replaces: an
+                installed web app there has storage of its own, so the passkey
                 follows through iCloud Keychain and is asked for once. */}
-            <p>{INSTALL_LEDE_IOS}</p>
+            <p>{guide === 'ios' ? INSTALL_LEDE_IOS : copy.lede}</p>
           </div>
         </header>
         <ol className="pwainstall-steps mninstall-steps">
-          <li>
-            <span className="mninstall-step-number" aria-hidden="true">
-              1
-            </span>
-            <span className="mninstall-step-glyph" aria-hidden="true">
-              <Share size={18} strokeWidth={2} />
-            </span>
-            <span>{INSTALL_HINT_STEPS[0]}</span>
-          </li>
-          <li>
-            <span className="mninstall-step-number" aria-hidden="true">
-              2
-            </span>
-            <span className="mninstall-step-glyph" aria-hidden="true">
-              <SquarePlus size={18} strokeWidth={2} />
-            </span>
-            <span>{INSTALL_HINT_STEPS[1]}</span>
-          </li>
+          {steps.map((step, index) => (
+            <li key={step.text}>
+              <span className="mninstall-step-number" aria-hidden="true">
+                {index + 1}
+              </span>
+              <span className="mninstall-step-glyph" aria-hidden="true">
+                <StepGlyph glyph={step.glyph} />
+              </span>
+              <span>{step.text}</span>
+            </li>
+          ))}
         </ol>
         <div className="pwainstall-actions">
           <button type="button" className="pwainstall-primary" onClick={onClose} ref={done}>

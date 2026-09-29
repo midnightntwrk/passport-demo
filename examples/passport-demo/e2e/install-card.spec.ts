@@ -224,7 +224,7 @@ test.describe('the install card on Home (2026/09/28)', () => {
         await offerInstall(page, 'dismissed');
         const install = page.getByTestId('landing-install');
         await expect(install).toBeVisible();
-        await expect(install).toHaveText('Install Passport');
+        await expect(install).toContainText('Install Passport');
         /* BELOW the two doors, not in front of them. */
         const signUp = await page.getByRole('button', { name: SIGN_IN_BUTTON }).boundingBox();
         const own = await install.boundingBox();
@@ -239,5 +239,45 @@ test.describe('the install card on Home (2026/09/28)', () => {
       ANDROID,
     );
     await close();
+  });
+
+  test('the landing offers Install Passport on a desktop too, with the steps for its browser (2026/09/29)', async ({
+    browser,
+  }) => {
+    test.setTimeout(240_000);
+    const cases = [
+      {
+        userAgent:
+          'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36',
+        step: 'Cast, save, and share',
+      },
+      {
+        userAgent:
+          'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Safari/605.1.15',
+        step: 'Add to Dock',
+      },
+    ];
+    for (const { userAgent, step: expected } of cases) {
+      const desktop = { userAgent, viewport: { width: 1280, height: 900 }, isMobile: false, hasTouch: false };
+      const { close } = await custodyPassportOnHome(
+        browser,
+        async (page, step) => {
+          if (step !== 'landing') return;
+          /* No prompt held: the case that used to render nothing at all. */
+          const install = page.getByTestId('landing-install');
+          await expect(install).toBeVisible();
+          await expect(install).toContainText('Install Passport');
+          await install.click();
+          const steps = page.getByTestId('install-steps');
+          await expect(steps).toBeVisible();
+          await expect(steps).toContainText(expected);
+          await steps.getByRole('button', { name: 'Done' }).click();
+          await expect(steps).toHaveCount(0);
+        },
+        undefined,
+        desktop,
+      );
+      await close();
+    }
   });
 });
