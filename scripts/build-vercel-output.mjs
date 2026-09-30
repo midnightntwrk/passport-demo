@@ -73,9 +73,14 @@
  *    then `rewrites[]`. That is Vercel's own ordering — redirects, filesystem,
  *    rewrites — so the committed `vercel.json` stays the single description of
  *    the routing, readable by anyone who has never run this script.
+ * 3. Bundles each `.ts` endpoint under `<app>/api/` (not `_lib`, not tests)
+ *    with esbuild into `functions/api/…/<name>.func/index.mjs`, a Node function
+ *    (2026/09/30: the Passport push endpoints). Functions are matched in the
+ *    filesystem phase, before the SPA rewrite. An app with no `api/` gets
+ *    exactly the static output it always did.
  */
 
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -137,6 +142,52 @@ routes.push({ handle: 'filesystem' });
 
 for (const rule of vercelConfig.rewrites ?? []) {
   routes.push({ src: rule.source, dest: rule.destination });
+}
+
+/* Serverless endpoints. Every `.ts` under `api/` except `_`-prefixed helpers
+   and tests; the helpers are bundled into each endpoint that imports them. */
+const apiDirectory = join(appDirectory, 'api');
+const endpoints = [];
+const collectEndpoints = (directory) => {
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    if (entry.name.startsWith('_')) continue;
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) collectEndpoints(path);
+    else if (entry.name.endsWith('.ts') && !entry.name.endsWith('.test.ts')) endpoints.push(path);
+  }
+};
+if (existsSync(apiDirectory)) collectEndpoints(apiDirectory);
+
+if (endpoints.length > 0) {
+  const { build } = await import('esbuild');
+  for (const endpoint of endpoints) {
+    const route = relative(appDirectory, endpoint).replace(/\.ts$/, '').split(sep).join('/');
+    const functionDirectory = join(outputDirectory, 'functions', `${route}.func`);
+    await build({
+      entryPoints: [endpoint],
+      outfile: join(functionDirectory, 'index.mjs'),
+      bundle: true,
+      platform: 'node',
+      format: 'esm',
+      target: 'node22',
+      logLevel: 'warning',
+    });
+    writeFileSync(
+      join(functionDirectory, '.vc-config.json'),
+      `${JSON.stringify(
+        {
+          runtime: 'nodejs22.x',
+          handler: 'index.mjs',
+          launcherType: 'Nodejs',
+          shouldAddHelpers: false,
+          maxDuration: 30,
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    console.log(`function /${route}`);
+  }
 }
 
 writeFileSync(

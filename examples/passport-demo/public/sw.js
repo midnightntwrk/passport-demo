@@ -255,15 +255,11 @@ self.addEventListener('message', (event) => {
   if (event.data?.type === 'BUILD_ID') event.ports?.[0]?.postMessage(BUILD_ID);
 });
 
-// The click side of the notifications `src/lib/notifications.ts` shows through
-// this worker. Android Chrome forbids the page-side Notification constructor
-// wherever a service worker is registered, so on the one platform this demo
-// notifies from, every notification is shown here and every tap arrives here
-// too — without this handler they would be inert.
-//
-// This is NOT push. There is no `push` handler, deliberately: a notification
-// only ever exists because a running Passport tab observed something on its
-// own wallet stream. See the scope note in `src/lib/notifications.ts`.
+// The click side of every notification this worker shows: the ones
+// `src/lib/notifications.ts` raises from a running tab (Android Chrome forbids
+// the page-side constructor wherever a worker is registered, so they all come
+// through here), and the background pushes below. Either way a tap opens or
+// focuses Passport.
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
   event.waitUntil(
@@ -274,6 +270,80 @@ self.addEventListener('notificationclick', (event) => {
       }
       return self.clients.openWindow('/');
     }),
+  );
+});
+
+/**
+ * BACKGROUND PUSH (2026/09/30)
+ * ----------------------------
+ * A payment to this Passport's account, relayed by Firebase Cloud Messaging
+ * once the server has checked the transaction on the indexer — see
+ * `src/lib/push.ts` and `api/push/notify.ts`. The message is DATA-ONLY, so
+ * this worker draws it, and it carries no amount, name, or address: the fixed
+ * sentence below is all a locked screen ever shows.
+ *
+ * FCM wraps the data as `{ data: { … }, from, fcmMessageId }`; a flat object
+ * is accepted too. Anything unreadable still shows the default sentence,
+ * because a push that shows nothing is one the browser holds against the site.
+ */
+const PUSH_DEFAULT_TITLE = 'You received a payment';
+const PUSH_DEFAULT_BODY = 'Open Passport to see it.';
+
+function pushNotificationFrom(text) {
+  let payload = null;
+  try {
+    payload = text ? JSON.parse(text) : null;
+  } catch {
+    payload = null;
+  }
+  const fields =
+    payload && typeof payload === 'object'
+      ? payload.data && typeof payload.data === 'object'
+        ? payload.data
+        : payload
+      : {};
+  const line = (value, fallback) =>
+    typeof value === 'string' && value.trim().length > 0 ? value.trim().slice(0, 200) : fallback;
+  const txHash = typeof fields.txHash === 'string' && /^[0-9a-f]{64}$/.test(fields.txHash) ? fields.txHash : null;
+  return {
+    title: line(fields.title, PUSH_DEFAULT_TITLE),
+    body: line(fields.body, PUSH_DEFAULT_BODY),
+    tag: txHash ? `passport-payment-${txHash}` : 'passport-payment',
+    url: '/',
+  };
+}
+
+self.addEventListener('push', (event) => {
+  let text = '';
+  try {
+    text = event.data ? event.data.text() : '';
+  } catch {
+    text = '';
+  }
+  const shown = pushNotificationFrom(text);
+  event.waitUntil(
+    self.registration.showNotification(shown.title, {
+      body: shown.body,
+      icon: '/icons/passport-192.png',
+      tag: shown.tag,
+      renotify: true,
+      data: { url: shown.url },
+    }),
+  );
+});
+
+// The browser replaced or expired the subscription. Re-subscribe under the
+// same key where it can; the page re-registers the new one with the server
+// the next time Passport is opened (`refreshPush` in `src/lib/push.ts`).
+// Bounded like every other wait in this worker, so it cannot park an update.
+self.addEventListener('pushsubscriptionchange', (event) => {
+  const key = event.oldSubscription?.options?.applicationServerKey;
+  if (event.newSubscription || !key) return;
+  event.waitUntil(
+    Promise.race([
+      self.registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key }),
+      new Promise((resolve) => setTimeout(resolve, REFRESH_TIMEOUT_MS)),
+    ]).catch(() => undefined),
   );
 });
 

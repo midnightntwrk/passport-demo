@@ -367,16 +367,23 @@ assert.ok(
   'The ZK manifest rule must come after /zk/(.*) or the year-long value wins.',
 );
 pass('the ZK integrity manifest is revalidated rather than pinned for a year');
-assert.equal(headerValue('/((?!zk/|zk-params/|assets/).*)', 'cache-control'), 'no-cache');
+assert.equal(headerValue('/((?!api/|zk/|zk-params/|assets/).*)', 'cache-control'), 'no-cache');
 pass('every stable-url file, both HTML shells included, must be revalidated');
 assert.equal(headerValue('/sw.js', 'cache-control'), 'no-cache');
 assert.equal(headerValue('/sw.js', 'service-worker-allowed'), '/');
 pass('the service worker script itself must be revalidated');
 assert.ok(
-  vercelConfig.rewrites.some((rule) => rule.source === '/((?!zk/|zk-params/|assets/).*)'),
+  vercelConfig.rewrites.some((rule) => rule.source === '/((?!api/|zk/|zk-params/|assets/).*)'),
   'The no-cache header rule and the SPA rewrite must share one negative lookahead.',
 );
 pass('the cache rule and the SPA rewrite cover exactly the same paths');
+/* `/api/**` is the push endpoints (2026/09/30). The SPA rewrite must never
+   answer them with `index.html`, and they set their own `no-store`. */
+assert.ok(
+  vercelConfig.rewrites.every((rule) => !new RegExp(`^${rule.source}$`).test('/api/push/notify')),
+  'An SPA rewrite would answer /api/push/* with index.html.',
+);
+pass('the push endpoints are not rewritten to the app shell');
 
 /* THE RESPONSE HEADERS THAT ARE NOT ABOUT CACHING
    -----------------------------------------------

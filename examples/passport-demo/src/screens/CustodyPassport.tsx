@@ -204,6 +204,7 @@ import { NETWORK_LABELS, type PassportNetwork } from './NetworkSwitcher.js'
 import type { PassportContractName } from '../identity/contractRuntime.js'
 import type { LocalMidnightWallet } from '../lib/localWallet.js'
 import { pushToast, updateToast } from './ToastStack.js'
+import { announcePayment } from '../lib/push.js'
 /* The explorer link a finished payment's toast and trail row carry. Pure, and
    free of the wallet SDK — see `../lib/networks.ts`. */
 import { explorerUrlFor, isLedgerTxHash, isTxIdentifier, resolveReceiptHash, txReceiptLink } from '../lib/networks.js'
@@ -2588,6 +2589,15 @@ export default function CustodyPassport({
          "View" goes straight to the explorer; otherwise the identifier its
          phases reported, which `reportSent` looks up (2026/09/28). */
       if (isLedgerTxHash(sent.txHash)) sentTxId.current = sent.txHash
+      /* Wakes the recipient's devices, where the build has background push.
+         Fire and forget: it returns at once, never throws, and the server
+         checks the transaction on the indexer before anyone is told. */
+      announcePayment({
+        recipientAccount: params.recipientAccountAddress,
+        tx: sentTxId.current,
+        lookup: async (identifier) =>
+          (await import('../identity/contractRuntime.js')).resolveTxHashOnce(indexerHttpUrl, identifier),
+      })
       clearCustodyShieldedSend(window.localStorage, {
         network: record.network,
         accountAddress: account.address,
