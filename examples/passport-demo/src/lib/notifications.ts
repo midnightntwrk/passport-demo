@@ -9,35 +9,27 @@
  * with Passport installed and backgrounded — the case the demo needs — and it
  * works on Android Chrome and on desktop Chrome, Edge, Firefox, and Safari.
  *
- * It is NOT background Web Push, and must not be described as such:
+ * On its own it is NOT background Web Push:
  *
- * - A Passport whose tab is CLOSED gets nothing. No server is watching the
- *   chain on the user's behalf; the observation happens in the page or not at
- *   all.
+ * - A Passport whose tab is CLOSED gets nothing from this module. The
+ *   observation happens in the page or not at all.
  * - An iOS Safari TAB gets nothing at all — `Notification` is simply absent
  *   there, and the Home control hides itself accordingly. An iOS home-screen
  *   web app on 16.4 or later can be granted permission and can show one
- *   through its service worker while it is running, so the paths below do
- *   cover it, but only while it is running. Nothing here survives the app
- *   being closed on any platform.
+ *   through its service worker while it is running.
  *
- * The half a real background push would need, so the gap reads as a size
- * rather than a shrug:
- *
- * - `public/sw.js` gains `push` and `pushsubscriptionchange` handlers. It has
- *   neither today, deliberately — its `notificationclick` handler serves the
- *   notifications THIS module shows through the worker, and nothing more.
- * - The client calls `registration.pushManager.subscribe()` with the server's
- *   VAPID public key, then posts the resulting endpoint and its `p256dh` and
- *   `auth` keys somewhere durable.
- * - That server keeps a subscription set per Passport, signs a VAPID JWT per
- *   delivery, encrypts every payload under RFC 8291, POSTs it to the push
- *   service, and drops subscriptions the service answers 404 or 410 for.
- * - Something server-side has to WATCH the chain per address, because a closed
- *   tab cannot watch it for itself. That is the real cost of the feature: an
- *   indexer subscription for every registered Passport, and a decision about
- *   holding the addresses needed to run it — which is precisely the privacy
- *   decision this demo has not taken.
+ * Background push (2026/09/30)
+ * ----------------------------
+ * The closed-Passport case is covered, for ONE event — a payment from another
+ * Passport to this account — by `./push.ts`, and only in a build configured
+ * with the `VITE_FIREBASE_*` values. There the Home toggle also registers the
+ * account with the server through Firebase Cloud Messaging; the SENDER's
+ * Passport reports the payment, the server checks it on the indexer, and
+ * `public/sw.js` shows it from its `push` handler. Nothing watches the chain
+ * per address: an opening balance or a gift from the Passport service is not
+ * pushed, and neither is anything else. On iPhone only a Home Screen app on
+ * iOS 16.4 or later can receive a push at all. Unconfigured, everything above
+ * is still the whole story.
  *
  * The mute switch
  * ---------------

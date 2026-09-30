@@ -1,5 +1,5 @@
 import { Bell, BellOff, BellRing } from 'lucide-react'
-import { useState, useSyncExternalStore } from 'react'
+import { useEffect, useState, useSyncExternalStore } from 'react'
 
 import {
   notificationPermission,
@@ -9,6 +9,7 @@ import {
   setNotificationsEnabled,
   subscribeToNotifications,
 } from '../lib/notifications.js'
+import { disablePush, pushAvailable, refreshPush } from '../lib/push.js'
 import './notification-toggle.css'
 
 /**
@@ -34,9 +35,13 @@ import './notification-toggle.css'
  *   It never asks again: a denied origin cannot be re-prompted from script, so
  *   a control that kept trying would be lying about what a tap can do.
  *
- * Scope: this is the in-app Notification API, not background Web Push. A
- * closed Passport notifies nobody. See the scope note in
- * `../lib/notifications.ts` before promising anyone otherwise.
+ * Background push rides on the same switch (2026/09/30). Where the build is
+ * configured for it and the browser can take it (`pushAvailable()` in
+ * `../lib/push.ts`), turning notifications on also registers this Passport's
+ * account for payments received while Passport is closed, and turning them off
+ * unregisters it. Where it is not, this control is exactly what it was: the
+ * in-app Notification API, and a closed Passport notifies nobody. Push never
+ * holds the control up and never changes what it says.
  */
 
 function getServerPermission(): ReturnType<typeof notificationPermission> {
@@ -50,10 +55,15 @@ function getServerEnabled(): boolean {
 export interface NotificationToggleProps {
   /** Extra class names, appended to the control's own. */
   className?: string
+  /**
+   * The account address background push is registered for — the contract the
+   * `.night` name resolves to. Absent, the control is in-app only.
+   */
+  pushAccount?: string | null
 }
 
 export default function NotificationToggle(props: NotificationToggleProps) {
-  const { className } = props
+  const { className, pushAccount = null } = props
   /* Two subscriptions rather than one state object: `useSyncExternalStore`
      compares snapshots by identity, and a freshly built object every read
      would re-render for ever. */
@@ -69,15 +79,24 @@ export default function NotificationToggle(props: NotificationToggleProps) {
   )
   const [asking, setAsking] = useState(false)
 
+  const on = permission === 'granted' && enabled
+
+  /* Turning on — by the tap below, or earlier on this device — registers the
+     account for push, and keeps that registration current on every visit.
+     Never prompts: it only runs once permission is granted. */
+  useEffect(() => {
+    if (on && pushAccount && pushAvailable()) void refreshPush(pushAccount)
+  }, [on, pushAccount])
+
   if (permission === 'unsupported') return null
 
-  const on = permission === 'granted' && enabled
   const denied = permission === 'denied'
 
   const onTap = () => {
     if (denied || asking) return
     if (permission === 'granted') {
       setNotificationsEnabled(!enabled)
+      if (enabled && pushAccount && pushAvailable()) void disablePush(pushAccount)
       return
     }
     setAsking(true)

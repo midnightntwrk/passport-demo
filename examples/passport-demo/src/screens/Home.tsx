@@ -1592,8 +1592,9 @@ export default function HomeScreen(props: HomeScreenProps) {
         ) : null}
 
         {/* Renders nothing where the browser has no Notification API, which is
-            why it needs no condition here. */}
-        <NotificationToggle />
+            why it needs no condition here. The account is what background push
+            registers, where the build is configured for it. */}
+        <NotificationToggle pushAccount={accountAddress} />
 
         {/* And nothing at all unless this build was given a Dynamic
             environment id AND somebody signed in with a provider — so in every

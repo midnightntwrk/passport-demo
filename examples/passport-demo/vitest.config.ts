@@ -708,6 +708,11 @@
  *                       `matchMedia`.
  *   txApproval.ts       Builds and proves transactions through the wallet.
  *   walletSnapshot.ts   Serialises the SDK's own sync state.
+ *   push.ts             Background push (2026/09/30): the Push API, a service
+ *                       worker registration, and Firebase's registration
+ *                       endpoints. Its config gate and the request shapes it
+ *                       replicates from the Firebase SDK are drilled in
+ *                       `src/lib/push.test.ts`; the rest needs a browser.
  *
  * WHAT IS OUT, AND WHY — `src/identity`
  * -------------------------------------
@@ -919,6 +924,10 @@
  *                       and the `.tsx` files are out. It is exercised against
  *                       the real stagenet indexer in a headless browser, which
  *                       is the only place its answers mean anything.
+ *   `api/**`            The push endpoints, run by Vercel rather than bundled
+ *                       into the app. Drilled against a fake Google and a fake
+ *                       indexer in `api/_lib/push.test.ts`; outside the
+ *                       denominator because it is not `src`.
  *   `*.tsx`, `main.tsx`, `pwa.tsx`, `backend.ts`, `publicProfile.ts`
  *                       React components and the browser bring-up around them.
  *                       There is no jsdom in this workspace and adding one
@@ -939,7 +948,7 @@ export default mergeConfig(
   viteConfig,
   defineConfig({
     test: {
-      include: ['src/**/*.test.ts'],
+      include: ['src/**/*.test.ts', 'api/**/*.test.ts'],
       coverage: {
         provider: 'v8',
         reporter: ['text', 'json-summary'],
