@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  custodyClaimHeldAlias,
+  custodyClaimOutcomeUncertain,
+  waitForNameOnAccount,
   CUSTODY_NAME_CHECKING_SENTENCE,
   CUSTODY_NAME_UNREACHABLE_SENTENCE,
   custodyNameAvailableSentence,
@@ -284,3 +287,74 @@ describe('somebody else got the name first', () => {
   });
 });
 
+
+describe('a claim whose answer was not a yes (2026/10/06)', () => {
+  const ACCOUNT = '35d824ac2d84df44f2b1a2853407a2bdd0974c1c37fc29224fbdc8d2015eaa01';
+  const refusal = (code: string, extra: Record<string, unknown> = {}) =>
+    Object.assign(new Error(code), { code, ...extra });
+
+  it('treats in-flight, confirmation, and bind refusals as "may have landed"', () => {
+    for (const code of ['registration-in-flight', 'confirmation-failed', 'bind-failed']) {
+      expect(custodyClaimOutcomeUncertain(refusal(code))).toBe(true);
+    }
+    for (const code of ['name-taken', 'deploy-failed', 'already-sponsored']) {
+      expect(custodyClaimOutcomeUncertain(refusal(code))).toBe(false);
+    }
+    expect(custodyClaimOutcomeUncertain(new Error('boom'))).toBe(false);
+    expect(custodyClaimOutcomeUncertain(null)).toBe(false);
+  });
+
+  it('reads the name a Passport already holds off an already-sponsored refusal', () => {
+    expect(custodyClaimHeldAlias(refusal('already-sponsored', { heldAlias: 'hectorest06' }))).toBe('hectorest06');
+    expect(custodyClaimHeldAlias(refusal('already-sponsored', { heldAlias: null }))).toBeNull();
+    expect(custodyClaimHeldAlias(refusal('name-taken', { heldAlias: 'x' }))).toBeNull();
+  });
+
+  const clock = () => {
+    let t = 0;
+    return { now: () => t, sleep: async (ms: number) => { t += ms; } };
+  };
+
+  it('finds the name on this account once the registry catches up — the 43 s case', async () => {
+    const c = clock();
+    let reads = 0;
+    const verdict = await waitForNameOnAccount({
+      alias: 'hectorest06',
+      account: ACCOUNT.toUpperCase(),
+      resolve: async () => (++reads < 3 ? null : { target: { kind: 'contract', hex: ACCOUNT } }),
+      ...c,
+    });
+    expect(verdict).toBe('mine');
+    expect(reads).toBe(3);
+  });
+
+  it('says other when the name points somewhere else', async () => {
+    const verdict = await waitForNameOnAccount({
+      alias: 'taken',
+      account: ACCOUNT,
+      resolve: async () => ({ target: { kind: 'contract', hex: 'ab'.repeat(32) } }),
+      ...clock(),
+    });
+    expect(verdict).toBe('other');
+  });
+
+  it('gives up as unknown after the wait, and survives reads that throw', async () => {
+    const c = clock();
+    let reads = 0;
+    const verdict = await waitForNameOnAccount({
+      alias: 'slow',
+      account: ACCOUNT,
+      resolve: async () => {
+        reads += 1;
+        if (reads % 2 === 0) throw new Error('indexer down');
+        return null;
+      },
+      timeoutMs: 30_000,
+      intervalMs: 5_000,
+      ...c,
+    });
+    expect(verdict).toBe('unknown');
+    expect(c.now()).toBeLessThanOrEqual(30_000);
+    expect(reads).toBeGreaterThan(3);
+  });
+});

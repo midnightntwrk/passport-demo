@@ -188,7 +188,10 @@ import {
   custodyNameFirstStage,
   custodyNameRaceOutcome,
   custodyNameTakenSentence,
+  custodyClaimHeldAlias,
+  custodyClaimOutcomeUncertain,
   custodyNameWasTaken,
+  waitForNameOnAccount,
 } from '../lib/custodyNameFirst.js'
 /* `../identity/midnamesText.js` and NOT `../identity/midnames.js`, for the
    reason `AliasClaim.tsx` gives at the same import: the module that goes and
@@ -1307,7 +1310,10 @@ export default function CustodyPassport({
            in this version. Coming back to the Passport does not need it. */
         const { custodyWalletSeed } = await import('../identity/custodyContractClient.js')
         const ownerKey = await deriveMidnamesOwnerKey(custodyWalletSeed(deps, owner))
-        let claimed
+        let claimed: { registerTxId?: string | null }
+        /* The name this Passport ends up holding: the one asked for, or the
+           one the service says it already holds (2026/10/06). */
+        let heldName = alias
         try {
           claimed = await sponsorAliasRegistrationAcross(
             FUNDER_URLS,
@@ -1328,14 +1334,39 @@ export default function CustodyPassport({
             loseTheRace()
             return
           }
-          throw cause
+          const held = custodyClaimHeldAlias(cause)
+          if (held !== null) {
+            /* ALREADY NAMED: the claim succeeded earlier, perhaps from a
+               press whose answer never arrived. Take the name it holds. */
+            heldName = held
+            claimed = { registerTxId: null }
+          } else if (custodyClaimOutcomeUncertain(cause)) {
+            /* MAY HAVE LANDED: look, rather than fail or ask twice. */
+            clock?.mark('name-claim-checking')
+            const { resolveAliasTarget } = await import('../identity/midnames.js')
+            const verdict = await waitForNameOnAccount({
+              alias,
+              account: address,
+              resolve: (name) => resolveAliasTarget(network as PassportNetwork, name),
+              sleep: (ms) => new Promise((resolve) => window.setTimeout(resolve, ms)),
+              now: () => Date.now(),
+            })
+            if (verdict === 'other') {
+              loseTheRace()
+              return
+            }
+            if (verdict !== 'mine') throw cause
+            claimed = { registerTxId: null }
+          } else {
+            throw cause
+          }
         }
         /* KEPT FOR THE TRAIL AND FOR NOTHING ELSE. The row that says the name
            is registered is worth a link to the transaction that registered it;
            the name card needs no such thing, and neither does anything else on
            screen, so it is session state rather than another stored field. */
         setRegisterTxId(claimed.registerTxId ?? null)
-        saveCustodyName(window.localStorage, owner, network, alias)
+        saveCustodyName(window.localStorage, owner, network, heldName)
         forgetCustodyChosenName(window.localStorage, owner, network)
         setTaken(null)
         setNameClaim('done')

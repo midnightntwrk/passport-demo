@@ -280,3 +280,87 @@ export function custodyNameRaceOutcome(
     stage: 'name',
   };
 }
+
+/* -------------------------------------------------------------------------- */
+/* A claim whose answer was not a yes (2026/10/06)                            */
+/* -------------------------------------------------------------------------- */
+/*
+ * THE DEFECT. A sign-up's name took 43 s to register. Partway through, the app
+ * asked the service again; the service answered `registration-in-flight` —
+ * "one is already in progress" — and the app treated that as the end and showed
+ * the claim as failed. The name landed three seconds later, on the right
+ * account. The person, told it had failed, tried another name and was refused
+ * because the Passport already held the first.
+ *
+ * Three refusals mean "it may well have landed": `registration-in-flight`,
+ * `confirmation-failed`, and `bind-failed`. Asking again could register twice,
+ * so the answer is to LOOK: read the registry until the name points at this
+ * account, at someone else, or the wait runs out. And `already-sponsored`
+ * naming the name this Passport holds is a claim that already succeeded.
+ */
+
+/** The refusals after which the name may already be registered to this account. */
+const CLAIM_OUTCOME_UNCERTAIN_CODES = new Set([
+  'registration-in-flight',
+  'confirmation-failed',
+  'bind-failed',
+]);
+
+function refusalCode(cause: unknown): string | null {
+  if (cause === null || typeof cause !== 'object') return null;
+  const code = (cause as { code?: unknown }).code;
+  return typeof code === 'string' ? code : null;
+}
+
+/** Whether the claim may have landed despite the refusal, so the registry must be read. */
+export function custodyClaimOutcomeUncertain(cause: unknown): boolean {
+  const code = refusalCode(cause);
+  return code !== null && CLAIM_OUTCOME_UNCERTAIN_CODES.has(code);
+}
+
+/** The name this Passport already holds, when the refusal says it has one; otherwise null. */
+export function custodyClaimHeldAlias(cause: unknown): string | null {
+  if (refusalCode(cause) !== 'already-sponsored') return null;
+  const held = (cause as { heldAlias?: unknown }).heldAlias;
+  return typeof held === 'string' && held.trim() !== '' ? held.trim() : null;
+}
+
+/** What the registry says about a name, as far as this check needs. */
+export type ResolvedNameTarget = { kind: string; hex: string } | null;
+
+/** Where a name was found pointing, after an uncertain claim. */
+export type NameLandingVerdict = 'mine' | 'other' | 'unknown';
+
+/**
+ * Reads the registry until the name points somewhere, or the wait runs out.
+ * `mine` when it points at `account`, `other` when at anything else, and
+ * `unknown` when it is still unregistered at the end — the claim then fails
+ * as it would have. A read that throws counts as "not yet".
+ */
+export async function waitForNameOnAccount(input: {
+  alias: string;
+  account: string;
+  resolve: (alias: string) => Promise<{ target: ResolvedNameTarget } | null>;
+  sleep: (ms: number) => Promise<void>;
+  now: () => number;
+  timeoutMs?: number;
+  intervalMs?: number;
+}): Promise<NameLandingVerdict> {
+  const timeoutMs = input.timeoutMs ?? 120_000;
+  const intervalMs = input.intervalMs ?? 5_000;
+  const account = input.account.toLowerCase();
+  const deadline = input.now() + timeoutMs;
+  for (;;) {
+    try {
+      const resolved = await input.resolve(input.alias);
+      const target = resolved?.target ?? null;
+      if (target !== null) {
+        return target.kind === 'contract' && target.hex.toLowerCase() === account ? 'mine' : 'other';
+      }
+    } catch {
+      /* The registry could not be read this time; read it again. */
+    }
+    if (input.now() + intervalMs > deadline) return 'unknown';
+    await input.sleep(intervalMs);
+  }
+}
