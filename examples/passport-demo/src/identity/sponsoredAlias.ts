@@ -136,6 +136,12 @@ export class AliasSponsorRefusal extends Error {
      * ends the walk rather than spending a second funder's NIGHT.
      */
     readonly reachedFunder: boolean = true,
+    /**
+     * The name this Passport already holds, sent beside `already-sponsored`
+     * (2026/10/06). Carried so a claim that finds its Passport already named
+     * can take that name, rather than show a refusal about a name it has.
+     */
+    readonly heldAlias: string | null = null,
   ) {
     super(message);
     this.name = 'AliasSponsorRefusal';
@@ -675,6 +681,7 @@ export async function sponsorAliasRegistration(
          funder speaking for itself, and a standby asked after that one would
          register the name a second time. */
       funderAnsweredWith(response.status, body),
+      typeof refusal.alias === 'string' ? refusal.alias : null,
     );
   }
 
