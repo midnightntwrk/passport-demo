@@ -12,7 +12,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { LOCAL_DEV_APP, withLocalApps, type RegistryApp } from './registry.js';
+import { LOCAL_DEV_APP, appListedOn, withLocalApps, type RegistryApp } from './registry.js';
 
 /** One fetched registry entry. */
 const FETCHED: RegistryApp = {
@@ -45,5 +45,21 @@ describe('the grid a build assembles', () => {
     const grid = withLocalApps([published, FETCHED]);
     expect(grid).toEqual([published, FETCHED]);
     expect(grid[0]?.featured).toBeUndefined();
+  });
+});
+
+describe('appListedOn — only apps that name the network (2026/10/10)', () => {
+  it('lists an app that names stagenet', () => {
+    expect(appListedOn({ networks: ['stagenet', 'preview'] }, 'stagenet')).toBe(true);
+  });
+
+  it('does not list an app with no networks, "*" (dropped by the parser), or only other networks', () => {
+    expect(appListedOn({ networks: [] }, 'stagenet')).toBe(false);
+    expect(appListedOn({}, 'stagenet')).toBe(false);
+    expect(appListedOn({ networks: ['mainnet'] }, 'stagenet')).toBe(false);
+  });
+
+  it('lists everything when no network is chosen', () => {
+    expect(appListedOn({ networks: [] }, undefined)).toBe(true);
   });
 });

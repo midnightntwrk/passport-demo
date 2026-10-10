@@ -53,12 +53,14 @@ on the schema. Run `node validate.js` locally first (no install). As of
 2026/09/28 it requires `id` (lowercase, digits, hyphens, at most 32),
 `name` (at most 40), `description` (at most 120), an `https` `icon` (at most
 50 KB), an `https` `url`, `category` (`defi`, `tools`, `gaming`, `social`,
-`nft`, `identity`, `other`), and a non-empty `networks` list from `preview`,
-`preprod`, `mainnet`, or `*`.
+`nft`, `identity`, `other`), and a non-empty `networks` list from `stagenet`,
+`preview`, `preprod`, `mainnet`, or `*`.
 
-Note the mismatch: the validator does not accept `stagenet`, while Passport
-itself runs on stagenet and its parser keeps a `stagenet` entry. Say so in the
-pull request rather than guessing a value; the registry maintainers decide.
+**Passport only lists an app that names `stagenet` explicitly.** The registry
+is shared with the 1AM app, where `*` means every network; Passport ignores
+`*` (and an entry with no networks), so an app written for 1AM does not appear
+in Passport by accident. To appear in Passport, include `"stagenet"` in
+`networks`.
 
 A listing is not an audit and grants nothing: the consent and approval sheets
 apply to every app, listed or not. Never set `featured`; maintainers do.

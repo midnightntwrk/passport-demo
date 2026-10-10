@@ -235,3 +235,18 @@ export async function fetchAppRegistry(
     window.clearTimeout(timer)
   }
 }
+
+/**
+ * Whether Passport lists an app on `network`: only when the app NAMES it
+ * (2026/10/10).
+ *
+ * The registry is shared with the 1AM app, and an entry written for 1AM with
+ * `"networks": ["*"]` reached Passport's grid as "every network" — the parser
+ * drops `*`, and an empty list used to mean "show everywhere". Passport runs on
+ * one network and lists what was listed for it: no networks, `*`, or only other
+ * networks means not shown. With no network chosen, everything is shown.
+ */
+export function appListedOn(app: Pick<RegistryApp, 'networks'>, network: string | undefined): boolean {
+  if (!network) return true
+  return Array.isArray(app.networks) && (app.networks as readonly string[]).includes(network)
+}

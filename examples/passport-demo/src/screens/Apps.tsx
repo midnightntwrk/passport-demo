@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { ArrowUpRight, Loader2, RotateCw, Search, X } from 'lucide-react'
 import {
+  appListedOn,
   fetchAppRegistry,
   withLocalApps,
   type RegistryApp,
@@ -116,12 +117,6 @@ function AppCard({ app, onOpen }: { app: RegistryApp; onOpen: () => void }) {
 }
 
 
-/** An app with no declared networks is shown everywhere rather than nowhere. */
-function onNetwork(app: RegistryApp, network: PassportNetwork | undefined): boolean {
-  if (!network) return true
-  if (!app.networks || app.networks.length === 0) return true
-  return app.networks.includes(network)
-}
 
 export interface FeaturedAppsProps {
   profile: AppsScreenProps['profile']
@@ -170,7 +165,7 @@ export function FeaturedApps(props: FeaturedAppsProps) {
 
   // Featured entries lead; the rest follow in registry order — on this network.
   const ordered = useMemo(() => {
-    const here = apps.filter((app) => onNetwork(app, network))
+    const here = apps.filter((app) => appListedOn(app, network))
     return [...here.filter((app) => app.featured), ...here.filter((app) => !app.featured)]
   }, [apps, network])
 
@@ -260,7 +255,7 @@ export default function AppsScreen(props: AppsScreenProps) {
   }, [])
 
   const filtered = useMemo(
-    () => apps.filter((app) => onNetwork(app, network) && matches(app, query)),
+    () => apps.filter((app) => appListedOn(app, network) && matches(app, query)),
     [apps, network, query],
   )
   const featured = useMemo(
