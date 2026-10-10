@@ -246,7 +246,13 @@ test('with nothing listed for this network, Home shows no Apps heading and no ra
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
   await installNetworkBoundary(page);
-  await serveRegistry(page, [{ ...FIXTURE_APP, id: 'elsewhere-app', name: 'Elsewhere App', networks: ['preprod'] }]);
+  /* Nor an app listed for "*" or for no network at all (2026/10/10): those are
+     1AM's entries, and Passport lists only an app that names stagenet. */
+  await serveRegistry(page, [
+    { ...FIXTURE_APP, id: 'elsewhere-app', name: 'Elsewhere App', networks: ['preprod'] },
+    { ...FIXTURE_APP, id: 'everywhere-app', name: 'Everywhere App', networks: ['*'] },
+    { ...FIXTURE_APP, id: 'nowhere-app', name: 'Nowhere App', networks: [] },
+  ]);
   await installVirtualAuthenticator(context, page);
   try {
     await page.goto('/');
@@ -258,6 +264,7 @@ test('with nothing listed for this network, Home shows no Apps heading and no ra
     await expect(page.locator('#mnapps-home-label')).toHaveCount(0);
     await expect(page.getByRole('button', { name: /Midnight Raffle/ })).toHaveCount(0);
     await expect(page.getByRole('button', { name: /Elsewhere App/ })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: /Everywhere App|Nowhere App/ })).toHaveCount(0);
     /* The feed fills the row the empty grid would have shared. */
     const discover = await page.locator('.mnhome-discover').boundingBox();
     const feed = await page.locator('.mnhome-activity').boundingBox();
